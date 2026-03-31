@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>91Astrology · AI Marketing Agent — System Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #060810;
+    --surface: rgba(10, 14, 26, 0.88);
+    --surface-hover: rgba(16, 22, 40, 0.98);
+    --border: rgba(160, 130, 60, 0.18);
+    --border-hover: rgba(200, 165, 80, 0.55);
+    --gold: #c9a255;
+    --gold-bright: #e8cb78;
+    --gold-dim: rgba(180, 140, 60, 0.35);
+    --text: #e6dcc8;
+    --text-dim: #8a8270;
+    --text-meta: #4a4840;
+    --scout: #3d70b8;
+    --intel: #7050b8;
+    --synthesis: #b89030;
+    --creative: #b05835;
+    --production: #2a9080;
+    --debate: #8830b8;
+    --execution: #28a058;
+    --infra: #486090;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Crimson Pro', Georgia, serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+  }
+
+  canvas#stars {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .nebula {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background:
+      radial-gradient(ellipse 60% 40% at 15% 20%, rgba(50,35,110,0.18) 0%, transparent 65%),
+      radial-gradient(ellipse 50% 35% at 85% 75%, rgba(35,60,130,0.15) 0%, transparent 60%),
+      radial-gradient(ellipse 40% 50% at 50% 50%, rgba(160,120,40,0.06) 0%, transparent 70%);
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 64px 44px 100px;
+  }
+
+  /* ── Header ─────────────────────────────────────── */
+  header {
+    text-align: center;
+    margin-bottom: 72px;
+  }
+
+  .eyebrow {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    color: var(--gold);
+    opacity: 0.65;
+    margin-bottom: 18px;
+  }
+
+  h1 {
+    font-family: 'Cinzel', serif;
+    font-size: clamp(26px, 3.8vw, 50px);
+    font-weight: 700;
+    letter-spacing: 3px;
+    background: linear-gradient(130deg, #f0e4a8 0%, #c9a255 45%, #e8d080 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 14px;
+    line-height: 1.2;
+  }
+
+  .subtitle {
+    font-family: 'Crimson Pro', serif;
+    font-size: 18px;
+    font-style: italic;
+    color: var(--text-dim);
+    letter-spacing: 0.4px;
+  }
+
+  .rule {
+    width: 180px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
+    margin: 26px auto 0;
+  }
+
+  /* ── Architecture wrapper ────────────────────────── */
+  .arch { display: flex; flex-direction: column; }
+
+  /* ── Layer ───────────────────────────────────────── */
+  .layer {
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    backdrop-filter: blur(10px);
+    padding: 22px 26px 24px;
+    position: relative;
+  }
+
+  .layer-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+
+  .layer-num {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--text-meta);
+    letter-spacing: 2px;
+  }
+
+  .layer-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 3px;
+    border: 1px solid;
+  }
+
+  .layer-name {
+    font-family: 'Cinzel', serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  .layer-freq {
+    margin-left: auto;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9.5px;
+    color: var(--text-meta);
+    letter-spacing: 0.8px;
+  }
+
+  /* ── Agents grid ─────────────────────────────────── */
+  .agents {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .agents.center { justify-content: center; }
+
+  /* ── Agent card ──────────────────────────────────── */
+  .card {
+    flex: 1;
+    min-width: 155px;
+    background: rgba(6, 9, 18, 0.72);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 15px 16px 14px;
+    transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease, background 0.22s ease;
+    cursor: default;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    opacity: 0;
+    transition: opacity 0.22s;
+    background: var(--card-accent, var(--gold));
+  }
+
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: var(--border-hover);
+    background: var(--surface-hover);
+    box-shadow: 0 10px 36px rgba(0,0,0,0.45), 0 0 24px rgba(180,140,60,0.07);
+  }
+
+  .card:hover::after { opacity: 1; }
+
+  .card-icon {
+    font-size: 21px;
+    display: block;
+    margin-bottom: 9px;
+    line-height: 1;
+  }
+
+  .card-name {
+    font-family: 'Cinzel', serif;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--text);
+    margin-bottom: 7px;
+    line-height: 1.45;
+  }
+
+  .card-desc {
+    font-size: 13.5px;
+    color: var(--text-dim);
+    line-height: 1.55;
+    font-style: italic;
+  }
+
+  .card-tags {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .tag {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 8.5px;
+    padding: 2.5px 7px;
+    border-left: 2px solid;
+    border-radius: 0 3px 3px 0;
+    background: rgba(255,255,255,0.025);
+    color: var(--text-meta);
+    letter-spacing: 0.3px;
+  }
+
+  .pill {
+    display: inline-block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 8px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid;
+    margin-top: 8px;
+    letter-spacing: 0.8px;
+  }
+
+  /* card-wide: spans full width */
+  .card.wide {
+    flex: none;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .card.wide .card-features {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+
+  .card.wide .feat {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    padding: 4px 12px;
+    border: 1px solid rgba(180,140,60,0.25);
+    border-radius: 20px;
+    color: var(--text-dim);
+    letter-spacing: 0.4px;
+  }
+
+  /* special cards */
+  .card.human {
+    border-color: rgba(200,160,80,0.35);
+    background: rgba(18,13,4,0.92);
+  }
+  .card.human .card-name { color: var(--gold-bright); }
+
+  .card.debate-card {
+    box-shadow: 0 0 32px rgba(136,48,184,0.14);
+  }
+  .card.debate-card:hover {
+    box-shadow: 0 10px 36px rgba(0,0,0,0.45), 0 0 48px rgba(136,48,184,0.25);
+  }
+
+  /* ── Connector between layers ────────────────────── */
+  .connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 12px 0;
+  }
+
+  .conn-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-meta);
+  }
+
+  .conn-arrow {
+    color: var(--gold);
+    font-size: 18px;
+    opacity: 0.55;
+    animation: bob 2.2s ease-in-out infinite;
+  }
+
+  @keyframes bob {
+    0%, 100% { opacity: 0.4; transform: translateY(0); }
+    50%       { opacity: 0.75; transform: translateY(4px); }
+  }
+
+  /* ── Layer accent theming ─────────────────────────── */
+
+  /* Scouts */
+  .scouts .layer-badge { color: var(--scout); border-color: rgba(61,112,184,0.4); background: rgba(61,112,184,0.07); }
+  .scouts .card { --card-accent: var(--scout); }
+  .scouts .tag { border-color: var(--scout); }
+
+  /* Intel */
+  .intel .layer-badge { color: var(--intel); border-color: rgba(112,80,184,0.4); background: rgba(112,80,184,0.07); }
+  .intel .card { --card-accent: var(--intel); }
+  .intel .tag { border-color: var(--intel); }
+
+  /* Synthesis */
+  .synthesis .layer-badge { color: var(--gold); border-color: rgba(184,144,48,0.4); background: rgba(184,144,48,0.07); }
+  .synthesis .card { --card-accent: var(--gold); }
+  .synthesis .tag { border-color: var(--gold); }
+
+  /* Creative */
+  .creative .layer-badge { color: #d06840; border-color: rgba(176,88,53,0.4); background: rgba(176,88,53,0.07); }
+  .creative .card { --card-accent: var(--creative); }
+  .creative .tag { border-color: var(--creative); }
+
+  /* Production */
+  .production .layer-badge { color: var(--production); border-color: rgba(42,144,128,0.4); background: rgba(42,144,128,0.07); }
+  .production .card { --card-accent: var(--production); }
+  .production .tag { border-color: var(--production); }
+
+  /* Debate */
+  .debate .layer-badge { color: #a040d0; border-color: rgba(136,48,184,0.4); background: rgba(136,48,184,0.07); }
+  .debate .card { --card-accent: var(--debate); }
+  .debate .tag { border-color: var(--debate); }
+
+  /* Execution */
+  .execution .layer-badge { color: var(--execution); border-color: rgba(40,160,88,0.4); background: rgba(40,160,88,0.07); }
+  .execution .card { --card-accent: var(--execution); }
+  .execution .tag { border-color: var(--execution); }
+
+  /* Infra */
+  .infra .layer-badge { color: #6888b0; border-color: rgba(72,96,144,0.4); background: rgba(72,96,144,0.07); }
+  .infra .card { --card-accent: var(--infra); }
+  .infra .tag { border-color: var(--infra); }
+
+  /* ── Feedback section ────────────────────────────── */
+  .feedback {
+    margin-top: 42px;
+    padding: 22px 26px;
+    border: 1px solid rgba(180,140,60,0.14);
+    border-radius: 12px;
+    background: rgba(12,8,3,0.55);
+    display: flex;
+    gap: 18px;
+    align-items: flex-start;
+  }
+
+  .feedback-icon { font-size: 26px; flex-shrink: 0; margin-top: 1px; }
+
+  .feedback-title {
+    font-family: 'Cinzel', serif;
+    font-size: 11px;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 10px;
+  }
+
+  .feedback-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .fb-pill {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 9.5px;
+    color: var(--text-dim);
+    padding: 4px 12px;
+    border: 1px solid rgba(180,140,60,0.18);
+    border-radius: 20px;
+    letter-spacing: 0.3px;
+  }
+
+  /* ── Stats bar ───────────────────────────────────── */
+  .stats {
+    display: flex;
+    margin-top: 46px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .stat {
+    flex: 1;
+    padding: 22px 20px;
+    text-align: center;
+    background: rgba(8,12,24,0.5);
+    border-right: 1px solid var(--border);
+  }
+  .stat:last-child { border-right: none; }
+
+  .stat-val {
+    font-family: 'Cinzel', serif;
+    font-size: clamp(22px, 2.5vw, 32px);
+    font-weight: 700;
+    color: var(--gold);
+    display: block;
+    margin-bottom: 5px;
+  }
+
+  .stat-lbl {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 8.5px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-meta);
+  }
+
+  /* ── Responsive ─────────────────────────────────── */
+  @media (max-width: 860px) {
+    .page { padding: 40px 20px 60px; }
+    .agents { gap: 9px; }
+    .card { min-width: 130px; }
+    .stats { flex-wrap: wrap; }
+    .stat { min-width: 45%; border-bottom: 1px solid var(--border); }
+  }
+
+  @media (max-width: 520px) {
+    .agents { flex-direction: column; }
+    .card { min-width: 100%; max-width: 100%; }
+    .stats { flex-direction: column; }
+    .stat { border-right: none; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="stars"></canvas>
+<div class="nebula"></div>
+
+<div class="page">
+
+  <!-- Header -->
+  <header>
+    <div class="eyebrow">91Astrology · AI Marketing System · Python + Claude API</div>
+    <h1>Full System Architecture</h1>
+    <div class="subtitle">9 Specialized Agents · 1 LLM Brain · Fully Autonomous with Human Gates</div>
+    <div class="rule"></div>
+  </header>
+
+  <div class="arch">
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 1 · DATA COLLECTION · Platform Scouts   -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer scouts">
+      <div class="layer-head">
+        <span class="layer-num">01</span>
+        <span class="layer-badge">Data Collection</span>
+        <span class="layer-name">Platform Scouts</span>
+        <span class="layer-freq">↻ every 6 – 12 hrs</span>
+      </div>
+      <div class="agents">
+        <div class="card">
+          <span class="card-icon">📸</span>
+          <div class="card-name">Instagram Scout</div>
+          <div class="card-desc">Monitors Reels, hashtags, competitor pages for viral astrology content</div>
+          <div class="card-tags">
+            <span class="tag">Reels · saves · shares · view-through</span>
+            <span class="tag">#astrology #jyotish #nrilife</span>
+            <span class="tag">Competitor page analysis</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">𝕏</span>
+          <div class="card-name">Twitter / X Scout</div>
+          <div class="card-desc">Tracks threads, trending astro topics, discourse and meme culture</div>
+          <div class="card-tags">
+            <span class="tag">RTs · quote tweets · impressions</span>
+            <span class="tag">Retrograde trends · astro memes</span>
+            <span class="tag">Viral thread formats</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🔻</span>
+          <div class="card-name">Reddit Scout</div>
+          <div class="card-desc">Scans r/astrology, r/india, r/NRI, r/hinduism for authentic demand signals</div>
+          <div class="card-tags">
+            <span class="tag">Upvotes · comment depth · saves</span>
+            <span class="tag">Personal story threads · questions</span>
+            <span class="tag">NRI community sub-reddits</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">💼</span>
+          <div class="card-name">LinkedIn Scout</div>
+          <div class="card-desc">Tracks NRI thought leaders, professional astrology content, credible tone posts</div>
+          <div class="card-tags">
+            <span class="tag">Shares · comments · post saves</span>
+            <span class="tag">Career + astrology angle</span>
+            <span class="tag">NRI professional diaspora</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">platform signals + engagement data</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 2 · INTELLIGENCE · Research Agents       -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer intel">
+      <div class="layer-head">
+        <span class="layer-num">02</span>
+        <span class="layer-badge">Intelligence</span>
+        <span class="layer-name">Research Agents</span>
+        <span class="layer-freq">↻ daily at 6 AM IST</span>
+      </div>
+      <div class="agents">
+        <div class="card">
+          <span class="card-icon">🔭</span>
+          <div class="card-name">Scout Coordinator</div>
+          <div class="card-desc">Receives all 4 scout feeds. Debates cross-platform patterns — when Instagram + Reddit both show the same signal, confidence multiplies. Outputs 3–5 creative ideas.</div>
+          <div class="card-tags">
+            <span class="tag">Cross-platform signal overlap detection</span>
+            <span class="tag">Multi-platform idea synthesis</span>
+            <span class="tag">→ 3–5 ranked creative ideas</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🕵️</span>
+          <div class="card-name">Competitor Research</div>
+          <div class="card-desc">Tracks AstroTalk, GaneshaSpeaks, Bejan Daruwalla. Finds format gaps, angle gaps, audience gaps — what nobody is doing that you can own.</div>
+          <div class="card-tags">
+            <span class="tag">Meta Ad Library scraping</span>
+            <span class="tag">Format · tone · audience gaps</span>
+            <span class="tag">→ differentiator creative ideas</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🪐</span>
+          <div class="card-name">Market Research</div>
+          <div class="card-desc">Astrological calendar + NRI event calendar. Knows that Sade Sati starting for Taurus is a high-intent moment 2 weeks before it happens.</div>
+          <div class="card-tags">
+            <span class="tag">Navratri · Diwali · Purnima · Ekadashi</span>
+            <span class="tag">Dasha · Antar Dasha · Sade Sati</span>
+            <span class="tag">Retrogrades · Eclipses · Muhurtas</span>
+            <span class="tag">NRI: tax season · school breaks · Diwali bonuses</span>
+            <span class="tag">→ timing-based campaign triggers</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">3 independent idea streams converge</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 3 · IDEA SYNTHESIS                       -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer synthesis">
+      <div class="layer-head">
+        <span class="layer-num">03</span>
+        <span class="layer-badge">Idea Synthesis</span>
+        <span class="layer-name">Idea Pool Debate Agent</span>
+        <span class="layer-freq">↻ after intelligence layer</span>
+      </div>
+      <div class="agents center">
+        <div class="card wide">
+          <span class="card-icon">⚗️</span>
+          <div class="card-name">Idea Pool Debate Agent</div>
+          <div class="card-desc" style="max-width:820px;">
+            Receives all ideas from Scout Coordinator + Competitor Research + Market Research simultaneously.
+            Cross-references overlapping signals (2+ sources = HIGH confidence). Merges complementary ideas
+            (competitor gap + trending format = experiment). Resolves conflicts (humorous tone vs. festival
+            respectfulness). Outputs a <strong style="color:var(--gold-bright)">ranked creative brief pool</strong> sorted by confidence × urgency.
+          </div>
+          <div class="card-features">
+            <span class="feat">✦ HIGH confidence = 2+ sources aligned</span>
+            <span class="feat">✦ URGENT = festival / dasha within 14 days</span>
+            <span class="feat">✦ Merges overlapping ideas across sources</span>
+            <span class="feat">✦ Resolves tone / timing conflicts via debate</span>
+            <span class="feat">✦ Outputs numbered brief pool with rationale</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">ranked creative briefs (confidence + urgency scored)</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 4 · CREATIVE STRATEGY                    -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer creative">
+      <div class="layer-head">
+        <span class="layer-num">04</span>
+        <span class="layer-badge">Creative Strategy</span>
+        <span class="layer-name">Strategy Agents</span>
+        <span class="layer-freq">↻ after synthesis</span>
+      </div>
+      <div class="agents">
+        <div class="card">
+          <span class="card-icon">✍️</span>
+          <div class="card-name">Creative Director</div>
+          <div class="card-desc">Takes ranked briefs. Writes 3 copy variants per brief — emotional, authoritative, curiosity. Defines visual direction and hook structure.</div>
+          <div class="card-tags">
+            <span class="tag">Headlines · body copy · CTA variants</span>
+            <span class="tag">Hook types: fear / curiosity / authority</span>
+            <span class="tag">Visual mood: tone, palette, symbols</span>
+            <span class="tag">Format: Reel / Carousel / Single image</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🎯</span>
+          <div class="card-name">Campaign Strategist</div>
+          <div class="card-desc">Designs audience segments, A/B test structure, targeting parameters, and budget allocation per experiment using all research inputs.</div>
+          <div class="card-tags">
+            <span class="tag">NRI tiers: Tamil · Telugu · Hindi · Marathi</span>
+            <span class="tag">Age groups from research (e.g. 35–44)</span>
+            <span class="tag">Geo: US · UK · Canada · Australia · UAE</span>
+            <span class="tag">A/B: audience split · creative split</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">copy variants + visual brief + targeting params</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 5 · CREATIVE PRODUCTION                  -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer production">
+      <div class="layer-head">
+        <span class="layer-num">05</span>
+        <span class="layer-badge">Creative Production</span>
+        <span class="layer-name">Ad Creative Generator</span>
+        <span class="layer-freq">↻ on-demand per campaign</span>
+      </div>
+      <div class="agents">
+        <div class="card" style="flex:2; min-width:200px;">
+          <span class="card-icon">🎨</span>
+          <div class="card-name">Prompt Engineer Agent</div>
+          <div class="card-desc">Transforms creative briefs into optimized generation prompts. Claude understands cultural nuance — outputs 3 prompt variants (emotional, authoritative, urgent) tailored to each image/video API.</div>
+          <div class="card-tags">
+            <span class="tag">Brief → pixel-perfect generation prompt</span>
+            <span class="tag">Cultural context: NRI · Vedic symbolism</span>
+            <span class="tag">Format specs: 1:1 · 9:16 · 1.91:1</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🖼️</span>
+          <div class="card-name">Static Image Pipeline</div>
+          <div class="card-desc">Generates ad creatives at Meta-required aspect ratios. 3 provider options by quality / cost.</div>
+          <div class="card-tags">
+            <span class="tag">GPT Image 1.5 — $0.04 · premium</span>
+            <span class="tag">Flux 2 Pro — $0.03 · best value</span>
+            <span class="tag">Google Imagen 4 — $0.02 · budget</span>
+          </div>
+          <span class="pill" style="color:var(--production); border-color:rgba(42,144,128,0.35);">1:1 · 9:16 · 1.91:1</span>
+        </div>
+        <div class="card">
+          <span class="card-icon">🎬</span>
+          <div class="card-name">Video Ad Pipeline</div>
+          <div class="card-desc">AI-powered Reels and Stories generation. Multi-language for NRI localization.</div>
+          <div class="card-tags">
+            <span class="tag">Creatify — UGC style ads</span>
+            <span class="tag">HeyGen — AI avatar + voice clone</span>
+            <span class="tag">Runway Gen-4 — cinematic b-roll</span>
+            <span class="tag">FFmpeg — slideshow from statics</span>
+          </div>
+          <span class="pill" style="color:var(--production); border-color:rgba(42,144,128,0.35);">40+ langs · hi/ta/te/mr</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">campaign plan + ad creatives → review</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 6 · DEBATE & DECISION                    -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer debate">
+      <div class="layer-head">
+        <span class="layer-num">06</span>
+        <span class="layer-badge">Debate &amp; Decision</span>
+        <span class="layer-name">Final Approval Gate</span>
+        <span class="layer-freq">↻ weekly / major campaigns</span>
+      </div>
+      <div class="agents">
+        <div class="card debate-card" style="flex:2;">
+          <span class="card-icon">⚖️</span>
+          <div class="card-name">Debate Moderator</div>
+          <div class="card-desc">3-round protocol: <em>Propose</em> (agents present plans) → <em>Challenge</em> (moderator attacks weak points — wrong tone, poor timing, budget waste) → <em>Synthesize</em> (final scored recommendation with rationale).</div>
+          <div class="card-tags">
+            <span class="tag">Round 1: agents propose campaign plans</span>
+            <span class="tag">Round 2: moderator challenges weak ideas</span>
+            <span class="tag">Round 3: synthesis + confidence score</span>
+          </div>
+          <span class="pill" style="color:#b060e0; border-color:rgba(136,48,184,0.4);">CLAUDE OPUS · deeper reasoning</span>
+        </div>
+        <div class="card human">
+          <span class="card-icon">🧑‍💻</span>
+          <div class="card-name">Human Approval Gate</div>
+          <div class="card-desc">You review the final recommendation in Metabase before any money moves. Approve, reject, or modify.</div>
+          <div class="card-tags">
+            <span class="tag">Metabase approval dashboard</span>
+            <span class="tag">Creative preview (image + video)</span>
+            <span class="tag">Budget review + audience check</span>
+            <span class="tag">One-click approve → Launcher</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">approved plan → live execution</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 7 · EXECUTION                            -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer execution">
+      <div class="layer-head">
+        <span class="layer-num">07</span>
+        <span class="layer-badge">Execution</span>
+        <span class="layer-name">Campaign Agents</span>
+        <span class="layer-freq">Monitor ↻ every 2 – 4 hrs</span>
+      </div>
+      <div class="agents">
+        <div class="card">
+          <span class="card-icon">🚀</span>
+          <div class="card-name">Campaign Launcher</div>
+          <div class="card-desc">Builds the full Meta campaign structure — campaign → ad sets → ads. Always starts in PAUSED state. Activates only after human confirmation. Wires in all targeting and creatives from upstream.</div>
+          <div class="card-tags">
+            <span class="tag">Campaign → AdSet → Ad hierarchy</span>
+            <span class="tag">NRI language + geo targeting</span>
+            <span class="tag">A/B test structure built-in</span>
+            <span class="tag">Always starts PAUSED · safe by default</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">📡</span>
+          <div class="card-name">Live Campaign Monitor</div>
+          <div class="card-desc">Watches all running campaigns 24/7. Makes autonomous optimizations based on performance rules. Sends performance insights back to intelligence layer.</div>
+          <div class="card-tags">
+            <span class="tag">Pause if CTR &lt; 0.5% after 1000 impressions</span>
+            <span class="tag">Scale +20% budget if ROAS &gt; 3×</span>
+            <span class="tag">Rotate creatives if frequency ≥ 3</span>
+            <span class="tag">Alert on anomalous spend patterns</span>
+            <span class="tag">→ performance insights → feedback loop</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <span class="conn-label">meta ads mcp server · 16 standardized tools</span>
+      <span class="conn-arrow">↓</span>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- LAYER 8 · INFRASTRUCTURE                       -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="layer infra">
+      <div class="layer-head">
+        <span class="layer-num">08</span>
+        <span class="layer-badge">Infrastructure</span>
+        <span class="layer-name">Core Systems</span>
+      </div>
+      <div class="agents">
+        <div class="card">
+          <span class="card-icon">🧠</span>
+          <div class="card-name">Claude API</div>
+          <div class="card-desc">Single LLM brain powering all 9 agents via the Anthropic SDK</div>
+          <div class="card-tags">
+            <span class="tag">claude-sonnet-4 → all intelligence agents</span>
+            <span class="tag">claude-opus-4 → debate moderator only</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">🔌</span>
+          <div class="card-name">Meta Ads MCP Server</div>
+          <div class="card-desc">One standardized Python MCP server. All agents call it — no duplicated Meta API code. Add Google Ads later without changing any agent.</div>
+          <div class="card-tags">
+            <span class="tag">Create · Read · Manage campaigns</span>
+            <span class="tag">Audience search · Lookalikes</span>
+            <span class="tag">Ad Library intel · Creative upload</span>
+          </div>
+          <span class="pill" style="color:#50c070; border-color:rgba(48,160,80,0.3);">16 TOOLS · Python MCP</span>
+        </div>
+        <div class="card">
+          <span class="card-icon">🗄️</span>
+          <div class="card-name">MongoDB</div>
+          <div class="card-desc">Stores campaign data, creative briefs, research outputs, performance history, and agent decisions</div>
+          <div class="card-tags">
+            <span class="tag">Brief pool · creative assets</span>
+            <span class="tag">Performance history · learnings</span>
+          </div>
+        </div>
+        <div class="card">
+          <span class="card-icon">📊</span>
+          <div class="card-name">Metabase</div>
+          <div class="card-desc">Dashboards for campaign performance monitoring and human approval workflow</div>
+          <div class="card-tags">
+            <span class="tag">Approval workflow dashboard</span>
+            <span class="tag">Campaign performance reports</span>
+            <span class="tag">Agent activity logs</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Feedback Loop ────────────────────────────── -->
+    <div class="feedback">
+      <div class="feedback-icon">♻️</div>
+      <div>
+        <div class="feedback-title">Continuous Learning Feedback Loop</div>
+        <div class="feedback-pills">
+          <span class="fb-pill">Monitor performance → Market Research (what's converting by calendar event)</span>
+          <span class="fb-pill">Monitor insights → Scout Coordinator (platform-specific performance patterns)</span>
+          <span class="fb-pill">A/B results → Campaign Strategist (winning audience segments)</span>
+          <span class="fb-pill">Creative CTR → Prompt Engineer (visual patterns that work)</span>
+          <span class="fb-pill">Competitor new ads → Competitor Research (ongoing gap tracking)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Stats Bar ──────────────────────────────────── -->
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-val">12</span>
+        <span class="stat-lbl">Agents Total</span>
+      </div>
+      <div class="stat">
+        <span class="stat-val">4</span>
+        <span class="stat-lbl">Platform Scouts</span>
+      </div>
+      <div class="stat">
+        <span class="stat-val">1</span>
+        <span class="stat-lbl">LLM Brain</span>
+      </div>
+      <div class="stat">
+        <span class="stat-val">16</span>
+        <span class="stat-lbl">Meta API Tools</span>
+      </div>
+      <div class="stat">
+        <span class="stat-val">Python</span>
+        <span class="stat-lbl">Language</span>
+      </div>
+      <div class="stat">
+        <span class="stat-val">∞</span>
+        <span class="stat-lbl">Feedback Loops</span>
+      </div>
+    </div>
+
+  </div><!-- /arch -->
+</div><!-- /page -->
+
+<script>
+  // Starfield
+  const canvas = document.getElementById('stars');
+  const ctx = canvas.getContext('2d');
+  function drawStars() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let i = 0; i < 200; i++) {
+      const x = Math.random() * canvas.width;
+      const y = Math.random() * canvas.height;
+      const r = Math.random() * 0.9 + 0.1;
+      const alpha = Math.random() * 0.45 + 0.06;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(240,230,200,${alpha})`;
+      ctx.fill();
+    }
+    // Occasional gold star
+    for (let i = 0; i < 12; i++) {
+      const x = Math.random() * canvas.width;
+      const y = Math.random() * canvas.height;
+      const r = Math.random() * 1.2 + 0.5;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(200,162,85,${Math.random() * 0.3 + 0.1})`;
+      ctx.fill();
+    }
+  }
+  drawStars();
+  window.addEventListener('resize', drawStars);
+
+  // Twinkle effect
+  let tickers = [];
+  function initTwinkle() {
+    const allStars = [];
+    for (let i = 0; i < 30; i++) {
+      allStars.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        r: Math.random() * 1.2 + 0.3,
+        phase: Math.random() * Math.PI * 2,
+        speed: 0.3 + Math.random() * 0.7
+      });
+    }
+    let last = 0;
+    function tick(ts) {
+      if (ts - last > 80) {
+        last = ts;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawStars();
+        allStars.forEach(s => {
+          s.phase += s.speed * 0.05;
+          const alpha = (Math.sin(s.phase) * 0.5 + 0.5) * 0.5 + 0.05;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(240,230,180,${alpha})`;
+          ctx.fill();
+        });
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+  initTwinkle();
+</script>
+</body>
+</html>
