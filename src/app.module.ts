@@ -4,6 +4,7 @@ import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
 import { ClaudeModule } from './claude/claude.module';
 import { CompaniesModule } from './companies/companies.module';
+import { PipelineModule } from './pipeline/pipeline.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { CompaniesModule } from './companies/companies.module';
     DatabaseModule,
     ClaudeModule,
     CompaniesModule,
+    PipelineModule,
   ],
 })
 export class AppModule {}

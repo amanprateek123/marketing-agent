@@ -45,6 +45,7 @@ export class ClaudeService {
         maxTurns: params.maxTurns ?? 10,
         cwd: process.cwd(),
         persistSession: false,
+        allowedTools: ['WebSearch', 'WebFetch', 'Bash'],
       },
     })) {
       if (message.type === 'result' && message.subtype === 'success') {
