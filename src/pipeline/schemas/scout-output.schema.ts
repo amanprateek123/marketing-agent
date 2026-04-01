@@ -17,9 +17,18 @@ export interface TrendingTopic {
   signalScore: number;
 }
 
+export interface ViralTrend {
+  trend: string;
+  why_it_works: string;
+  brand_tie_in: string;
+  signalScore: number;
+  source: string;
+}
+
 export interface ScoutOutputData {
   platform: string;
   trending_topics: TrendingTopic[];
+  viral_trends: ViralTrend[];
   format_insights: string[];
   hook_examples: string[];
   raw_summary: string;

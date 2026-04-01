@@ -123,4 +123,12 @@ export class CreateCompanyDto {
 
   @IsOptional() @IsEnum(['weekly', 'biweekly'])
   runFrequency?: string;
+
+  @IsOptional() @IsObject()
+  pipelineConfig?: {
+    mode?: 'daily' | 'weekly';
+    ideasPerRun?: number;
+    autoSwitch?: boolean;
+    coldStartDays?: number;
+  };
 }

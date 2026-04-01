@@ -37,6 +37,13 @@ export interface CompanyPrompts {
   digestWriter: string;
 }
 
+export interface PipelineConfig {
+  mode: 'daily' | 'weekly';
+  ideasPerRun: number;       // how many ideas to generate per run (1-10)
+  autoSwitch: boolean;       // auto switch daily → weekly after cold start
+  coldStartDays: number;     // days to run daily before switching (default 14)
+}
+
 export interface CompanyLearnings {
   version: number;
   updatedAt: Date;

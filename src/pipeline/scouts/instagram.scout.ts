@@ -23,14 +23,27 @@ export class InstagramScout extends ScoutBaseService {
     super(claudeService, liveContextBuilder, scoutOutputModel, scoutSignalModel);
   }
 
-  protected buildResearchPrompt(company: CompanyDocument): string {
+  protected buildResearchPrompt(
+    company: CompanyDocument,
+    recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
+  ): string {
     return `
-Scout Instagram right now for trending content signals relevant to ${company.name}.
+Scout Instagram right now for two types of signals for ${company.name}.
 
-Focus on the Indian ${company.industry} space targeting ${company.targetAudience}.
+PART 1 — INDUSTRY SIGNALS
+Find trending content in Indian ${company.industry} space targeting ${company.targetAudience}.
 Competitors to watch: ${company.competitors.join(', ')}.
+Search for: trending reels, viral hooks, high-engagement formats in this niche.
 
-Use web_search to find live signals. Return only the JSON output as specified in your instructions.
+PART 2 — VIRAL TRENDS (trend-jacking opportunities)
+Find what is massively trending on Instagram India RIGHT NOW — regardless of industry.
+This includes: viral memes, Bollywood moments, IPL/cricket, pop culture, viral challenges, news events.
+For each trend, suggest how ${company.name} could create content using that trend.
+Search: "trending Instagram India today", "viral reels India this week", current events trending.
+
+${this.buildExclusionBlock(recentlyCovered)}
+
+Return both in the JSON output as specified in your instructions.
     `.trim();
   }
 }

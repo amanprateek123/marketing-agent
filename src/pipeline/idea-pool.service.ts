@@ -140,6 +140,8 @@ export class IdeaPoolService {
     marketResearch: string,
     company: CompanyDocument,
   ): string {
+    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 3;
+
     const topSignals = coordinator.topSignals
       .slice(0, 5)
       .map(
@@ -149,7 +151,7 @@ export class IdeaPoolService {
       .join('\n');
 
     return `
-Generate 5 content ideas for ${company.name} and pick the single best one.
+Generate ${ideasPerRun} content ideas for ${company.name} and pick the single best one.
 
 TOP CROSS-PLATFORM SIGNALS:
 ${topSignals || 'See coordinator synthesis below.'}

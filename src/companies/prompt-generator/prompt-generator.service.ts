@@ -51,7 +51,7 @@ The scout MUST return a valid JSON object in this exact format:
   "platform": "instagram|reddit|twitter|youtube",
   "trending_topics": [
     {
-      "topic": "string — the trend or theme",
+      "topic": "string — industry-specific trend or theme",
       "angle": "string — the specific angle, not just the topic name",
       "engagementProof": {
         "metric": "upvotes|views|likes|shares",
@@ -64,10 +64,21 @@ The scout MUST return a valid JSON object in this exact format:
       "signalScore": number between 1-10
     }
   ],
+  "viral_trends": [
+    {
+      "trend": "string — name of the viral trend, meme, event, or cultural moment",
+      "why_it_works": "string — why this is massive right now, with evidence",
+      "brand_tie_in": "string — specific content idea for THIS company riding this trend",
+      "signalScore": number between 1-10,
+      "source": "https://actual-url.com/evidence"
+    }
+  ],
   "format_insights": ["string array of content format observations"],
   "hook_examples": ["string array of real hooks or titles seen performing well"],
   "raw_summary": "string — 2-3 sentence overall summary of what was found"
 }
+IMPORTANT: viral_trends is a REQUIRED field. It must be a separate array from trending_topics.
+Do NOT put viral trends inside trending_topics. Do NOT leave viral_trends empty if trends were found.
 No markdown, no explanation outside the JSON. Return only the JSON object.
 
 ───────────────────────────────────────────

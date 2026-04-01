@@ -6,6 +6,7 @@ import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { ScoutSignal, ScoutSignalDocument } from './schemas/scout-signal.schema';
+import { ScoutOutput, ScoutOutputDocument } from './schemas/scout-output.schema';
 import { CoordinatorOutput, CoordinatorOutputDocument } from './schemas/coordinator-output.schema';
 import { ResearchOutput, ResearchOutputDocument } from './schemas/research-output.schema';
 
@@ -29,6 +30,8 @@ export class CoordinatorService {
     private readonly liveContextBuilder: LiveContextBuilder,
     @InjectModel(ScoutSignal.name)
     private readonly scoutSignalModel: Model<ScoutSignalDocument>,
+    @InjectModel(ScoutOutput.name)
+    private readonly scoutOutputModel: Model<ScoutOutputDocument>,
     @InjectModel(CoordinatorOutput.name)
     private readonly coordinatorOutputModel: Model<CoordinatorOutputDocument>,
     @InjectModel(ResearchOutput.name)
@@ -41,20 +44,32 @@ export class CoordinatorService {
   ): Promise<CoordinatorResult> {
     const tenantId = company.tenantId;
 
-    // Load all signals saved by scouts for this run
-    const signals = await this.scoutSignalModel
-      .find({ tenantId, runId })
-      .lean()
-      .exec();
+    // Load industry signals + scout outputs (for viral trends)
+    const [signals, scoutOutputs] = await Promise.all([
+      this.scoutSignalModel.find({ tenantId, runId }).lean().exec(),
+      this.scoutOutputModel.find({ tenantId, runId }).lean().exec(),
+    ]);
 
     if (signals.length === 0) {
       this.logger.warn(`No signals found for tenantId=${tenantId} runId=${runId}`);
     }
 
+    const viralTrendsCount = scoutOutputs.reduce(
+      (sum, o) => sum + (o.data?.viral_trends?.length ?? 0), 0,
+    );
+    this.logger.log(
+      `Coordinator input: ${signals.length} industry signals + ${viralTrendsCount} viral trends`,
+    );
+
     const systemPrompt = company.prompts?.coordinator ?? '';
     const liveContext = this.liveContextBuilder.build(company);
 
-    const userMessage = this.buildCoordinatorPrompt(signals);
+    const viralTrendInputs = scoutOutputs.map((o) => ({
+      platform: o.platform,
+      viral_trends: o.data?.viral_trends ?? [],
+    }));
+
+    const userMessage = this.buildCoordinatorPrompt(signals, viralTrendInputs);
 
     const result = await this.claudeService.runAgent({
       tenantId,
@@ -182,6 +197,7 @@ Return your full market research findings.
       sourceQuality: string;
       engagementProof?: { metric: string; value: number; source: string };
     }>,
+    scoutOutputs: Array<{ platform: string; viral_trends: any[] }>,
   ): string {
     const grouped: Record<string, typeof signals> = {};
     for (const s of signals) {
@@ -189,32 +205,51 @@ Return your full market research findings.
       grouped[s.platform].push(s);
     }
 
-    const sections = Object.entries(grouped)
+    const industrySections = Object.entries(grouped)
       .map(([platform, platformSignals]) => {
         const lines = platformSignals
           .sort((a, b) => b.signalScore - a.signalScore)
           .slice(0, 10)
           .map(
             (s) =>
-              `  - [Score ${s.signalScore}] Topic: "${s.topic}" | Angle: "${s.angle}" | Recency: ${s.recency} | Specificity: ${s.specificity} | Source: ${s.engagementProof?.source ?? 'N/A'}`,
+              `  - [Score ${s.signalScore}] Topic: "${s.topic}" | Angle: "${s.angle}" | Recency: ${s.recency} | Source: ${s.engagementProof?.source ?? 'N/A'}`,
           )
           .join('\n');
-        return `## ${platform.toUpperCase()} (${platformSignals.length} signals)\n${lines}`;
+        return `### ${platform.toUpperCase()} (${platformSignals.length} signals)\n${lines}`;
+      })
+      .join('\n\n');
+
+    const viralSections = scoutOutputs
+      .filter((o) => o.viral_trends?.length > 0)
+      .map(({ platform, viral_trends }) => {
+        const lines = viral_trends
+          .slice(0, 5)
+          .map(
+            (v) =>
+              `  - [Score ${v.signalScore}] Trend: "${v.trend}" | Tie-in: "${v.brand_tie_in}" | Source: ${v.source}`,
+          )
+          .join('\n');
+        return `### ${platform.toUpperCase()} viral trends\n${lines}`;
       })
       .join('\n\n');
 
     return `
-Synthesise the following scout signals from across all platforms.
+Synthesise the following signals from across all platforms and decide what's worth acting on.
 
-${sections.length > 0 ? sections : 'No signals collected this run.'}
+## INDUSTRY SIGNALS (niche-specific)
+${industrySections || 'No industry signals collected.'}
+
+## VIRAL TRENDS (trend-jacking opportunities)
+${viralSections || 'No viral trends collected.'}
 
 Your job:
-1. Identify topics that appear across multiple platforms (cross-platform momentum)
-2. Score each cross-platform topic with a compositeScore (0–10)
-3. Explain your rationale for the top signals
-4. Produce a synthesis brief that the intelligence agents can use
+1. From industry signals — identify topics appearing across multiple platforms (cross-platform momentum)
+2. From viral trends — identify trends strong enough to tie into the brand, with a clear brand_tie_in
+3. Combine both into a single ranked list (topSignals) scored 0–10
+4. A viral trend with a strong brand tie-in can outscore a weak industry signal
+5. Produce a synthesis brief that the intelligence and idea pool agents can use
 
-Return your full synthesis.
+Return your full synthesis including the ranked topSignals JSON block.
     `.trim();
   }
 

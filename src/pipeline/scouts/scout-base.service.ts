@@ -11,6 +11,7 @@ import {
   ScoutOutputDocument,
   ScoutOutputData,
   TrendingTopic,
+  ViralTrend,
 } from '../schemas/scout-output.schema';
 import { ScoutSignal, ScoutSignalDocument } from '../schemas/scout-signal.schema';
 
@@ -37,7 +38,10 @@ export abstract class ScoutBaseService {
 
     const systemPrompt = this.getSystemPrompt(company);
     const liveContext = this.liveContextBuilder.build(company);
-    const userMessage = this.buildResearchPrompt(company);
+
+    // Load recently covered signals to inject as exclusion context
+    const recentlyCovered = await this.loadRecentSignals(company.tenantId);
+    const userMessage = this.buildResearchPrompt(company, recentlyCovered);
 
     // Verification loop — retry up to 3 times if JSON is invalid
     let output: ScoutOutputData | null = null;
@@ -63,7 +67,7 @@ export abstract class ScoutBaseService {
 
         output = this.parseAndValidate(result.content);
         this.logger.log(
-          `Scout success: ${this.platform} | attempt: ${attempt} | signals: ${output.trending_topics.length}`,
+          `Scout success: ${this.platform} | attempt: ${attempt} | industry signals: ${output.trending_topics.length} | viral trends: ${output.viral_trends.length}`,
         );
         break;
       } catch (err) {
@@ -99,7 +103,32 @@ export abstract class ScoutBaseService {
   }
 
   // Each scout provides its own research prompt
-  protected abstract buildResearchPrompt(company: CompanyDocument): string;
+  // recentlyCovered is injected by base class — scouts don't need to fetch it
+  protected abstract buildResearchPrompt(
+    company: CompanyDocument,
+    recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
+  ): string;
+
+  // Helper — scouts call this to append the exclusion block to their prompt
+  protected buildExclusionBlock(
+    recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
+  ): string {
+    if (recentlyCovered.length === 0) return '';
+
+    const lines = recentlyCovered
+      .map((s) => `  - "${s.topic}" | angle: "${s.angle}" [${s.type} — TTL: ${s.type === 'viral' ? '7d' : '14d'}]`)
+      .join('\n');
+
+    return `
+ALREADY RESEARCHED — DO NOT REPEAT:
+The following topic+angle combinations were covered in the last 1-2 weeks.
+Do not return them again. Find genuinely new angles or new topics.
+Same topic with a DIFFERENT angle is allowed.
+Viral trends older than 7 days should be skipped entirely.
+
+${lines}
+    `.trim();
+  }
 
   private getSystemPrompt(company: CompanyDocument): string {
     const promptKey = `${this.platform}Scout` as keyof typeof company.prompts;
@@ -144,7 +173,7 @@ export abstract class ScoutBaseService {
     if (!Array.isArray(parsed.hook_examples)) throw new Error('Missing field: hook_examples');
     if (typeof parsed.raw_summary !== 'string') throw new Error('Missing field: raw_summary');
 
-    // Validate and filter topics — remove any without a source URL
+    // Validate and filter industry topics — must have real source URL
     const validTopics = (parsed.trending_topics as TrendingTopic[]).filter((t) => {
       const hasSource = t.engagementProof?.source &&
         t.engagementProof.source.startsWith('http');
@@ -160,9 +189,21 @@ export abstract class ScoutBaseService {
       return true;
     });
 
+    // Validate and filter viral trends — must have source URL and score
+    const validViralTrends = ((parsed.viral_trends ?? []) as ViralTrend[]).filter((v) => {
+      const hasSource = v.source && v.source.startsWith('http');
+      const hasScore = typeof v.signalScore === 'number';
+      if (!hasSource || !hasScore) {
+        this.logger.warn(`Dropping viral trend "${v.trend}" — missing source or signalScore`);
+        return false;
+      }
+      return true;
+    });
+
     return {
       platform: parsed.platform,
       trending_topics: validTopics,
+      viral_trends: validViralTrends,
       format_insights: parsed.format_insights ?? [],
       hook_examples: parsed.hook_examples ?? [],
       raw_summary: parsed.raw_summary ?? '',
@@ -202,10 +243,35 @@ export abstract class ScoutBaseService {
     }
   }
 
+  private async loadRecentSignals(
+    tenantId: string,
+  ): Promise<{ topic: string; angle: string; type: 'industry' | 'viral' }[]> {
+    const industryTTL = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000); // 14 days
+    const viralTTL = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);     // 7 days
+
+    const recent = await this.scoutSignalModel
+      .find({
+        tenantId,
+        platform: this.platform,
+        createdAt: { $gte: industryTTL },
+      })
+      .sort({ signalScore: -1 })
+      .limit(20)
+      .lean()
+      .exec();
+
+    return recent.map((s) => ({
+      topic: s.topic,
+      angle: s.angle,
+      type: ((s as any).createdAt >= viralTTL ? 'viral' : 'industry') as 'industry' | 'viral',
+    }));
+  }
+
   private emptyOutput(): ScoutOutputData {
     return {
       platform: this.platform,
       trending_topics: [],
+      viral_trends: [],
       format_insights: [],
       hook_examples: [],
       raw_summary: `${this.platform} scout failed after 3 attempts — no data collected.`,

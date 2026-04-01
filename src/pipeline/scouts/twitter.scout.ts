@@ -23,16 +23,27 @@ export class TwitterScout extends ScoutBaseService {
     super(claudeService, liveContextBuilder, scoutOutputModel, scoutSignalModel);
   }
 
-  protected buildResearchPrompt(company: CompanyDocument): string {
+  protected buildResearchPrompt(
+    company: CompanyDocument,
+    recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
+  ): string {
     return `
-Scout Twitter/X right now for trending conversations relevant to ${company.name}.
+Scout Twitter/X right now for two types of signals for ${company.name}.
 
-Focus on real-time Indian ${company.industry} discourse — viral angles, trending hashtags,
-cultural moments, and competitor mentions.
-Competitors to monitor: ${company.competitors.join(', ')}.
+PART 1 — INDUSTRY SIGNALS
+Find trending conversations in Indian ${company.industry} space.
+Viral angles, trending hashtags, competitor mentions: ${company.competitors.join(', ')}.
+Use web_search with site:twitter.com and site:x.com queries.
 
-Use web_search with site:twitter.com and site:x.com queries to find live signals.
-Return only the JSON output as specified in your instructions.
+PART 2 — VIRAL TRENDS (trend-jacking opportunities)
+Find what is trending on Twitter India right now — regardless of industry.
+This includes: viral tweets, trending hashtags, memes, Bollywood/cricket/political moments going viral.
+For each trend, suggest how ${company.name} could create content riding that trend.
+Search: "trending Twitter India today", "viral tweet India this week", top India hashtags now.
+
+${this.buildExclusionBlock(recentlyCovered)}
+
+Return both in the JSON output as specified in your instructions.
     `.trim();
   }
 }

@@ -817,9 +817,102 @@ GET    /api/v1/pipeline/:tenantId/briefs             → latest scored briefs
 
 ## Phase 3 — Scheduling + Delivery (Week 6)
 
-> **Goal:** BullMQ scheduling for weekly pipeline runs + n8n delivery to Slack/WhatsApp/Email.
+> **Goal:** BullMQ scheduling for daily/weekly pipeline runs + n8n delivery to Slack/WhatsApp/Email + tenant feedback collection.
 >
-> **Exit Criteria:** Pipeline runs automatically every Monday 9 AM per tenant. Weekly report arrives in Slack.
+> **Exit Criteria:** Pipeline runs automatically per tenant schedule. Report arrives in Slack. Tenant can approve/reject ideas via Slack reactions.
+
+### Product Flow (agreed)
+
+#### Cold Start (Week 1-2) — Daily mode
+```
+Every day:
+  → 4 scouts research trending + viral signals
+  → Coordinator synthesises cross-platform signals
+  → Competitor Research + Market Research run in parallel
+  → Idea Pool generates N ideas (tenant-configured, default 3)
+  → Digest sent to tenant via Slack/WhatsApp
+  → Tenant reacts per idea: ✅ good / ❌ bad
+  → Feedback stored in MongoDB
+```
+
+#### End of Cold Start — Learning checkpoint
+```
+Learning Agent runs:
+  → Analyses all approvals + rejections
+  → Extracts patterns: topics, angles, formats, sources tenant likes
+  → Updates company.learnings
+  → Confidence check:
+      > 60% approval rate → switch to weekly (autoSwitch)
+      40-60% → extend daily one more week
+      < 40% → alert, human review needed
+```
+
+#### Steady State (Week 3+) — Weekly mode
+```
+Every Monday:
+  → Same pipeline, informed by learnings
+  → Tenant picks 1 winner from N ideas
+  → Winner goes to creative production (Phase 4)
+  → Campaign launches (Phase 5)
+  → Performance tracked (Phase 6)
+  → Learning agent updates monthly (Phase 7)
+```
+
+### Tenant Pipeline Configuration
+Each tenant controls their own pipeline via `pipelineConfig` on the company document:
+```json
+{
+  "mode": "daily | weekly",
+  "ideasPerRun": 3,        // 1-10, how many ideas per run
+  "autoSwitch": true,      // auto switch daily → weekly after cold start
+  "coldStartDays": 14      // days to run daily before switching
+}
+```
+
+### Idea Sources
+Ideas can originate from any of these sources — tracked per idea:
+- **Scout signals** — what's trending on each platform right now
+- **Viral trends** — trend-jacking opportunities (IPL, Bollywood, memes)
+- **Competitor gaps** — what competitors aren't doing
+- **Market insights** — industry trends, consumer behaviour
+
+The learning agent tracks which source produces the best-performing ideas for each tenant.
+
+### Approval → Campaign Flow
+
+#### Learning Period (Week 1-2) — Human in the loop
+```
+Tenant approves idea ✅ via Slack
+    ↓
+Creative auto-generated (ad copy + image)
+    ↓
+Sent to tenant: "Your ad is ready. Launch?"
+    ↓
+Tenant confirms → campaign launches
+    ↓
+Auditor monitors performance
+```
+Tenant stays in control. Builds trust in the system gradually.
+
+#### Steady State (Week 3+) — Full automation
+```
+Idea auto-selected by system (highest score)
+    ↓
+Creative auto-generated
+    ↓
+Campaign auto-launched (no human step)
+    ↓
+Auditor monitors
+    ↓
+Tenant sees results only
+```
+
+#### Switch conditions (ALL 3 must be true)
+1. Approval rate > 60% — system knows what tenant likes
+2. Campaign ROAS > target for 2+ consecutive weeks — system proven to work
+3. Tenant explicitly enables full auto in settings — they choose when ready
+
+If any condition fails → stay in human-in-the-loop mode.
 
 ### Step 3.1 — BullMQ Setup
 
@@ -1396,6 +1489,40 @@ await this.auditQueue.add(
 > **Goal:** Monthly learning agent that extracts patterns from campaign performance and updates company-specific learnings.
 >
 > **Exit Criteria:** Learning Agent reads 30 days of briefs + outcomes, extracts instincts with confidence scores, updates company.learnings, triggers prompt regeneration.
+
+### Architecture: Vectors + LLM (why both)
+
+The learning system uses a two-layer architecture — vectors for retrieval, LLM for reasoning:
+
+```
+Past campaign performance (structured numbers: ROAS, CTR, conversions)
+         +
+Past briefs + signals (embedded as vectors → MongoDB Atlas Vector Search)
+         ↓
+Learning Agent queries: "find briefs similar to this week's winner"
+Vector search returns semantically similar past campaigns (not just string match)
+         ↓
+LLM reasons over retrieved data + raw numbers
+"IPL-tied content outperforms generic astrology 3x — confidence 0.87"
+         ↓
+Outputs human-readable learnings → stored in company.learnings (MongoDB)
+         ↓
+LiveContextBuilder injects learnings as plain text into every future agent prompt
+         ↓
+Prompts regenerated — all 9 agents now aware of what works
+```
+
+**Why vectors + text (not vectors alone):**
+- Vectors are for *retrieval* — finding similar past campaigns fast
+- LLM is for *reasoning* — understanding why something worked
+- Storing learnings as human-readable text (not vectors) lets every agent use them directly in prompts
+- LLMs cannot reason directly from vector space — they need text
+
+**Signal deduplication upgrade (also in Phase 7):**
+- Embed every scout signal on save
+- Before each scout run, vector-query past signals
+- Similarity > 0.85 = same idea, inject as "already covered" context
+- Replaces the topic+angle string matching used in Phase 2
 
 ### Step 7.1 — Learning Module
 
@@ -2015,6 +2142,13 @@ volumes:
 | RAG | Not now | All company knowledge fits in prompt. Add as optional layer when data outgrows context |
 | Delivery | n8n (self-hosted) | Visual routing for Slack/WhatsApp/Email. Marketing team can change channels without code |
 | Learning | Monthly with 3+ data point minimum | Prevents overfitting to small samples. Confidence scoring for each pattern |
+| Cold start strategy | Daily research + tenant feedback loop (14 days) | System has no idea what tenant likes on day 1. Daily ideas + ✅/❌ reactions build preference data fast. Auto-switches to weekly after confidence threshold (>60% approval) |
+| Ideas per run | Tenant-configurable (default 3, max 10) | Every tenant has different experimentation appetite. Startups may want 10/day, established brands want 1-3/week. Stored in company.pipelineConfig.ideasPerRun |
+| Idea sources | 4 types tracked per idea (scout/viral/competitor/market) | Learning agent uses source tracking to find which input type produces best-performing ideas for each tenant |
+| Campaign automation | Human-in-loop during learning, full auto after | During cold start: creative auto-generated but tenant confirms before launch. After steady state: fully autonomous. Switch requires 3 conditions: >60% approval rate + ROAS target met 2 consecutive weeks + tenant explicitly enables auto |
+| Signal deduplication (now) | Topic+angle TTL (14d industry, 7d viral) | Simple, effective for early stage. Prevents re-researching same topic+angle within 2 weeks |
+| Signal deduplication (Phase 7 upgrade) | Vector embeddings + cosine similarity | Semantic dedup catches same idea with different wording. Use MongoDB Atlas Vector Search. Threshold: 0.85 similarity = skip. Implement after 6-8 weeks of data when string matching starts failing |
+| Vector embedding storage | Single collection, filtered by tenantId | Each signal document gets an `embedding` field (1536 dims). Atlas Vector Search pre-filters by tenantId before similarity search. No separate index per tenant — overkill and expensive. Embedding model: OpenAI text-embedding-3-small or Claude. Query: find signals where tenantId=X AND createdAt > 8 weeks ago AND similarity > 0.85 |
 
 ---
 
