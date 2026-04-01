@@ -49,45 +49,57 @@ export class IdeaPoolService {
     marketResearch: string,
   ): Promise<IdeaPoolResult> {
     const tenantId = company.tenantId;
-
-    const systemPrompt = company.prompts?.ideaPool ?? '';
     const liveContext = this.liveContextBuilder.build(company);
+    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 3;
 
-    const userMessage = this.buildIdeaPoolPrompt(
+    // ── Step 1: Generate ideas (no scores) ───────────────────────────────────
+    const generateMessage = this.buildGeneratePrompt(
       coordinatorResult,
       competitorResearch,
       marketResearch,
       company,
+      ideasPerRun,
     );
 
-    const result = await this.claudeService.runAgent({
+    const generated = await this.claudeService.runAgent({
       tenantId,
       runId,
       agentType: AgentType.IDEA_POOL,
-      systemPrompt,
+      systemPrompt: company.prompts?.ideaPool ?? '',
       liveContext,
-      userMessage,
+      userMessage: generateMessage,
       maxTurns: 8,
     });
 
-    const parsed = this.parseBriefs(result.content);
+    const rawBriefs = this.parseGeneratedBriefs(generated.content);
 
-    if (parsed.briefs.length === 0) {
-      this.logger.warn(
-        `Idea pool returned no briefs: tenantId=${tenantId} runId=${runId}`,
-      );
+    if (rawBriefs.length === 0) {
+      this.logger.warn(`Idea pool returned no briefs: tenantId=${tenantId} runId=${runId}`);
       return { briefs: [], selectedBriefId: '', selectionReason: '' };
     }
 
-    // Score and select
-    const scored = this.scoreBriefs(parsed.briefs);
-    const selected = scored[0];
-    const briefId = uuidv4();
-    selected.briefId = briefId;
+    // ── Step 2: Score ideas blindly (separate agent call) ────────────────────
+    const scoreMessage = this.buildScoringPrompt(rawBriefs, company);
 
-    // Persist intelligence briefs (one per idea)
+    const scored = await this.claudeService.runAgent({
+      tenantId,
+      runId,
+      agentType: AgentType.IDEA_POOL,
+      systemPrompt: company.prompts?.ideaPool ?? '',
+      liveContext,
+      userMessage: scoreMessage,
+      maxTurns: 3,
+    });
+
+    const scoredBriefs = this.parseScoredBriefs(scored.content, rawBriefs);
+    const sorted = scoredBriefs.sort((a, b) => b.finalScore - a.finalScore);
+    const winner = sorted[0];
+    const briefId = uuidv4();
+    winner.briefId = briefId;
+
+    // ── Persist ───────────────────────────────────────────────────────────────
     await this.intelligenceBriefModel.insertMany(
-      scored.map((b) => ({
+      sorted.map((b) => ({
         tenantId,
         runId,
         topic: b.topic,
@@ -104,54 +116,50 @@ export class IdeaPoolService {
       })),
     );
 
-    // Persist the winner as a creative brief
     await this.creativeBriefModel.create({
       tenantId,
       runId,
       briefId,
-      topic: selected.topic,
-      angle: selected.angle,
-      platform: selected.platform,
-      format: selected.format,
-      audience: selected.audience,
-      hook: selected.hook,
-      keyMessage: selected.keyMessage,
-      conversionBridge: selected.conversionBridge,
-      suggestedBudget: selected.suggestedBudget ?? 0,
-      finalScore: selected.finalScore,
+      topic: winner.topic,
+      angle: winner.angle,
+      platform: winner.platform,
+      format: winner.format,
+      audience: winner.audience,
+      hook: winner.hook,
+      keyMessage: winner.keyMessage,
+      conversionBridge: winner.conversionBridge,
+      suggestedBudget: winner.suggestedBudget ?? 0,
+      finalScore: winner.finalScore,
       selected: true,
-      selectionReason: parsed.selectionReason ?? 'Highest composite score',
+      selectionReason: winner.selectionReason ?? 'Highest score from blind evaluation',
     });
 
     this.logger.log(
-      `Idea pool done: tenantId=${tenantId} runId=${runId} briefs=${scored.length} selected=${briefId}`,
+      `Idea pool done: tenantId=${tenantId} runId=${runId} briefs=${sorted.length} selected=${briefId}`,
     );
 
     return {
-      briefs: scored,
+      briefs: sorted,
       selectedBriefId: briefId,
-      selectionReason: parsed.selectionReason ?? 'Highest composite score',
+      selectionReason: winner.selectionReason ?? 'Highest score from blind evaluation',
     };
   }
 
-  private buildIdeaPoolPrompt(
+  // ── Step 1 prompt: generate ideas, NO scores ────────────────────────────────
+  private buildGeneratePrompt(
     coordinator: CoordinatorResult,
     competitorResearch: string,
     marketResearch: string,
     company: CompanyDocument,
+    ideasPerRun: number,
   ): string {
-    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 3;
-
     const topSignals = coordinator.topSignals
       .slice(0, 5)
-      .map(
-        (s, i) =>
-          `${i + 1}. "${s.topic}" | Platforms: ${s.platforms.join(', ')} | Score: ${s.compositeScore} | ${s.rationale}`,
-      )
+      .map((s, i) => `${i + 1}. "${s.topic}" | Platforms: ${s.platforms.join(', ')} | ${s.rationale}`)
       .join('\n');
 
     return `
-Generate ${ideasPerRun} content ideas for ${company.name} and pick the single best one.
+Generate ${ideasPerRun} content ideas for ${company.name}. Do NOT score them — scoring happens separately.
 
 TOP CROSS-PLATFORM SIGNALS:
 ${topSignals || 'See coordinator synthesis below.'}
@@ -159,21 +167,19 @@ ${topSignals || 'See coordinator synthesis below.'}
 COORDINATOR SYNTHESIS:
 ${coordinator.content}
 
-COMPETITOR RESEARCH SUMMARY:
+COMPETITOR RESEARCH:
 ${competitorResearch.slice(0, 2000)}
 
-MARKET RESEARCH SUMMARY:
+MARKET RESEARCH:
 ${marketResearch.slice(0, 2000)}
 
-For each idea, provide:
+For each idea provide:
 - topic, angle, platform, format, audience
 - hook (opening line or visual hook)
 - keyMessage (what the audience should believe after seeing this)
 - conversionBridge (how this leads to a sale or sign-up)
 - suggestedBudget (INR for paid promotion, 0 if organic)
-- finalScore (0–10)
-
-Then select the single best idea and explain why.
+- ideaSource: "scout_signal" | "viral_trend" | "competitor_gap" | "market_insight"
 
 Return a JSON block:
 \`\`\`json
@@ -189,52 +195,95 @@ Return a JSON block:
       "keyMessage": "...",
       "conversionBridge": "...",
       "suggestedBudget": 0,
-      "finalScore": 8.5,
-      "confidenceScore": 7,
-      "urgencyScore": 8,
+      "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight",
       "sourcePlatforms": ["instagram", "youtube"]
     }
-  ],
-  "selectedIndex": 0,
-  "selectionReason": "..."
+  ]
 }
 \`\`\`
     `.trim();
   }
 
-  private parseBriefs(content: string): {
-    briefs: any[];
-    selectionReason: string;
-  } {
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
-    if (!jsonMatch) return { briefs: [], selectionReason: '' };
+  // ── Step 2 prompt: score ideas blindly ────────────────────────────────────
+  private buildScoringPrompt(briefs: any[], company: CompanyDocument): string {
+    const briefList = briefs
+      .map((b, i) => `
+Idea ${i + 1}:
+  Topic: ${b.topic}
+  Angle: ${b.angle}
+  Platform: ${b.platform} | Format: ${b.format}
+  Audience: ${b.audience}
+  Hook: ${b.hook}
+  Key Message: ${b.keyMessage}
+  Conversion Bridge: ${b.conversionBridge}
+      `.trim())
+      .join('\n\n');
 
+    return `
+Score these ${briefs.length} content ideas for ${company.name}. Be objective and critical — do not inflate scores.
+
+${briefList}
+
+For each idea score:
+- confidenceScore (0–10): how confident are you this topic is genuinely trending?
+- urgencyScore (0–10): how time-sensitive is this? Must act this week?
+- finalScore (0–10): overall potential — consider virality, brand fit, conversion potential
+- selectionReason: one sentence on why this score
+
+Use the full range. A mediocre idea should score 4-5, not 7-8.
+
+Return a JSON block:
+\`\`\`json
+{
+  "scores": [
+    {
+      "index": 0,
+      "confidenceScore": 7,
+      "urgencyScore": 9,
+      "finalScore": 8.2,
+      "selectionReason": "..."
+    }
+  ]
+}
+\`\`\`
+    `.trim();
+  }
+
+  private parseGeneratedBriefs(content: string): any[] {
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
+    if (!jsonMatch) return [];
     try {
       const parsed = JSON.parse(jsonMatch[1]);
-      const briefs: any[] = Array.isArray(parsed.briefs) ? parsed.briefs : [];
-      const selectedIndex: number = parsed.selectedIndex ?? 0;
-      const selectionReason: string = parsed.selectionReason ?? '';
-
-      // Mark the selected brief
-      if (briefs[selectedIndex]) {
-        briefs[selectedIndex]._selected = true;
-      }
-
-      return { briefs, selectionReason };
+      return Array.isArray(parsed.briefs) ? parsed.briefs : [];
     } catch {
-      return { briefs: [], selectionReason: '' };
+      return [];
     }
   }
 
-  private scoreBriefs(
-    briefs: any[],
-  ): Array<any & { briefId: string; finalScore: number }> {
-    return briefs
-      .map((b) => ({
-        ...b,
-        briefId: '',
-        finalScore: Number(b.finalScore ?? 0),
-      }))
-      .sort((a, b) => b.finalScore - a.finalScore);
+  private parseScoredBriefs(content: string, rawBriefs: any[]): any[] {
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
+    if (!jsonMatch) {
+      // fallback: return briefs with zero scores
+      return rawBriefs.map((b) => ({ ...b, briefId: '', finalScore: 0, confidenceScore: 0, urgencyScore: 0 }));
+    }
+
+    try {
+      const parsed = JSON.parse(jsonMatch[1]);
+      const scores: any[] = Array.isArray(parsed.scores) ? parsed.scores : [];
+
+      return rawBriefs.map((b, i) => {
+        const score = scores.find((s) => s.index === i) ?? {};
+        return {
+          ...b,
+          briefId: '',
+          confidenceScore: Number(score.confidenceScore ?? 0),
+          urgencyScore: Number(score.urgencyScore ?? 0),
+          finalScore: Number(score.finalScore ?? 0),
+          selectionReason: score.selectionReason ?? '',
+        };
+      });
+    } catch {
+      return rawBriefs.map((b) => ({ ...b, briefId: '', finalScore: 0, confidenceScore: 0, urgencyScore: 0 }));
+    }
   }
 }

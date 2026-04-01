@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
@@ -24,7 +24,7 @@ export interface TriggerPipelineResult {
 }
 
 @Injectable()
-export class PipelineOrchestratorService {
+export class PipelineOrchestratorService implements OnModuleInit {
   private readonly logger = new Logger(PipelineOrchestratorService.name);
 
   constructor(
@@ -49,6 +49,38 @@ export class PipelineOrchestratorService {
     @InjectModel(Digest.name)
     private readonly digestModel: Model<DigestDocument>,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.recoverStuckRuns();
+  }
+
+  private async recoverStuckRuns(): Promise<void> {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const stuckStatuses = ['pending', 'scouts_running', 'intelligence_running', 'idea_pool_running'];
+
+    const stuckRuns = await this.pipelineRunModel
+      .find({
+        status: { $in: stuckStatuses },
+        updatedAt: { $lt: twoHoursAgo },
+      })
+      .lean()
+      .exec();
+
+    if (stuckRuns.length === 0) return;
+
+    this.logger.warn(`Found ${stuckRuns.length} stuck run(s) — recovering...`);
+
+    for (const run of stuckRuns) {
+      this.logger.log(`Recovering stuck run: ${run.runId} (status: ${run.status})`);
+      await this.pipelineRunModel.updateOne(
+        { runId: run.runId },
+        { status: 'pending', error: null },
+      );
+      this.executeDAG(run.tenantId, run.runId).catch((err) => {
+        this.logger.error(`Recovery failed for ${run.runId}: ${err.message}`);
+      });
+    }
+  }
 
   async trigger(tenantId: string): Promise<TriggerPipelineResult> {
     const company = await this.companiesService.findByTenantId(tenantId);

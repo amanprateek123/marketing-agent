@@ -2152,6 +2152,60 @@ volumes:
 
 ---
 
+## Known Optimisations Backlog
+
+Issues identified during Phase 2 design review. To be addressed in priority order.
+
+### Priority 1 — ✅ Implemented
+
+**Stuck run detector** ✅
+- Problem: If server crashes mid-agent, run stays stuck in `scouts_running` / `intelligence_running` forever. No one restarts it.
+- Fix: On server startup, find any runs stuck in a non-terminal state for >2 hours and auto-resume them.
+- Implemented: `PipelineOrchestratorService.recoverStuckRuns()` called via `OnModuleInit`.
+
+**Separate idea generation + scoring** ✅
+- Problem: Idea Pool agent generates AND scores its own ideas — self-scoring is biased. Everything gets 7-9/10.
+- Fix: Two-step process. Step 1 generates ideas with no scores. Step 2 scores them blindly with explicit instruction to use full range (mediocre = 4-5, not 7-8).
+- Also tracks `ideaSource` per idea: scout_signal / viral_trend / competitor_gap / market_insight.
+- Implemented: `IdeaPoolService` — `buildGeneratePrompt()` + `buildScoringPrompt()`.
+- Future upgrade: score against historical performance data, weight by ideaSource, factor in tenant approval history. Implement in Phase 7 when real data available.
+
+**Cost estimation from token counts** ✅
+- Problem: `costUSD` is always 0 — Claude Code subscription doesn't return billing data. No visibility into per-run cost.
+- Fix: Token counts DO come back. Estimate cost using Claude's public pricing (Sonnet: $3/M input + $15/M output, Haiku: $0.8/M input + $4/M output).
+- Implemented: `ClaudeService.estimateCost()` — used as fallback when `total_cost_usd` is 0.
+
+### Priority 2 — Implement in Phase 3-4
+
+**Coordinator aware of past winning briefs**
+- Problem: Coordinator ranks signals but doesn't know which topics historically converted into good campaigns.
+- Fix: Inject top 5 past briefs with high ROAS into coordinator prompt. It will naturally favour signals similar to past winners.
+- Where: `CoordinatorService.run()` — load top performing `intelligence_briefs` and inject into prompt.
+
+**Scout quality tracking**
+- Problem: If a scout returns 2 signals instead of 10, we don't know if the platform was quiet or Claude searched poorly.
+- Fix: Track signal count per scout per run. If consistently below threshold (e.g. <3 signals) → flag prompt for review.
+- Where: `ScoutBaseService.execute()` — log signal count, store in `pipeline_runs`.
+
+**Platform failure flagging to coordinator**
+- Problem: If YouTube scout fails all 3 attempts, coordinator doesn't know — it just sees fewer signals and may draw wrong conclusions.
+- Fix: Pass platform failure flags to coordinator prompt. Coordinator can note the gap and weight other platforms accordingly.
+- Where: `PipelineOrchestratorService.executeDAG()` — track which scouts returned empty and pass to coordinator.
+
+### Priority 3 — Implement in Phase 7
+
+**Prompt quality validation after generation**
+- Problem: If prompt generator produces a bad prompt, there's no quality check. Bad prompts silently degrade all agents.
+- Fix: After generation, run a validation agent that scores each of the 9 prompts 1-10 against requirements. Regenerate any below 7.
+- Where: `PromptGeneratorService.generate()` — add validation step after parsing.
+
+**Digest actionability**
+- Problem: Current digest presents ideas but doesn't tell the tenant what to do next clearly enough.
+- Fix: Add "THIS WEEK'S ACTION" section at the very top — one sentence, one next step. Make it impossible to miss.
+- Where: `DigestWriterService` — update prompt to always lead with action item.
+
+---
+
 ## Weekly Checklist Template
 
 Use this for each development week:

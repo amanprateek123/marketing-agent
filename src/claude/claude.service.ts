@@ -56,6 +56,10 @@ export class ClaudeService {
       }
     }
 
+    // Estimate cost from token counts (subscription doesn't return billing data)
+    const estimatedCostUSD = this.estimateCost(model, inputTokens, outputTokens);
+    const finalCostUSD = costUSD > 0 ? costUSD : estimatedCostUSD;
+
     await this.logUsage({
       tenantId: params.tenantId,
       runId: params.runId,
@@ -63,16 +67,26 @@ export class ClaudeService {
       claudeModel: model,
       inputTokens,
       outputTokens,
-      costUSD,
+      costUSD: finalCostUSD,
     });
 
-    return { content: result, inputTokens, outputTokens, costUSD };
+    return { content: result, inputTokens, outputTokens, costUSD: finalCostUSD };
   }
 
   getModel(agentType: AgentType): ClaudeModel {
     return HAIKU_AGENTS.includes(agentType)
       ? 'claude-haiku-4-5-20251001'
       : 'claude-sonnet-4-6';
+  }
+
+  private estimateCost(model: ClaudeModel, inputTokens: number, outputTokens: number): number {
+    // Pricing per million tokens (as of 2026)
+    const pricing: Record<ClaudeModel, { input: number; output: number }> = {
+      'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
+      'claude-haiku-4-5-20251001': { input: 0.8, output: 4.0 },
+    };
+    const p = pricing[model];
+    return (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output;
   }
 
   private async logUsage(data: {
