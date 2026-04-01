@@ -174,29 +174,32 @@ ${lines}
     if (!Array.isArray(parsed.hook_examples)) throw new Error('Missing field: hook_examples');
     if (typeof parsed.raw_summary !== 'string') throw new Error('Missing field: raw_summary');
 
-    // Validate and filter industry topics — must have real source URL
+    // Validate industry topics — drop only if signalScore is missing entirely
     const validTopics = (parsed.trending_topics as TrendingTopic[]).filter((t) => {
+      if (typeof t.signalScore !== 'number') {
+        this.logger.warn(`Dropping signal "${t.topic}" — missing signalScore`);
+        return false;
+      }
       const hasSource = t.engagementProof?.source &&
         t.engagementProof.source.startsWith('http');
-      const hasValue = typeof t.engagementProof?.value === 'number';
-      const hasScore = typeof t.signalScore === 'number';
-
-      if (!hasSource || !hasValue || !hasScore) {
-        this.logger.warn(
-          `Dropping signal "${t.topic}" — missing source URL, engagement value, or signalScore`,
-        );
-        return false;
+      if (!hasSource) {
+        // Penalise but keep — no URL means lower confidence, not zero value
+        t.signalScore = Math.min(t.signalScore, 5);
+        this.logger.warn(`Signal "${t.topic}" kept with capped score (no source URL)`);
       }
       return true;
     });
 
-    // Validate and filter viral trends — must have source URL and score
+    // Validate viral trends — drop only if signalScore is missing entirely
     const validViralTrends = ((parsed.viral_trends ?? []) as ViralTrend[]).filter((v) => {
-      const hasSource = v.source && v.source.startsWith('http');
-      const hasScore = typeof v.signalScore === 'number';
-      if (!hasSource || !hasScore) {
-        this.logger.warn(`Dropping viral trend "${v.trend}" — missing source or signalScore`);
+      if (typeof v.signalScore !== 'number') {
+        this.logger.warn(`Dropping viral trend "${v.trend}" — missing signalScore`);
         return false;
+      }
+      const hasSource = v.source && v.source.startsWith('http');
+      if (!hasSource) {
+        v.signalScore = Math.min(v.signalScore, 5);
+        this.logger.warn(`Viral trend "${v.trend}" kept with capped score (no source URL)`);
       }
       return true;
     });
