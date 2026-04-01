@@ -6,6 +6,7 @@ import {
   AgentResult,
   ClaudeModel,
   HAIKU_AGENTS,
+  NO_TOOL_AGENTS,
   RunAgentParams,
 } from './claude.types';
 import { UsageLog } from './schemas/usage-log.schema';
@@ -37,6 +38,8 @@ export class ClaudeService {
     let outputTokens = 0;
     let costUSD = 0;
 
+    this.logger.log(`[${params.agentType}] Starting query()...`);
+
     for await (const message of query({
       prompt: params.userMessage,
       options: {
@@ -45,9 +48,20 @@ export class ClaudeService {
         maxTurns: params.maxTurns ?? 10,
         cwd: process.cwd(),
         persistSession: false,
-        allowedTools: ['WebSearch', 'WebFetch', 'Bash'],
+        allowedTools: NO_TOOL_AGENTS.includes(params.agentType)
+          ? []
+          : ['WebSearch', 'WebFetch', 'Bash'],
       },
     })) {
+      this.logger.log(`[${params.agentType}] Message: type=${message.type} subtype=${(message as any).subtype ?? '-'}`);
+
+      if (message.type === 'assistant') {
+        const blocks: any[] = Array.isArray(message.message?.content) ? message.message.content : [];
+        const text = blocks.find((b) => b.type === 'text')?.text ?? '';
+        if (text.length > 0) {
+          this.logger.log(`[${params.agentType}] Generating... (${text.length} chars so far)`);
+        }
+      }
       if (message.type === 'result' && message.subtype === 'success') {
         result = message.result;
         costUSD = message.total_cost_usd ?? 0;
@@ -55,6 +69,8 @@ export class ClaudeService {
         outputTokens = message.usage?.output_tokens ?? 0;
       }
     }
+
+    this.logger.log(`[${params.agentType}] query() completed. result length: ${result.length}`);
 
     // Estimate cost from token counts (subscription doesn't return billing data)
     const estimatedCostUSD = this.estimateCost(model, inputTokens, outputTokens);

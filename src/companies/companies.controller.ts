@@ -7,6 +7,7 @@ import {
   Param,
   HttpCode,
   HttpStatus,
+  Logger,
 } from '@nestjs/common';
 import { CompaniesService } from './companies.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
@@ -15,6 +16,8 @@ import { UpdateCompanyDto } from './dto/update-company.dto';
 
 @Controller('companies')
 export class CompaniesController {
+  private readonly logger = new Logger(CompaniesController.name);
+
   constructor(
     private readonly companiesService: CompaniesService,
     private readonly promptGenerator: PromptGeneratorService,
@@ -27,7 +30,7 @@ export class CompaniesController {
 
     // Fire and forget — don't block the response
     this.promptGenerator.generate(company.tenantId).catch((err) =>
-      console.error(`Prompt generation failed for ${company.tenantId}:`, err.message),
+      this.logger.error(`Prompt generation failed for ${company.tenantId}: ${err.message}`),
     );
 
     return {
@@ -57,7 +60,7 @@ export class CompaniesController {
     if (needsPromptRegen) {
       // Fire and forget
       this.promptGenerator.generate(tenantId).catch((err) =>
-        console.error(`Prompt regeneration failed for ${tenantId}:`, err.message),
+        this.logger.error(`Prompt regeneration failed for ${tenantId}: ${err.message}`),
       );
     }
 
@@ -77,7 +80,7 @@ export class CompaniesController {
     await this.companiesService.findByTenantId(tenantId);
 
     this.promptGenerator.generate(tenantId).catch((err) =>
-      console.error(`Manual prompt regeneration failed for ${tenantId}:`, err.message),
+      this.logger.error(`Manual prompt regeneration failed for ${tenantId}: ${err.message}`),
     );
 
     return { tenantId, message: 'Prompt regeneration started.' };

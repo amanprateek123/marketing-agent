@@ -23,6 +23,18 @@ export const HAIKU_AGENTS: AgentType[] = [
   AgentType.DIGEST_WRITER,
 ];
 
+// Agents that don't need any tools (pure text generation — no web search needed)
+export const NO_TOOL_AGENTS: AgentType[] = [
+  AgentType.PROMPT_GENERATOR,
+  AgentType.COORDINATOR,
+  AgentType.IDEA_POOL,
+  AgentType.DIGEST_WRITER,
+  AgentType.CREATIVE_PRODUCER,
+  AgentType.CAMPAIGN_CREATOR,
+  AgentType.CAMPAIGN_AUDITOR,
+  AgentType.LEARNING_AGENT,
+];
+
 export interface RunAgentParams {
   tenantId: string;
   agentType: AgentType;

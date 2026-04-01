@@ -22,7 +22,10 @@ CRITICAL RULES:
    strategic patterns, and proven methodologies from the skills provided.
 5. Each prompt must be deeply specific to THIS company's industry, tone, and audience —
    but generic enough that price/product changes don't require regeneration.
-6. Each prompt should be 400-700 words — detailed enough to be useful, concise enough to fit in context.
+6. Scout prompts (instagramScout, redditScout, twitterScout, youtubeScout): 600-900 words —
+   they must include all 3 required sections plus brand-specific focus areas.
+   Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter): 300-500 words —
+   focus on synthesis logic, scoring criteria, and brand voice.
 
 ───────────────────────────────────────────
 SCOUT PROMPT REQUIREMENTS (instagramScout, redditScout, twitterScout, youtubeScout)
@@ -32,8 +35,9 @@ All 4 scout prompts MUST include these 3 sections in addition to brand-specific 
 SECTION A — LIVE DATA TOOLS:
 Instruct the scout to use real tools to fetch live data — never rely on memory or training data.
 - instagramScout + twitterScout + redditScout: use web_search tool with specific search queries.
-  For redditScout use search queries like: "site:reddit.com/r/astrology [topic]", "site:reddit.com [topic] upvotes"
-  to find real Reddit threads. Extract post URLs, visible upvote counts, and post dates from results.
+  For redditScout use search queries like: "site:reddit.com/r/[industry-subreddit] [topic]", "site:reddit.com [topic] upvotes"
+  to find real Reddit threads. Use the most relevant subreddits for this company's specific industry.
+  Extract post URLs, visible upvote counts, and post dates from results.
 - youtubeScout: use bash tool to call YouTube Data API with this exact key ${youtubeApiKey}:
   curl "https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&order=viewCount&publishedAfter={7_days_ago}&maxResults=20&key=${youtubeApiKey}"
   Extract real view counts and publish dates from the response.
@@ -85,7 +89,18 @@ No markdown, no explanation outside the JSON. Return only the JSON object.
 NON-SCOUT PROMPTS (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter)
 ───────────────────────────────────────────
 These agents receive already-collected data. They do NOT need tool usage instructions.
-Focus on: synthesis logic, scoring frameworks, output structure, brand voice, decision criteria.
+Focus on: synthesis logic, scoring frameworks, brand voice, decision criteria.
+
+Specific guidance per agent:
+- coordinator: How to weigh signals across platforms, what makes a signal worth escalating,
+  how to identify cross-platform consensus vs platform-specific noise.
+- competitorResearch: What competitor weaknesses and content gaps are most exploitable for THIS brand,
+  how to frame gaps as opportunities.
+- marketResearch: What market signals matter most for THIS company's category and audience.
+- ideaPool: Brand voice guidelines for idea generation, what makes an idea on-brand vs off-brand,
+  how to bridge content ideas to this company's conversion goals.
+- digestWriter: Tone and format for the weekly intelligence digest, what executives/founders of
+  THIS type of company want to see first, how to prioritize findings.
 
 ───────────────────────────────────────────
 FINAL OUTPUT FORMAT
@@ -134,20 +149,33 @@ export class PromptGeneratorService {
     const company = await this.companiesService.findByTenantId(tenantId);
     const skillContents = await this.readAllSkills();
 
-    const result = await this.claudeService.runAgent({
-      tenantId,
-      agentType: AgentType.PROMPT_GENERATOR,
-      systemPrompt: buildPromptGeneratorSystemPrompt(
-        this.configService.get<string>('youtube.apiKey') ?? '',
-      ),
-      liveContext: '',
-      userMessage: JSON.stringify({
-        companyProfile: this.buildCompanyProfile(company),
-        skills: skillContents,
-      }),
-      model: 'claude-sonnet-4-6',
-      maxTurns: 10,
-    });
+    let result;
+    try {
+      result = await this.claudeService.runAgent({
+        tenantId,
+        agentType: AgentType.PROMPT_GENERATOR,
+        systemPrompt: buildPromptGeneratorSystemPrompt(
+          this.configService.get<string>('youtube.apiKey') ?? '',
+        ),
+        liveContext: '',
+        userMessage: JSON.stringify({
+          companyProfile: this.buildCompanyProfile(company),
+          skills: skillContents,
+        }),
+        model: 'claude-sonnet-4-6',
+        maxTurns: 3,
+      });
+    } catch (err: any) {
+      this.logger.error(`Claude agent failed for ${tenantId}: ${err.message}`);
+      throw err;
+    }
+
+    if (!result.content || result.content.trim() === '') {
+      this.logger.error(`Prompt generator returned empty content for ${tenantId}`);
+      throw new Error('Prompt generator returned empty content');
+    }
+
+    this.logger.log(`Raw response received: ${result.content.length} chars | tokens in:${result.inputTokens} out:${result.outputTokens} cost:$${result.costUSD.toFixed(4)}`);
 
     const prompts = this.parsePrompts(result.content);
     await this.companiesService.updatePrompts(tenantId, prompts);
@@ -176,6 +204,21 @@ export class PromptGeneratorService {
     };
   }
 
+  // Only marketing skills are useful for prompt generation.
+  // Technical/execution skills (autonomous-loops, continuous-learning-v2, etc.)
+  // are implemented in TypeScript code — not needed in agent prompts.
+  private readonly MARKETING_SKILLS = [
+    'ad-creative',
+    'paid-ads',
+    'copywriting',
+    'marketing-psychology',
+    'social-content',
+    'customer-research',
+    'competitor-alternatives',
+    'market-research',
+    'product-marketing-context',
+  ];
+
   private async readAllSkills(): Promise<Record<string, string>> {
     const skills: Record<string, string> = {};
 
@@ -187,9 +230,11 @@ export class PromptGeneratorService {
       return skills;
     }
 
+    // Only load marketing skills — skip technical/execution skills
+    const relevantDirs = skillDirs.filter((dir) => this.MARKETING_SKILLS.includes(dir));
+
     await Promise.all(
-      skillDirs.map(async (dir) => {
-        // Try SKILL.md first (coreyhaines31/marketingskills format), fallback to README.md
+      relevantDirs.map(async (dir) => {
         const skillMdPath = path.join(SKILLS_DIR, dir, 'SKILL.md');
         const readmePath = path.join(SKILLS_DIR, dir, 'README.md');
         try {
@@ -198,7 +243,6 @@ export class PromptGeneratorService {
         } catch {
           try {
             const content = await fs.readFile(readmePath, 'utf-8');
-            // Skip placeholder files
             if (!content.includes('Placeholder — replace')) {
               skills[dir] = content;
             }
@@ -209,7 +253,7 @@ export class PromptGeneratorService {
       }),
     );
 
-    this.logger.log(`Loaded ${Object.keys(skills).length} skills`);
+    this.logger.log(`Loaded ${Object.keys(skills).length} marketing skills`);
     return skills;
   }
 
@@ -217,16 +261,23 @@ export class PromptGeneratorService {
     let parsed: Partial<CompanyPrompts>;
 
     try {
-      // Strip possible markdown code fences if Claude wraps the JSON
-      const cleaned = content
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/```\s*$/i, '')
-        .trim();
-
-      parsed = JSON.parse(cleaned);
-    } catch {
-      throw new Error(`Prompt Generator returned invalid JSON.\n\nRaw response:\n${content}`);
+      // Try to extract a ```json block first (Claude often adds explanation before it)
+      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
+      if (fenceMatch) {
+        parsed = JSON.parse(fenceMatch[1].trim());
+      } else {
+        // Fallback: find the outermost { ... } in the response
+        const start = content.indexOf('{');
+        const end = content.lastIndexOf('}');
+        if (start === -1 || end === -1) {
+          throw new Error('No JSON object found in response');
+        }
+        parsed = JSON.parse(content.slice(start, end + 1));
+      }
+    } catch (err: any) {
+      this.logger.error(`JSON parse failed: ${err.message}`);
+      this.logger.error(`Raw response (first 500 chars): ${content.slice(0, 500)}`);
+      throw new Error(`Prompt Generator returned invalid JSON: ${err.message}`);
     }
 
     // Validate all 9 keys are present and non-empty
@@ -237,6 +288,10 @@ export class PromptGeneratorService {
     if (missingKeys.length > 0) {
       throw new Error(`Prompt Generator response missing keys: ${missingKeys.join(', ')}`);
     }
+
+    REQUIRED_PROMPT_KEYS.forEach((key) => {
+      this.logger.log(`Prompt ready: ${key} (${parsed[key]!.trim().split(/\s+/).length} words)`);
+    });
 
     return parsed as CompanyPrompts;
   }
