@@ -50,9 +50,8 @@ export class IdeaPoolService {
   ): Promise<IdeaPoolResult> {
     const tenantId = company.tenantId;
     const liveContext = this.liveContextBuilder.build(company);
-    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 3;
+    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 5;
 
-    // ── Step 1: Generate ideas (no scores) ───────────────────────────────────
     const generateMessage = this.buildGeneratePrompt(
       coordinatorResult,
       competitorResearch,
@@ -71,35 +70,21 @@ export class IdeaPoolService {
       maxTurns: 8,
     });
 
-    const rawBriefs = this.parseGeneratedBriefs(generated.content);
+    const briefs = this.parseBriefs(generated.content);
 
-    if (rawBriefs.length === 0) {
+    if (briefs.length === 0) {
       this.logger.warn(`Idea pool returned no briefs: tenantId=${tenantId} runId=${runId}`);
       return { briefs: [], selectedBriefId: '', selectionReason: '' };
     }
 
-    // ── Step 2: Score ideas blindly (separate agent call) ────────────────────
-    const scoreMessage = this.buildScoringPrompt(rawBriefs, company);
-
-    const scored = await this.claudeService.runAgent({
-      tenantId,
-      runId,
-      agentType: AgentType.IDEA_POOL,
-      systemPrompt: company.prompts?.ideaPool ?? '',
-      liveContext,
-      userMessage: scoreMessage,
-      maxTurns: 3,
-    });
-
-    const scoredBriefs = this.parseScoredBriefs(scored.content, rawBriefs);
-    const sorted = scoredBriefs.sort((a, b) => b.finalScore - a.finalScore);
-    const winner = sorted[0];
+    // ── Rule-based winner selection ───────────────────────────────────────────
+    const winner = this.selectWinner(briefs, coordinatorResult);
     const briefId = uuidv4();
     winner.briefId = briefId;
 
     // ── Persist ───────────────────────────────────────────────────────────────
     await this.intelligenceBriefModel.insertMany(
-      sorted.map((b) => ({
+      briefs.map((b) => ({
         tenantId,
         runId,
         topic: b.topic,
@@ -107,9 +92,9 @@ export class IdeaPoolService {
         platform: b.platform,
         format: b.format,
         audience: b.audience,
-        confidenceScore: b.confidenceScore ?? 0,
-        urgencyScore: b.urgencyScore ?? 0,
-        finalScore: b.finalScore,
+        confidenceScore: 0,
+        urgencyScore: b.urgent ? 10 : 5,
+        finalScore: b.priorityScore ?? 0,
         sourcePlatforms: b.sourcePlatforms ?? [],
         suggestedBudget: b.suggestedBudget ?? 0,
         selected: b.briefId === briefId,
@@ -129,23 +114,34 @@ export class IdeaPoolService {
       keyMessage: winner.keyMessage,
       conversionBridge: winner.conversionBridge,
       suggestedBudget: winner.suggestedBudget ?? 0,
-      finalScore: winner.finalScore,
+      finalScore: winner.priorityScore ?? 0,
       selected: true,
-      selectionReason: winner.selectionReason ?? 'Highest score from blind evaluation',
+      selectionReason: winner.selectionReason,
     });
 
     this.logger.log(
-      `Idea pool done: tenantId=${tenantId} runId=${runId} briefs=${sorted.length} selected=${briefId}`,
+      `Idea pool done: tenantId=${tenantId} runId=${runId} briefs=${briefs.length} selected=${briefId} source=${winner.ideaSource}`,
     );
 
     return {
-      briefs: sorted,
+      briefs: briefs.map((b) => ({
+        briefId: b.briefId ?? '',
+        topic: b.topic,
+        angle: b.angle,
+        platform: b.platform,
+        format: b.format,
+        audience: b.audience,
+        hook: b.hook ?? '',
+        keyMessage: b.keyMessage ?? '',
+        conversionBridge: b.conversionBridge ?? '',
+        suggestedBudget: b.suggestedBudget ?? 0,
+        finalScore: b.priorityScore ?? 0,
+      })),
       selectedBriefId: briefId,
-      selectionReason: winner.selectionReason ?? 'Highest score from blind evaluation',
+      selectionReason: winner.selectionReason,
     };
   }
 
-  // ── Step 1 prompt: generate ideas, NO scores ────────────────────────────────
   private buildGeneratePrompt(
     coordinator: CoordinatorResult,
     competitorResearch: string,
@@ -153,35 +149,55 @@ export class IdeaPoolService {
     company: CompanyDocument,
     ideasPerRun: number,
   ): string {
+    const coordinatorSlots = Math.max(1, ideasPerRun - 2);
+
     const topSignals = coordinator.topSignals
-      .slice(0, 5)
-      .map((s, i) => `${i + 1}. "${s.topic}" | Platforms: ${s.platforms.join(', ')} | ${s.rationale}`)
+      .slice(0, coordinatorSlots)
+      .map((s, i) =>
+        `Signal ${i + 1} (score: ${s.compositeScore}) — "${s.topic}" | Platforms: ${s.platforms.join(', ')} | ${s.rationale}`,
+      )
       .join('\n');
 
     return `
-Generate ${ideasPerRun} content ideas for ${company.name}. Do NOT score them — scoring happens separately.
+Generate exactly ${ideasPerRun} content ideas for ${company.name} split across 3 sources.
 
-TOP CROSS-PLATFORM SIGNALS:
-${topSignals || 'See coordinator synthesis below.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SOURCE 1 — COORDINATOR SIGNALS (generate ${coordinatorSlots} ideas)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Generate one idea per signal below. Each idea MUST directly address its signal.
+Set ideaSource to "scout_signal" or "viral_trend" based on what the signal is.
+Set signalRank to the signal number (1, 2, 3...).
 
-COORDINATOR SYNTHESIS:
+${topSignals || coordinator.content.slice(0, 2000)}
+
+FULL COORDINATOR SYNTHESIS (for context):
 ${coordinator.content}
 
-COMPETITOR RESEARCH:
-${competitorResearch.slice(0, 2000)}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SOURCE 2 — COMPETITOR GAP (generate 1 idea)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+From the competitor research below, identify the single biggest gap or vulnerability
+a competitor has RIGHT NOW that ${company.name} can exploit.
+Set ideaSource to "competitor_gap".
+Set urgent: true if this gap is time-sensitive (competitor is vulnerable this week).
 
-MARKET RESEARCH:
-${marketResearch.slice(0, 2000)}
+${competitorResearch}
 
-For each idea provide:
-- topic, angle, platform, format, audience
-- hook (opening line or visual hook)
-- keyMessage (what the audience should believe after seeing this)
-- conversionBridge (how this leads to a sale or sign-up)
-- suggestedBudget (INR for paid promotion, 0 if organic)
-- ideaSource: "scout_signal" | "viral_trend" | "competitor_gap" | "market_insight"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SOURCE 3 — MARKET INSIGHT (generate 1 idea)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+From the market research below, identify the strongest seasonal or trending
+market opportunity for ${company.name} right now.
+Set ideaSource to "market_insight".
+Set urgent: true if this is time-sensitive (seasonal window closing soon).
 
-Return a JSON block:
+${marketResearch}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return exactly ${ideasPerRun} ideas. For each idea provide:
+
 \`\`\`json
 {
   "briefs": [
@@ -191,99 +207,92 @@ Return a JSON block:
       "platform": "instagram|youtube|twitter|reddit",
       "format": "reel|carousel|thread|video|image",
       "audience": "...",
-      "hook": "...",
-      "keyMessage": "...",
-      "conversionBridge": "...",
+      "hook": "opening line or visual hook",
+      "keyMessage": "what the audience should believe after seeing this",
+      "conversionBridge": "how this leads to a sale or sign-up",
       "suggestedBudget": 0,
       "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight",
-      "sourcePlatforms": ["instagram", "youtube"]
+      "sourcePlatforms": ["instagram", "youtube"],
+      "signalRank": 1,
+      "urgent": false,
+      "priorityScore": 8.5,
+      "selectionReason": "one sentence on why this idea matters now"
     }
   ]
 }
 \`\`\`
+
+Rules:
+- signalRank: 1/2/3 for coordinator signal ideas, null for competitor/market ideas
+- urgent: true only if this idea must be executed THIS WEEK
+- priorityScore: your honest 1-10 rating for this idea's potential
     `.trim();
   }
 
-  // ── Step 2 prompt: score ideas blindly ────────────────────────────────────
-  private buildScoringPrompt(briefs: any[], company: CompanyDocument): string {
-    const briefList = briefs
-      .map((b, i) => `
-Idea ${i + 1}:
-  Topic: ${b.topic}
-  Angle: ${b.angle}
-  Platform: ${b.platform} | Format: ${b.format}
-  Audience: ${b.audience}
-  Hook: ${b.hook}
-  Key Message: ${b.keyMessage}
-  Conversion Bridge: ${b.conversionBridge}
-      `.trim())
-      .join('\n\n');
-
-    return `
-Score these ${briefs.length} content ideas for ${company.name}. Be objective and critical — do not inflate scores.
-
-${briefList}
-
-For each idea score:
-- confidenceScore (0–10): how confident are you this topic is genuinely trending?
-- urgencyScore (0–10): how time-sensitive is this? Must act this week?
-- finalScore (0–10): overall potential — consider virality, brand fit, conversion potential
-- selectionReason: one sentence on why this score
-
-Use the full range. A mediocre idea should score 4-5, not 7-8.
-
-Return a JSON block:
-\`\`\`json
-{
-  "scores": [
-    {
-      "index": 0,
-      "confidenceScore": 7,
-      "urgencyScore": 9,
-      "finalScore": 8.2,
-      "selectionReason": "..."
+  // ── Rule-based winner selection ─────────────────────────────────────────────
+  // Priority order:
+  // 1. Urgent competitor gap (competitor is vulnerable RIGHT NOW)
+  // 2. Idea tied to Signal 1 (highest coordinator signal)
+  // 3. Urgent market insight
+  // 4. Idea tied to Signal 2
+  // 5. Fallback: highest priorityScore
+  private selectWinner(briefs: any[], coordinator: CoordinatorResult): any {
+    // 1. Urgent competitor gap
+    const urgentGap = briefs.find((b) => b.ideaSource === 'competitor_gap' && b.urgent === true);
+    if (urgentGap) {
+      urgentGap.selectionReason = urgentGap.selectionReason ?? 'Urgent competitor gap — competitor is vulnerable this week';
+      return urgentGap;
     }
-  ]
-}
-\`\`\`
-    `.trim();
+
+    // 2. Signal 1 idea
+    const signal1 = briefs.find((b) => b.signalRank === 1);
+    if (signal1) {
+      const topSignal = coordinator.topSignals[0];
+      signal1.selectionReason = signal1.selectionReason ??
+        `Tied to top coordinator signal "${topSignal?.topic ?? 'Signal 1'}" (score: ${topSignal?.compositeScore ?? 'N/A'})`;
+      return signal1;
+    }
+
+    // 3. Urgent market insight
+    const urgentMarket = briefs.find((b) => b.ideaSource === 'market_insight' && b.urgent === true);
+    if (urgentMarket) {
+      urgentMarket.selectionReason = urgentMarket.selectionReason ?? 'Urgent market insight — seasonal window closing';
+      return urgentMarket;
+    }
+
+    // 4. Signal 2 idea
+    const signal2 = briefs.find((b) => b.signalRank === 2);
+    if (signal2) {
+      signal2.selectionReason = signal2.selectionReason ?? 'Tied to Signal 2 — no Signal 1 idea generated';
+      return signal2;
+    }
+
+    // 5. Fallback: highest priorityScore
+    const fallback = briefs.sort((a, b) => (b.priorityScore ?? 0) - (a.priorityScore ?? 0))[0];
+    fallback.selectionReason = fallback.selectionReason ?? 'Highest priority score among generated ideas';
+    return fallback;
   }
 
-  private parseGeneratedBriefs(content: string): any[] {
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
-    if (!jsonMatch) return [];
+  private parseBriefs(content: string): any[] {
+    const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
+    if (fenceMatch) {
+      try {
+        const parsed = JSON.parse(fenceMatch[1].trim());
+        return Array.isArray(parsed.briefs) ? parsed.briefs.map((b: any) => ({ ...b, briefId: '' })) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    // Fallback: find outermost { }
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start === -1 || end === -1) return [];
     try {
-      const parsed = JSON.parse(jsonMatch[1]);
-      return Array.isArray(parsed.briefs) ? parsed.briefs : [];
+      const parsed = JSON.parse(content.slice(start, end + 1));
+      return Array.isArray(parsed.briefs) ? parsed.briefs.map((b: any) => ({ ...b, briefId: '' })) : [];
     } catch {
       return [];
-    }
-  }
-
-  private parseScoredBriefs(content: string, rawBriefs: any[]): any[] {
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
-    if (!jsonMatch) {
-      // fallback: return briefs with zero scores
-      return rawBriefs.map((b) => ({ ...b, briefId: '', finalScore: 0, confidenceScore: 0, urgencyScore: 0 }));
-    }
-
-    try {
-      const parsed = JSON.parse(jsonMatch[1]);
-      const scores: any[] = Array.isArray(parsed.scores) ? parsed.scores : [];
-
-      return rawBriefs.map((b, i) => {
-        const score = scores.find((s) => s.index === i) ?? {};
-        return {
-          ...b,
-          briefId: '',
-          confidenceScore: Number(score.confidenceScore ?? 0),
-          urgencyScore: Number(score.urgencyScore ?? 0),
-          finalScore: Number(score.finalScore ?? 0),
-          selectionReason: score.selectionReason ?? '',
-        };
-      });
-    } catch {
-      return rawBriefs.map((b) => ({ ...b, briefId: '', finalScore: 0, confidenceScore: 0, urgencyScore: 0 }));
     }
   }
 }

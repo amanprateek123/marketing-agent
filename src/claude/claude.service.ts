@@ -72,6 +72,10 @@ export class ClaudeService {
 
     this.logger.log(`[${params.agentType}] query() completed. result length: ${result.length}`);
 
+    if (result.length < 100 && result.toLowerCase().includes("limit")) {
+      throw new Error(`Claude rate limit hit: ${result.trim()}`);
+    }
+
     // Estimate cost from token counts (subscription doesn't return billing data)
     const estimatedCostUSD = this.estimateCost(model, inputTokens, outputTokens);
     const finalCostUSD = costUSD > 0 ? costUSD : estimatedCostUSD;

@@ -8,7 +8,7 @@
 >
 > **Timeline:** 12 weeks across 8 phases
 >
-> **Last Updated:** March 2026
+> **Last Updated:** April 2026
 
 ---
 
@@ -829,7 +829,7 @@ Every day:
   → 4 scouts research trending + viral signals
   → Coordinator synthesises cross-platform signals
   → Competitor Research + Market Research run in parallel
-  → Idea Pool generates N ideas (tenant-configured, default 3)
+  → Idea Pool generates N ideas in 3 buckets (tenant-configured, default 5), rule-based winner selection
   → Digest sent to tenant via Slack/WhatsApp
   → Tenant reacts per idea: ✅ good / ❌ bad
   → Feedback stored in MongoDB
@@ -2143,7 +2143,7 @@ volumes:
 | Delivery | n8n (self-hosted) | Visual routing for Slack/WhatsApp/Email. Marketing team can change channels without code |
 | Learning | Monthly with 3+ data point minimum | Prevents overfitting to small samples. Confidence scoring for each pattern |
 | Cold start strategy | Daily research + tenant feedback loop (14 days) | System has no idea what tenant likes on day 1. Daily ideas + ✅/❌ reactions build preference data fast. Auto-switches to weekly after confidence threshold (>60% approval) |
-| Ideas per run | Tenant-configurable (default 3, max 10) | Every tenant has different experimentation appetite. Startups may want 10/day, established brands want 1-3/week. Stored in company.pipelineConfig.ideasPerRun |
+| Ideas per run | Tenant-configurable (default 5, max 10) | Every tenant has different experimentation appetite. Startups may want 10/day, established brands want 1-3/week. Stored in company.pipelineConfig.ideasPerRun. Budget: (N-2) coordinator ideas + 1 competitor gap + 1 market insight |
 | Idea sources | 4 types tracked per idea (scout/viral/competitor/market) | Learning agent uses source tracking to find which input type produces best-performing ideas for each tenant |
 | Campaign automation | Human-in-loop during learning, full auto after | During cold start: creative auto-generated but tenant confirms before launch. After steady state: fully autonomous. Switch requires 3 conditions: >60% approval rate + ROAS target met 2 consecutive weeks + tenant explicitly enables auto |
 | Signal deduplication (now) | Topic+angle TTL (14d industry, 7d viral) | Simple, effective for early stage. Prevents re-researching same topic+angle within 2 weeks |
@@ -2154,55 +2154,93 @@ volumes:
 
 ## Known Optimisations Backlog
 
-Issues identified during Phase 2 design review. To be addressed in priority order.
+Issues identified during Phase 2 build and testing. To be addressed in priority order.
 
 ### Priority 1 — ✅ Implemented
 
 **Stuck run detector** ✅
-- Problem: If server crashes mid-agent, run stays stuck in `scouts_running` / `intelligence_running` forever. No one restarts it.
-- Fix: On server startup, find any runs stuck in a non-terminal state for >2 hours and auto-resume them.
-- Implemented: `PipelineOrchestratorService.recoverStuckRuns()` called via `OnModuleInit`.
+- Problem: If server crashes mid-agent, run stays stuck in `scouts_running` / `intelligence_running` forever.
+- Fix: On server startup, find runs stuck in non-terminal state for >2 hours and auto-resume.
+- Implemented: `PipelineOrchestratorService.recoverStuckRuns()` via `OnModuleInit`.
 
-**Separate idea generation + scoring** ✅
-- Problem: Idea Pool agent generates AND scores its own ideas — self-scoring is biased. Everything gets 7-9/10.
-- Fix: Two-step process. Step 1 generates ideas with no scores. Step 2 scores them blindly with explicit instruction to use full range (mediocre = 4-5, not 7-8).
-- Also tracks `ideaSource` per idea: scout_signal / viral_trend / competitor_gap / market_insight.
-- Implemented: `IdeaPoolService` — `buildGeneratePrompt()` + `buildScoringPrompt()`.
-- Future upgrade: score against historical performance data, weight by ideaSource, factor in tenant approval history. Implement in Phase 7 when real data available.
+**Bucket-based idea pool with rule-based selection** ✅
+- Problem: Idea Pool generated ideas then scored them with a second LLM call — self-scoring bias inflated all scores to 7-9/10, and the scoring step wasted a full agent call.
+- Fix: Removed scoring entirely. Ideas are now generated in 3 explicit buckets: (N-2) from coordinator signals, 1 from competitor gap, 1 from market insight. Winner is selected by deterministic rules: urgent competitor gap → Signal 1 → urgent market insight → Signal 2 → highest `priorityScore`. Selection reason is always traceable.
+- Tracks `ideaSource` per idea: `scout_signal` / `viral_trend` / `competitor_gap` / `market_insight`. Each coordinator idea tagged with `signalRank` and `urgent` flag.
+- Default `ideasPerRun` changed from 3 to 5 (both schema and service).
+- Implemented: `IdeaPoolService.buildGeneratePrompt()`, `selectWinner()`, `parseBriefs()`.
 
 **Cost estimation from token counts** ✅
-- Problem: `costUSD` is always 0 — Claude Code subscription doesn't return billing data. No visibility into per-run cost.
-- Fix: Token counts DO come back. Estimate cost using Claude's public pricing (Sonnet: $3/M input + $15/M output, Haiku: $0.8/M input + $4/M output).
-- Implemented: `ClaudeService.estimateCost()` — used as fallback when `total_cost_usd` is 0.
+- Problem: `costUSD` always 0 — Claude Code subscription doesn't return billing data.
+- Fix: Estimate from token counts using public pricing (Sonnet: $3/M input + $15/M output, Haiku: $0.8/M input + $4/M output).
+- Implemented: `ClaudeService.estimateCost()`.
+
+**Full data flow — no truncation** ✅
+- Problem: Competitor research (23KB) and market research (19KB) were truncated to 2000 chars in idea pool prompt.
+- Fix: All three inputs (coordinator content, competitor research, market research) pass in full — no slicing anywhere.
+- Implemented: `IdeaPoolService.buildGeneratePrompt()`.
+
+**Viral trend deduplication** ✅
+- Problem: `saveSignals()` only saved industry topics to `scout_signals`. Viral trends were never saved, so TTL dedup never excluded repeated viral trends across runs.
+- Fix: Viral trends now saved to `scout_signals` with `signalType: 'viral'`. TTL is 7d for viral, 14d for industry. `loadRecentSignals()` queries both types with correct TTL per type.
+- Implemented: `ScoutBaseService.saveSignals()`, `loadRecentSignals()`, `ScoutSignal` schema.
+
+**Scout failure now throws** ✅
+- Problem: After 3 failed attempts, scout saved an empty output and continued. Orchestrator counted it as a valid scout (`existingScouts.length >= 4`), so coordinator ran on zero signals from that platform silently.
+- Fix: Scout throws after 3 failures. Pipeline fails cleanly and can be resumed. No empty outputs saved.
+- Implemented: `ScoutBaseService.execute()`.
+
+**Coordinator output schema in prompt** ✅
+- Problem: Coordinator prompt told agent to "return topSignals JSON" but never showed field names. Agent invented its own structure, parser silently returned `[]`.
+- Fix: Explicit JSON schema with exact field names (`topic`, `platforms`, `compositeScore`, `rationale`) added to coordinator prompt. Parser now logs a warning when JSON block is missing or malformed.
+- Implemented: `CoordinatorService.buildCoordinatorPrompt()`, `extractTopSignals()`.
+
+**Phase D skip loads briefs from DB** ✅
+- Problem: On pipeline resume, Phase D skip reconstructed `ideaPoolResult` with `briefs: []`. Digest writer had no runner-up ideas to include.
+- Fix: Load all `intelligence_briefs` from DB when skipping Phase D so digest gets full runner-up list.
+- Implemented: `PipelineOrchestratorService.executeDAG()`.
+
+**Digest writer never asks questions** ✅
+- Problem: Digest agent asked for clarification when topSignals was empty instead of writing with available data.
+- Fix: Prompt explicitly says "Do NOT ask any questions. Write the digest immediately using the data provided." Runner-up ideas now included in prompt.
+- Implemented: `DigestWriterService.buildDigestPrompt()`.
+
+**Prompt generator improvements** ✅
+- JSON parser now extracts ```json block anywhere in response (not just start) — same fix as scouts.
+- Word count guidance split: scouts 600-900 words, non-scouts 300-500 words.
+- Non-scout agents now get specific per-agent guidance in the meta-prompt.
+- Reddit example subreddit generalised (was hardcoded to `r/astrology`).
+- Errors now surface via NestJS Logger instead of `console.error`.
+- Implemented: `PromptGeneratorService`, `CompaniesController`.
 
 ### Priority 2 — Implement in Phase 3-4
 
 **Coordinator aware of past winning briefs**
 - Problem: Coordinator ranks signals but doesn't know which topics historically converted into good campaigns.
-- Fix: Inject top 5 past briefs with high ROAS into coordinator prompt. It will naturally favour signals similar to past winners.
+- Fix: Inject top 5 past briefs with high ROAS into coordinator prompt. It will favour signals similar to past winners.
 - Where: `CoordinatorService.run()` — load top performing `intelligence_briefs` and inject into prompt.
 
 **Scout quality tracking**
 - Problem: If a scout returns 2 signals instead of 10, we don't know if the platform was quiet or Claude searched poorly.
-- Fix: Track signal count per scout per run. If consistently below threshold (e.g. <3 signals) → flag prompt for review.
-- Where: `ScoutBaseService.execute()` — log signal count, store in `pipeline_runs`.
+- Fix: Track signal count per scout per run. Flag runs where any scout returns <3 signals.
+- Where: `ScoutBaseService.execute()` — store signal count in `pipeline_runs`.
 
 **Platform failure flagging to coordinator**
-- Problem: If YouTube scout fails all 3 attempts, coordinator doesn't know — it just sees fewer signals and may draw wrong conclusions.
-- Fix: Pass platform failure flags to coordinator prompt. Coordinator can note the gap and weight other platforms accordingly.
-- Where: `PipelineOrchestratorService.executeDAG()` — track which scouts returned empty and pass to coordinator.
+- Problem: If a scout fails, coordinator just sees fewer signals and may draw wrong conclusions without knowing why.
+- Fix: Pass platform failure flags to coordinator prompt so it can weight remaining platforms accordingly.
+- Where: `PipelineOrchestratorService.executeDAG()`.
 
 ### Priority 3 — Implement in Phase 7
 
 **Prompt quality validation after generation**
 - Problem: If prompt generator produces a bad prompt, there's no quality check. Bad prompts silently degrade all agents.
-- Fix: After generation, run a validation agent that scores each of the 9 prompts 1-10 against requirements. Regenerate any below 7.
-- Where: `PromptGeneratorService.generate()` — add validation step after parsing.
+- Fix: After generation, run a validation agent that scores each of the 9 prompts 1-10. Regenerate any below 7.
+- Where: `PromptGeneratorService.generate()`.
 
 **Digest actionability**
-- Problem: Current digest presents ideas but doesn't tell the tenant what to do next clearly enough.
-- Fix: Add "THIS WEEK'S ACTION" section at the very top — one sentence, one next step. Make it impossible to miss.
-- Where: `DigestWriterService` — update prompt to always lead with action item.
+- Problem: Digest presents ideas but doesn't lead with a single clear next step.
+- Fix: Add "THIS WEEK'S ACTION" section at the very top — one sentence, one next step.
+- Where: `DigestWriterService` — update prompt.
 
 ---
 

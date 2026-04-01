@@ -41,6 +41,9 @@ export class ScoutSignal {
 
   @Prop({ enum: ['high', 'medium'], default: 'medium' })
   sourceQuality: string;
+
+  @Prop({ enum: ['industry', 'viral'], default: 'industry', index: true })
+  signalType: string;
 }
 
 export const ScoutSignalSchema = SchemaFactory.createForClass(ScoutSignal);

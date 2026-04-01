@@ -75,24 +75,36 @@ Conversion bridge: ${winner.conversionBridge}
 Score: ${winner.finalScore}/10`
       : 'No brief selected this run.';
 
+    const runnerUps = ideaPool.briefs
+      .filter((b) => b.briefId !== ideaPool.selectedBriefId)
+      .sort((a, b) => b.finalScore - a.finalScore)
+      .slice(0, 4)
+      .map((b, i) => `${i + 1}. "${b.topic}" | ${b.platform} ${b.format} | Score: ${b.finalScore}/10`)
+      .join('\n');
+
     return `
 Write the weekly marketing intelligence digest for ${company.name}.
 
+IMPORTANT: You have all the data you need below. Do NOT ask any questions. Do NOT request clarification. Write the digest immediately using the data provided.
+
 TOP SIGNALS THIS WEEK:
-${topSignals || 'No signals this run.'}
+${topSignals || 'See coordinator synthesis — signals were collected across all platforms.'}
 
 WINNING CONTENT BRIEF:
 ${winnerBlock}
 
 SELECTION REASON: ${ideaPool.selectionReason}
 
-The digest should:
-1. Open with 2-3 key market insights (what's trending and why it matters)
-2. Present the winning content idea with full brief details
-3. List runner-up ideas briefly (topic + platform + score)
-4. Close with one actionable next step
+RUNNER-UP IDEAS (not selected this run):
+${runnerUps || 'No runner-up ideas.'}
 
-Write in a clear, confident tone. This goes directly to the marketing team.
+The digest should:
+1. Open with 2-3 key market insights from the top signals
+2. Present the winning content idea with full brief details
+3. List the runner-up ideas with their scores
+4. Close with one actionable next step for the team
+
+Write in a clear, confident tone. This goes directly to the marketing team. 400-500 words max.
     `.trim();
   }
 }

@@ -4,10 +4,11 @@ import { Model } from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 import { CompaniesService } from '../companies/companies.service';
 import { PipelineRun, PipelineRunDocument } from './schemas/pipeline-run.schema';
-import { ScoutOutput, ScoutOutputDocument, ScoutOutputData } from './schemas/scout-output.schema';
+import { ScoutOutput, ScoutOutputDocument } from './schemas/scout-output.schema';
 import { CoordinatorOutput, CoordinatorOutputDocument } from './schemas/coordinator-output.schema';
 import { ResearchOutput, ResearchOutputDocument } from './schemas/research-output.schema';
 import { CreativeBrief, CreativeBriefDocument } from './schemas/creative-brief.schema';
+import { IntelligenceBrief, IntelligenceBriefDocument } from './schemas/intelligence-brief.schema';
 import { Digest, DigestDocument } from './schemas/digest.schema';
 import { InstagramScout } from './scouts/instagram.scout';
 import { RedditScout } from './scouts/reddit.scout';
@@ -46,6 +47,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
     private readonly researchOutputModel: Model<ResearchOutputDocument>,
     @InjectModel(CreativeBrief.name)
     private readonly creativeBriefModel: Model<CreativeBriefDocument>,
+    @InjectModel(IntelligenceBrief.name)
+    private readonly intelligenceBriefModel: Model<IntelligenceBriefDocument>,
     @InjectModel(Digest.name)
     private readonly digestModel: Model<DigestDocument>,
   ) {}
@@ -136,11 +139,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
         .lean()
         .exec();
 
-      let scoutData: Record<string, ScoutOutputData>;
-
       if (existingScouts.length >= 4) {
         this.logger.log(`[${runId}] Phase A: skipped — scouts already complete`);
-        scoutData = Object.fromEntries(existingScouts.map((s) => [s.platform, s.data]));
       } else {
         await update('scouts_running', 'scouts');
         this.logger.log(`[${runId}] Phase A: scouts starting`);
@@ -152,7 +152,6 @@ export class PipelineOrchestratorService implements OnModuleInit {
           this.youtubeScout.execute(company, runId),
         ]);
 
-        scoutData = { instagram, reddit, twitter, youtube };
         this.logger.log(
           `[${runId}] Phase A done — signals: instagram=${instagram.trending_topics.length} reddit=${reddit.trending_topics.length} twitter=${twitter.trending_topics.length} youtube=${youtube.trending_topics.length}`,
         );
@@ -210,8 +209,24 @@ export class PipelineOrchestratorService implements OnModuleInit {
 
       if (existingBrief) {
         this.logger.log(`[${runId}] Phase D: skipped — idea pool already complete`);
+        const allBriefs = await this.intelligenceBriefModel
+          .find({ tenantId, runId })
+          .lean()
+          .exec();
         ideaPoolResult = {
-          briefs: [],
+          briefs: allBriefs.map((b) => ({
+            briefId: b.selected ? existingBrief.briefId : '',
+            topic: b.topic,
+            angle: b.angle,
+            platform: b.platform,
+            format: b.format,
+            audience: b.audience,
+            hook: b.selected ? existingBrief.hook : '',
+            keyMessage: b.selected ? existingBrief.keyMessage : '',
+            conversionBridge: b.selected ? existingBrief.conversionBridge : '',
+            suggestedBudget: b.suggestedBudget,
+            finalScore: b.finalScore,
+          })),
           selectedBriefId: existingBrief.briefId,
           selectionReason: existingBrief.selectionReason,
         };

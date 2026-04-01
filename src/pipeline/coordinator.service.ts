@@ -249,7 +249,22 @@ Your job:
 4. A viral trend with a strong brand tie-in can outscore a weak industry signal
 5. Produce a synthesis brief that the intelligence and idea pool agents can use
 
-Return your full synthesis including the ranked topSignals JSON block.
+You MUST include a JSON block at the end using EXACTLY this format:
+
+\`\`\`json
+{
+  "topSignals": [
+    {
+      "topic": "short topic name",
+      "platforms": ["instagram", "twitter"],
+      "compositeScore": 9.2,
+      "rationale": "one sentence on why this signal matters now"
+    }
+  ]
+}
+\`\`\`
+
+Include 5–10 top signals. Use exactly these field names: topic, platforms, compositeScore, rationale.
     `.trim();
   }
 
@@ -262,15 +277,19 @@ Return your full synthesis including the ranked topSignals JSON block.
         const signals = parsed.topSignals ?? parsed.top_signals ?? parsed.signals ?? [];
         if (Array.isArray(signals) && signals.length > 0) {
           return signals.slice(0, 10).map((s: any) => ({
-            topic: String(s.topic ?? ''),
-            platforms: Array.isArray(s.platforms) ? s.platforms : [],
+            topic: String(s.topic ?? s.title ?? s.id ?? ''),
+            platforms: Array.isArray(s.platforms) ? s.platforms
+              : Array.isArray(s.platformPresence) ? s.platformPresence
+              : [],
             compositeScore: Number(s.compositeScore ?? s.composite_score ?? 0),
-            rationale: String(s.rationale ?? ''),
+            rationale: String(s.rationale ?? s.urgency ?? (Array.isArray(s.primaryAngles) ? s.primaryAngles[0] : '') ?? ''),
           }));
         }
-      } catch {
-        // fall through to empty
+      } catch (err: any) {
+        this.logger.warn(`extractTopSignals JSON parse failed: ${err.message} — topSignals will be empty`);
       }
+    } else {
+      this.logger.warn('extractTopSignals: no ```json block found in coordinator response — topSignals will be empty');
     }
 
     // Fallback: return empty array — content is still stored in full

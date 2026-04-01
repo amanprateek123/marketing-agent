@@ -76,16 +76,17 @@ export abstract class ScoutBaseService {
           `Scout attempt ${attempt}/3 failed: ${this.platform} | ${lastError}`,
         );
         if (attempt === 3) {
-          // Return empty output rather than crashing the pipeline
-          output = this.emptyOutput();
           this.logger.error(
             `Scout gave up after 3 attempts: ${this.platform} | run: ${runId}`,
+          );
+          throw new Error(
+            `${this.platform} scout failed after 3 attempts: ${lastError}`,
           );
         }
       }
     }
 
-    const finalOutput = output!;
+    const finalOutput = output!; // always defined — loop throws on 3rd failure
 
     // Save full scout output
     await this.scoutOutputModel.create({
@@ -96,8 +97,8 @@ export abstract class ScoutBaseService {
       enriched: false,
     });
 
-    // Save individual signals for dedup tracking
-    await this.saveSignals(company.tenantId, runId, finalOutput.trending_topics);
+    // Save individual signals for dedup tracking (industry + viral)
+    await this.saveSignals(company.tenantId, runId, finalOutput.trending_topics, finalOutput.viral_trends);
 
     return finalOutput;
   }
@@ -214,13 +215,13 @@ ${lines}
     tenantId: string,
     runId: string,
     topics: TrendingTopic[],
+    viralTrends: ViralTrend[] = [],
   ): Promise<void> {
     for (const topic of topics) {
       const hash = createHash('md5')
-        .update(`${tenantId}:${this.platform}:${topic.topic}:${topic.angle}`)
+        .update(`${tenantId}:${this.platform}:industry:${topic.topic}:${topic.angle}`)
         .digest('hex');
 
-      // Upsert — don't duplicate signals across runs
       await this.scoutSignalModel.updateOne(
         { hash },
         {
@@ -236,6 +237,30 @@ ${lines}
             recency: topic.recency,
             specificity: topic.specificity,
             sourceQuality: topic.sourceQuality,
+            signalType: 'industry',
+          },
+        },
+        { upsert: true },
+      );
+    }
+
+    for (const trend of viralTrends) {
+      const hash = createHash('md5')
+        .update(`${tenantId}:${this.platform}:viral:${trend.trend}`)
+        .digest('hex');
+
+      await this.scoutSignalModel.updateOne(
+        { hash },
+        {
+          $set: {
+            tenantId,
+            runId,
+            platform: this.platform,
+            topic: trend.trend,
+            angle: trend.brand_tie_in,
+            hash,
+            signalScore: trend.signalScore,
+            signalType: 'viral',
           },
         },
         { upsert: true },
@@ -253,28 +278,21 @@ ${lines}
       .find({
         tenantId,
         platform: this.platform,
-        createdAt: { $gte: industryTTL },
+        $or: [
+          { signalType: 'viral', createdAt: { $gte: viralTTL } },
+          { signalType: { $ne: 'viral' }, createdAt: { $gte: industryTTL } },
+        ],
       })
       .sort({ signalScore: -1 })
-      .limit(20)
+      .limit(25)
       .lean()
       .exec();
 
     return recent.map((s) => ({
       topic: s.topic,
       angle: s.angle,
-      type: ((s as any).createdAt >= viralTTL ? 'viral' : 'industry') as 'industry' | 'viral',
+      type: ((s as any).signalType === 'viral' ? 'viral' : 'industry') as 'industry' | 'viral',
     }));
   }
 
-  private emptyOutput(): ScoutOutputData {
-    return {
-      platform: this.platform,
-      trending_topics: [],
-      viral_trends: [],
-      format_insights: [],
-      hook_examples: [],
-      raw_summary: `${this.platform} scout failed after 3 attempts — no data collected.`,
-    };
-  }
 }

@@ -137,7 +137,7 @@ export class Company {
     type: Object,
     default: () => ({
       mode: 'daily',
-      ideasPerRun: 3,
+      ideasPerRun: 5,
       autoSwitch: true,
       coldStartDays: 14,
     }),
