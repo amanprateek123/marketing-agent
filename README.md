@@ -957,20 +957,58 @@ src/
 
 Every autonomous decision logs: `tenantId`, `runId`, `agent`, `action`, `reason`, `outcome`, `metadata`.
 
-### Step 3.4 — Validation ✅
+### Step 3.4 — Per-Idea Digest + Slack Delivery ✅
+
+**Digest schema updated** — one MongoDB record per digest unit (type: `signals` | `idea` | `cta`), all sharing the same `runId`. Each idea record stores `briefId`, `ideaIndex`, and `recommended` flag.
+
+**Slack delivery — one message per idea:**
+- Message 1: market signals summary
+- Messages 2–6: one full content brief per idea (⭐ RECOMMENDED on the system pick, with `selectionReason`)
+- Message 7: CTA — "review the N ideas above and pick one"
+- Dividers between each message for readability
+
+**No scores shown in digest** — removed entirely. Human team picks the idea, system recommends but doesn't decide.
+
+**`POST /api/v1/pipeline/:tenantId/runs/:runId/regenerate-digest`** — regenerates and re-delivers digest from existing MongoDB data without re-running scouts/coordinator/idea pool.
+
+**Digest writer moved from Haiku → Sonnet** — per-idea briefs require brand voice + Hinglish copywriting quality that Haiku couldn't deliver reliably.
+
+### Step 3.5 — Validation ✅
 
 - [x] Pipeline auto-schedules on server start for all tenants
-- [x] Slack digest received after pipeline completion
-- [x] `delivered: true` set in MongoDB after Slack send
+- [x] Slack delivers 7 messages per run (signals + 5 ideas + CTA)
+- [x] Each idea stored separately in MongoDB with same `runId`
+- [x] Recommended idea marked with ⭐ and `selectionReason`
+- [x] `delivered: true` + `deliveredAt` set after Slack send
+- [x] Digest regeneration endpoint works from existing run data
 - [x] Action logger schema + service ready for use in Phase 4+
 
 ---
 
 ## Phase 4 — Creative Production (Week 7–8)
 
-> **Goal:** Auto-generate ad copy (3 variants), static image, and video from the selected brief.
+> **Goal:** Team approves any idea from the digest → system auto-generates ad copy (3 variants), image, and video for that idea.
 >
-> **Exit Criteria:** Given a selected brief, system produces a complete creative package (copy + image + video) stored in S3.
+> **Exit Criteria:** Given an approved brief, system produces a complete creative package (copy + image + video) stored in S3.
+
+### Approval Flow
+
+```
+Digest delivered (5 ideas in Slack)
+    ↓
+Team picks any idea and calls:
+POST /api/v1/creative/:tenantId/briefs/:briefId/approve
+    ↓
+Creative production triggered for that briefId only
+    ↓
+Copy + Image + Video generated in parallel
+    ↓
+CreativePackage saved to MongoDB
+    ↓
+Slack: "Creative ready. Review before launch."
+```
+
+> **Decision:** No auto-trigger after pipeline. Human approves which idea to produce. Up to 2 ideas can be approved per run (generates 2 full creative packages). Slack button approval deferred to Phase 5.
 
 ### Step 4.1 — Creative Module Structure
 
@@ -978,129 +1016,74 @@ Every autonomous decision logs: `tenantId`, `runId`, `agent`, `action`, `reason`
 src/
 ├── creative/
 │   ├── creative.module.ts
+│   ├── creative.controller.ts           # POST /briefs/:briefId/approve
 │   ├── schemas/
-│   │   └── creative-package.schema.ts
+│   │   └── creative-package.schema.ts   # Stores prompts + URLs + copy variants
 │   ├── copy-writer/
 │   │   └── copy-writer.service.ts
 │   ├── image-generator/
-│   │   └── image-generator.service.ts
+│   │   └── image-generator.service.ts   # Nano Banana (Google Gemini Image API)
 │   ├── video-generator/
-│   │   └── video-generator.service.ts
+│   │   └── video-generator.service.ts   # Kling 3.0 via fal.ai
 │   ├── creative-producer/
-│   │   └── creative-producer.service.ts    # Orchestrates all 3 in parallel
+│   │   └── creative-producer.service.ts # Orchestrates all 3 in parallel
 │   └── s3/
-│       └── s3.service.ts                   # Upload assets to S3
+│       └── s3.service.ts                # Upload assets to S3
 ```
 
-### Step 4.2 — Copy Writer
+### Step 4.2 — Creative Package Schema
 
-**copy-writer.service.ts:**
-
-- Uses `ad-creative` + `copywriting` skills (baked into creative system prompt by Prompt Generator)
-- Generates 3 primary text variants using PAS (Problem-Agitate-Solution) + BAB (Before-After-Bridge)
-- Generates 5 headline variants + CTA variants
-- Auto-selects best variant based on `company.learnings.winningPatterns`:
-  - If winning hook style is "personal story" → prefer variants that use personal story hooks
-  - If losing hook style is "question hooks" → demote variants that use questions
-
-**Output:**
 ```typescript
-interface CopyPackage {
-  variants: {
-    primaryText: string;
-    headline: string;
-    cta: string;
-    hookStyle: string;     // tagged for attribution
-  }[];
-  selectedIndex: number;
-  selectionReason: string;
+creative_packages {
+  tenantId: string;
+  runId: string;
+  briefId: string;
+  status: 'pending' | 'completed' | 'failed';
+
+  // Copy
+  copyVariants: { primaryText: string; headline: string; cta: string; hookStyle: string; }[];
+  selectedCopyIndex: number;
+  copySelectionReason: string;
+
+  // Image
+  imagePrompt: string;    // Claude-generated prompt — stored for debugging + learning
+  imageUrl: string;       // S3 URL
+
+  // Video
+  videoPrompt: string;    // Claude-generated prompt — stored for debugging + learning
+  videoUrl: string;       // S3 URL
+
+  approvedAt: Date;
+  completedAt?: Date;
 }
 ```
 
-### Step 4.3 — Image Generator
+### Step 4.3 — Copy Writer
 
-**image-generator.service.ts:**
+- Generates 3 ad copy variants using PAS + BAB frameworks
+- Each variant: `primaryText` + `headline` + `cta` + `hookStyle` tag
+- Auto-selects best variant based on `company.learnings.winningPatterns`
 
-- Claude crafts a detailed image generation prompt based on the brief + brand guidelines
-- Calls Ideogram v3 or Flux via fal.ai API
-- Uploads result to S3
-- Returns S3 URL
+### Step 4.4 — Image Generator (Nano Banana — Google Gemini Image API)
 
-```typescript
-async generate(brief: CreativeBrief, company: CompanyDocument): Promise<string> {
-  // Step 1: Claude writes the image prompt
-  const promptResult = await this.claudeService.runAgent({
-    tenantId: company.tenantId,
-    agentType: AgentType.CREATIVE_PRODUCER,
-    systemPrompt: '...', // image prompt crafting instructions
-    liveContext: this.liveContextBuilder.build(company),
-    userMessage: `Write a detailed image generation prompt for this ad brief: ${JSON.stringify(brief)}
-      Brand guidelines: ${company.brandGuidelines}
-      Return ONLY the image prompt, nothing else.`,
-    model: 'claude-sonnet-4-6',
-    maxTurns: 3,
-  });
+- Claude writes a detailed image generation prompt from the brief + brand guidelines
+- Calls Nano Banana API (Google AI Studio / Vertex AI)
+- Uploads result to S3 at `{tenantId}/creatives/images/`
+- Stores the Claude-generated prompt in `creative_packages.imagePrompt`
 
-  // Step 2: Call Ideogram/Flux API
-  const imageUrl = await this.callIdeogramApi(promptResult.content);
+### Step 4.5 — Video Generator (Kling 3.0 via fal.ai) — deferred
 
-  // Step 3: Upload to S3
-  return await this.s3Service.uploadFromUrl(imageUrl, `${company.tenantId}/creatives/`);
-}
-```
+> **Deferred:** fal.ai API key not yet available. Video generator will be added once key is obtained. `videoPrompt` will still be generated and stored by Claude so it's ready when the API is wired up.
 
-### Step 4.4 — Video Generator
+### Step 4.6 — Validation
 
-**video-generator.service.ts:**
-
-- Claude writes a scene-by-scene script with shot descriptions
-- Calls Kling AI 2.0 API with the script
-- Polls for completion (video generation takes minutes)
-- Uploads to S3
-
-### Step 4.5 — Creative Producer (Orchestrator)
-
-**creative-producer.service.ts:**
-
-```typescript
-async produce(brief: CreativeBrief, company: CompanyDocument, runId: string): Promise<CreativePackage> {
-  // Run all 3 in parallel
-  const [copyPackage, imageUrl, videoUrl] = await Promise.all([
-    this.copyWriter.generate(brief, company, runId),
-    this.imageGenerator.generate(brief, company),
-    this.videoGenerator.generate(brief, company),
-  ]);
-
-  // Save creative package
-  const pkg = await this.savePackage({
-    tenantId: company.tenantId,
-    briefId: brief.briefId,
-    runId,
-    copyVariants: copyPackage.variants,
-    selectedCopy: copyPackage.variants[copyPackage.selectedIndex],
-    imageUrl,
-    videoUrl,
-    createdAt: new Date(),
-  });
-
-  return pkg;
-}
-```
-
-### Step 4.6 — Creative BullMQ Job
-
-- Triggered automatically after Idea Pool selects a brief
-- `creative.processor.ts` picks up the job, calls `creativeProducer.produce()`
-- On completion, triggers campaign creation (Phase 5)
-
-### Step 4.7 — Validation
-
-- [ ] Given a test brief, Copy Writer produces 3 variants with tagged hook styles
-- [ ] Image Generator produces an ad image via Ideogram/Flux
-- [ ] Video Generator produces a 15–30s Reel via Kling AI
-- [ ] All assets uploaded to S3 with correct paths
-- [ ] Creative package saved to MongoDB with all references
-- [ ] BullMQ job triggers correctly after pipeline completion
+- [ ] `POST /creative/:tenantId/briefs/:briefId/approve` triggers creative production
+- [ ] Copy Writer produces 3 variants with tagged hook styles
+- [ ] Image Generator produces an ad image via Nano Banana + uploads to S3
+- [ ] Video Generator produces a 15–20s Reel via Kling 3.0 + uploads to S3
+- [ ] `imagePrompt` and `videoPrompt` stored in MongoDB
+- [ ] Slack notification sent when creative package is complete
+- [ ] Up to 2 briefs can be approved and produced per run
 
 ---
 

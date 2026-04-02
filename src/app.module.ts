@@ -8,6 +8,7 @@ import { CompaniesModule } from './companies/companies.module';
 import { PipelineModule } from './pipeline/pipeline.module';
 import { CommonModule } from './common/common.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
+import { CreativeModule } from './creative/creative.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { SchedulerModule } from './scheduler/scheduler.module';
     PipelineModule,
     CommonModule,
     SchedulerModule,
+    CreativeModule,
   ],
 })
 export class AppModule {}

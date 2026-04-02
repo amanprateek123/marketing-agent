@@ -23,14 +23,11 @@ export default () => ({
     s3Bucket: process.env.AWS_S3_BUCKET ?? '',
     region: process.env.AWS_REGION ?? 'ap-south-1',
   },
-  ideogram: {
-    apiKey: process.env.IDEOGRAM_API_KEY ?? '',
+  google: {
+    aiApiKey: process.env.GOOGLE_AI_API_KEY ?? '',
   },
   fal: {
     apiKey: process.env.FAL_API_KEY ?? '',
-  },
-  kling: {
-    apiKey: process.env.KLING_API_KEY ?? '',
   },
   youtube: {
     apiKey: process.env.YOUTUBE_API_KEY ?? '',

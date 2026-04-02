@@ -77,21 +77,27 @@ export class IdeaPoolService {
       return { briefs: [], selectedBriefId: '', selectionReason: '' };
     }
 
+    // ── Assign a unique briefId to every brief upfront ───────────────────────
+    briefs.forEach((b) => { b.briefId = uuidv4(); });
+
     // ── Rule-based winner selection ───────────────────────────────────────────
     const winner = this.selectWinner(briefs, coordinatorResult);
-    const briefId = uuidv4();
-    winner.briefId = briefId;
+    const briefId = winner.briefId;
 
     // ── Persist ───────────────────────────────────────────────────────────────
     await this.intelligenceBriefModel.insertMany(
       briefs.map((b) => ({
         tenantId,
         runId,
+        briefId: b.briefId,
         topic: b.topic,
         angle: b.angle,
         platform: b.platform,
         format: b.format,
         audience: b.audience,
+        hook: b.hook ?? '',
+        keyMessage: b.keyMessage ?? '',
+        conversionBridge: b.conversionBridge ?? '',
         confidenceScore: 0,
         urgencyScore: b.urgent ? 10 : 5,
         finalScore: b.priorityScore ?? 0,

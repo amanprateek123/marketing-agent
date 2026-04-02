@@ -11,6 +11,9 @@ export class IntelligenceBrief {
   @Prop({ required: true, index: true })
   runId: string;
 
+  @Prop({ index: true })
+  briefId: string;
+
   @Prop({ required: true })
   topic: string;
 
@@ -25,6 +28,15 @@ export class IntelligenceBrief {
 
   @Prop({ required: true })
   audience: string;
+
+  @Prop({ default: '' })
+  hook: string;
+
+  @Prop({ default: '' })
+  keyMessage: string;
+
+  @Prop({ default: '' })
+  conversionBridge: string;
 
   @Prop({ required: true, default: 0 })
   confidenceScore: number;
