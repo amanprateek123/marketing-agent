@@ -23,13 +23,14 @@
 7. [Phase 6 — Auditor + Optimizer (Week 10)](#phase-6--auditor--optimizer-week-10)
 8. [Phase 7 — Learning System (Week 11)](#phase-7--learning-system-week-11)
 9. [Phase 8 — Production + Multi-Tenant (Week 12)](#phase-8--production--multi-tenant-week-12)
-10. [Project Structure (Final)](#project-structure-final)
-11. [Environment Variables](#environment-variables)
-12. [Docker Compose](#docker-compose)
-13. [Database Collections Reference](#database-collections-reference)
-14. [API Routes Reference](#api-routes-reference)
-15. [Skills Reference](#skills-reference)
-16. [Key Decisions Log](#key-decisions-log)
+10. [Phase 9 — Agent Team Review System (Planned)](#phase-9--agent-team-review-system-planned)
+11. [Project Structure (Final)](#project-structure-final)
+12. [Environment Variables](#environment-variables)
+13. [Docker Compose](#docker-compose)
+14. [Database Collections Reference](#database-collections-reference)
+15. [API Routes Reference](#api-routes-reference)
+16. [Skills Reference](#skills-reference)
+17. [Key Decisions Log](#key-decisions-log)
 
 ---
 
@@ -1667,6 +1668,179 @@ Run the security-reviewer.md agent from `.claude/agents/` against the full codeb
 
 ---
 
+## Phase 9 — Agent Team Review System (Planned)
+
+> **Goal:** Insert expert persona review gates at 3 checkpoints in the pipeline to catch weak output before money is spent, and extract actionable insights from performance data.
+>
+> **Build after:** Phase 8 (full pipeline running with real campaign data)
+
+### Overview
+
+A panel of AI expert personas debates pipeline output in structured 3-round discussions. Each persona brings a different professional lens. They read each other's feedback, challenge each other, and synthesize into consensus + ranked action items.
+
+### The 3 Review Checkpoints
+
+| Checkpoint | Trigger | Personas Used | Output |
+|------------|---------|---------------|--------|
+| **Idea Pool** | After ideas are scored | All 5 | Which ideas to pursue, which to drop + why. Summary sent to Slack |
+| **Creative Package** | After copy/visuals generated | Copywriter + Psychologist + Skeptical Customer | Pass / auto-revise / block launch |
+| **Campaign Performance** | After Day 7/14/30 data written | Media Buyer + Brand Strategist | Actionable advice in plain language → feeds learning loop |
+
+### The 5 Default Personas
+
+Global defaults, seeded automatically for every tenant on first run. No manual setup required.
+
+| # | Persona | Domain | Evaluates |
+|---|---------|--------|-----------|
+| 1 | **Media Buyer** | performance_marketing | Budget efficiency, audience targeting, ROAS potential, platform fit |
+| 2 | **Copywriter** | copywriting | Hook strength, headline clarity, CTA, tone, persuasion |
+| 3 | **Consumer Psychologist** | consumer_behavior | Emotional triggers, cognitive biases, motivation, why someone clicks |
+| 4 | **Brand Strategist** | brand_strategy | Positioning, consistency, differentiation from competitors |
+| 5 | **Skeptical Customer** | end_user | "Would I actually stop scrolling for this?" |
+
+Default personas are global (`tenantId: null`). Tenants can override system prompts or add custom personas.
+
+### How a Discussion Works (3 Rounds)
+
+```
+Round 1 — Independent Review (parallel Claude calls)
+  Each persona reviews the pipeline output independently
+  Returns: score (1–10), strengths, weaknesses, suggestions
+
+Round 2 — Discussion (parallel Claude calls)
+  Each persona receives everyone else's Round 1 feedback
+  They agree, disagree, challenge, and build on each other's points
+
+Round 3 — Synthesis (single moderator call)
+  Moderator reads full R1 + R2 discussion
+  Returns: consensus points, dissenting views, ranked action items, final score
+```
+
+Total Claude calls per review: `(N personas × 2 rounds) + 1 moderator`
+Example with 5 personas: 11 calls per gate.
+
+### Score-Based Gate Logic
+
+| Final Score | Action |
+|-------------|--------|
+| **>= 7** | Pipeline continues — output approved |
+| **5–6** | Auto-revise — action items fed back, output regenerated once, then continues |
+| **< 5** | Pipeline paused — Slack alert sent, flagged for human review |
+
+### ReviewConfig (per tenant, stored in MongoDB)
+
+Fully controllable per tenant — which personas, which checkpoints, thresholds:
+
+```json
+{
+  "tenantId": "fittrack",
+  "checkpoints": {
+    "idea_pool": {
+      "enabled": true,
+      "personaIds": ["media_buyer", "copywriter", "psychologist", "brand_strategist", "skeptical_customer"],
+      "minScore": 6,
+      "autoRevise": true
+    },
+    "creative_package": {
+      "enabled": true,
+      "personaIds": ["copywriter", "psychologist", "skeptical_customer"],
+      "minScore": 7,
+      "autoRevise": true
+    },
+    "campaign_performance": {
+      "enabled": true,
+      "personaIds": ["media_buyer", "brand_strategist"],
+      "minScore": null
+    }
+  }
+}
+```
+
+### Persona Storage Model
+
+```
+personas collection
+├── media_buyer         (isDefault: true,  tenantId: null)   ← shared globally
+├── copywriter          (isDefault: true,  tenantId: null)
+├── psychologist        (isDefault: true,  tenantId: null)
+├── brand_strategist    (isDefault: true,  tenantId: null)
+├── skeptical_customer  (isDefault: true,  tenantId: null)
+│
+└── fitness_expert      (isDefault: false, tenantId: "fittrack")  ← tenant-specific custom
+```
+
+### New Files to Create
+
+```
+src/review/
+  schemas/
+    persona.schema.ts           — Expert persona profiles
+    discussion.schema.ts        — Full discussion records (rounds, messages, consensus)
+    review-config.schema.ts     — Per-tenant checkpoint configuration
+  dto/
+    create-persona.dto.ts
+    start-discussion.dto.ts
+    update-review-config.dto.ts
+  personas.defaults.ts          — Hardcoded default persona system prompts (5 experts)
+  agent-team.service.ts         — 3-round discussion orchestration
+  review.controller.ts          — CRUD for personas + config + trigger discussions
+  review.module.ts
+```
+
+### Files to Update
+
+| File | Change |
+|------|--------|
+| `claude/claude.types.ts` | Add `REVIEW_PERSONA`, `REVIEW_MODERATOR` to AgentType + NO_TOOL_AGENTS |
+| `pipeline/idea-pool.service.ts` | Call `agentTeamService.discuss()` after scoring, append result to digest |
+| `creative/creative-producer.service.ts` | Call `agentTeamService.discuss()` after generation, gate on score |
+| `pipeline/campaign-auditor.service.ts` | Call `agentTeamService.discuss()` after writing performance data |
+| `app.module.ts` | Register ReviewModule |
+
+### Discussion Document Shape
+
+```typescript
+{
+  tenantId: string
+  targetType: 'idea_pool' | 'creative_package' | 'campaign_performance'
+  targetId: string                          // briefId, packageId, or campaignId
+  personaIds: string[]
+  rounds: [
+    {
+      round: 1,
+      messages: [{ personaId, personaName, score, strengths, weaknesses, suggestions }]
+    },
+    {
+      round: 2,
+      messages: [{ personaId, personaName, agreements, challenges, additions }]
+    },
+    {
+      round: 3,
+      messages: [{ role: 'moderator', consensus, dissentingViews, actionItems, finalScore }]
+    }
+  ]
+  finalScore: number
+  actionItems: string[]
+  status: 'running' | 'completed' | 'failed'
+  totalCostUSD: number
+}
+```
+
+### Phase 9 Exit Criteria
+
+- [ ] 5 default personas seeded for new tenants automatically
+- [ ] 3-round discussion runs end-to-end for all 3 checkpoint types
+- [ ] Score gate blocks creative launch when score < 5
+- [ ] Auto-revise loop regenerates creative once when score 5–6
+- [ ] Idea Pool review summary included in Slack digest
+- [ ] Campaign performance review feeds into learning agent
+- [ ] Custom persona CRUD working per tenant
+- [ ] ReviewConfig CRUD working per tenant
+- [ ] All discussion records stored in MongoDB with full round history
+- [ ] Cost tracked per discussion in `usage_logs`
+
+---
+
 ## Project Structure (Final)
 
 ```
@@ -1980,6 +2154,9 @@ volumes:
 | `action_logs` | Every autonomous decision with reasoning | `tenantId + timestamp`, `tenantId + agent` |
 | `usage_logs` | Every Claude API call (billing ledger) | `tenantId + timestamp`, `tenantId + agent` |
 | `learning_runs` | Monthly learning execution log | `tenantId + version` |
+| `personas` | Expert reviewer profiles (defaults + custom) | `tenantId` (null for defaults), `domain` |
+| `discussions` | Full agent team review records with all rounds | `tenantId + targetId`, `tenantId + targetType` |
+| `review_configs` | Per-tenant checkpoint configuration | `tenantId` (unique) |
 
 ---
 
@@ -2005,6 +2182,15 @@ volumes:
 | `GET` | `/api/v1/usage/:tenantId` | 8 | Token usage + cost per agent |
 | `GET` | `/api/v1/usage/:tenantId/monthly` | 8 | Monthly totals by agent |
 | `GET` | `/api/v1/health` | 8 | Health check endpoint |
+| `POST` | `/api/v1/review/personas` | 9 | Create custom persona for tenant |
+| `GET` | `/api/v1/review/personas/:tenantId` | 9 | List all personas (defaults + custom) for tenant |
+| `PATCH` | `/api/v1/review/personas/:id` | 9 | Update persona system prompt or criteria |
+| `DELETE` | `/api/v1/review/personas/:id` | 9 | Delete custom persona |
+| `GET` | `/api/v1/review/config/:tenantId` | 9 | Get checkpoint config for tenant |
+| `PATCH` | `/api/v1/review/config/:tenantId` | 9 | Update checkpoint config (enable/disable, personas, thresholds) |
+| `POST` | `/api/v1/review/discuss` | 9 | Manually trigger a team discussion on any pipeline output |
+| `GET` | `/api/v1/review/discussions/:tenantId` | 9 | List all discussions for tenant |
+| `GET` | `/api/v1/review/discussions/detail/:id` | 9 | Full discussion with all rounds and action items |
 
 ---
 
