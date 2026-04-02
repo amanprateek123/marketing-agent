@@ -10,6 +10,7 @@ import { ResearchOutput, ResearchOutputSchema } from './schemas/research-output.
 import { Digest, DigestSchema } from './schemas/digest.schema';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
+import { DeliveryModule } from '../delivery/delivery.module';
 import { InstagramScout } from './scouts/instagram.scout';
 import { RedditScout } from './scouts/reddit.scout';
 import { TwitterScout } from './scouts/twitter.scout';
@@ -34,6 +35,7 @@ import { PipelineController } from './pipeline.controller';
     ]),
     ClaudeModule,
     CompaniesModule,
+    DeliveryModule,
   ],
   controllers: [PipelineController],
   providers: [

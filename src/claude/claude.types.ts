@@ -20,7 +20,6 @@ export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 // Agents that use Haiku (cheap, single-turn, formatting tasks)
 export const HAIKU_AGENTS: AgentType[] = [
   AgentType.MARKET_RESEARCH,
-  AgentType.DIGEST_WRITER,
 ];
 
 // Agents that don't need any tools (pure text generation — no web search needed)

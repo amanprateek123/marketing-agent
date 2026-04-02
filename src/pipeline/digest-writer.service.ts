@@ -8,6 +8,7 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { Digest, DigestDocument } from './schemas/digest.schema';
 import { IdeaPoolResult } from './idea-pool.service';
 import { CoordinatorResult } from './coordinator.service';
+import { SlackService } from '../delivery/slack.service';
 
 @Injectable()
 export class DigestWriterService {
@@ -16,6 +17,7 @@ export class DigestWriterService {
   constructor(
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
+    private readonly slackService: SlackService,
     @InjectModel(Digest.name)
     private readonly digestModel: Model<DigestDocument>,
   ) {}
@@ -25,86 +27,172 @@ export class DigestWriterService {
     runId: string,
     coordinatorResult: CoordinatorResult,
     ideaPoolResult: IdeaPoolResult,
-  ): Promise<string> {
+  ): Promise<void> {
     const tenantId = company.tenantId;
+    const slackWebhook = company.delivery?.slackWebhook;
 
-    const systemPrompt = company.prompts?.digestWriter ?? '';
-    const liveContext = this.liveContextBuilder.build(company);
-
-    const userMessage = this.buildDigestPrompt(coordinatorResult, ideaPoolResult, company);
-
-    const result = await this.claudeService.runAgent({
-      tenantId,
-      runId,
-      agentType: AgentType.DIGEST_WRITER,
-      systemPrompt,
-      liveContext,
-      userMessage,
-      maxTurns: 3,
-    });
-
+    // ── 1. Signals summary ────────────────────────────────────────────────────
+    const signalsContent = await this.writeSignalsSummary(
+      company, runId, coordinatorResult,
+    );
     await this.digestModel.create({
-      tenantId,
-      runId,
-      content: result.content,
-      delivered: false,
+      tenantId, runId, type: 'signals', content: signalsContent, delivered: false,
     });
 
-    this.logger.log(`Digest written: tenantId=${tenantId} runId=${runId}`);
-    return result.content;
+    if (slackWebhook) {
+      await this.slackService.sendMessage(slackWebhook, tenantId, signalsContent);
+    }
+
+    // ── 2. One digest entry + Slack message per idea ──────────────────────────
+    for (let i = 0; i < ideaPoolResult.briefs.length; i++) {
+      const brief = ideaPoolResult.briefs[i];
+      const isRecommended = brief.briefId === ideaPoolResult.selectedBriefId;
+
+      const ideaContent = await this.writeIdeaBrief(
+        company, runId, brief, isRecommended, ideaPoolResult.selectionReason, i + 1, ideaPoolResult.briefs.length,
+      );
+
+      await this.digestModel.create({
+        tenantId,
+        runId,
+        type: 'idea',
+        briefId: brief.briefId,
+        ideaIndex: i + 1,
+        recommended: isRecommended,
+        content: ideaContent,
+        delivered: false,
+      });
+
+      if (slackWebhook) {
+        await this.slackService.sendDivider(slackWebhook, tenantId);
+        await this.slackService.sendMessage(slackWebhook, tenantId, ideaContent);
+      }
+    }
+
+    // ── 3. CTA ────────────────────────────────────────────────────────────────
+    const ctaContent = this.buildCta(company, ideaPoolResult);
+    await this.digestModel.create({
+      tenantId, runId, type: 'cta', content: ctaContent, delivered: false,
+    });
+
+    if (slackWebhook) {
+      await this.slackService.sendDivider(slackWebhook, tenantId);
+      await this.slackService.sendMessage(slackWebhook, tenantId, ctaContent);
+    }
+
+    // Mark all delivered
+    if (slackWebhook) {
+      await this.digestModel.updateMany(
+        { tenantId, runId },
+        { delivered: true, deliveredAt: new Date() },
+      );
+    }
+
+    this.logger.log(
+      `Digest done: tenantId=${tenantId} runId=${runId} ideas=${ideaPoolResult.briefs.length} slack=${!!slackWebhook}`,
+    );
   }
 
-  private buildDigestPrompt(
-    coordinator: CoordinatorResult,
-    ideaPool: IdeaPoolResult,
+  // ── Signals summary ─────────────────────────────────────────────────────────
+  private async writeSignalsSummary(
     company: CompanyDocument,
-  ): string {
+    runId: string,
+    coordinator: CoordinatorResult,
+  ): Promise<string> {
     const topSignals = coordinator.topSignals
-      .slice(0, 3)
-      .map((s) => `- "${s.topic}" (score: ${s.compositeScore}) — ${s.rationale}`)
+      .slice(0, 5)
+      .map((s, i) => `${i + 1}. "${s.topic}" — ${s.rationale}`)
       .join('\n');
 
-    const winner = ideaPool.briefs.find((b) => b.briefId === ideaPool.selectedBriefId);
-    const winnerBlock = winner
-      ? `Topic: ${winner.topic}
-Angle: ${winner.angle}
-Platform: ${winner.platform} | Format: ${winner.format}
-Hook: ${winner.hook}
-Key message: ${winner.keyMessage}
-Conversion bridge: ${winner.conversionBridge}
-Score: ${winner.finalScore}/10`
-      : 'No brief selected this run.';
+    const result = await this.claudeService.runAgent({
+      tenantId: company.tenantId,
+      runId,
+      agentType: AgentType.DIGEST_WRITER,
+      systemPrompt: company.prompts?.digestWriter ?? '',
+      liveContext: this.liveContextBuilder.build(company),
+      userMessage: `
+Write a market signals summary for ${company.name}'s marketing team.
 
-    const runnerUps = ideaPool.briefs
-      .filter((b) => b.briefId !== ideaPool.selectedBriefId)
-      .sort((a, b) => b.finalScore - a.finalScore)
-      .slice(0, 4)
-      .map((b, i) => `${i + 1}. "${b.topic}" | ${b.platform} ${b.format} | Score: ${b.finalScore}/10`)
-      .join('\n');
-
-    return `
-Write the weekly marketing intelligence digest for ${company.name}.
-
-IMPORTANT: You have all the data you need below. Do NOT ask any questions. Do NOT request clarification. Write the digest immediately using the data provided.
+Do NOT ask questions. Write immediately.
 
 TOP SIGNALS THIS WEEK:
-${topSignals || 'See coordinator synthesis — signals were collected across all platforms.'}
+${topSignals || 'General platform signals collected — no top signals ranked this run.'}
 
-WINNING CONTENT BRIEF:
-${winnerBlock}
+Write 3-4 punchy sentences covering:
+- What is happening in the market right now
+- Which signals are most urgent and why
+- The single biggest opportunity this week
 
-SELECTION REASON: ${ideaPool.selectionReason}
+Format as Slack markdown. No headers. 80-100 words max.
+      `.trim(),
+      maxTurns: 2,
+    });
 
-RUNNER-UP IDEAS (not selected this run):
-${runnerUps || 'No runner-up ideas.'}
+    return `📊 *${company.name} | Weekly Intelligence — Week of ${this.weekLabel()}*\n\n${result.content}`;
+  }
 
-The digest should:
-1. Open with 2-3 key market insights from the top signals
-2. Present the winning content idea with full brief details
-3. List the runner-up ideas with their scores
-4. Close with one actionable next step for the team
+  // ── Per-idea brief ──────────────────────────────────────────────────────────
+  private async writeIdeaBrief(
+    company: CompanyDocument,
+    runId: string,
+    brief: IdeaPoolResult['briefs'][0],
+    isRecommended: boolean,
+    selectionReason: string,
+    index: number,
+    total: number,
+  ): Promise<string> {
+    const recommendedLine = isRecommended
+      ? `\n⭐ *System recommendation:* ${selectionReason}`
+      : '';
 
-Write in a clear, confident tone. This goes directly to the marketing team. 400-500 words max.
-    `.trim();
+    const result = await this.claudeService.runAgent({
+      tenantId: company.tenantId,
+      runId,
+      agentType: AgentType.DIGEST_WRITER,
+      systemPrompt: company.prompts?.digestWriter ?? '',
+      liveContext: this.liveContextBuilder.build(company),
+      userMessage: `
+Write a content brief for ${company.name}'s marketing team. This is idea ${index} of ${total}.
+
+Do NOT ask questions. Write immediately.
+
+BRIEF DATA:
+Topic: ${brief.topic}
+Angle: ${brief.angle}
+Platform: ${brief.platform} | Format: ${brief.format}
+Audience: ${brief.audience}
+Hook: ${brief.hook}
+Key message: ${brief.keyMessage}
+Conversion bridge: ${brief.conversionBridge}
+Budget: ₹${brief.suggestedBudget}
+
+Write a focused content brief in Slack markdown format:
+- Bold topic as the header
+- 1 sentence on the angle/why this matters now
+- Hook (exact opening line or visual)
+- Key message (what the audience should believe after)
+- Conversion bridge (how it leads to a purchase)
+- Platform + format + suggested budget
+
+120-150 words max. No scores. Confident, actionable tone.
+      `.trim(),
+      maxTurns: 2,
+    });
+
+    const label = isRecommended ? `💡 *Idea ${index} of ${total} — RECOMMENDED*` : `💡 *Idea ${index} of ${total}*`;
+    return `${label}${recommendedLine}\n\n${result.content}`;
+  }
+
+  // ── CTA — no LLM needed ────────────────────────────────────────────────────
+  private buildCta(_company: CompanyDocument, ideaPool: IdeaPoolResult): string {
+    const recommended = ideaPool.briefs.find((b) => b.briefId === ideaPool.selectedBriefId);
+    const platform = recommended?.platform ?? 'your chosen platform';
+    const format = recommended?.format ?? 'content';
+
+    return `✅ *Next step*\nReview the ${ideaPool.briefs.length} ideas above and pick one to produce. The recommended idea is a ${platform} ${format}. Reply here or tag the creative team to get started.`;
+  }
+
+  private weekLabel(): string {
+    return new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   }
 }

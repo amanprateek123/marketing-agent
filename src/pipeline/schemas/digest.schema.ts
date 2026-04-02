@@ -11,11 +11,26 @@ export class Digest {
   @Prop({ required: true, index: true })
   runId: string;
 
-  // Full formatted digest content
+  // 'signals' = market signals summary, 'idea' = content idea brief, 'cta' = next step
+  @Prop({ required: true, enum: ['signals', 'idea', 'cta'], index: true })
+  type: string;
+
+  // For idea type: the briefId this digest entry belongs to
+  @Prop()
+  briefId?: string;
+
+  // For idea type: position (1-N) among all ideas this run
+  @Prop()
+  ideaIndex?: number;
+
+  // Whether this idea is the system-recommended one
+  @Prop({ default: false })
+  recommended: boolean;
+
+  // Full formatted content for this digest entry
   @Prop({ required: true })
   content: string;
 
-  // Delivered to n8n?
   @Prop({ default: false })
   delivered: boolean;
 

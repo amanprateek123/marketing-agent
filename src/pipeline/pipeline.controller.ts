@@ -37,4 +37,21 @@ export class PipelineController {
     if (!run) throw new NotFoundException(`Run ${runId} not found`);
     return run;
   }
+
+  /**
+   * POST /api/v1/pipeline/:tenantId/runs/:runId/regenerate-digest
+   * Regenerate and re-deliver the digest for an existing run using stored data.
+   */
+  @Post(':tenantId/runs/:runId/regenerate-digest')
+  async regenerateDigest(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+  ) {
+    try {
+      await this.orchestrator.regenerateDigest(tenantId, runId);
+      return { success: true, message: 'Digest regenerated and delivered' };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
 }

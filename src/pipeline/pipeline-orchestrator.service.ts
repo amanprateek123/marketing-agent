@@ -126,6 +126,65 @@ export class PipelineOrchestratorService implements OnModuleInit {
     return this.pipelineRunModel.findOne({ runId }).lean().exec();
   }
 
+  async regenerateDigest(tenantId: string, runId: string): Promise<void> {
+    const company = await this.companiesService.findByTenantId(tenantId);
+
+    // Load coordinator result
+    const coordinatorOutput = await this.coordinatorOutputModel
+      .findOne({ tenantId, runId })
+      .lean()
+      .exec();
+    if (!coordinatorOutput) {
+      throw new Error(`No coordinator output found for runId=${runId}`);
+    }
+
+    // Load creative brief (selected idea)
+    const creativeBrief = await this.creativeBriefModel
+      .findOne({ tenantId, runId })
+      .lean()
+      .exec();
+    if (!creativeBrief) {
+      throw new Error(`No creative brief found for runId=${runId}`);
+    }
+
+    // Load all intelligence briefs
+    const allBriefs = await this.intelligenceBriefModel
+      .find({ tenantId, runId })
+      .lean()
+      .exec();
+
+    // Delete existing digests for this run so we get a fresh set
+    await this.digestModel.deleteMany({ tenantId, runId });
+
+    const coordinatorResult: CoordinatorResult = {
+      coordinatorOutputId: coordinatorOutput._id.toString(),
+      content: coordinatorOutput.content,
+      topSignals: coordinatorOutput.topSignals,
+    };
+
+    const ideaPoolResult: IdeaPoolResult = {
+      briefs: allBriefs.map((b) => ({
+        briefId: b.selected ? creativeBrief.briefId : '',
+        topic: b.topic,
+        angle: b.angle,
+        platform: b.platform,
+        format: b.format,
+        audience: b.audience,
+        hook: b.selected ? creativeBrief.hook : '',
+        keyMessage: b.selected ? creativeBrief.keyMessage : '',
+        conversionBridge: b.selected ? creativeBrief.conversionBridge : '',
+        suggestedBudget: b.suggestedBudget,
+        finalScore: b.finalScore,
+      })),
+      selectedBriefId: creativeBrief.briefId,
+      selectionReason: creativeBrief.selectionReason,
+    };
+
+    this.logger.log(`[${runId}] Regenerating digest for tenantId=${tenantId}`);
+    await this.digestWriterService.run(company, runId, coordinatorResult, ideaPoolResult);
+    this.logger.log(`[${runId}] Digest regenerated`);
+  }
+
   private async executeDAG(tenantId: string, runId: string): Promise<void> {
     const update = (status: string, phase: string) =>
       this.pipelineRunModel.updateOne({ runId }, { status, phase });
@@ -240,7 +299,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
 
       // ── Phase E: Digest ───────────────────────────────────────────────────
       const existingDigest = await this.digestModel
-        .findOne({ tenantId, runId })
+        .findOne({ tenantId, runId, type: 'cta' })
         .lean()
         .exec();
 

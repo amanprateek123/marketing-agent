@@ -914,130 +914,55 @@ Tenant sees results only
 
 If any condition fails → stay in human-in-the-loop mode.
 
-### Step 3.1 — BullMQ Setup
+### Step 3.1 — BullMQ Scheduler ✅
 
 ```
 src/
 ├── scheduler/
 │   ├── scheduler.module.ts
-│   ├── queues/
-│   │   ├── queue.constants.ts       # Queue names
-│   │   ├── weekly-pipeline.processor.ts
-│   │   ├── creative.processor.ts    # placeholder for Phase 4
-│   │   ├── audit.processor.ts       # placeholder for Phase 6
-│   │   └── learning.processor.ts    # placeholder for Phase 7
-│   └── scheduler.service.ts         # Cron setup for all recurring jobs
+│   ├── scheduler.service.ts     # Schedules per tenant on startup (daily/weekly)
+│   ├── pipeline.processor.ts    # BullMQ worker — calls orchestrator.trigger()
+│   └── queue.constants.ts       # Queue name constants
 ```
 
-**queue.constants.ts:**
-```typescript
-export const QUEUES = {
-  WEEKLY_PIPELINE: 'weekly-pipeline',
-  CREATIVE_PRODUCTION: 'creative-production',
-  CAMPAIGN_AUDIT: 'campaign-audit',
-  MONTHLY_LEARNING: 'monthly-learning',
-};
-```
+**Auto cold-start detection:** On `OnModuleInit`, `SchedulerService` loads all tenants and schedules each one based on `createdAt` age vs `coldStartDays`:
+- Age < `coldStartDays` → daily at 9 AM IST (`0 9 * * *`)
+- Age ≥ `coldStartDays` → weekly Monday 9 AM IST (`0 9 * * 1`)
 
-**scheduler.service.ts:**
-```typescript
-@Injectable()
-export class SchedulerService {
-  // Called on app bootstrap — sets up recurring jobs for all tenants
-  async setupRecurringJobs() {
-    const companies = await this.companyService.findAll();
+No manual intervention needed when a tenant graduates from cold start — schedule updates automatically on next server restart.
 
-    for (const company of companies) {
-      // Weekly intelligence pipeline — Monday 9 AM IST
-      await this.weeklyPipelineQueue.add(
-        `pipeline-${company.tenantId}`,
-        { tenantId: company.tenantId },
-        {
-          repeat: { pattern: '0 9 * * 1', tz: 'Asia/Kolkata' },
-          jobId: `weekly-${company.tenantId}`, // prevents duplicates
-        }
-      );
-    }
-  }
-}
-```
+### Step 3.2 — Direct Slack Delivery ✅
 
-**Multi-tenant isolation:** Each job carries `tenantId`. Processor fetches company data per job. No cross-tenant data leakage.
-
-### Step 3.2 — n8n Setup
+> **Decision:** n8n removed — unnecessary middleware. Digest posts directly to Slack via incoming webhook stored on `company.delivery.slackWebhook`.
 
 ```
 src/
 ├── delivery/
 │   ├── delivery.module.ts
-│   └── n8n.service.ts
+│   └── slack.service.ts    # Posts digest blocks to Slack; splits >2900-char content
 ```
 
-**n8n.service.ts:**
-```typescript
-@Injectable()
-export class N8nService {
-  async sendWeeklyReport(tenantId: string, report: WeeklyReport): Promise<void> {
-    const company = await this.companyService.findByTenantId(tenantId);
+Delivery is triggered at the end of `DigestWriterService.run()`. On success, sets `digest.delivered = true` in MongoDB.
 
-    // HMAC signature for webhook security
-    const signature = this.generateHmac(JSON.stringify(report));
-
-    await axios.post(this.configService.get('n8n.webhookUrl'), {
-      tenantId,
-      companyName: company.name,
-      report,
-      delivery: company.delivery,  // slack/whatsapp/email/notion targets
-    }, {
-      headers: { 'X-Webhook-Signature': signature },
-    });
-  }
-}
-```
-
-**n8n workflow (set up in n8n UI at n8n.briefos.io:5678):**
-
-1. Webhook trigger (receives POST from BriefOS)
-2. Verify HMAC signature
-3. Switch node — routes by delivery channel:
-   - Slack: Format report → Send to `delivery.slackWebhook`
-   - WhatsApp: Concise summary → Send via WhatsApp Business API
-   - Email: Full formatted HTML report → Send via SMTP
-   - Notion: Structured brief → Write to `delivery.notionDatabaseId`
-
-### Step 3.3 — Action Logger
+### Step 3.3 — Action Logger ✅
 
 ```
 src/
 ├── common/
-│   ├── action-logger/
-│   │   ├── action-log.schema.ts
-│   │   └── action-logger.service.ts
+│   ├── common.module.ts
+│   └── action-logger/
+│       ├── action-log.schema.ts      # MongoDB collection: action_logs
+│       └── action-logger.service.ts  # ActionLoggerService.log()
 ```
 
-**action-log.schema.ts:**
-```typescript
-{
-  tenantId: string;
-  runId?: string;
-  agent: AgentType;
-  action: string;           // e.g. "brief_selected", "campaign_paused", "budget_scaled"
-  reason: string;           // full reasoning from the agent
-  outcome: string;          // what happened as a result
-  metadata?: any;           // additional context (brief scores, metrics, etc.)
-  timestamp: Date;
-}
-```
+Every autonomous decision logs: `tenantId`, `runId`, `agent`, `action`, `reason`, `outcome`, `metadata`.
 
-Every autonomous decision across the system logs through `ActionLoggerService.log()`.
+### Step 3.4 — Validation ✅
 
-### Step 3.4 — Validation
-
-- [ ] Pipeline runs automatically at scheduled time for test tenant
-- [ ] Weekly report JSON arrives at n8n webhook
-- [ ] Slack message received with formatted report
-- [ ] Action logs show pipeline execution trail
-- [ ] Multiple tenants can have independent schedules
+- [x] Pipeline auto-schedules on server start for all tenants
+- [x] Slack digest received after pipeline completion
+- [x] `delivered: true` set in MongoDB after Slack send
+- [x] Action logger schema + service ready for use in Phase 4+
 
 ---
 
