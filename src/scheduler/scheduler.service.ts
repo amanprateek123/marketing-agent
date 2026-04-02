@@ -1,7 +1,10 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
+import { InjectModel } from '@nestjs/mongoose';
 import { Queue } from 'bullmq';
+import { Model } from 'mongoose';
 import { CompaniesService } from '../companies/companies.service';
+import { PipelineRun, PipelineRunDocument } from '../pipeline/schemas/pipeline-run.schema';
 import { QUEUES } from './queue.constants';
 
 @Injectable()
@@ -11,6 +14,8 @@ export class SchedulerService implements OnModuleInit {
   constructor(
     @InjectQueue(QUEUES.PIPELINE) private readonly pipelineQueue: Queue,
     private readonly companiesService: CompaniesService,
+    @InjectModel(PipelineRun.name)
+    private readonly pipelineRunModel: Model<PipelineRunDocument>,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -35,6 +40,18 @@ export class SchedulerService implements OnModuleInit {
     const autoSwitch = pipelineConfig?.autoSwitch ?? true;
     const ageInDays = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
     const isInColdStart = autoSwitch && ageInDays < coldStartDays;
+
+    // Don't re-schedule if a run completed in the last 20 hours — prevents
+    // BullMQ from immediately firing a missed job on server restart
+    const recentRun = await this.pipelineRunModel.findOne({
+      tenantId,
+      status: 'completed',
+      completedAt: { $gte: new Date(Date.now() - 20 * 60 * 60 * 1000) },
+    }).lean().exec();
+
+    if (recentRun) {
+      this.logger.log(`Skipping immediate schedule for ${tenantId} — run completed recently`);
+    }
 
     // Remove any existing repeatable jobs for this tenant before re-scheduling
     const existingJobs = await this.pipelineQueue.getRepeatableJobs();

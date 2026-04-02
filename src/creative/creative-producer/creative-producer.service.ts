@@ -52,37 +52,62 @@ export class CreativeProducerService {
     this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId}`);
 
     try {
-      const [copyPackage, imageResult, videoResult] = await Promise.all([
+      // Run all 3 independently — partial results are always saved
+      const [copyResult, imageResult, videoResult] = await Promise.allSettled([
         this.copyWriter.generate(brief, company, runId),
         this.imageGenerator.generate(brief, company, runId),
         this.videoGenerator.generate(brief, company, runId),
       ]);
 
+      const copyPackage = copyResult.status === 'fulfilled' ? copyResult.value : null;
+      const image = imageResult.status === 'fulfilled' ? imageResult.value : null;
+      const video = videoResult.status === 'fulfilled' ? videoResult.value : null;
+
+      if (copyResult.status === 'rejected') this.logger.error(`CopyWriter failed: ${copyResult.reason}`);
+      if (imageResult.status === 'rejected') this.logger.error(`ImageGenerator failed: ${imageResult.reason}`);
+      if (videoResult.status === 'rejected') this.logger.error(`VideoGenerator failed: ${videoResult.reason}`);
+
+      const allFailed = !copyPackage && !image && !video;
+      const status = allFailed ? 'failed' : 'completed';
+
       await this.creativePackageModel.updateOne(
         { _id: pkg._id },
         {
-          status: 'completed',
-          copyVariants: copyPackage.variants,
-          selectedCopyIndex: copyPackage.selectedIndex,
-          copySelectionReason: copyPackage.selectionReason,
-          imagePrompt: imageResult.imagePrompt,
-          imageUrl: imageResult.imageUrl,
-          videoPrompt: videoResult.videoPrompt,
-          videoUrl: videoResult.videoUrl,
+          status,
+          ...(copyPackage && {
+            copyVariants: copyPackage.variants,
+            selectedCopyIndex: copyPackage.selectedIndex,
+            copySelectionReason: copyPackage.selectionReason,
+          }),
+          ...(image && {
+            imagePrompt: image.imagePrompt,
+            imageUrl: image.imageUrl,
+          }),
+          ...(video && {
+            videoPrompt: video.videoPrompt,
+            videoUrl: video.videoUrl,
+          }),
           completedAt: new Date(),
         },
       );
 
-      this.logger.log(`Creative production complete: tenantId=${tenantId} briefId=${briefId}`);
+      this.logger.log(`Creative production ${status}: tenantId=${tenantId} briefId=${briefId} copy=${!!copyPackage} image=${!!image} video=${!!video}`);
 
-      const slackWebhook = company.delivery?.slackWebhook;
-      if (slackWebhook) {
-        const selectedCopy = copyPackage.variants[copyPackage.selectedIndex];
-        await this.slackService.sendMessage(
-          slackWebhook,
-          tenantId,
-          `✅ *Creative ready — ${brief.topic}*\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}\n*Hook style:* ${selectedCopy.hookStyle}\n\nImage + video prompts stored in DB. Reply to approve for campaign launch.`,
-        );
+      if (!allFailed) {
+        const slackWebhook = company.delivery?.slackWebhook;
+        if (slackWebhook) {
+          const selectedCopy = copyPackage?.variants[copyPackage.selectedIndex];
+          const copyLine = selectedCopy
+            ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
+            : '';
+          const imageLine = image?.imageUrl ? '\n✅ Image generated' : '\n⚠️ Image generation failed — retry needed';
+          const videoLine = '\n⏳ Video prompt stored — awaiting API key';
+          await this.slackService.sendMessage(
+            slackWebhook,
+            tenantId,
+            `🎨 *Creative ready — ${brief.topic}*${copyLine}${imageLine}${videoLine}`,
+          );
+        }
       }
 
       return (await this.creativePackageModel.findById(pkg._id).lean().exec()) as any;

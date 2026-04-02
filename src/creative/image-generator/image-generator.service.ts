@@ -71,7 +71,13 @@ Return ONLY the image prompt, nothing else.
     this.logger.log(`Image prompt generated: tenantId=${company.tenantId} briefTopic=${brief.topic}`);
 
     // Step 2 — Call Nano Banana (Google Gemini Image API)
-    const imageUrl = await this.callNanoBanana(imagePrompt, company.tenantId);
+    // Always return the prompt even if the API call fails
+    let imageUrl = '';
+    try {
+      imageUrl = await this.callNanoBanana(imagePrompt, company.tenantId);
+    } catch (err: any) {
+      this.logger.error(`Nano Banana API failed (prompt saved): ${err.message}`);
+    }
 
     return { imagePrompt, imageUrl };
   }
@@ -86,7 +92,7 @@ Return ONLY the image prompt, nothing else.
     this.logger.log(`Calling Nano Banana API: tenantId=${tenantId}`);
 
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent`,
       {
         contents: [
           {
@@ -94,11 +100,14 @@ Return ONLY the image prompt, nothing else.
           },
         ],
         generationConfig: {
-          responseModalities: ['IMAGE', 'TEXT'],
+          responseModalities: ['TEXT', 'IMAGE'],
         },
       },
       {
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
         timeout: 60000,
       },
     );
