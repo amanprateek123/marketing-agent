@@ -33,6 +33,13 @@ export class CreativeProducerService {
     private readonly creativePackageModel: Model<CreativePackageDocument>,
   ) {}
 
+  async findByBriefId(tenantId: string, briefId: string): Promise<CreativePackageDocument | null> {
+    return this.creativePackageModel
+      .findOne({ tenantId, briefId, status: 'completed' })
+      .lean()
+      .exec() as any;
+  }
+
   async produce(
     tenantId: string,
     briefId: string,

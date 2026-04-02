@@ -9,6 +9,7 @@ import { PipelineModule } from './pipeline/pipeline.module';
 import { CommonModule } from './common/common.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { CreativeModule } from './creative/creative.module';
+import { CampaignsModule } from './campaigns/campaigns.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { CreativeModule } from './creative/creative.module';
     CommonModule,
     SchedulerModule,
     CreativeModule,
+    CampaignsModule,
   ],
 })
 export class AppModule {}

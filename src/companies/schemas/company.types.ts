@@ -35,6 +35,7 @@ export interface CompanyPrompts {
   marketResearch: string;
   ideaPool: string;
   digestWriter: string;
+  campaignCreator: string;
 }
 
 export interface PipelineConfig {

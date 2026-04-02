@@ -9,6 +9,8 @@ export type PipelineRunStatus =
   | 'scouts_enriching'
   | 'intelligence_running'
   | 'idea_pool_running'
+  | 'creative_running'
+  | 'campaign_launching'
   | 'completed'
   | 'failed';
 
@@ -40,6 +42,12 @@ export class PipelineRun {
 
   @Prop()
   selectedBriefId?: string;
+
+  @Prop()
+  campaignId?: string;
+
+  @Prop()
+  metaCampaignId?: string;
 
   @Prop({ default: 0 })
   costUSD: number;

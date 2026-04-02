@@ -11,6 +11,8 @@ import { Digest, DigestSchema } from './schemas/digest.schema';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { DeliveryModule } from '../delivery/delivery.module';
+import { CreativeModule } from '../creative/creative.module';
+import { CampaignsModule } from '../campaigns/campaigns.module';
 import { InstagramScout } from './scouts/instagram.scout';
 import { RedditScout } from './scouts/reddit.scout';
 import { TwitterScout } from './scouts/twitter.scout';
@@ -36,6 +38,8 @@ import { PipelineController } from './pipeline.controller';
     ClaudeModule,
     CompaniesModule,
     DeliveryModule,
+    CreativeModule,
+    CampaignsModule,
   ],
   controllers: [PipelineController],
   providers: [

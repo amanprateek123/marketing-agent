@@ -28,5 +28,6 @@ import { DeliveryModule } from '../delivery/delivery.module';
     VideoGeneratorService,
     CreativeProducerService,
   ],
+  exports: [CreativeProducerService],
 })
 export class CreativeModule {}

@@ -17,6 +17,9 @@ import { YoutubeScout } from './scouts/youtube.scout';
 import { CoordinatorService, CoordinatorResult } from './coordinator.service';
 import { IdeaPoolService, IdeaPoolResult } from './idea-pool.service';
 import { DigestWriterService } from './digest-writer.service';
+import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
+import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 
 export interface TriggerPipelineResult {
   runId: string;
@@ -37,6 +40,9 @@ export class PipelineOrchestratorService implements OnModuleInit {
     private readonly coordinatorService: CoordinatorService,
     private readonly ideaPoolService: IdeaPoolService,
     private readonly digestWriterService: DigestWriterService,
+    private readonly creativeProducerService: CreativeProducerService,
+    private readonly campaignCreatorService: CampaignCreatorService,
+    private readonly campaignsService: CampaignsService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
     @InjectModel(ScoutOutput.name)
@@ -308,6 +314,74 @@ export class PipelineOrchestratorService implements OnModuleInit {
       } else {
         this.logger.log(`[${runId}] Phase E: digest writer`);
         await this.digestWriterService.run(company, runId, coordinatorResult, ideaPoolResult);
+      }
+
+      // ── Phase F: Creative Production ──────────────────────────────────────
+      const existingCreative = await this.creativeProducerService.findByBriefId(
+        tenantId,
+        ideaPoolResult.selectedBriefId,
+      );
+
+      let creativePackage: any;
+
+      if (existingCreative) {
+        this.logger.log(`[${runId}] Phase F: skipped — creative already complete`);
+        creativePackage = existingCreative;
+      } else {
+        await update('creative_running', 'creative');
+        this.logger.log(`[${runId}] Phase F: creative production`);
+
+        const selectedBrief = ideaPoolResult.briefs.find(
+          (b) => b.briefId === ideaPoolResult.selectedBriefId,
+        );
+        if (!selectedBrief) throw new Error('Selected brief not found in idea pool result');
+
+        creativePackage = await this.creativeProducerService.produce(
+          tenantId,
+          selectedBrief.briefId,
+          runId,
+          {
+            topic: selectedBrief.topic,
+            angle: selectedBrief.angle,
+            platform: selectedBrief.platform,
+            format: selectedBrief.format,
+            audience: selectedBrief.audience,
+            hook: selectedBrief.hook,
+            keyMessage: selectedBrief.keyMessage,
+            conversionBridge: selectedBrief.conversionBridge,
+          },
+        );
+      }
+
+      // ── Phase G: Campaign Launch ───────────────────────────────────────────
+      const existingCampaign = await this.campaignsService
+        .findAll(tenantId)
+        .then((campaigns) => campaigns.find((c) => c.runId === runId));
+
+      if (existingCampaign) {
+        this.logger.log(`[${runId}] Phase G: skipped — campaign already launched`);
+      } else {
+        await update('campaign_launching', 'campaign');
+        this.logger.log(`[${runId}] Phase G: campaign launch`);
+
+        const creativeBriefDoc = await this.creativeBriefModel
+          .findOne({ tenantId, runId, briefId: ideaPoolResult.selectedBriefId })
+          .lean()
+          .exec();
+
+        if (!creativeBriefDoc) throw new Error('Creative brief not found for campaign launch');
+
+        const campaign = await this.campaignCreatorService.create(
+          creativeBriefDoc,
+          creativePackage,
+          company,
+          runId,
+        );
+
+        await this.pipelineRunModel.updateOne(
+          { runId },
+          { campaignId: campaign._id.toString(), metaCampaignId: campaign.metaCampaignId },
+        );
       }
 
       // ── Done ──────────────────────────────────────────────────────────────
