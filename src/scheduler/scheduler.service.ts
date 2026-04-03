@@ -7,12 +7,15 @@ import { CompaniesService } from '../companies/companies.service';
 import { PipelineRun, PipelineRunDocument } from '../pipeline/schemas/pipeline-run.schema';
 import { QUEUES } from './queue.constants';
 
+const AUDIT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 @Injectable()
 export class SchedulerService implements OnModuleInit {
   private readonly logger = new Logger(SchedulerService.name);
 
   constructor(
     @InjectQueue(QUEUES.PIPELINE) private readonly pipelineQueue: Queue,
+    @InjectQueue(QUEUES.CAMPAIGN_AUDIT) private readonly auditQueue: Queue,
     private readonly companiesService: CompaniesService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
@@ -24,11 +27,32 @@ export class SchedulerService implements OnModuleInit {
 
   async setupRecurringJobs(): Promise<void> {
     const companies = await this.companiesService.findAll();
-    this.logger.log(`Setting up scheduled pipeline jobs for ${companies.length} tenant(s)`);
+    this.logger.log(`Setting up scheduled jobs for ${companies.length} tenant(s)`);
 
     for (const company of companies) {
       await this.scheduleForTenant(company.tenantId, new Date((company as any).createdAt), company.pipelineConfig);
+      await this.scheduleAuditForTenant(company.tenantId);
     }
+  }
+
+  async scheduleAuditForTenant(tenantId: string): Promise<void> {
+    // Remove existing repeatable audit job for this tenant before re-scheduling
+    const existingJobs = await this.auditQueue.getRepeatableJobs();
+    for (const job of existingJobs) {
+      if (job.name === `audit-${tenantId}`) {
+        await this.auditQueue.removeRepeatableByKey(job.key);
+      }
+    }
+
+    await this.auditQueue.add(
+      `audit-${tenantId}`,
+      { tenantId },
+      {
+        repeat: { every: AUDIT_INTERVAL_MS },
+        jobId: `audit-${tenantId}`,
+      },
+    );
+    this.logger.log(`Scheduled campaign audit every 6h for tenantId=${tenantId}`);
   }
 
   async scheduleForTenant(

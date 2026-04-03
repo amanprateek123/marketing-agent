@@ -24,7 +24,7 @@ CRITICAL RULES:
    but generic enough that price/product changes don't require regeneration.
 6. Scout prompts (instagramScout, redditScout, twitterScout, youtubeScout): 600-900 words —
    they must include all 3 required sections plus brand-specific focus areas.
-   Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter): 300-500 words —
+   Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter, campaignCreator): 300-500 words —
    focus on synthesis logic, scoring criteria, and brand voice.
 
 ───────────────────────────────────────────
@@ -103,6 +103,38 @@ Specific guidance per agent:
   THIS type of company want to see first, how to prioritize findings.
 
 ───────────────────────────────────────────
+CAMPAIGN CREATOR PROMPT (campaignCreator)
+───────────────────────────────────────────
+This agent takes a selected brief and creative package and launches a real Meta Ads campaign via MCP tools.
+Write a 300-500 word system prompt that covers:
+
+1. AUDIENCE STRATEGY — specific to this company's industry, geography, and target personas:
+   - Which Meta audience types work best for this company (interests, behaviours, lookalikes)
+   - The 70/30 split rule: 70% proven/lookalike audience, 30% broad test audience
+   - Which demographics to always include or always exclude for this brand
+
+2. CAMPAIGN STRUCTURE — based on this company's primaryObjective and platform mix:
+   - Which Meta campaign objective to use (CONVERSIONS, AWARENESS, TRAFFIC, LEAD_GENERATION)
+   - Ad set structure — how many ad sets, what targeting variation between them
+   - Placement recommendations (Reels, Stories, Feed) based on this brand's content format preferences
+
+3. NAMING CONVENTION — must always follow this exact pattern:
+   META_{OBJECTIVE}_{AUDIENCE}_{TOPIC}_{DATE}
+   Example: META_CONVERSIONS_URBAN_WOMEN_28-35_MORNING_ROUTINE_2026-04-03
+
+4. BUDGET RULES (CRITICAL — these are enforced by TypeScript before this agent runs):
+   - Never suggest exceeding the budget passed in the user message
+   - Explain how to split budget across ad sets for this company's objective
+   - When to use daily vs lifetime budget
+
+5. BRAND SAFETY — specific to this company:
+   - What placements or audience segments to always avoid
+   - Any brand-specific targeting notes from the company profile
+
+Do NOT include any product names, prices, or specific dates — these are injected at runtime.
+Focus on evergreen Meta Ads strategy tailored to this company's audience and objective.
+
+───────────────────────────────────────────
 FINAL OUTPUT FORMAT
 ───────────────────────────────────────────
 Return ONLY a valid JSON object with exactly these keys:
@@ -115,7 +147,8 @@ Return ONLY a valid JSON object with exactly these keys:
   "competitorResearch": "...",
   "marketResearch": "...",
   "ideaPool": "...",
-  "digestWriter": "..."
+  "digestWriter": "...",
+  "campaignCreator": "..."
 }
 
 No markdown, no explanation, no code blocks — just the raw JSON object.
@@ -131,6 +164,7 @@ const REQUIRED_PROMPT_KEYS: (keyof CompanyPrompts)[] = [
   'marketResearch',
   'ideaPool',
   'digestWriter',
+  'campaignCreator',
 ];
 
 @Injectable()
