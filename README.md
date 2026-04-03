@@ -23,7 +23,7 @@
 7. [Phase 6 — Auditor + Optimizer (Week 10)](#phase-6--auditor--optimizer-week-10)
 8. [Phase 7 — Learning System (Week 11)](#phase-7--learning-system-week-11)
 9. [Phase 8 — Production + Multi-Tenant (Week 12)](#phase-8--production--multi-tenant-week-12)
-10. [Phase 9 — Agent Team Review System (Planned)](#phase-9--agent-team-review-system-planned)
+10. [Phase 9 — Agent Teams Architecture (Planned)](#phase-9--agent-teams-architecture-planned)
 11. [Project Structure (Final)](#project-structure-final)
 12. [Environment Variables](#environment-variables)
 13. [Docker Compose](#docker-compose)
@@ -1700,176 +1700,373 @@ Run the security-reviewer.md agent from `.claude/agents/` against the full codeb
 
 ---
 
-## Phase 9 — Agent Team Review System (Planned)
+## Phase 9 — Agent Teams Architecture (Planned)
 
-> **Goal:** Insert expert persona review gates at 3 checkpoints in the pipeline to catch weak output before money is spent, and extract actionable insights from performance data.
+> **Goal:** Replace sequential single-agent pipeline stages with collaborative agent teams that debate, challenge each other, and converge on better decisions. Uses Claude Code SDK experimental agent teams feature.
 >
 > **Build after:** Phase 8 (full pipeline running with real campaign data)
+>
+> **Requires:** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.local.json` — **already set**
+
+### How Agent Teams Actually Work
+
+**Verified via testing (April 2026):**
+
+- `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` unlocks `TeamCreate`, `Agent` (with `name` + `team_name` params), and `SendMessage` as tools available to any Claude agent session
+- NestJS calls `ClaudeService.runAgent()` **once** for the lead agent — that's it
+- The lead agent internally orchestrates the team using these tools:
+  1. `TeamCreate({ team_name: "scout-team" })` — creates team config
+  2. `Agent({ name: "reddit-scout", team_name: "scout-team", run_in_background: true, prompt: "..." })` — spawns each teammate
+  3. Teammates run in parallel, send results back via `SendMessage({ to: "team-lead", message: "..." })`
+  4. Lead synthesizes and returns final output to NestJS
+
+```
+NestJS BullMQ job
+    ↓
+ClaudeService.runAgent({ agent: 'intelligence-lead', prompt: '...' })  ← single query() call
+    ↓
+Lead Agent (intelligence-lead.md system prompt)
+    ├── TeamCreate({ team_name: "scout-team" })
+    ├── Agent({ name: "reddit-scout", team_name: "scout-team", run_in_background: true })
+    ├── Agent({ name: "twitter-scout", team_name: "scout-team", run_in_background: true })
+    ├── Agent({ name: "youtube-scout", team_name: "scout-team", run_in_background: true })
+    │       ↓ scouts run in parallel, each does WebSearch/WebFetch
+    │       ↓ each calls SendMessage({ to: "team-lead", message: findings })
+    ├── Lead receives all responses, cross-validates, synthesizes
+    └── Returns structured JSON output
+    ↓
+query() returns to NestJS — writes to MongoDB
+```
+
+**Key facts:**
+- No CLI subprocess needed from NestJS — `query()` is sufficient
+- `team-orchestrator.service.ts` is a thin wrapper — team logic lives in agent `.md` files
+- The `Agent` tool's `name` + `team_name` params are what enable peer-to-peer messaging
+- **One unconfirmed piece:** background teammate reliably receiving `SendMessage` mid-run — validate with Scout Team end-to-end test first
 
 ### Overview
 
-A panel of AI expert personas debates pipeline output in structured 3-round discussions. Each persona brings a different professional lens. They read each other's feedback, challenge each other, and synthesize into consensus + ranked action items.
+Agent teams are groups of independent Claude Code sessions that share a task list and can message each other directly (peer-to-peer). Unlike subagents that only report back to a parent, agent teammates run in parallel, do independent work, and report findings back to the lead via `SendMessage`.
 
-### The 3 Review Checkpoints
+**4 Agent Teams + 1 persistent single agent replace key pipeline stages:**
 
-| Checkpoint | Trigger | Personas Used | Output |
-|------------|---------|---------------|--------|
-| **Idea Pool** | After ideas are scored | All 5 | Which ideas to pursue, which to drop + why. Summary sent to Slack |
-| **Creative Package** | After copy/visuals generated | Copywriter + Psychologist + Skeptical Customer | Pass / auto-revise / block launch |
-| **Campaign Performance** | After Day 7/14/30 data written | Media Buyer + Brand Strategist | Actionable advice in plain language → feeds learning loop |
+| Team | Stage | Replaces | Why |
+|---|---|---|---|
+| **Scout Team** | Signal collection + synthesis | 4 scouts + coordinator (Phase 2) | Scouts cross-validate signals in real-time, kill manufactured hype before coordinator |
+| **Strategy Team** | Idea selection | Rule-based winner selection (Phase 2) | Ideas are debated rather than scored by rigid rules — budget goes to battle-tested ideas |
+| **Creative Team** | Copy production | Single copywriter (Phase 4) | Copy is iterated through critique rather than self-selected on first draft |
+| **Learning Team** | Bi-weekly learning | Separate creative + campaign learners (Phase 7) | Analysts discuss cross-domain insights neither would find alone |
 
-### The 5 Default Personas
+**1 Persistent Single Agent (enhanced):**
 
-Global defaults, seeded automatically for every tenant on first run. No manual setup required.
+| Agent | Stage | Enhancement |
+|---|---|---|
+| **Performance Marketing Expert** | Every 6h audit | Replaces rule-based optimizer. Escalates to Diagnosis Team when uncertain |
 
-| # | Persona | Domain | Evaluates |
-|---|---------|--------|-----------|
-| 1 | **Media Buyer** | performance_marketing | Budget efficiency, audience targeting, ROAS potential, platform fit |
-| 2 | **Copywriter** | copywriting | Hook strength, headline clarity, CTA, tone, persuasion |
-| 3 | **Consumer Psychologist** | consumer_behavior | Emotional triggers, cognitive biases, motivation, why someone clicks |
-| 4 | **Brand Strategist** | brand_strategy | Positioning, consistency, differentiation from competitors |
-| 5 | **Skeptical Customer** | end_user | "Would I actually stop scrolling for this?" |
+---
 
-Default personas are global (`tenantId: null`). Tenants can override system prompts or add custom personas.
-
-### How a Discussion Works (3 Rounds)
+### Pipeline with Agent Teams
 
 ```
-Round 1 — Independent Review (parallel Claude calls)
-  Each persona reviews the pipeline output independently
-  Returns: score (1–10), strengths, weaknesses, suggestions
+WEEKLY PIPELINE (Monday 9 AM IST)
+═══════════════════════════════════════════════════════════
 
-Round 2 — Discussion (parallel Claude calls)
-  Each persona receives everyone else's Round 1 feedback
-  They agree, disagree, challenge, and build on each other's points
+SCOUT TEAM — Agent Team (4 agents)                ~15 min
+  Lead:      Intelligence Lead (also scouts Instagram)
+  Teammates: Reddit Scout, Twitter Scout, YouTube Scout
 
-Round 3 — Synthesis (single moderator call)
-  Moderator reads full R1 + R2 discussion
-  Returns: consensus points, dissenting views, ranked action items, final score
+  Flow:
+    1. Each scout collects signals from their platform (parallel tasks)
+    2. Scouts share findings — cross-validate across platforms
+    3. Filter manufactured hype ("this is brand-pushed, not organic")
+    4. Intelligence Lead synthesizes into ranked top 5-7 signals
+       with multi-platform confirmation scores
+
+  Input:  company config, recently-covered signals (dedup TTL)
+  Output: cross-validated signals + weekly_signals doc written
+          to company.signals.weekly for fast feedback loop
+      ↓
+Competitor Research (subagent, WebSearch + WebFetch)   ~5 min
+Market Research     (subagent, WebSearch + WebFetch)
+
+      ↓
+STRATEGY TEAM — Agent Team (3 agents)                ~15 min
+  Lead:      Strategist (uses past learnings + crossDomain insights)
+  Teammates: Contrarian, Customer Advocate
+
+  Flow:
+    1. Reads signals + research + company.signals.weekly (fast feedback)
+    2. Each teammate proposes their best campaign idea
+    3. Contrarian attacks weak ideas ("this trend is already saturated")
+    4. Customer Advocate grounds in ICP pain points
+    5. Strategist uses past learnings to pick winner
+    6. Consensus on single idea with battle-tested rationale
+
+  Input:  signals, research docs, company.learnings, company.signals.weekly
+  Output: 1 CreativeBrief + N IntelligenceBriefs with rationale
+      ↓
+Digest Writer (single agent) → Slack                   ~3 min
+
+      ↓
+CREATIVE TEAM — Agent Team (3 agents)                ~15 min
+  Lead:      Creative Director
+  Teammates: Copywriter, Brand Checker
+
+  Shared Task List:
+    Task 1: Draft 3 copy variants         → Copywriter
+    Task 2: Review + critique drafts      → Creative Director
+    Task 3: Compliance + Meta spec check  → Brand Checker
+    Task 4: Revise based on feedback      → Copywriter
+    Task 5: Final approval                → Creative Director
+
+  Flow (2-round iteration):
+    Round 1 — Copywriter drafts, Director critiques, Brand Checker flags
+    Round 2 — Copywriter revises, Director approves
+
+  Fallback: if team fails → existing CopyWriter single agent (unchanged)
+
+  Input:  winning brief, company.learnings.creative, brand guidelines
+  Output: 3 reviewed copy variants + primary selection
+
+      ↓
+Image + Video (parallel subagents)                     ~5 min
+      ↓
+TypeScript Safety Rails → Campaign Creator             ~5 min
+
+                                              TOTAL ~63 min
+
+═══════════════════════════════════════════════════════════
+EVERY 6 HOURS — Campaign Monitoring
+═══════════════════════════════════════════════════════════
+
+Campaign Auditor (single agent, Meta Ads MCP)          ~3 min
+      ↓
+TypeScript Safety Rails (hard limits — non-negotiable):
+  CTR < 0.3% after 72h → FORCE PAUSE
+  Frequency > 4.0      → FORCE PAUSE
+  Budget exceeded       → FORCE PAUSE
+      ↓
+Performance Marketing Expert (single agent)            ~5 min
+  Reviews metrics + company.signals.weekly + learnings
+  Actions: adjust budgets, shift ad sets, swap creatives
+  Writes: company.signals.weekly (rolling 7-day observations)
+      ↓
+  Confident? → execute actions
+  Uncertain? ↓
+
+DIAGNOSIS TEAM — Agent Team (3 agents, on-demand)    ~10 min
+  Lead:      Performance Analyst
+  Teammates: Creative Analyst, Audience Strategist
+
+  Flow:
+    1. Perf Analyst shares the anomaly ("ROAS dropped 40% overnight")
+    2. Creative Analyst evaluates ad-level signals (hook CTR, watch time)
+    3. Audience Strategist evaluates targeting signals (frequency, reach)
+    4. Team debates root cause — each tries to disprove others' theory
+    5. Consensus diagnosis + specific optimization actions
+
+  Input:  campaign metrics, creative package, audience config, learnings
+  Output: root cause + fix plan → executed by Perf Expert
+
+═══════════════════════════════════════════════════════════
+BI-WEEKLY — Every Other Monday, 3 AM IST
+═══════════════════════════════════════════════════════════
+
+LEARNING TEAM — Agent Team (3 agents)               ~20 min
+  Lead:      Marketing Strategist
+  Teammates: Creative Analyst, Campaign Analyst
+
+  Flow:
+    1. Creative Analyst reviews: hook styles, formats, CTAs, visual patterns
+    2. Campaign Analyst reviews: audiences, budgets, timing, ROAS patterns
+    3. Analysts share findings — look for cross-domain correlations
+       ("question hooks × broad audiences = 4.1x ROAS — neither of us
+        would have found this alone")
+    4. Strategist synthesizes into actionable cross-domain insights
+    5. Update all learnings + regenerate ALL agent prompts
+
+  Input:  all campaigns + creatives + briefs from last 2 weeks
+          + company.signals.weekly observations from Perf Expert
+  Output:
+    company.learnings.creative   (updated)
+    company.learnings.campaign   (updated)
+    company.learnings.crossDomain (NEW — cross-domain combos)
+    Prompt regeneration for all 17 agent definitions
 ```
 
-Total Claude calls per review: `(N personas × 2 rounds) + 1 moderator`
-Example with 5 personas: 11 calls per gate.
+---
 
-### Score-Based Gate Logic
-
-| Final Score | Action |
-|-------------|--------|
-| **>= 7** | Pipeline continues — output approved |
-| **5–6** | Auto-revise — action items fed back, output regenerated once, then continues |
-| **< 5** | Pipeline paused — Slack alert sent, flagged for human review |
-
-### ReviewConfig (per tenant, stored in MongoDB)
-
-Fully controllable per tenant — which personas, which checkpoints, thresholds:
-
-```json
-{
-  "tenantId": "fittrack",
-  "checkpoints": {
-    "idea_pool": {
-      "enabled": true,
-      "personaIds": ["media_buyer", "copywriter", "psychologist", "brand_strategist", "skeptical_customer"],
-      "minScore": 6,
-      "autoRevise": true
-    },
-    "creative_package": {
-      "enabled": true,
-      "personaIds": ["copywriter", "psychologist", "skeptical_customer"],
-      "minScore": 7,
-      "autoRevise": true
-    },
-    "campaign_performance": {
-      "enabled": true,
-      "personaIds": ["media_buyer", "brand_strategist"],
-      "minScore": null
-    }
-  }
-}
-```
-
-### Persona Storage Model
+### Fast Feedback Loop (New Data Flow)
 
 ```
-personas collection
-├── media_buyer         (isDefault: true,  tenantId: null)   ← shared globally
-├── copywriter          (isDefault: true,  tenantId: null)
-├── psychologist        (isDefault: true,  tenantId: null)
-├── brand_strategist    (isDefault: true,  tenantId: null)
-├── skeptical_customer  (isDefault: true,  tenantId: null)
-│
-└── fitness_expert      (isDefault: false, tenantId: "fittrack")  ← tenant-specific custom
+Performance Marketing Expert (every 6h)
+  → writes: company.signals.weekly
+    (rolling 7-day observations: "urgency hooks declining", "broad CTR up")
+        ↓
+Scout Team reads company.signals.weekly before synthesis
+Strategy Team reads company.signals.weekly before debate
+Learning Team reads company.signals.weekly as additional input
+        ↓
+Next week's campaign incorporates this week's live signal data
+without waiting for bi-weekly Learning Team
 ```
+
+---
+
+### Agent Definitions Required (`.claude/agents/`)
+
+17 reusable agent definitions. Each is a markdown file with system prompt, tools, and model. Referenced by name when spawning teammates.
+
+| File | Role | Used In | Tools |
+|---|---|---|---|
+| `intelligence-lead.md` | Scout Team lead + Instagram scout | Scout Team | WebSearch, WebFetch |
+| `reddit-scout.md` | Reddit signal collector | Scout Team | WebSearch, WebFetch |
+| `twitter-scout.md` | Twitter/X signal collector | Scout Team | WebSearch, WebFetch |
+| `youtube-scout.md` | YouTube signal collector | Scout Team | WebSearch, WebFetch |
+| `strategist.md` | Strategy Team lead | Strategy Team | None |
+| `contrarian.md` | Challenges ideas | Strategy Team | None |
+| `customer-advocate.md` | ICP perspective | Strategy Team | None |
+| `creative-director.md` | Creative Team lead | Creative Team | None |
+| `copywriter.md` | Ad copy drafting | Creative Team | None |
+| `brand-checker.md` | Compliance + Meta spec review | Creative Team | None |
+| `performance-analyst.md` | Diagnosis Team lead | Diagnosis Team | None |
+| `creative-analyst.md` | Ad creative pattern analysis | Diagnosis + Learning | None |
+| `audience-strategist.md` | Targeting pattern analysis | Diagnosis Team | None |
+| `marketing-strategist.md` | Learning Team lead | Learning Team | None |
+| `campaign-analyst.md` | Campaign data analysis | Learning Team | None |
+| `perf-marketing-expert.md` | Ongoing campaign optimization | Every 6h (single) | Meta MCP |
+
+---
 
 ### New Files to Create
 
 ```
-src/review/
-  schemas/
-    persona.schema.ts           — Expert persona profiles
-    discussion.schema.ts        — Full discussion records (rounds, messages, consensus)
-    review-config.schema.ts     — Per-tenant checkpoint configuration
-  dto/
-    create-persona.dto.ts
-    start-discussion.dto.ts
-    update-review-config.dto.ts
-  personas.defaults.ts          — Hardcoded default persona system prompts (5 experts)
-  agent-team.service.ts         — 3-round discussion orchestration
-  review.controller.ts          — CRUD for personas + config + trigger discussions
-  review.module.ts
+src/teams/
+  team-orchestrator.service.ts    — Thin wrapper: calls ClaudeService.runAgent() with lead agent
+  team-fallback.service.ts        — Fallback to single-agent if team fails (timeout or error)
+
+.claude/agents/
+  intelligence-lead.md
+  reddit-scout.md
+  twitter-scout.md
+  youtube-scout.md
+  strategist.md
+  contrarian.md
+  customer-advocate.md
+  creative-director.md
+  copywriter.md
+  brand-checker.md
+  performance-analyst.md
+  creative-analyst.md
+  audience-strategist.md
+  marketing-strategist.md
+  campaign-analyst.md
+  perf-marketing-expert.md
+```
+
+### NestJS Implementation Pattern
+
+```typescript
+// team-orchestrator.service.ts — thin wrapper, no team logic here
+async runScoutTeam(company: Company): Promise<ScoutOutput> {
+  return this.claudeService.runAgent({
+    agent: 'intelligence-lead',   // loads .claude/agents/intelligence-lead.md
+    prompt: this.liveContextBuilder.buildScoutPrompt(company),
+    allowedTools: ['TeamCreate', 'Agent', 'SendMessage', 'WebSearch', 'WebFetch'],
+  });
+  // Team creation, teammate spawning, SendMessage — all happens inside intelligence-lead.md
+}
+
+// intelligence-lead.md system prompt instructs Claude to:
+// 1. TeamCreate({ team_name: "scout-team" })
+// 2. Agent({ name: "reddit-scout", team_name: "scout-team", run_in_background: true, prompt: "..." })
+// 3. Agent({ name: "twitter-scout", ... }), Agent({ name: "youtube-scout", ... })
+// 4. Wait for SendMessage responses from each teammate
+// 5. Cross-validate and return structured JSON
 ```
 
 ### Files to Update
 
 | File | Change |
-|------|--------|
-| `claude/claude.types.ts` | Add `REVIEW_PERSONA`, `REVIEW_MODERATOR` to AgentType + NO_TOOL_AGENTS |
-| `pipeline/idea-pool.service.ts` | Call `agentTeamService.discuss()` after scoring, append result to digest |
-| `creative/creative-producer.service.ts` | Call `agentTeamService.discuss()` after generation, gate on score |
-| `pipeline/campaign-auditor.service.ts` | Call `agentTeamService.discuss()` after writing performance data |
-| `app.module.ts` | Register ReviewModule |
+|---|---|
+| `claude/claude.types.ts` | Add team agent types + PERFORMANCE_MARKETING_EXPERT |
+| `pipeline/scouts/scout-base.service.ts` | Replace with `TeamOrchestratorService.runScoutTeam()` |
+| `pipeline/coordinator/coordinator.service.ts` | Merged into `intelligence-lead.md` system prompt |
+| `pipeline/idea-pool/idea-pool.service.ts` | Replace winner selection with Strategy Team |
+| `creative/copy-writer/copy-writer.service.ts` | Wrap with Creative Team, fallback on failure |
+| `campaigns/campaign-auditor/campaign-optimizer.service.ts` | Replace rule-based with Perf Expert |
+| `learning/campaign-learning.service.ts` | Merge into Learning Team |
+| `learning/creative-learning.service.ts` | Merge into Learning Team |
+| `scheduler/scheduler.service.ts` | Add bi-weekly Learning Team cron |
+| `companies/schemas/company.schema.ts` | Add `learnings.crossDomain`, `signals.weekly` fields |
+| `.claude/settings.local.json` | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — **already set, verified working** |
 
-### Discussion Document Shape
+---
+
+### New MongoDB Schema Fields
 
 ```typescript
-{
-  tenantId: string
-  targetType: 'idea_pool' | 'creative_package' | 'campaign_performance'
-  targetId: string                          // briefId, packageId, or campaignId
-  personaIds: string[]
-  rounds: [
-    {
-      round: 1,
-      messages: [{ personaId, personaName, score, strengths, weaknesses, suggestions }]
-    },
-    {
-      round: 2,
-      messages: [{ personaId, personaName, agreements, challenges, additions }]
-    },
-    {
-      round: 3,
-      messages: [{ role: 'moderator', consensus, dissentingViews, actionItems, finalScore }]
-    }
-  ]
-  finalScore: number
-  actionItems: string[]
-  status: 'running' | 'completed' | 'failed'
-  totalCostUSD: number
+// company.schema.ts additions
+learnings: {
+  creative: { ... },       // existing
+  campaign: { ... },       // existing
+  crossDomain: {           // NEW — cross-domain combos from Learning Team
+    insights: [{
+      combo: string,       // e.g. "question_hook × broad_audience"
+      avgROAS: number,
+      sampleSize: number,
+      confidence: 'low' | 'medium' | 'high',
+      recommendation: string,
+    }],
+    version: number,
+    lastUpdated: Date,
+  }
+},
+signals: {
+  weekly: {                // NEW — rolling 7d observations from Perf Expert
+    observations: string[],
+    lastUpdated: Date,
+  }
 }
 ```
 
+---
+
+### Cost Summary
+
+| Component | Type | Frequency | Est. Cost/Week |
+|---|---|---|---|
+| Scout Team | Agent Team (4) | 1x | $4–8 |
+| Research | Subagents (2) | 1x | $0.50 |
+| Strategy Team | Agent Team (3) | 1x | $2–6 |
+| Digest Writer | Single (1) | 1x | $0.50 |
+| Creative Team | Agent Team (3) | 1x | $2–6 |
+| Image + Video | Subagents (2) | 1x | $0.50 |
+| Campaign Creator | Single (1) | 1x | $0.50 |
+| Auditor + Perf Expert | Single (1) | 28x | $2–4 |
+| Diagnosis Team | Agent Team (3) | ~2x/week | $4–12 |
+| Learning Team | Agent Team (3) | 0.5x/week | $1–3 |
+| **Total** | | | **$18–45/week** |
+
+---
+
 ### Phase 9 Exit Criteria
 
-- [ ] 5 default personas seeded for new tenants automatically
-- [ ] 3-round discussion runs end-to-end for all 3 checkpoint types
-- [ ] Score gate blocks creative launch when score < 5
-- [ ] Auto-revise loop regenerates creative once when score 5–6
-- [ ] Idea Pool review summary included in Slack digest
-- [ ] Campaign performance review feeds into learning agent
-- [ ] Custom persona CRUD working per tenant
-- [ ] ReviewConfig CRUD working per tenant
-- [ ] All discussion records stored in MongoDB with full round history
-- [ ] Cost tracked per discussion in `usage_logs`
+- [x] `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` confirmed in settings — verified April 2026
+- [x] `TeamCreate`, `Agent` (with `name`+`team_name`), `SendMessage` tools confirmed available
+- [ ] Scout Team end-to-end test — validate background teammate receives `SendMessage` mid-run
+- [ ] All 16 agent definition files created in `.claude/agents/`
+- [ ] Scout Team runs end-to-end, cross-validates signals correctly
+- [ ] Strategy Team debates and selects a winning idea with rationale
+- [ ] Creative Team iterates copy through 2 rounds and approves
+- [ ] Creative Team falls back to single copywriter on team failure
+- [ ] Performance Marketing Expert writes `company.signals.weekly` after every audit
+- [ ] Diagnosis Team activates only when Perf Expert flags uncertainty
+- [ ] Learning Team runs bi-weekly and produces `crossDomain` insights
+- [ ] `company.learnings.crossDomain` schema live and populated
+- [ ] `company.signals.weekly` read by Scout Team and Strategy Team
+- [ ] Prompt regeneration updates all 16+ prompts after Learning Team run
+- [ ] Cost tracked per team activation in `usage_logs`
 
 ---
 
@@ -2004,11 +2201,41 @@ briefos/
 ├── .claude/
 │   ├── CLAUDE.md
 │   ├── mcp.json
+│   ├── settings.local.json         (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
 │   ├── agents/
+│   │   ├── — dev agents —
 │   │   ├── architect.md
 │   │   ├── typescript-reviewer.md
 │   │   ├── security-reviewer.md
-│   │   └── loop-operator.md
+│   │   ├── loop-operator.md
+│   │   │
+│   │   ├── — scout team (Phase 9) —
+│   │   ├── intelligence-lead.md
+│   │   ├── reddit-scout.md
+│   │   ├── twitter-scout.md
+│   │   ├── youtube-scout.md
+│   │   │
+│   │   ├── — strategy team (Phase 9) —
+│   │   ├── strategist.md
+│   │   ├── contrarian.md
+│   │   ├── customer-advocate.md
+│   │   │
+│   │   ├── — creative team (Phase 9) —
+│   │   ├── creative-director.md
+│   │   ├── copywriter.md
+│   │   ├── brand-checker.md
+│   │   │
+│   │   ├── — diagnosis team (Phase 9) —
+│   │   ├── performance-analyst.md
+│   │   ├── creative-analyst.md
+│   │   ├── audience-strategist.md
+│   │   │
+│   │   ├── — learning team (Phase 9) —
+│   │   ├── marketing-strategist.md
+│   │   ├── campaign-analyst.md
+│   │   │
+│   │   └── — persistent single agent (Phase 9) —
+│   │       └── perf-marketing-expert.md
 │   ├── skills/
 │   │   ├── paid-ads/
 │   │   ├── ad-creative/
@@ -2193,10 +2420,7 @@ volumes:
 | `campaigns` | Meta campaign records + audit history | `tenantId + metaCampaignId`, `tenantId + status` |
 | `action_logs` | Every autonomous decision with reasoning | `tenantId + timestamp`, `tenantId + agent` |
 | `usage_logs` | Every Claude API call (billing ledger) | `tenantId + timestamp`, `tenantId + agent` |
-| `learning_runs` | Monthly learning execution log | `tenantId + version` |
-| `personas` | Expert reviewer profiles (defaults + custom) | `tenantId` (null for defaults), `domain` |
-| `discussions` | Full agent team review records with all rounds | `tenantId + targetId`, `tenantId + targetType` |
-| `review_configs` | Per-tenant checkpoint configuration | `tenantId` (unique) |
+| `learning_runs` | Bi-weekly learning team execution log | `tenantId + version` |
 
 ---
 
@@ -2222,15 +2446,9 @@ volumes:
 | `GET` | `/api/v1/usage/:tenantId` | 8 | Token usage + cost per agent |
 | `GET` | `/api/v1/usage/:tenantId/monthly` | 8 | Monthly totals by agent |
 | `GET` | `/api/v1/health` | 8 | Health check endpoint |
-| `POST` | `/api/v1/review/personas` | 9 | Create custom persona for tenant |
-| `GET` | `/api/v1/review/personas/:tenantId` | 9 | List all personas (defaults + custom) for tenant |
-| `PATCH` | `/api/v1/review/personas/:id` | 9 | Update persona system prompt or criteria |
-| `DELETE` | `/api/v1/review/personas/:id` | 9 | Delete custom persona |
-| `GET` | `/api/v1/review/config/:tenantId` | 9 | Get checkpoint config for tenant |
-| `PATCH` | `/api/v1/review/config/:tenantId` | 9 | Update checkpoint config (enable/disable, personas, thresholds) |
-| `POST` | `/api/v1/review/discuss` | 9 | Manually trigger a team discussion on any pipeline output |
-| `GET` | `/api/v1/review/discussions/:tenantId` | 9 | List all discussions for tenant |
-| `GET` | `/api/v1/review/discussions/detail/:id` | 9 | Full discussion with all rounds and action items |
+| `POST` | `/api/v1/pipeline/:tenantId/run-team` | 9 | Trigger weekly pipeline with agent teams enabled |
+| `GET` | `/api/v1/learning/:tenantId/cross-domain` | 9 | Get cross-domain insights from Learning Team |
+| `GET` | `/api/v1/learning/:tenantId/weekly-signals` | 9 | Get rolling 7-day signals from Perf Expert |
 
 ---
 
@@ -2252,8 +2470,9 @@ volumes:
 **How skills are used:**
 Skills are NOT injected directly into agent calls at runtime. Instead, `PromptGeneratorService` reads all marketing skills and uses them — along with the company profile — to generate rich, company-specific system prompts. These are stored in `company.prompts.*` in MongoDB and used for every agent call. Running `/regenerate` rebuilds all prompts when skills or company data changes.
 
-**Prompts generated (10 total):**
-`instagramScout`, `redditScout`, `twitterScout`, `youtubeScout`, `coordinator`, `competitorResearch`, `marketResearch`, `ideaPool`, `digestWriter`, `campaignCreator`
+**Prompts generated (10 core + 16 agent definitions regenerated by Learning Team):**
+Core: `instagramScout`, `redditScout`, `twitterScout`, `youtubeScout`, `coordinator`, `competitorResearch`, `marketResearch`, `ideaPool`, `digestWriter`, `campaignCreator`
+Agent definitions (Phase 9): all 16 `.claude/agents/*.md` files are regenerated by the Learning Team after each bi-weekly run, incorporating cross-domain insights into each role's system prompt.
 
 ### Execution Skills (from everything-claude-code)
 
@@ -2283,6 +2502,10 @@ Skills are NOT injected directly into agent calls at runtime. Instead, `PromptGe
 | Delivery | n8n (self-hosted) | Visual routing for Slack/WhatsApp/Email. Marketing team can change channels without code |
 | Learning | Monthly with 3+ data point minimum | Prevents overfitting to small samples. Confidence scoring for each pattern |
 | Cold start strategy | Daily research + tenant feedback loop (14 days) | System has no idea what tenant likes on day 1. Daily ideas + ✅/❌ reactions build preference data fast. Auto-switches to weekly after confidence threshold (>60% approval) |
+| Agent Teams vs 3-round discussion (Phase 9) | Agent teams (Claude Code SDK experimental) | Original Phase 9 plan used sequential parallel Claude calls (N×2+1 calls per gate). Agent teams give real peer-to-peer messaging, shared task lists, and self-coordination. Scouts cross-validate in real-time. Strategy team debates converge faster than round-robin. One Learning Team discussion replaces two isolated monthly agents — cross-domain insights only emerge from the debate. |
+| Scout Team merges coordinator | Intelligence Lead also scouts Instagram | Saves 1 agent vs separate coordinator + 4 scouts = 5 agents. Lead synthesizes while scouting, reduces coordination overhead. 4 agents is optimal (docs: 3-5 sweet spot). |
+| Performance Marketing Expert cadence | Single agent every 6h, escalates to Diagnosis Team | Running full 3-agent Diagnosis Team every 6h = $56-168/week. Single expert handles 90% of cycles. Team activates only on uncertainty. Hybrid approach saves ~$40-120/week. |
+| Learning cadence | Bi-weekly (was monthly) | Monthly learning = 3-4 campaigns launched before insights from first campaign are incorporated. Bi-weekly keeps feedback loop tight. Fast feedback via company.signals.weekly bridges the gap between audits and Learning Team runs. |
 | Campaign creator prompt | Generated by PromptGeneratorService using `paid-ads` skill | Campaign creator needs company-specific audience strategy, placement preferences, and naming conventions — not just generic Meta Ads knowledge. Generated once, reused on every campaign launch. |
 | Ideas per run | Tenant-configurable (default 5, max 10) | Every tenant has different experimentation appetite. Startups may want 10/day, established brands want 1-3/week. Stored in company.pipelineConfig.ideasPerRun. Budget: (N-2) coordinator ideas + 1 competitor gap + 1 market insight |
 | Idea sources | 4 types tracked per idea (scout/viral/competitor/market) | Learning agent uses source tracking to find which input type produces best-performing ideas for each tenant |
