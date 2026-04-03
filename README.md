@@ -1,19 +1,270 @@
-# BriefOS — Phase-by-Phase Build Guide
+# BriefOS — Autonomous AI Marketing Agent
 
-> **Stack:** Node.js + NestJS + TypeScript + Claude Code SDK + MongoDB + BullMQ + Redis + Meta Ads MCP
+> **Stack:** Node.js + NestJS + TypeScript + Claude Code SDK (`@anthropic-ai/claude-agent-sdk`) + MongoDB + BullMQ + Redis + Meta Ads MCP
 >
 > **Runtime:** Node.js (not Bun — bottleneck is AI API calls, not runtime speed)
 >
 > **Framework:** NestJS (DI, modules, guards, interceptors — built for this complexity)
 >
-> **Timeline:** 12 weeks across 8 phases
+> **Timeline:** 12 weeks across 9 phases (Phase 1-8 core, Phase 9 agent teams)
 >
 > **Last Updated:** April 2026
 
 ---
 
+## System Architecture
+
+### What BriefOS Does
+
+A company registers once. From that point, BriefOS autonomously runs weekly intelligence gathering, generates ad creatives, launches Meta Ads campaigns, monitors performance every 6 hours, and improves itself monthly by learning from results. No human in the loop — except to override when needed.
+
+### End-to-End Flow
+
+```
+COMPANY REGISTERS (one-time)
+══════════════════════════════════════════════════════════════════════════
+
+  POST /api/v1/companies
+  { name, industry, products, competitors, targetAudience, budget, ... }
+       │
+       ▼
+  PromptGeneratorService (Claude Sonnet)
+  └── Auto-generates 10+ system prompts tailored to the company
+      Stored in MongoDB → company.prompts
+      NEVER hardcoded — live data injected at runtime via LiveContextBuilder
+
+
+WEEKLY PIPELINE (Monday 9 AM IST — BullMQ cron)
+══════════════════════════════════════════════════════════════════════════
+
+  ┌─── PHASE A: Signal Collection ─────────────────────────── ~15 min ───┐
+  │                                                                       │
+  │  Scout Team (Phase 9 — Agent Team, single query() call)               │
+  │  ┌───────────────────────────────────────────────────────────────┐    │
+  │  │  Intelligence Lead (team lead + Instagram scout)              │    │
+  │  │       │                                                       │    │
+  │  │       ├── TeamCreate("scout-{runId}")                         │    │
+  │  │       │                                                       │    │
+  │  │       ├── Spawns 3 teammates in parallel (Agent tool):        │    │
+  │  │       │   ┌──────────┐  ┌──────────┐  ┌──────────┐           │    │
+  │  │       │   │  Reddit  │  │ Twitter  │  │ YouTube  │           │    │
+  │  │       │   │  Scout   │  │  Scout   │  │  Scout   │           │    │
+  │  │       │   │ WebSearch│  │ WebSearch│  │ WebSearch│           │    │
+  │  │       │   │ WebFetch │  │ WebFetch │  │ WebFetch │           │    │
+  │  │       │   └────┬─────┘  └────┬─────┘  └────┬─────┘           │    │
+  │  │       │        │             │             │                  │    │
+  │  │       │        └──── SendMessage(findings) ────┘              │    │
+  │  │       │                      │                                │    │
+  │  │       ├── Scouts Instagram itself (parallel with teammates)   │    │
+  │  │       ├── Receives 3 SendMessage responses                    │    │
+  │  │       ├── Cross-validates signals across platforms             │    │
+  │  │       ├── Filters manufactured hype                           │    │
+  │  │       ├── TeamDelete (cleanup)                                │    │
+  │  │       └── Returns ranked JSON: topSignals + viralTrends       │    │
+  │  └───────────────────────────────────────────────────────────────┘    │
+  │                                                                       │
+  │  Fallback: if Scout Team fails → 4 parallel single-agent scouts       │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  ┌─── PHASE B: Coordinator ───────────────────────────────── ~5 min ────┐
+  │  Reads all scout signals + viral trends from MongoDB                  │
+  │  Claude Sonnet synthesizes cross-platform momentum                    │
+  │  Outputs: ranked topSignals with compositeScores (0-10)               │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  ┌─── PHASE C: Intelligence Research (parallel) ──────────── ~5 min ────┐
+  │  ┌─────────────────────────┐  ┌─────────────────────────┐            │
+  │  │ Competitor Research      │  │ Market Research          │            │
+  │  │ (Sonnet, WebSearch)      │  │ (Haiku, WebSearch)       │            │
+  │  │ Recent campaigns,        │  │ Consumer trends,         │            │
+  │  │ positioning changes      │  │ market conditions        │            │
+  │  └─────────────────────────┘  └─────────────────────────┘            │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  ┌─── PHASE D: Idea Pool ────────────────────────────────── ~5 min ────┐
+  │  Reads: coordinator synthesis + research + company.learnings          │
+  │  Generates N intelligence briefs (campaign ideas)                     │
+  │  Selects 1 winner → CreativeBrief with hook, keyMessage, audience     │
+  │  Human team can override selection via digest                         │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  ┌─── PHASE E: Digest Writer ────────────────────────────── ~3 min ────┐
+  │  Formats everything into human-readable report                        │
+  │  Delivers to Slack via slack.service.ts                               │
+  │  Contains: signals summary, all ideas, selected winner, rationale     │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  ┌─── PHASE F: Creative Production ──────────────────────── ~5 min ────┐
+  │  CreativeProducerService.produce() — all in parallel:                  │
+  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐             │
+  │  │  CopyWriter    │  │ ImageGenerator │  │ VideoGenerator │             │
+  │  │  3 copy        │  │ Ideogram/Flux  │  │ Kling AI 2.0   │             │
+  │  │  variants      │  │ via fal.ai     │  │                │             │
+  │  └───────────────┘  └───────────────┘  └───────────────┘             │
+  │  All assets uploaded to S3 (tenantId/ prefix)                         │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  ┌─── PHASE G: Campaign Launch ──────────────────────────── ~5 min ────┐
+  │  TypeScript Safety Rails (Claude CANNOT override):                     │
+  │  ├── Budget ≤ maxBudgetPerCampaign                                    │
+  │  ├── Weekly spend ≤ weeklyBudgetCap                                   │
+  │  └── Forbidden topics check                                           │
+  │       ↓                                                               │
+  │  CampaignCreatorService → Meta Ads MCP → LIVE campaign                │
+  └───────────────────────────────────────────────────────────────────────┘
+
+                                                          TOTAL ~43 min
+
+
+EVERY 6 HOURS — Campaign Monitoring (BullMQ cron)
+══════════════════════════════════════════════════════════════════════════
+
+  CampaignAuditorService
+       │
+       ├── Fetches live metrics from Meta Ads (MCP)
+       │
+       ├── TypeScript Safety Rails (FORCE — non-negotiable):
+       │   ├── CTR < 0.3% after 72h    → FORCE PAUSE
+       │   ├── Frequency > 4.0         → FORCE PAUSE
+       │   └── Budget exceeded          → FORCE PAUSE
+       │
+       ├── CampaignOptimizerService (Claude agent):
+       │   ├── Reviews metrics + learnings
+       │   ├── Auto-pauses underperformers
+       │   ├── Auto-scales winners (≤ maxBudgetScalePercent)
+       │   └── Updates campaign status in MongoDB
+       │
+       └── Writes performance back to creative briefs (for learning)
+
+
+MONTHLY — 1st of Month, 3 AM IST (BullMQ cron)
+══════════════════════════════════════════════════════════════════════════
+
+  ┌─────────────────────────────┐  ┌─────────────────────────────┐
+  │ CampaignLearningService     │  │ CreativeLearningService      │
+  │ Analyses 30 days of:        │  │ Analyses all creatives:      │
+  │ • audience → ROAS scores    │  │ • winning/losing hooks       │
+  │ • platform performance      │  │ • format effectiveness       │
+  │ • budget/timing patterns    │  │ • CTA/tone/visual patterns   │
+  │ • objective insights        │  │ • causal insights            │
+  └──────────────┬──────────────┘  └──────────────┬──────────────┘
+                 │                                 │
+                 └────────────┬────────────────────┘
+                              │
+                              ▼
+                 company.learnings updated
+                              │
+                              ▼
+                 PromptGeneratorService.regenerate()
+                 ALL agent prompts updated with new learnings
+                              │
+                              ▼
+                 Next week's pipeline is smarter
+```
+
+### Key Architecture Decisions
+
+```
+SAFETY
+├── ALL budget/safety checks in TypeScript — Claude agents CANNOT override
+├── Budget caps are hardcoded limits, not suggestions to the AI
+└── Forbidden topics enforced before campaign creation, not by prompts
+
+MULTI-TENANT
+├── EVERY MongoDB query includes tenantId filter
+├── EVERY S3 path prefixed with tenantId/
+└── EVERY agent call scoped by tenantId
+
+AI ENGINE (ClaudeService)
+├── ALL agent calls route through ClaudeService.runAgent()
+├── Never call query() directly — always through the service
+├── Model routing: Sonnet for intelligence, Haiku for cheap single-turn
+├── Tool routing: team leads get TeamCreate/Agent/SendMessage
+├── Usage tracking: every call logged with tokens + cost
+└── Verification loops: retry up to 3x on invalid JSON
+
+PROMPT ARCHITECTURE
+├── System prompts stored in MongoDB per company (company.prompts.*)
+├── NO hardcoded product names, prices, or dates in prompts
+├── Live data (products, promotions) injected at runtime via LiveContextBuilder
+├── Prompts regenerated when learnings update (monthly)
+└── 14 skills from .claude/skills/ baked into prompts by PromptGenerator
+
+AGENT TEAMS (Phase 9)
+├── Requires: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+├── NestJS calls query() ONCE for team lead → lead orchestrates internally
+├── Lead uses Agent tool (name + team_name) to spawn teammates
+├── Teammates communicate via SendMessage (peer-to-peer)
+├── Fallback: if team fails → single-agent approach (Phase 2-7 code)
+└── Team logic lives in .claude/agents/*.md, NOT in TypeScript
+
+PIPELINE RESILIENCE
+├── DAG state machine — each phase checks if already complete before running
+├── Failed runs auto-resume from last successful phase
+├── Stuck runs (>2h) recovered on server restart
+└── Cold start mode: daily runs for first 14 days, then weekly
+```
+
+### Module Dependency Graph
+
+```
+AppModule
+├── ConfigModule (global)
+├── BullModule (Redis connection)
+├── DatabaseModule (MongoDB)
+├── ClaudeModule ─────────────────── ClaudeService + UsageLog
+│     ↑ used by all agent modules
+├── CompaniesModule ──────────────── CompaniesService + PromptGenerator + LiveContextBuilder
+│     ↑ used by pipeline, teams
+├── PipelineModule ───────────────── PipelineOrchestrator + Scouts + Coordinator
+│     ├── uses: ClaudeModule          + IdeaPool + DigestWriter
+│     ├── uses: CompaniesModule       + TeamOrchestrator + TeamFallback
+│     ├── uses: CreativeModule
+│     ├── uses: CampaignsModule
+│     └── uses: DeliveryModule
+├── CreativeModule ───────────────── CreativeProducer + CopyWriter + ImageGen + VideoGen
+│     └── uses: ClaudeModule
+├── CampaignsModule ──────────────── CampaignCreator + SafetyChecks + Auditor + Optimizer
+│     └── uses: ClaudeModule
+├── LearningModule ───────────────── CampaignLearning + CreativeLearning
+│     ├── uses: ClaudeModule
+│     └── uses: CompaniesModule
+├── DeliveryModule ───────────────── SlackService
+├── SchedulerModule ──────────────── BullMQ cron: pipeline (weekly) + audit (6h) + learning (monthly)
+│     └── uses: PipelineModule, CampaignsModule, LearningModule
+└── CommonModule ─────────────────── ActionLogger (audit trail)
+```
+
+### MongoDB Collections (14)
+
+```
+companies              │ Profile + prompts + learnings + signals
+pipeline_runs          │ DAG state machine (resumable)
+scout_outputs          │ Per-platform findings per run
+scout_signals          │ Signal dedup tracking (7d/14d TTL)
+coordinator_outputs    │ Cross-platform synthesis
+research_outputs       │ Competitor + market research
+intelligence_briefs    │ N candidate campaign ideas
+creative_briefs        │ Selected winner
+digests                │ Formatted reports
+creative_packages      │ Copy + image + video assets
+campaigns              │ Meta Ads campaign data
+action_logs            │ Autonomous decision audit trail
+usage_logs             │ Per-agent token + cost tracking
+learning_runs          │ Monthly learning records
+```
+
+---
+
 ## Table of Contents
 
+0. [System Architecture](#system-architecture)
 1. [Pre-Build Setup](#pre-build-setup)
 2. [Phase 1 — Foundation (Week 1–2)](#phase-1--foundation-week-12)
 3. [Phase 2 — Intelligence Pipeline + Scout Validation (Week 3–5)](#phase-2--intelligence-pipeline--scout-validation-week-35)
@@ -23,8 +274,8 @@
 7. [Phase 6 — Auditor + Optimizer (Week 10)](#phase-6--auditor--optimizer-week-10)
 8. [Phase 7 — Learning System (Week 11)](#phase-7--learning-system-week-11)
 9. [Phase 8 — Production + Multi-Tenant (Week 12)](#phase-8--production--multi-tenant-week-12)
-10. [Phase 9 — Agent Teams Architecture (Planned)](#phase-9--agent-teams-architecture-planned)
-11. [Project Structure (Final)](#project-structure-final)
+10. [Phase 9 — Agent Teams Architecture (In Progress)](#phase-9--agent-teams-architecture-in-progress)
+11. [Project Structure (Actual)](#project-structure-actual--as-built)
 12. [Environment Variables](#environment-variables)
 13. [Docker Compose](#docker-compose)
 14. [Database Collections Reference](#database-collections-reference)
@@ -60,7 +311,7 @@ npm install @nestjs/throttler
 npm install @nestjs/schedule
 
 # Claude Code SDK
-npm install @anthropic-ai/claude-code
+npm install @anthropic-ai/claude-agent-sdk
 
 # HTTP client (for external APIs)
 npm install axios
@@ -299,7 +550,7 @@ POST   /api/v1/companies/:tenantId/regenerate   → re-run prompt generation man
 src/
 ├── claude/
 │   ├── claude.module.ts
-│   ├── claude.service.ts            # Wraps query() from @anthropic-ai/claude-code
+│   ├── claude.service.ts            # Wraps query() from @anthropic-ai/claude-agent-sdk
 │   ├── schemas/
 │   │   └── usage-log.schema.ts      # Every query() call logged
 │   └── claude.types.ts              # AgentType enum, model routing config
@@ -308,7 +559,7 @@ src/
 **claude.service.ts — Core Methods:**
 
 ```typescript
-import { query } from '@anthropic-ai/claude-code';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 
 @Injectable()
 export class ClaudeService {
@@ -1700,7 +1951,7 @@ Run the security-reviewer.md agent from `.claude/agents/` against the full codeb
 
 ---
 
-## Phase 9 — Agent Teams Architecture (Planned)
+## Phase 9 — Agent Teams Architecture (In Progress)
 
 > **Goal:** Replace sequential single-agent pipeline stages with collaborative agent teams that debate, challenge each other, and converge on better decisions. Uses Claude Code SDK experimental agent teams feature.
 >
@@ -1995,8 +2246,8 @@ async runScoutTeam(company: Company): Promise<ScoutOutput> {
 | `pipeline/idea-pool/idea-pool.service.ts` | Replace winner selection with Strategy Team |
 | `creative/copy-writer/copy-writer.service.ts` | Wrap with Creative Team, fallback on failure |
 | `campaigns/campaign-auditor/campaign-optimizer.service.ts` | Replace rule-based with Perf Expert |
-| `learning/campaign-learning.service.ts` | Merge into Learning Team |
-| `learning/creative-learning.service.ts` | Merge into Learning Team |
+| `learning/campaign-learning.service.ts` | Merge into Learning Team (future) |
+| `learning/creative-learning.service.ts` | Merge into Learning Team (future) |
 | `scheduler/scheduler.service.ts` | Add bi-weekly Learning Team cron |
 | `companies/schemas/company.schema.ts` | Add `learnings.crossDomain`, `signals.weekly` fields |
 | `.claude/settings.local.json` | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — **already set, verified working** |
@@ -2070,7 +2321,7 @@ signals: {
 
 ---
 
-## Project Structure (Final)
+## Project Structure (Actual — as built)
 
 ```
 briefos/
@@ -2079,7 +2330,6 @@ briefos/
 │   ├── app.module.ts
 │   │
 │   ├── config/
-│   │   ├── config.module.ts
 │   │   └── configuration.ts
 │   │
 │   ├── database/
@@ -2087,8 +2337,8 @@ briefos/
 │   │
 │   ├── claude/
 │   │   ├── claude.module.ts
-│   │   ├── claude.service.ts
-│   │   ├── claude.types.ts
+│   │   ├── claude.service.ts              ← ALL agent calls route through here
+│   │   ├── claude.types.ts                ← 18 AgentTypes + model/tool routing
 │   │   └── schemas/
 │   │       └── usage-log.schema.ts
 │   │
@@ -2097,8 +2347,8 @@ briefos/
 │   │   ├── companies.controller.ts
 │   │   ├── companies.service.ts
 │   │   ├── schemas/
-│   │   │   ├── company.schema.ts
-│   │   │   └── company.types.ts
+│   │   │   ├── company.schema.ts          ← + signals field (Phase 9)
+│   │   │   └── company.types.ts           ← + CompanySignals, intelligenceLead
 │   │   ├── dto/
 │   │   │   ├── create-company.dto.ts
 │   │   │   └── update-company.dto.ts
@@ -2109,44 +2359,44 @@ briefos/
 │   ├── pipeline/
 │   │   ├── pipeline.module.ts
 │   │   ├── pipeline.controller.ts
-│   │   ├── schemas/
-│   │   │   ├── pipeline-run.schema.ts
-│   │   │   ├── scout-output.schema.ts
-│   │   │   ├── scout-signal.schema.ts
-│   │   │   ├── intelligence-brief.schema.ts
-│   │   │   └── creative-brief.schema.ts
+│   │   ├── pipeline-orchestrator.service.ts  ← DAG: Scout Team → fallback
+│   │   ├── coordinator.service.ts            ← synthesis + research runners
+│   │   ├── idea-pool.service.ts
+│   │   ├── digest-writer.service.ts
 │   │   ├── scouts/
 │   │   │   ├── scout-base.service.ts
 │   │   │   ├── instagram.scout.ts
 │   │   │   ├── reddit.scout.ts
 │   │   │   ├── twitter.scout.ts
 │   │   │   └── youtube.scout.ts
-│   │   ├── coordinator/
-│   │   │   └── coordinator.service.ts
-│   │   ├── intelligence/
-│   │   │   ├── competitor-research.service.ts
-│   │   │   └── market-research.service.ts
-│   │   ├── idea-pool/
-│   │   │   └── idea-pool.service.ts
-│   │   ├── digest/
-│   │   │   └── digest.service.ts
-│   │   └── orchestrator/
-│   │       └── orchestrator.service.ts
+│   │   └── schemas/
+│   │       ├── pipeline-run.schema.ts
+│   │       ├── scout-output.schema.ts
+│   │       ├── scout-signal.schema.ts
+│   │       ├── coordinator-output.schema.ts
+│   │       ├── research-output.schema.ts
+│   │       ├── intelligence-brief.schema.ts
+│   │       ├── creative-brief.schema.ts
+│   │       └── digest.schema.ts
+│   │
+│   ├── teams/                                ← Phase 9: Agent Teams
+│   │   ├── teams.module.ts
+│   │   ├── team-orchestrator.service.ts      ← 1 query() → lead runs team
+│   │   └── team-fallback.service.ts          ← Fallback decision logic
 │   │
 │   ├── creative/
 │   │   ├── creative.module.ts
-│   │   ├── schemas/
-│   │   │   └── creative-package.schema.ts
+│   │   ├── creative.controller.ts
+│   │   ├── creative-producer/
+│   │   │   └── creative-producer.service.ts
 │   │   ├── copy-writer/
 │   │   │   └── copy-writer.service.ts
 │   │   ├── image-generator/
 │   │   │   └── image-generator.service.ts
 │   │   ├── video-generator/
 │   │   │   └── video-generator.service.ts
-│   │   ├── creative-producer/
-│   │   │   └── creative-producer.service.ts
-│   │   └── s3/
-│   │       └── s3.service.ts
+│   │   └── schemas/
+│   │       └── creative-package.schema.ts
 │   │
 │   ├── campaigns/
 │   │   ├── campaigns.module.ts
@@ -2163,107 +2413,66 @@ briefos/
 │   │
 │   ├── learning/
 │   │   ├── learning.module.ts
-│   │   ├── learning-agent.service.ts
+│   │   ├── campaign-learning.service.ts
+│   │   ├── creative-learning.service.ts
 │   │   └── schemas/
 │   │       └── learning-run.schema.ts
 │   │
 │   ├── scheduler/
 │   │   ├── scheduler.module.ts
 │   │   ├── scheduler.service.ts
-│   │   └── processors/
-│   │       ├── weekly-pipeline.processor.ts
-│   │       ├── creative.processor.ts
-│   │       ├── audit.processor.ts
-│   │       └── learning.processor.ts
+│   │   ├── pipeline.processor.ts
+│   │   ├── audit.processor.ts
+│   │   ├── learning.processor.ts
+│   │   └── queue.constants.ts
 │   │
 │   ├── delivery/
 │   │   ├── delivery.module.ts
-│   │   └── n8n.service.ts
+│   │   └── slack.service.ts
 │   │
 │   └── common/
-│       ├── guards/
-│       │   └── api-key.guard.ts
-│       ├── interceptors/
-│       │   ├── tenant.interceptor.ts
-│       │   └── usage-logging.interceptor.ts
-│       ├── decorators/
-│       │   └── tenant.decorator.ts
-│       ├── action-logger/
-│       │   ├── action-log.schema.ts
-│       │   └── action-logger.service.ts
-│       ├── exceptions/
-│       │   ├── budget-cap.error.ts
-│       │   ├── forbidden-topic.error.ts
-│       │   └── campaign-limit.error.ts
-│       └── filters/
-│           └── all-exceptions.filter.ts
+│       ├── common.module.ts
+│       └── action-logger/
+│           ├── action-log.schema.ts
+│           └── action-logger.service.ts
 │
 ├── .claude/
 │   ├── CLAUDE.md
 │   ├── mcp.json
 │   ├── settings.local.json         (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
 │   ├── agents/
-│   │   ├── — dev agents —
-│   │   ├── architect.md
-│   │   ├── typescript-reviewer.md
-│   │   ├── security-reviewer.md
-│   │   ├── loop-operator.md
-│   │   │
-│   │   ├── — scout team (Phase 9) —
-│   │   ├── intelligence-lead.md
-│   │   ├── reddit-scout.md
-│   │   ├── twitter-scout.md
-│   │   ├── youtube-scout.md
-│   │   │
-│   │   ├── — strategy team (Phase 9) —
-│   │   ├── strategist.md
-│   │   ├── contrarian.md
-│   │   ├── customer-advocate.md
-│   │   │
-│   │   ├── — creative team (Phase 9) —
-│   │   ├── creative-director.md
-│   │   ├── copywriter.md
-│   │   ├── brand-checker.md
-│   │   │
-│   │   ├── — diagnosis team (Phase 9) —
-│   │   ├── performance-analyst.md
-│   │   ├── creative-analyst.md
-│   │   ├── audience-strategist.md
-│   │   │
-│   │   ├── — learning team (Phase 9) —
-│   │   ├── marketing-strategist.md
-│   │   ├── campaign-analyst.md
-│   │   │
-│   │   └── — persistent single agent (Phase 9) —
-│   │       └── perf-marketing-expert.md
-│   ├── skills/
-│   │   ├── paid-ads/
-│   │   ├── ad-creative/
-│   │   ├── product-marketing-context/
-│   │   ├── marketing-psychology/
-│   │   ├── competitor-alternatives/
-│   │   ├── customer-research/
-│   │   ├── copywriting/
-│   │   ├── social-content/
-│   │   ├── continuous-learning-v2/
-│   │   ├── autonomous-loops/
-│   │   ├── cost-aware-llm-pipeline/
-│   │   ├── verification-loop/
-│   │   ├── iterative-retrieval/
-│   │   └── market-research/
-│   └── commands/
-│       ├── multi-plan.md
-│       ├── orchestrate.md
-│       └── learn-eval.md
+│   │   ├── intelligence-lead.md     ← Scout Team lead (Phase 9, built)
+│   │   ├── reddit-scout.md          ← Scout Team (Phase 9, built)
+│   │   ├── twitter-scout.md         ← Scout Team (Phase 9, built)
+│   │   └── youtube-scout.md         ← Scout Team (Phase 9, built)
+│   │   # Planned (not yet created):
+│   │   # strategist.md, contrarian.md, customer-advocate.md (Strategy Team)
+│   │   # creative-director.md, copywriter.md, brand-checker.md (Creative Team)
+│   │   # performance-analyst.md, creative-analyst.md, audience-strategist.md (Diagnosis Team)
+│   │   # marketing-strategist.md, campaign-analyst.md (Learning Team)
+│   │   # perf-marketing-expert.md (persistent single agent)
+│   └── skills/
+│       ├── paid-ads/
+│       ├── ad-creative/
+│       ├── product-marketing-context/
+│       ├── marketing-psychology/
+│       ├── competitor-alternatives/
+│       ├── customer-research/
+│       ├── copywriting/
+│       ├── social-content/
+│       ├── continuous-learning-v2/
+│       ├── autonomous-loops/
+│       ├── cost-aware-llm-pipeline/
+│       ├── verification-loop/
+│       ├── iterative-retrieval/
+│       └── market-research/
 │
-├── .env
-├── .env.example
 ├── package.json
 ├── tsconfig.json
+├── tsconfig.build.json
 ├── nest-cli.json
-├── Dockerfile
-├── docker-compose.yml
-└── BRIEFOS.md
+├── system-architecture.html
+└── README.md
 ```
 
 ---
@@ -2410,17 +2619,20 @@ volumes:
 
 | Collection | Purpose | Key Indexes |
 |---|---|---|
-| `companies` | Profile + requirements + prompts + learnings | `tenantId` (unique) |
-| `pipeline_runs` | Weekly run state machine | `tenantId + runId`, `tenantId + status` |
-| `scout_outputs` | Raw + enriched scout findings | `tenantId + runId + platform` |
-| `scout_signals` | Signal freshness tracking | `tenantId + hash` (unique), `tenantId + topic` |
-| `intelligence_briefs` | Coordinator + competitor + market output | `tenantId + runId` |
-| `creative_briefs` | Ranked briefs + performance attribution | `tenantId + briefId`, `tenantId + runId` |
-| `creative_packages` | Generated ad creatives | `tenantId + briefId` |
-| `campaigns` | Meta campaign records + audit history | `tenantId + metaCampaignId`, `tenantId + status` |
+| `companies` | Profile + requirements + prompts + learnings + signals | `tenantId` (unique) |
+| `pipeline_runs` | Weekly run state machine (resumable) | `tenantId + runId`, `tenantId + status` |
+| `scout_outputs` | Per-platform scout findings per run | `tenantId + runId + platform` |
+| `scout_signals` | Individual signal dedup tracking (7d/14d TTL) | `tenantId + hash` (unique) |
+| `coordinator_outputs` | Cross-platform synthesis + ranked topSignals | `tenantId + runId` |
+| `research_outputs` | Competitor + market research per run | `tenantId + runId` |
+| `intelligence_briefs` | N candidate campaign ideas per run | `tenantId + runId` |
+| `creative_briefs` | Selected winner with hook, keyMessage, etc. | `tenantId + briefId`, `tenantId + runId` |
+| `digests` | Formatted reports (narrative, CTA, data) | `tenantId + runId` |
+| `creative_packages` | Generated ad creatives (copy + image + video) | `tenantId + briefId` |
+| `campaigns` | Meta Ads campaign data + audit history | `tenantId + metaCampaignId`, `tenantId + status` |
 | `action_logs` | Every autonomous decision with reasoning | `tenantId + timestamp`, `tenantId + agent` |
-| `usage_logs` | Every Claude API call (billing ledger) | `tenantId + timestamp`, `tenantId + agent` |
-| `learning_runs` | Bi-weekly learning team execution log | `tenantId + version` |
+| `usage_logs` | Every Claude API call (per-agent cost tracking) | `tenantId + timestamp`, `tenantId + agent` |
+| `learning_runs` | Monthly learning analysis records | `tenantId + version` |
 
 ---
 

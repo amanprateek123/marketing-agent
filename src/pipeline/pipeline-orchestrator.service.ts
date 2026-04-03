@@ -20,6 +20,8 @@ import { DigestWriterService } from './digest-writer.service';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
+import { TeamOrchestratorService } from '../teams/team-orchestrator.service';
+import { TeamFallbackService } from '../teams/team-fallback.service';
 
 export interface TriggerPipelineResult {
   runId: string;
@@ -43,6 +45,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
     private readonly creativeProducerService: CreativeProducerService,
     private readonly campaignCreatorService: CampaignCreatorService,
     private readonly campaignsService: CampaignsService,
+    private readonly teamOrchestrator: TeamOrchestratorService,
+    private readonly teamFallback: TeamFallbackService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
     @InjectModel(ScoutOutput.name)
@@ -198,7 +202,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
     try {
       const company = await this.companiesService.findByTenantId(tenantId);
 
-      // ── Phase A: Scouts ───────────────────────────────────────────────────
+      // ── Phase A: Scouts (Agent Team with fallback) ────────────────────────
       const existingScouts = await this.scoutOutputModel
         .find({ tenantId, runId })
         .lean()
@@ -208,18 +212,31 @@ export class PipelineOrchestratorService implements OnModuleInit {
         this.logger.log(`[${runId}] Phase A: skipped — scouts already complete`);
       } else {
         await update('scouts_running', 'scouts');
-        this.logger.log(`[${runId}] Phase A: scouts starting`);
 
-        const [instagram, reddit, twitter, youtube] = await Promise.all([
-          this.instagramScout.execute(company, runId),
-          this.redditScout.execute(company, runId),
-          this.twitterScout.execute(company, runId),
-          this.youtubeScout.execute(company, runId),
-        ]);
-
-        this.logger.log(
-          `[${runId}] Phase A done — signals: instagram=${instagram.trending_topics.length} reddit=${reddit.trending_topics.length} twitter=${twitter.trending_topics.length} youtube=${youtube.trending_topics.length}`,
-        );
+        // Try Scout Team first (Phase 9) — single query() with 4 agents collaborating
+        try {
+          this.logger.log(`[${runId}] Phase A: Scout Team starting`);
+          const teamResult = await this.teamOrchestrator.runScoutTeam(company, runId);
+          this.logger.log(
+            `[${runId}] Phase A done (Scout Team) — topSignals: ${teamResult.topSignals.length} viralTrends: ${teamResult.viralTrends.length}`,
+          );
+        } catch (teamErr: any) {
+          // Fallback to parallel single-agent scouts (Phase 2 approach)
+          if (this.teamFallback.shouldFallback(teamErr, `scout-${runId}`)) {
+            this.logger.warn(`[${runId}] Phase A: falling back to single-agent scouts`);
+            const [instagram, reddit, twitter, youtube] = await Promise.all([
+              this.instagramScout.execute(company, runId),
+              this.redditScout.execute(company, runId),
+              this.twitterScout.execute(company, runId),
+              this.youtubeScout.execute(company, runId),
+            ]);
+            this.logger.log(
+              `[${runId}] Phase A done (fallback) — signals: instagram=${instagram.trending_topics.length} reddit=${reddit.trending_topics.length} twitter=${twitter.trending_topics.length} youtube=${youtube.trending_topics.length}`,
+            );
+          } else {
+            throw teamErr;
+          }
+        }
       }
 
       // ── Phase B: Coordinator ──────────────────────────────────────────────

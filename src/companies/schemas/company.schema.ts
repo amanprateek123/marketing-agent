@@ -7,6 +7,7 @@ import {
   DeliveryConfig,
   CompanyPrompts,
   CompanyLearnings,
+  CompanySignals,
   PipelineConfig,
 } from './company.types';
 
@@ -150,6 +151,10 @@ export class Company {
 
   @Prop({ type: Object, default: null })
   learnings: CompanyLearnings | null;
+
+  // Phase 9 — rolling performance signals from Campaign Auditor (fast feedback loop)
+  @Prop({ type: Object, default: null })
+  signals: CompanySignals | null;
 }
 
 export const CompanySchema = SchemaFactory.createForClass(Company);

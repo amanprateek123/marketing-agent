@@ -22,6 +22,9 @@ import { IdeaPoolService } from './idea-pool.service';
 import { DigestWriterService } from './digest-writer.service';
 import { PipelineOrchestratorService } from './pipeline-orchestrator.service';
 import { PipelineController } from './pipeline.controller';
+import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
+import { TeamOrchestratorService } from '../teams/team-orchestrator.service';
+import { TeamFallbackService } from '../teams/team-fallback.service';
 
 @Module({
   imports: [
@@ -34,6 +37,7 @@ import { PipelineController } from './pipeline.controller';
       { name: CoordinatorOutput.name, schema: CoordinatorOutputSchema },
       { name: ResearchOutput.name, schema: ResearchOutputSchema },
       { name: Digest.name, schema: DigestSchema },
+      { name: UsageLog.name, schema: UsageLogSchema },
     ]),
     ClaudeModule,
     CompaniesModule,
@@ -51,9 +55,15 @@ import { PipelineController } from './pipeline.controller';
     IdeaPoolService,
     DigestWriterService,
     PipelineOrchestratorService,
+    TeamOrchestratorService,
+    TeamFallbackService,
   ],
   exports: [
     PipelineOrchestratorService,
+    InstagramScout,
+    RedditScout,
+    TwitterScout,
+    YoutubeScout,
   ],
 })
 export class PipelineModule {}

@@ -15,6 +15,8 @@ export enum AgentType {
   PROMPT_GENERATOR = 'prompt_generator',
   CREATIVE_LEARNING_AGENT = 'creative_learning_agent',
   CAMPAIGN_LEARNING_AGENT = 'campaign_learning_agent',
+  // Phase 9 — Agent Team leads
+  SCOUT_TEAM_LEAD = 'scout_team_lead',
 }
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
@@ -22,6 +24,11 @@ export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 // Agents that use Haiku (cheap, single-turn, formatting tasks)
 export const HAIKU_AGENTS: AgentType[] = [
   AgentType.MARKET_RESEARCH,
+];
+
+// Phase 9 team leads — get TeamCreate, Agent, SendMessage on top of web tools
+export const TEAM_LEAD_AGENTS: AgentType[] = [
+  AgentType.SCOUT_TEAM_LEAD,
 ];
 
 // Agents that don't need any tools (pure text generation — no web search needed)

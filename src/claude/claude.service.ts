@@ -7,6 +7,7 @@ import {
   ClaudeModel,
   HAIKU_AGENTS,
   NO_TOOL_AGENTS,
+  TEAM_LEAD_AGENTS,
   RunAgentParams,
 } from './claude.types';
 import { UsageLog } from './schemas/usage-log.schema';
@@ -50,7 +51,9 @@ export class ClaudeService {
         persistSession: false,
         allowedTools: NO_TOOL_AGENTS.includes(params.agentType)
           ? []
-          : ['WebSearch', 'WebFetch', 'Bash'],
+          : TEAM_LEAD_AGENTS.includes(params.agentType)
+            ? ['TeamCreate', 'TeamDelete', 'Agent', 'SendMessage', 'TaskCreate', 'WebSearch', 'WebFetch']
+            : ['WebSearch', 'WebFetch', 'Bash'],
       },
     })) {
       this.logger.log(`[${params.agentType}] Message: type=${message.type} subtype=${(message as any).subtype ?? '-'}`);

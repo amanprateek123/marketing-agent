@@ -36,6 +36,18 @@ export interface CompanyPrompts {
   ideaPool: string;
   digestWriter: string;
   campaignCreator: string;
+  // Phase 9 — agent team lead prompts
+  intelligenceLead?: string;
+}
+
+// Phase 9 — rolling 7-day observations written by Performance Marketing Expert
+export interface WeeklySignals {
+  observations: string[];
+  lastUpdated: Date;
+}
+
+export interface CompanySignals {
+  weekly: WeeklySignals;
 }
 
 export interface PipelineConfig {
