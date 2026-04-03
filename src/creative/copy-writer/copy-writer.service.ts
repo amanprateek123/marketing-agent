@@ -34,17 +34,18 @@ export class CopyWriterService {
     company: CompanyDocument,
     runId: string,
   ): Promise<CopyPackage> {
-    const winningPatterns = company.learnings?.winningPatterns;
-    const losingPatterns = company.learnings?.losingPatterns;
+    const creative = company.learnings?.creative;
 
-    const learningsBlock = winningPatterns
+    const learningsBlock = creative
       ? `
 WINNING PATTERNS (favour these):
-- Hook styles: ${winningPatterns.hooks.join(', ') || 'none yet'}
-- Formats: ${winningPatterns.formats.join(', ') || 'none yet'}
+- Hook styles: ${creative.winningHooks.join(', ') || 'none yet'}
+- Formats: ${creative.winningFormats.join(', ') || 'none yet'}
+- CTA insights: ${creative.ctaInsights.join(', ') || 'none yet'}
 
 LOSING PATTERNS (avoid these):
-- Hook styles: ${losingPatterns?.hooks.join(', ') || 'none yet'}
+- Hook styles: ${creative.losingHooks.join(', ') || 'none yet'}
+- Formats: ${creative.losingFormats.join(', ') || 'none yet'}
       `.trim()
       : 'No learnings yet — use your best judgement.';
 

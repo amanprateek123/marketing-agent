@@ -4,22 +4,26 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { CompaniesModule } from '../companies/companies.module';
 import { PipelineModule } from '../pipeline/pipeline.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
+import { LearningModule } from '../learning/learning.module';
 import { PipelineRun, PipelineRunSchema } from '../pipeline/schemas/pipeline-run.schema';
 import { QUEUES } from './queue.constants';
 import { SchedulerService } from './scheduler.service';
 import { PipelineProcessor } from './pipeline.processor';
 import { AuditProcessor } from './audit.processor';
+import { LearningProcessor } from './learning.processor';
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: QUEUES.PIPELINE }),
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_AUDIT }),
+    BullModule.registerQueue({ name: QUEUES.MONTHLY_LEARNING }),
     MongooseModule.forFeature([{ name: PipelineRun.name, schema: PipelineRunSchema }]),
     CompaniesModule,
     PipelineModule,
     CampaignsModule,
+    LearningModule,
   ],
-  providers: [SchedulerService, PipelineProcessor, AuditProcessor],
+  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor],
   exports: [SchedulerService],
 })
 export class SchedulerModule {}

@@ -16,6 +16,7 @@ export class SchedulerService implements OnModuleInit {
   constructor(
     @InjectQueue(QUEUES.PIPELINE) private readonly pipelineQueue: Queue,
     @InjectQueue(QUEUES.CAMPAIGN_AUDIT) private readonly auditQueue: Queue,
+    @InjectQueue(QUEUES.MONTHLY_LEARNING) private readonly learningQueue: Queue,
     private readonly companiesService: CompaniesService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
@@ -32,7 +33,29 @@ export class SchedulerService implements OnModuleInit {
     for (const company of companies) {
       await this.scheduleForTenant(company.tenantId, new Date((company as any).createdAt), company.pipelineConfig);
       await this.scheduleAuditForTenant(company.tenantId);
+      await this.scheduleLearningForTenant(company.tenantId);
     }
+  }
+
+  async scheduleLearningForTenant(tenantId: string): Promise<void> {
+    // Remove existing repeatable learning job before re-scheduling
+    const existingJobs = await this.learningQueue.getRepeatableJobs();
+    for (const job of existingJobs) {
+      if (job.name === `learning-${tenantId}`) {
+        await this.learningQueue.removeRepeatableByKey(job.key);
+      }
+    }
+
+    // 1st of every month at 3 AM IST
+    await this.learningQueue.add(
+      `learning-${tenantId}`,
+      { tenantId },
+      {
+        repeat: { pattern: '0 3 1 * *', tz: 'Asia/Kolkata' },
+        jobId: `learning-${tenantId}`,
+      },
+    );
+    this.logger.log(`Scheduled monthly learning for tenantId=${tenantId} (1st of month, 3 AM IST)`);
   }
 
   async scheduleAuditForTenant(tenantId: string): Promise<void> {

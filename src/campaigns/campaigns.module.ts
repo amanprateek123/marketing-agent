@@ -10,6 +10,7 @@ import { CampaignOptimizerService } from './campaign-auditor/campaign-optimizer.
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { CommonModule } from '../common/common.module';
+import { LearningModule } from '../learning/learning.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { CommonModule } from '../common/common.module';
     ClaudeModule,
     CompaniesModule,
     CommonModule,
+    LearningModule,
   ],
   controllers: [CampaignsController],
   providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService],

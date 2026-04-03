@@ -13,6 +13,8 @@ export enum AgentType {
   CAMPAIGN_AUDITOR = 'campaign_auditor',
   LEARNING_AGENT = 'learning_agent',
   PROMPT_GENERATOR = 'prompt_generator',
+  CREATIVE_LEARNING_AGENT = 'creative_learning_agent',
+  CAMPAIGN_LEARNING_AGENT = 'campaign_learning_agent',
 }
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
@@ -32,6 +34,8 @@ export const NO_TOOL_AGENTS: AgentType[] = [
   AgentType.CAMPAIGN_CREATOR,
   AgentType.CAMPAIGN_AUDITOR,
   AgentType.LEARNING_AGENT,
+  AgentType.CREATIVE_LEARNING_AGENT,
+  AgentType.CAMPAIGN_LEARNING_AGENT,
 ];
 
 export interface RunAgentParams {

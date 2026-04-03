@@ -1393,150 +1393,182 @@ await this.auditQueue.add(
 
 ---
 
-## Phase 7 — Learning System (Week 11)
+## Phase 7 — Learning System (Week 11) ✅
 
-> **Goal:** Monthly learning agent that extracts patterns from campaign performance and updates company-specific learnings.
+> **Goal:** Two separate learning agents — one for creative patterns, one for campaign patterns — triggered by real data events, not fixed schedules. Full causal analysis to understand WHY something worked or failed, not just THAT it did.
 >
-> **Exit Criteria:** Learning Agent reads 30 days of briefs + outcomes, extracts instincts with confidence scores, updates company.learnings, triggers prompt regeneration.
+> **Exit Criteria:** Creative and campaign learnings stored separately. Event-driven triggers working. Causal analysis identifies root causes with confidence scores. Prompts regenerated only on deep runs.
+>
+> **Status: Built.** `CreativeLearningService`, `CampaignLearningService`, trigger wiring in auditor, monthly safety-net job. Pending: end-to-end test with real campaign data.
 
-### Architecture: Vectors + LLM (why both)
+### Core Design Decisions
 
-The learning system uses a two-layer architecture — vectors for retrieval, LLM for reasoning:
+**1. Creative and Campaign learnings are separate**
+
+They answer different questions and mixing them creates false conclusions:
+
+| | Creative Learning | Campaign Learning |
+|---|---|---|
+| **Answers** | "What content works?" | "How should we run campaigns?" |
+| **Data source** | `creative_packages` + CTR signal | `campaigns` + ROAS/conversion data |
+| **Analyzes** | Hooks, copy style, CTA, format, visuals | Audience segments, budget, timing, platform ROAS |
+| **Used by** | CopyWriter, Idea Pool, Scout prompts | Campaign Creator, Auditor prompts |
+| **Stored in** | `company.learnings.creative` | `company.learnings.campaign` |
+
+**2. Event-driven triggers, not fixed schedule**
+
+Campaign data is meaningless on Day 1-2 (Meta learning phase). Running learning on noise produces wrong patterns.
+
+| Trigger | Type | Action |
+|---------|------|--------|
+| Auditor writes **Day 7** performance | Quick scan | Update confidence scores only — NO prompt regen |
+| Auditor **pauses** a campaign | Root cause | Immediate failure diagnosis — update losing patterns |
+| Auditor writes **Day 30** performance | Deep run | Full causal analysis + prompt regeneration |
+| **3+ new Day 30** snapshots accumulate | Deep run | Cross-campaign pattern extraction + prompt regen |
+
+**3. Causal analysis — isolate the variable**
+
+Bad ROAS could be caused by any of these independently:
+- `creative_issue` — weak hook/copy drove low CTR before audience even mattered
+- `audience_mismatch` — right message, wrong people
+- `format_mismatch` — right content, wrong placement
+- `topic_exhaustion` — audience has seen this angle too many times
+- `timing_issue` — competitor sale, seasonal drop, external event
+- `budget_issue` — too low to exit Meta learning phase
+
+The agent isolates the cause by holding other variables constant:
+```
+Brief 1: topic=workout, format=Reels, audience=urban_women, hook=challenge → ROAS 3.2x ✅
+Brief 2: topic=workout, format=Feed,  audience=urban_women, hook=challenge → ROAS 1.0x ❌
+                                ↑ only format changed
+→ root_cause: format_mismatch (NOT topic or hook or audience)
+→ pattern: "workout topic works on Reels, not Feed" (confidence: 0.72)
+```
+
+### CompanyLearnings Schema
+
+```typescript
+interface CompanyLearnings {
+  version: number;
+  updatedAt: Date;
+
+  creative: {
+    winningHooks: string[];          // hook styles → high CTR
+    losingHooks: string[];           // hook styles → low CTR
+    winningFormats: string[];        // formats → high engagement
+    losingFormats: string[];         // formats to avoid
+    ctaInsights: string[];           // which CTAs drive conversions
+    copyToneInsights: string[];      // tone patterns that resonate
+    visualInsights: string[];        // image/video patterns
+  };
+
+  campaign: {
+    audienceScores: Record<string, number>;   // segment → avg ROAS
+    platformROAS: Record<string, number>;     // platform → avg ROAS
+    budgetInsights: string[];                 // budget patterns
+    timingInsights: string[];                 // day/week/season patterns
+    objectiveInsights: string[];              // objective effectiveness
+  };
+
+  causalInsights: {
+    finding: string;           // "Reels convert 3x better than Feed for this brand"
+    isolatedVariable: string;  // "format"
+    controlledFor: string[];   // ["same topic", "same audience", "same hook"]
+    rootCause: string;         // "format_mismatch"
+    confidence: number;        // 0.0–1.0
+    dataPoints: number;
+  }[];
+
+  topicScores: Record<string, number>;  // topic → performance score (cross-cutting)
+}
+```
+
+### Two Learning Agents
+
+**`CREATIVE_LEARNING_AGENT`**
+- Triggered: when 3+ new creative packages have Day 7 CTR data
+- Data: `creative_packages` (headline, primaryText, hookStyle, CTA) + CTR from campaigns
+- Output: updates `company.learnings.creative`
+- Prompt regen: only CopyWriter + Idea Pool + Scout prompts
+
+**`CAMPAIGN_LEARNING_AGENT`**
+- Triggered: Day 30 writeback OR campaign paused
+- Data: `intelligence_briefs` + `campaigns` + `creative_packages` (full picture)
+- Output: updates `company.learnings.campaign` + `causalInsights` + `topicScores`
+- Prompt regen: Campaign Creator + Auditor + Coordinator prompts
+
+### Confidence Scoring
 
 ```
-Past campaign performance (structured numbers: ROAS, CTR, conversions)
-         +
-Past briefs + signals (embedded as vectors → MongoDB Atlas Vector Search)
-         ↓
-Learning Agent queries: "find briefs similar to this week's winner"
-Vector search returns semantically similar past campaigns (not just string match)
-         ↓
-LLM reasons over retrieved data + raw numbers
-"IPL-tied content outperforms generic astrology 3x — confidence 0.87"
-         ↓
-Outputs human-readable learnings → stored in company.learnings (MongoDB)
-         ↓
-LiveContextBuilder injects learnings as plain text into every future agent prompt
-         ↓
-Prompts regenerated — all 9 agents now aware of what works
+3 data points  → max confidence 0.60
+5 data points  → max confidence 0.85
+10+ data points → max confidence 1.00
+
+Pattern is only stored if confidence >= 0.50
+Pattern is only injected into prompts if confidence >= 0.60
 ```
 
-**Why vectors + text (not vectors alone):**
-- Vectors are for *retrieval* — finding similar past campaigns fast
-- LLM is for *reasoning* — understanding why something worked
-- Storing learnings as human-readable text (not vectors) lets every agent use them directly in prompts
-- LLMs cannot reason directly from vector space — they need text
+### Step 7.1 — CompanyLearnings Schema ✅
 
-**Signal deduplication upgrade (also in Phase 7):**
-- Embed every scout signal on save
-- Before each scout run, vector-query past signals
-- Similarity > 0.85 = same idea, inject as "already covered" context
-- Replaces the topic+angle string matching used in Phase 2
+Updated `src/companies/schemas/company.types.ts` — replaced flat `winningPatterns`/`losingPatterns` with separate `CreativeLearnings`, `CampaignLearnings`, `CausalInsight`, and `CompanyLearnings` interfaces. `topicScores` is cross-cutting (lives at top level, not inside creative or campaign).
 
-### Step 7.1 — Learning Module
+Fixed `src/creative/copy-writer/copy-writer.service.ts` to reference new `company.learnings.creative` shape.
+
+### Step 7.2 — Creative Learning Service ✅
+
+`src/learning/creative-learning.service.ts`
+
+- **`runQuickScan(tenantId)`** — fetches completed creative packages from last 60 days, joins with campaign CTR, sends to `CREATIVE_LEARNING_AGENT`
+- Uses **CTR** (not ROAS) as primary signal — CTR fires before audience effects
+- Does **NOT** regenerate prompts — quick scan only updates `company.learnings.creative`
+- Logs every run to `learning_runs` collection with `promptsRegenerated: false`
+
+### Step 7.3 — Campaign Learning Service ✅
+
+`src/learning/campaign-learning.service.ts`
+
+- **`runDeepRun(tenantId)`** — full causal analysis across all campaigns with Day 30 data; updates `company.learnings.campaign` + `causalInsights` + `topicScores`; regenerates all prompts via `PromptGeneratorService`; skips if < 3 campaigns have Day 30 data
+- **`runRootCauseAnalysis(tenantId, campaignId)`** — triggered on pause; diagnoses single campaign failure; appends one `CausalInsight` to `company.learnings.causalInsights`
+- Passes company thresholds (targetROAS, pauseIfCTRBelow, etc.) to Claude so it knows what "winning" means per tenant
+- Previous learnings always passed as context so Claude builds on existing knowledge, not from scratch
+
+### Module Structure ✅
 
 ```
 src/
 ├── learning/
-│   ├── learning.module.ts
-│   ├── learning-agent.service.ts
+│   ├── learning.module.ts              — registers Campaign + CreativePackage schemas
+│   ├── creative-learning.service.ts   — creative pattern extraction (exported)
+│   ├── campaign-learning.service.ts   — campaign causal analysis (exported)
 │   ├── schemas/
-│   │   └── learning-run.schema.ts
+│   │   └── learning-run.schema.ts     — audit trail per run
 ```
 
-### Step 7.2 — Learning Agent Service
+`LearningModule` is imported by `CampaignsModule` so `CampaignAuditorService` can inject both learning services. `PromptGeneratorService` is exported from `CompaniesModule` for use by `CampaignLearningService`.
 
-**learning-agent.service.ts:**
+### Step 7.4 — Trigger Points in Existing Services ✅
 
-```typescript
-async runLearning(tenantId: string): Promise<LearningRun> {
-  const company = await this.companyService.findByTenantId(tenantId);
+| Service | When | Triggers | Blocking? |
+|---------|------|----------|-----------|
+| `CampaignAuditorService` | After Day 7 writeback | `creativeLearning.runQuickScan(tenantId)` | No — fire & forget |
+| `CampaignAuditorService` | After Day 30 writeback | `campaignLearning.runDeepRun(tenantId)` | No — fire & forget |
+| `CampaignAuditorService` | After pause | `campaignLearning.runRootCauseAnalysis(tenantId, campaignId)` | No — fire & forget |
+| `LearningProcessor` (monthly job) | 1st of month, 3 AM IST | `runQuickScan` + `runDeepRun` in sequence | Yes — safety net |
 
-  // Fetch all briefs with performance data from last 30 days
-  const briefs = await this.briefsService.findWithPerformance(tenantId, 30);
+All event-driven triggers are non-blocking (`.catch()` logged) so audit loop is never delayed by a learning failure.
 
-  if (briefs.length < 3) {
-    // Not enough data to learn — skip
-    return this.createSkippedRun(tenantId, 'Insufficient data (need 3+ campaigns with performance)');
-  }
+### Step 7.5 — Validation
 
-  // Claude extracts patterns using continuous-learning-v2 skill methodology
-  const result = await this.claudeService.runAgent({
-    tenantId,
-    agentType: AgentType.LEARNING_AGENT,
-    systemPrompt: LEARNING_AGENT_PROMPT, // uses continuous-learning-v2 pattern
-    liveContext: this.liveContextBuilder.build(company),
-    userMessage: `Analyze these campaign outcomes and extract learning patterns.
-      MINIMUM 3 data points to confirm any pattern.
-      Tag each instinct with a confidence score (0.0-1.0).
-
-      Campaign data:
-      ${JSON.stringify(briefs, null, 2)}
-
-      Current learnings (previous version):
-      ${JSON.stringify(company.learnings, null, 2)}
-
-      Return JSON with: topicScores, winningPatterns, losingPatterns, audienceInsights`,
-    model: 'claude-sonnet-4-6',
-    maxTurns: 5,
-  });
-
-  const newLearnings = this.parseLearnings(result.content);
-
-  // Update company.learnings in MongoDB
-  await this.companyService.updateLearnings(tenantId, {
-    ...newLearnings,
-    version: (company.learnings?.version || 0) + 1,
-    updatedAt: new Date(),
-  });
-
-  // Trigger prompt regeneration — new learnings should influence agent behavior
-  await this.promptGenerator.generate(tenantId);
-
-  // Log learning run
-  const run = await this.saveLearningRun({
-    tenantId,
-    version: newLearnings.version,
-    briefsAnalyzed: briefs.length,
-    instinctsExtracted: this.countInstincts(newLearnings),
-    promptsRegenerated: true,
-    runAt: new Date(),
-  });
-
-  await this.actionLogger.log({
-    tenantId,
-    agent: AgentType.LEARNING_AGENT,
-    action: 'learnings_updated',
-    reason: `Analyzed ${briefs.length} campaigns. Extracted ${run.instinctsExtracted} instincts.`,
-    outcome: `Learnings updated to v${newLearnings.version}. 9 agent prompts regenerated.`,
-  });
-
-  return run;
-}
-```
-
-### Step 7.3 — Monthly BullMQ Job
-
-```typescript
-// In scheduler.service.ts:
-await this.learningQueue.add(
-  `learning-${company.tenantId}`,
-  { tenantId: company.tenantId },
-  {
-    repeat: { pattern: '0 3 1 * *', tz: 'Asia/Kolkata' }, // 1st of month, 3 AM IST
-    jobId: `learning-${company.tenantId}`,
-  }
-);
-```
-
-### Step 7.4 — Validation
-
-- [ ] Learning Agent correctly identifies winning and losing patterns from test data
-- [ ] Minimum 3 data points requirement enforced (no patterns from 1-2 campaigns)
-- [ ] company.learnings updated with new version number
-- [ ] Prompt Generator re-runs after learning update
-- [ ] New prompts reflect updated learnings (manually verify)
-- [ ] Learning run logged with instinct count
+- [x] Creative and campaign learnings stored in separate fields (`company.learnings.creative` / `.campaign`)
+- [x] Quick scan runs after Day 7 — does NOT regenerate prompts (`promptsRegenerated: false`)
+- [x] Deep run runs after Day 30 — regenerates all prompts via `PromptGeneratorService`
+- [x] Root cause analysis fires when campaign is paused — appends `CausalInsight` to `causalInsights[]`
+- [x] Causal analysis correctly isolates variable when other factors are held constant
+- [x] Minimum 3 campaigns enforced before deep run (`MIN_CAMPAIGNS = 3`)
+- [x] Confidence scores correctly capped by data volume (3→0.60, 5→0.85, 10+→1.00)
+- [x] `company.learnings` version increments on every learning update
+- [x] All learning runs logged in `learning_runs` collection with status, cost, instinctsExtracted
+- [ ] End-to-end test: launch 3+ campaigns → wait Day 30 → verify `company.learnings` populated
 
 ---
 

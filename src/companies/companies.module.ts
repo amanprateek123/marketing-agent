@@ -16,6 +16,6 @@ import { LiveContextBuilder } from './prompt-generator/live-context.builder';
   ],
   controllers: [CompaniesController],
   providers: [CompaniesService, PromptGeneratorService, LiveContextBuilder],
-  exports: [CompaniesService, LiveContextBuilder],
+  exports: [CompaniesService, LiveContextBuilder, PromptGeneratorService],
 })
 export class CompaniesModule {}

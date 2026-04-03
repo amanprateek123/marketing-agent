@@ -10,6 +10,8 @@ import { CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { CampaignOptimizerService, CampaignMetrics } from './campaign-optimizer.service';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
+import { CreativeLearningService } from '../../learning/creative-learning.service';
+import { CampaignLearningService } from '../../learning/campaign-learning.service';
 
 export interface AuditResult {
   tenantId: string;
@@ -29,6 +31,8 @@ export class CampaignAuditorService {
     private readonly campaignsService: CampaignsService,
     private readonly optimizer: CampaignOptimizerService,
     private readonly actionLogger: ActionLoggerService,
+    private readonly creativeLearning: CreativeLearningService,
+    private readonly campaignLearning: CampaignLearningService,
     @InjectModel(IntelligenceBrief.name)
     private readonly briefModel: Model<IntelligenceBriefDocument>,
   ) {}
@@ -193,6 +197,11 @@ Return the metrics as a JSON object with fields: spend, impressions, clicks, con
     this.logger.log(
       `Campaign paused: tenantId=${company.tenantId} metaCampaignId=${campaign.metaCampaignId} reason="${reason}"`,
     );
+
+    // Trigger root cause analysis async — do not await (non-blocking)
+    this.campaignLearning
+      .runRootCauseAnalysis(company.tenantId, campaign._id.toString())
+      .catch((err) => this.logger.error(`Root cause analysis failed: ${err.message}`));
   }
 
   private async writePerformanceBack(
@@ -220,6 +229,11 @@ Return the metrics as a JSON object with fields: spend, impressions, clicks, con
       );
       written = true;
       this.logger.log(`Day 7 performance written for briefId=${campaign.briefId}`);
+
+      // Trigger creative quick scan after Day 7 — async, non-blocking
+      this.creativeLearning
+        .runQuickScan(campaign.tenantId)
+        .catch((err) => this.logger.error(`Creative quick scan failed: ${err.message}`));
     }
 
     if (ageDays >= 14 && !brief.performanceWritten?.day14) {
@@ -238,6 +252,11 @@ Return the metrics as a JSON object with fields: spend, impressions, clicks, con
       );
       written = true;
       this.logger.log(`Day 30 performance written for briefId=${campaign.briefId}`);
+
+      // Trigger campaign deep run after Day 30 — async, non-blocking
+      this.campaignLearning
+        .runDeepRun(campaign.tenantId)
+        .catch((err) => this.logger.error(`Campaign deep run failed: ${err.message}`));
     }
 
     return written;

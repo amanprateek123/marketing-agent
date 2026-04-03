@@ -45,18 +45,38 @@ export interface PipelineConfig {
   coldStartDays: number;     // days to run daily before switching (default 14)
 }
 
+export interface CreativeLearnings {
+  winningHooks: string[];        // hook styles that drove high CTR
+  losingHooks: string[];         // hook styles that consistently underperformed
+  winningFormats: string[];      // formats (Reels, Stories, Feed) with best engagement
+  losingFormats: string[];       // formats to avoid for this brand
+  ctaInsights: string[];         // which CTA styles drive conversions
+  copyToneInsights: string[];    // tone patterns that resonate (aspirational, urgent, etc.)
+  visualInsights: string[];      // image/video patterns that performed well
+}
+
+export interface CampaignLearnings {
+  audienceScores: Record<string, number>;  // audience segment → avg ROAS
+  platformROAS: Record<string, number>;    // platform → avg ROAS
+  budgetInsights: string[];                // budget size/structure patterns
+  timingInsights: string[];                // day of week, season, time of day patterns
+  objectiveInsights: string[];             // which objectives work for this brand
+}
+
+export interface CausalInsight {
+  finding: string;           // human-readable pattern
+  isolatedVariable: string;  // which variable was isolated (format, hook, audience, etc.)
+  controlledFor: string[];   // what was held constant across compared campaigns
+  rootCause: 'creative_issue' | 'audience_mismatch' | 'format_mismatch' | 'topic_exhaustion' | 'timing_issue' | 'budget_issue';
+  confidence: number;        // 0.0–1.0
+  dataPoints: number;        // how many campaigns this is based on
+}
+
 export interface CompanyLearnings {
   version: number;
   updatedAt: Date;
-  topicScores: Record<string, number>;
-  winningPatterns: {
-    hooks: string[];
-    formats: string[];
-    audiences: string[];
-  };
-  losingPatterns: {
-    hooks: string[];
-    formats: string[];
-  };
-  audienceInsights: string[];
+  topicScores: Record<string, number>;   // topic → performance score (cross-cutting)
+  creative: CreativeLearnings;
+  campaign: CampaignLearnings;
+  causalInsights: CausalInsight[];
 }

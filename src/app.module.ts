@@ -10,6 +10,7 @@ import { CommonModule } from './common/common.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { CreativeModule } from './creative/creative.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
+import { LearningModule } from './learning/learning.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { CampaignsModule } from './campaigns/campaigns.module';
     SchedulerModule,
     CreativeModule,
     CampaignsModule,
+    LearningModule,
   ],
 })
 export class AppModule {}
