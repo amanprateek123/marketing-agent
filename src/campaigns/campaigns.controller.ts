@@ -8,10 +8,16 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { CampaignsService } from './campaigns.service';
+import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
+import { CompaniesService } from '../companies/companies.service';
 
 @Controller('api/v1/campaigns')
 export class CampaignsController {
-  constructor(private readonly campaignsService: CampaignsService) {}
+  constructor(
+    private readonly campaignsService: CampaignsService,
+    private readonly campaignCreator: CampaignCreatorService,
+    private readonly companiesService: CompaniesService,
+  ) {}
 
   @Get(':tenantId')
   async findAll(@Param('tenantId') tenantId: string) {
@@ -26,6 +32,24 @@ export class CampaignsController {
     const campaign = await this.campaignsService.findById(tenantId, campaignId);
     if (!campaign) throw new NotFoundException('Campaign not found');
     return campaign;
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/approve
+   * Human approves a pending campaign → launches on Meta Ads.
+   */
+  @Post(':tenantId/:campaignId/approve')
+  async approve(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+      const campaign = await this.campaignCreator.launch(campaignId, company);
+      return { success: true, metaCampaignId: campaign.metaCampaignId, status: campaign.status };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
   }
 
   @Post(':tenantId/:campaignId/pause')

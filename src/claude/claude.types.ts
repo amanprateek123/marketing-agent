@@ -18,6 +18,7 @@ export enum AgentType {
   // Phase 9 — Agent Team leads
   STRATEGY_TEAM_LEAD = 'strategy_team_lead',
   CREATIVE_TEAM_LEAD = 'creative_team_lead',
+  CAMPAIGN_REVIEW_LEAD = 'campaign_review_lead',
 }
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';

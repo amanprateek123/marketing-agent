@@ -213,7 +213,7 @@ Return ONLY the JSON object described in your instructions.`,
     const brief = await this.briefModel.findOne({ tenantId, briefId: campaign.briefId }).lean().exec();
     const creative = await this.creativePackageModel.findOne({ tenantId, briefId: campaign.briefId }).lean().exec();
 
-    const ageMs = Date.now() - new Date(campaign.launchedAt).getTime();
+    const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
 
     let result;

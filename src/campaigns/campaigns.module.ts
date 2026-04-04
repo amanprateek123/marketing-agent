@@ -11,20 +11,25 @@ import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { CommonModule } from '../common/common.module';
 import { LearningModule } from '../learning/learning.module';
+import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
+import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
+import { DeliveryModule } from '../delivery/delivery.module';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Campaign.name, schema: CampaignSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
+      { name: UsageLog.name, schema: UsageLogSchema },
     ]),
     ClaudeModule,
     CompaniesModule,
     CommonModule,
     LearningModule,
+    DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService],
+  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService],
   exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService],
 })
 export class CampaignsModule {}

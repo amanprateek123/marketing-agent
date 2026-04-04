@@ -3,7 +3,7 @@ import { HydratedDocument } from 'mongoose';
 
 export type CampaignDocument = HydratedDocument<Campaign>;
 
-export type CampaignStatus = 'active' | 'paused' | 'completed' | 'failed';
+export type CampaignStatus = 'pending_approval' | 'active' | 'paused' | 'completed' | 'failed';
 
 @Schema({ collection: 'campaigns', timestamps: true })
 export class Campaign {
@@ -16,13 +16,13 @@ export class Campaign {
   @Prop({ required: true, index: true })
   briefId: string;
 
-  @Prop({ required: true })
+  @Prop({ default: '' })
   creativePackageId: string;
 
-  @Prop({ required: true, unique: true, index: true })
+  @Prop({ index: true, default: '' })
   metaCampaignId: string;
 
-  @Prop({ required: true, default: 'active' })
+  @Prop({ required: true, default: 'pending_approval' })
   status: CampaignStatus;
 
   @Prop({ required: true })
@@ -31,8 +31,11 @@ export class Campaign {
   @Prop({ required: true })
   objective: string;
 
-  @Prop({ required: true })
-  launchedAt: Date;
+  @Prop()
+  launchedAt?: Date;
+
+  @Prop()
+  approvedAt?: Date;
 
   @Prop()
   pausedAt?: Date;
@@ -72,6 +75,24 @@ export class Campaign {
     reason: string;
     metricsBefore: Record<string, number>;
   }[];
+
+  // Phase 9 — Campaign Review Team data
+  @Prop({ type: String, default: '' })
+  reviewNotes: string;
+
+  @Prop({ type: Object, default: null })
+  reviewAdjustments: {
+    budgetAdjusted: boolean;
+    originalBudget: number;
+    recommendedBudget: number;
+    targetingNotes: string;
+    timingNotes: string;
+    scaleRules: string;
+    pauseRules: string;
+  };
+
+  @Prop({ type: [Object], default: [] })
+  reviewDebateLog: { round: number; from: string; summary: string }[];
 }
 
 export const CampaignSchema = SchemaFactory.createForClass(Campaign);

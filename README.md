@@ -121,16 +121,39 @@ WEEKLY PIPELINE (Monday 9 AM IST — BullMQ cron)
   └───────────────────────────────────────────────────────────────────────┘
        │
        ▼
-  ┌─── PHASE G: Campaign Launch ──────────────────────────── ~5 min ────┐
-  │  TypeScript Safety Rails (Claude CANNOT override):                     │
+  ┌─── PHASE G: Campaign Launch (Phase 9 — Agent Team) ──── ~5 min ────┐
+  │  Step 1: TypeScript Safety Rails (Claude CANNOT override):             │
   │  ├── Budget ≤ maxBudgetPerCampaign                                    │
   │  ├── Weekly spend ≤ weeklyBudgetCap                                   │
   │  └── Forbidden topics check                                           │
   │       ↓                                                               │
-  │  CampaignCreatorService → Meta Ads MCP → LIVE campaign                │
+  │  Step 2: Campaign Review Team (peer-to-peer debate)                    │
+  │  ┌───────────────────────────────────────────────────────────────┐     │
+  │  │  Campaign Strategist (lead)    Performance Analyst (teammate)  │     │
+  │  │       │                              │                        │     │
+  │  │  R1:  │── proposes launch config ──▶│                        │     │
+  │  │       │                              │── challenges budget,   │     │
+  │  │       │◀── targeting, timing ───────│   risk, guardrails     │     │
+  │  │  R2:  │── defends or adjusts ──────▶│                        │     │
+  │  │       │◀── approved ────────────────│                        │     │
+  │  └───────────────────────────────────────────────────────────────┘     │
+  │  Output: approved/rejected + adjusted budget + scale/pause rules       │
+  │                                                                        │
+  │  Step 3: Save as "pending_approval" → Slack notification               │
+  │  ┌─────────────────────────────────────────────────┐                   │
+  │  │  🚀 Campaign Ready for Approval                  │                   │
+  │  │  Budget: ₹10,000 (adjusted from ₹15,000)        │                   │
+  │  │  Review: "Start conservative, scale if ROAS >2x" │                   │
+  │  │  Targeting: 6 metros, 25-42 age range            │                   │
+  │  │                                                   │                   │
+  │  │  POST /campaigns/:id/approve to launch            │                   │
+  │  └─────────────────────────────────────────────────┘                   │
+  │                                                                        │
+  │  Step 4: Human approves → Meta Ads MCP → LIVE campaign                 │
+  │  (or rejects → Slack notification with reason)                         │
   └───────────────────────────────────────────────────────────────────────┘
 
-                                                          TOTAL ~43 min
+                                                          TOTAL ~48 min
 
 
 EVERY 6 HOURS — Campaign Monitoring (BullMQ cron)
@@ -185,7 +208,8 @@ MONTHLY — 1st of Month, 3 AM IST (BullMQ cron)
 SAFETY
 ├── ALL budget/safety checks in TypeScript — Claude agents CANNOT override
 ├── Budget caps are hardcoded limits, not suggestions to the AI
-└── Forbidden topics enforced before campaign creation, not by prompts
+├── Forbidden topics enforced before campaign creation, not by prompts
+└── Campaign Review Team + HUMAN APPROVAL required before any Meta Ads spend
 
 MULTI-TENANT
 ├── EVERY MongoDB query includes tenantId filter
@@ -245,7 +269,8 @@ AppModule
 ├── CreativeModule ───────────────── CreativeProducer + CopyWriter + ImageGen + VideoGen
 │     └── uses: ClaudeModule
 ├── CampaignsModule ──────────────── CampaignCreator + SafetyChecks + Auditor + Optimizer
-│     └── uses: ClaudeModule
+│     ├── uses: ClaudeModule          + CampaignReviewTeam
+│     └── uses: DeliveryModule (Slack approval notifications)
 ├── LearningModule ───────────────── CampaignLearning + CreativeLearning
 │     ├── uses: ClaudeModule
 │     └── uses: CompaniesModule
@@ -2041,29 +2066,38 @@ Cost: ~$1 per debate run
 src/teams/
   strategy-team.service.ts        — Strategist + Contrarian debate via CLI (Phase D)
   creative-team.service.ts        — Creative Director + Brand Compliance debate via CLI (Phase F)
+  campaign-review-team.service.ts — Campaign Strategist + Performance Analyst debate via CLI (Phase G)
 ```
 
 ### Files Updated
 
 | File | Change |
 |---|---|
-| `claude/claude.types.ts` | Added `STRATEGY_TEAM_LEAD`, `CREATIVE_TEAM_LEAD`, `TEAM_LEAD_AGENTS` |
+| `claude/claude.types.ts` | Added `STRATEGY_TEAM_LEAD`, `CREATIVE_TEAM_LEAD`, `CAMPAIGN_REVIEW_LEAD`, `TEAM_LEAD_AGENTS` |
 | `pipeline/pipeline-orchestrator.service.ts` | Phase D uses `StrategyTeamService` instead of `IdeaPoolService` |
-| `pipeline/pipeline.module.ts` | Registered `StrategyTeamService` + `CreativeTeamService` |
+| `pipeline/pipeline.module.ts` | Registered all team services |
 | `pipeline/schemas/creative-brief.schema.ts` | Added `debateRounds`, `debateLog`, `debateRationale` fields |
 | `creative/creative-producer/creative-producer.service.ts` | Tries `CreativeTeamService` first, falls back to single-agent |
 | `creative/image-generator/image-generator.service.ts` | Added `generateFromPrompt()` for pre-reviewed prompts |
 | `creative/creative.module.ts` | Registered `CreativeTeamService` |
+| `campaigns/campaign-creator/campaign-creator.service.ts` | Review team + human approval before Meta launch |
+| `campaigns/campaigns.controller.ts` | Added `POST /approve` endpoint |
+| `campaigns/campaigns.module.ts` | Registered `CampaignReviewTeamService` |
+| `campaigns/schemas/campaign.schema.ts` | Added `pending_approval` status, review fields, `approvedAt` |
 | `companies/schemas/company.schema.ts` | Added `signals: CompanySignals` field |
 | `companies/schemas/company.types.ts` | Added `CompanySignals`, `WeeklySignals`, `intelligenceLead` prompt |
 
-### Future Teams (Planned, not built)
+### All Agent Teams
 
-| Team | Stage | Status | Why agent teams fit |
-|---|---|---|---|
-| **Creative Team** | Creative production | **Built** | Creative Director + Brand Compliance debate copy + image prompt + video prompt until compliant |
-| **Diagnosis Team** | Campaign troubleshooting | Planned | Performance Analyst + Creative Analyst + Audience Strategist debate root cause of underperformance |
-| **Learning Team** | Bi-weekly learning | Planned | Creative Analyst + Campaign Analyst find cross-domain insights neither would discover alone |
+| Team | Phase | Agents | Cost | Status |
+|---|---|---|---|---|
+| **Strategy Team** | D — Idea selection | Strategist + Contrarian | ~$1 | **Built** |
+| **Creative Team** | F — Creative production | Creative Director + Brand Compliance | ~$0.82 | **Built** |
+| **Campaign Review Team** | G — Pre-launch review | Campaign Strategist + Performance Analyst | ~$0.62 | **Built** |
+| **Diagnosis Team** | Monitoring — Troubleshooting | TBD | TBD | Planned |
+| **Learning Team** | Monthly — Pattern extraction | TBD | TBD | Planned |
+
+Total agent team cost per pipeline run: **~$2.44**
 
 ### Phase 9 Exit Criteria
 
@@ -2079,6 +2113,11 @@ src/teams/
 - [x] Creative Team runs end-to-end with peer-to-peer debate (Creative Director + Brand Compliance)
 - [x] Creative Team produces reviewed copy + image prompt + video prompt with compliance notes
 - [x] Creative Team integrated into pipeline Phase F (with single-agent fallback)
+- [x] Campaign Review Team runs end-to-end (Campaign Strategist + Performance Analyst)
+- [x] Campaign Review Team adjusts budget, sets scale/pause rules, reviews targeting
+- [x] Campaign saved as `pending_approval` → Slack notification with full review
+- [x] Human approval required via `POST /campaigns/:id/approve` before Meta launch
+- [x] Rejected campaigns notified to Slack with reason + debate log
 - [ ] Diagnosis Team built and integrated
 - [ ] Learning Team built and integrated
 
@@ -2144,7 +2183,8 @@ Marketing Agent/
 │   │
 │   ├── teams/                                ← Phase 9: Agent Teams
 │   │   ├── strategy-team.service.ts          ← Strategist vs Contrarian debate (CLI)
-│   │   └── creative-team.service.ts          ← Creative Director vs Brand Compliance (CLI)
+│   │   ├── creative-team.service.ts          ← Creative Director vs Brand Compliance (CLI)
+│   │   └── campaign-review-team.service.ts   ← Campaign Strategist vs Performance Analyst (CLI)
 │   │
 │   ├── creative/
 │   │   ├── creative.module.ts
@@ -2403,6 +2443,7 @@ volumes:
 | `GET` | `/api/v1/pipeline/:tenantId/briefs` | 2 | Latest scored briefs |
 | `GET` | `/api/v1/campaigns/:tenantId` | 5 | All campaigns + metrics |
 | `GET` | `/api/v1/campaigns/:tenantId/:campaignId` | 5 | Campaign detail + audit log |
+| `POST` | `/api/v1/campaigns/:tenantId/:campaignId/approve` | 9 | Human approves reviewed campaign → launches on Meta |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/pause` | 5 | Manual override pause |
 | `GET` | `/api/v1/reports/:tenantId/weekly` | 3 | Latest weekly digest |
 | `GET` | `/api/v1/reports/:tenantId/performance` | 6 | Campaign performance summary |
@@ -2410,9 +2451,10 @@ volumes:
 | `GET` | `/api/v1/usage/:tenantId` | 8 | Token usage + cost per agent |
 | `GET` | `/api/v1/usage/:tenantId/monthly` | 8 | Monthly totals by agent |
 | `GET` | `/api/v1/health` | 8 | Health check endpoint |
-| `POST` | `/api/v1/pipeline/:tenantId/run-team` | 9 | Trigger weekly pipeline with agent teams enabled |
-| `GET` | `/api/v1/learning/:tenantId/cross-domain` | 9 | Get cross-domain insights from Learning Team |
-| `GET` | `/api/v1/learning/:tenantId/weekly-signals` | 9 | Get rolling 7-day signals from Perf Expert |
+| `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/strategy-team-test` | 9 | Test Strategy Team debate with existing run data |
+| `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/creative-team-test` | 9 | Test Creative Team debate with existing brief |
+| `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/campaign-review-test` | 9 | Test Campaign Review → save pending → Slack |
+| `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/generate-digest` | 9 | Generate digest from Strategy Team output |
 
 ---
 

@@ -17,6 +17,9 @@ import { ResearchOutput } from './schemas/research-output.schema';
 import { CreativeBrief } from './schemas/creative-brief.schema';
 import { IntelligenceBrief } from './schemas/intelligence-brief.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
+import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
+import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
+import { CreativePackage } from '../creative/schemas/creative-package.schema';
 
 @Controller('pipeline')
 export class PipelineController {
@@ -26,6 +29,10 @@ export class PipelineController {
     private readonly strategyTeam: StrategyTeamService,
     private readonly digestWriter: DigestWriterService,
     private readonly creativeTeam: CreativeTeamService,
+    private readonly campaignReviewTeam: CampaignReviewTeamService,
+    private readonly campaignCreator: CampaignCreatorService,
+    @InjectModel(CreativePackage.name)
+    private readonly creativePackageModel: Model<CreativePackage>,
     @InjectModel(CoordinatorOutput.name)
     private readonly coordinatorOutputModel: Model<CoordinatorOutput>,
     @InjectModel(ResearchOutput.name)
@@ -219,6 +226,56 @@ export class PipelineController {
       );
 
       return { success: true, runId: testRunId, result };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/pipeline/:tenantId/runs/:runId/campaign-review-test
+   * Full flow: Campaign Review Team debate → save as pending_approval → Slack notification.
+   * Returns the campaignId for approval.
+   */
+  @Post(':tenantId/runs/:runId/campaign-review-test')
+  async campaignReviewTest(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+  ) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+
+      const brief = await this.creativeBriefModel
+        .findOne({ tenantId, runId })
+        .lean()
+        .exec();
+      if (!brief) throw new Error(`No creative brief found for runId=${runId}`);
+
+      // Try to load creative package, use empty if not found
+      const pkg = await this.creativePackageModel
+        .findOne({ tenantId, briefId: brief.briefId })
+        .lean()
+        .exec();
+
+      const testRunId = `review-test-${Date.now()}`;
+
+      console.log('Starting campaign review test with brief:', pkg);
+
+      // Full flow: review → save as pending_approval → Slack
+      const campaign = await this.campaignCreator.create(
+        { ...brief, runId: testRunId } as any,
+        (pkg ?? {}) as any,
+        company,
+        testRunId,
+      );
+
+      return {
+        success: true,
+        runId: testRunId,
+        campaignId: (campaign as any)._id.toString(),
+        status: campaign.status,
+        budget: campaign.budget,
+        message: 'Campaign pending approval. Check Slack or call POST /api/v1/campaigns/' + tenantId + '/' + (campaign as any)._id.toString() + '/approve to launch.',
+      };
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }

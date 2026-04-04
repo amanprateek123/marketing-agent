@@ -69,7 +69,7 @@ export class CampaignAuditorService {
           cpc: metrics.cpc,
         });
 
-        const ageMs = Date.now() - new Date(campaign.launchedAt).getTime();
+        const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
         const ageHours = ageMs / (1000 * 60 * 60);
         const ageDays = ageHours / 24;
 

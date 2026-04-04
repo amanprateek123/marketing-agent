@@ -25,6 +25,8 @@ import { PipelineController } from './pipeline.controller';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { StrategyTeamService } from '../teams/strategy-team.service';
 import { CreativeTeamService } from '../teams/creative-team.service';
+import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
+import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 
 @Module({
   imports: [
@@ -38,6 +40,7 @@ import { CreativeTeamService } from '../teams/creative-team.service';
       { name: ResearchOutput.name, schema: ResearchOutputSchema },
       { name: Digest.name, schema: DigestSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
+      { name: CreativePackage.name, schema: CreativePackageSchema },
     ]),
     ClaudeModule,
     CompaniesModule,
@@ -57,6 +60,7 @@ import { CreativeTeamService } from '../teams/creative-team.service';
     PipelineOrchestratorService,
     StrategyTeamService,
     CreativeTeamService,
+    CampaignReviewTeamService,
   ],
   exports: [
     PipelineOrchestratorService,
