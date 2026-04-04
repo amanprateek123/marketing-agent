@@ -24,6 +24,7 @@ import { PipelineOrchestratorService } from './pipeline-orchestrator.service';
 import { PipelineController } from './pipeline.controller';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { StrategyTeamService } from '../teams/strategy-team.service';
+import { CreativeTeamService } from '../teams/creative-team.service';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { StrategyTeamService } from '../teams/strategy-team.service';
     DigestWriterService,
     PipelineOrchestratorService,
     StrategyTeamService,
+    CreativeTeamService,
   ],
   exports: [
     PipelineOrchestratorService,

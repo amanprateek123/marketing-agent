@@ -9,11 +9,14 @@ import {
 import { PipelineOrchestratorService } from './pipeline-orchestrator.service';
 import { CompaniesService } from '../companies/companies.service';
 import { StrategyTeamService } from '../teams/strategy-team.service';
-import { CoordinatorService } from './coordinator.service';
+import { DigestWriterService } from './digest-writer.service';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CoordinatorOutput } from './schemas/coordinator-output.schema';
 import { ResearchOutput } from './schemas/research-output.schema';
+import { CreativeBrief } from './schemas/creative-brief.schema';
+import { IntelligenceBrief } from './schemas/intelligence-brief.schema';
+import { CreativeTeamService } from '../teams/creative-team.service';
 
 @Controller('pipeline')
 export class PipelineController {
@@ -21,10 +24,16 @@ export class PipelineController {
     private readonly orchestrator: PipelineOrchestratorService,
     private readonly companiesService: CompaniesService,
     private readonly strategyTeam: StrategyTeamService,
+    private readonly digestWriter: DigestWriterService,
+    private readonly creativeTeam: CreativeTeamService,
     @InjectModel(CoordinatorOutput.name)
     private readonly coordinatorOutputModel: Model<CoordinatorOutput>,
     @InjectModel(ResearchOutput.name)
     private readonly researchOutputModel: Model<ResearchOutput>,
+    @InjectModel(CreativeBrief.name)
+    private readonly creativeBriefModel: Model<CreativeBrief>,
+    @InjectModel(IntelligenceBrief.name)
+    private readonly intelligenceBriefModel: Model<IntelligenceBrief>,
   ) {}
 
   /**
@@ -93,6 +102,120 @@ export class PipelineController {
         },
         competitorResearch,
         marketResearch,
+      );
+
+      return { success: true, runId: testRunId, result };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/pipeline/:tenantId/runs/:runId/generate-digest
+   * Generates digest from Strategy Team debate output.
+   * Uses coordinator data from sourceRunId and strategy briefs from the given runId.
+   */
+  @Post(':tenantId/runs/:runId/generate-digest')
+  async generateDigestFromDebate(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+  ) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+
+      // Load creative brief to find source coordinator run
+      const creativeBrief = await this.creativeBriefModel
+        .findOne({ tenantId, runId })
+        .lean()
+        .exec();
+      if (!creativeBrief) {
+        throw new Error(`No creative brief found for runId=${runId}`);
+      }
+
+      // Load coordinator from the most recent full pipeline run
+      const coordOutput = await this.coordinatorOutputModel
+        .findOne({ tenantId })
+        .sort({ _id: -1 })
+        .lean()
+        .exec();
+      if (!coordOutput) {
+        throw new Error('No coordinator output found');
+      }
+
+      // Load all intelligence briefs from the strategy test run
+      const allBriefs = await this.intelligenceBriefModel
+        .find({ tenantId, runId })
+        .lean()
+        .exec();
+
+      await this.digestWriter.run(
+        company,
+        runId,
+        {
+          coordinatorOutputId: (coordOutput as any)._id.toString(),
+          content: coordOutput.content,
+          topSignals: coordOutput.topSignals,
+        },
+        {
+          briefs: allBriefs.map((b) => ({
+            briefId: b.selected ? creativeBrief.briefId : (b as any).briefId ?? '',
+            topic: b.topic,
+            angle: b.angle,
+            platform: b.platform,
+            format: b.format,
+            audience: b.audience,
+            hook: b.selected ? creativeBrief.hook : (b as any).hook ?? '',
+            keyMessage: b.selected ? creativeBrief.keyMessage : (b as any).keyMessage ?? '',
+            conversionBridge: b.selected ? creativeBrief.conversionBridge : (b as any).conversionBridge ?? '',
+            suggestedBudget: b.suggestedBudget,
+            finalScore: b.finalScore,
+          })),
+          selectedBriefId: creativeBrief.briefId,
+          selectionReason: creativeBrief.selectionReason,
+        },
+      );
+
+      return { success: true, message: 'Digest generated and delivered' };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/pipeline/:tenantId/runs/:runId/creative-team-test
+   * Runs ONLY the Creative Team debate using an existing creative brief.
+   */
+  @Post(':tenantId/runs/:runId/creative-team-test')
+  async creativeTeamTest(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+  ) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+
+      const brief = await this.creativeBriefModel
+        .findOne({ tenantId, runId })
+        .lean()
+        .exec();
+      if (!brief) {
+        throw new Error(`No creative brief found for runId=${runId}`);
+      }
+
+      const testRunId = `creative-test-${Date.now()}`;
+
+      const result = await this.creativeTeam.run(
+        {
+          topic: brief.topic,
+          angle: brief.angle,
+          platform: brief.platform,
+          format: brief.format,
+          audience: brief.audience,
+          hook: brief.hook,
+          keyMessage: brief.keyMessage,
+          conversionBridge: brief.conversionBridge,
+        },
+        company,
+        testRunId,
       );
 
       return { success: true, runId: testRunId, result };

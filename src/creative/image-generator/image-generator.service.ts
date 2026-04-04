@@ -82,6 +82,27 @@ Return ONLY the image prompt, nothing else.
     return { imagePrompt, imageUrl };
   }
 
+  /**
+   * Generate image from a pre-reviewed prompt (from Creative Team).
+   * Skips Claude prompt generation — goes straight to image API.
+   */
+  async generateFromPrompt(
+    imagePrompt: string,
+    company: CompanyDocument,
+    runId: string,
+  ): Promise<ImageResult> {
+    this.logger.log(`Generating image from reviewed prompt: tenantId=${company.tenantId}`);
+
+    let imageUrl = '';
+    try {
+      imageUrl = await this.callNanoBanana(imagePrompt, company.tenantId);
+    } catch (err: any) {
+      this.logger.error(`Image API failed (prompt saved): ${err.message}`);
+    }
+
+    return { imagePrompt, imageUrl };
+  }
+
   private async callNanoBanana(prompt: string, tenantId: string): Promise<string> {
     const apiKey = this.configService.get<string>('google.aiApiKey');
 

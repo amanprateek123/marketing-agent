@@ -10,12 +10,15 @@ import { CreativeController } from './creative.controller';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { DeliveryModule } from '../delivery/delivery.module';
+import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
+import { CreativeTeamService } from '../teams/creative-team.service';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: CreativePackage.name, schema: CreativePackageSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
+      { name: UsageLog.name, schema: UsageLogSchema },
     ]),
     ClaudeModule,
     CompaniesModule,
@@ -26,6 +29,7 @@ import { DeliveryModule } from '../delivery/delivery.module';
     CopyWriterService,
     ImageGeneratorService,
     VideoGeneratorService,
+    CreativeTeamService,
     CreativeProducerService,
   ],
   exports: [CreativeProducerService],

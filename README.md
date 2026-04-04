@@ -98,14 +98,26 @@ WEEKLY PIPELINE (Monday 9 AM IST — BullMQ cron)
   └───────────────────────────────────────────────────────────────────────┘
        │
        ▼
-  ┌─── PHASE F: Creative Production ──────────────────────── ~5 min ────┐
-  │  CreativeProducerService.produce() — all in parallel:                  │
-  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐             │
-  │  │  CopyWriter    │  │ ImageGenerator │  │ VideoGenerator │             │
-  │  │  3 copy        │  │ Ideogram/Flux  │  │ Kling AI 2.0   │             │
-  │  │  variants      │  │ via fal.ai     │  │                │             │
-  │  └───────────────┘  └───────────────┘  └───────────────┘             │
-  │  All assets uploaded to S3 (tenantId/ prefix)                         │
+  ┌─── PHASE F: Creative Production (Phase 9 — Agent Team) ── ~5 min ────┐
+  │  CreativeProducerService.produce():                                    │
+  │                                                                        │
+  │  TRY: Creative Team (peer-to-peer debate)                              │
+  │  ┌───────────────────────────────────────────────────────────────┐     │
+  │  │  Creative Director (lead)     Brand Compliance (teammate)     │     │
+  │  │       │                              │                        │     │
+  │  │  R1:  │── copy + image prompt ─────▶│                        │     │
+  │  │       │   + video prompt            │── flags policy issues   │     │
+  │  │       │◀── compliance review ───────│   brand tone, specs     │     │
+  │  │  R2:  │── revises flagged items ───▶│                        │     │
+  │  │       │◀── approved ────────────────│                        │     │
+  │  └───────────────────────────────────────────────────────────────┘     │
+  │  Output: 3 copy variants + reviewed imagePrompt + reviewed videoPrompt │
+  │                                                                        │
+  │  CATCH: Fallback to single-agent (CopyWriter + ImageGen + VideoGen)    │
+  │                                                                        │
+  │  Then: ImageGenerator uses reviewed prompt → Gemini API → image        │
+  │        VideoGenerator uses reviewed prompt → stored (Kling deferred)   │
+  │  All assets saved to creative_packages + S3 (tenantId/ prefix)         │
   └───────────────────────────────────────────────────────────────────────┘
        │
        ▼
@@ -2027,17 +2039,21 @@ Cost: ~$1 per debate run
 
 ```
 src/teams/
-  strategy-team.service.ts        — Strategist + Contrarian debate via CLI
+  strategy-team.service.ts        — Strategist + Contrarian debate via CLI (Phase D)
+  creative-team.service.ts        — Creative Director + Brand Compliance debate via CLI (Phase F)
 ```
 
 ### Files Updated
 
 | File | Change |
 |---|---|
-| `claude/claude.types.ts` | Added `SCOUT_TEAM_LEAD`, `STRATEGY_TEAM_LEAD`, `TEAM_LEAD_AGENTS` |
+| `claude/claude.types.ts` | Added `STRATEGY_TEAM_LEAD`, `CREATIVE_TEAM_LEAD`, `TEAM_LEAD_AGENTS` |
 | `pipeline/pipeline-orchestrator.service.ts` | Phase D uses `StrategyTeamService` instead of `IdeaPoolService` |
-| `pipeline/pipeline.module.ts` | Registered `StrategyTeamService` |
+| `pipeline/pipeline.module.ts` | Registered `StrategyTeamService` + `CreativeTeamService` |
 | `pipeline/schemas/creative-brief.schema.ts` | Added `debateRounds`, `debateLog`, `debateRationale` fields |
+| `creative/creative-producer/creative-producer.service.ts` | Tries `CreativeTeamService` first, falls back to single-agent |
+| `creative/image-generator/image-generator.service.ts` | Added `generateFromPrompt()` for pre-reviewed prompts |
+| `creative/creative.module.ts` | Registered `CreativeTeamService` |
 | `companies/schemas/company.schema.ts` | Added `signals: CompanySignals` field |
 | `companies/schemas/company.types.ts` | Added `CompanySignals`, `WeeklySignals`, `intelligenceLead` prompt |
 
@@ -2045,7 +2061,7 @@ src/teams/
 
 | Team | Stage | Status | Why agent teams fit |
 |---|---|---|---|
-| **Creative Team** | Copy production | Planned | Creative Director + Copywriter + Brand Checker iterate through critique rounds |
+| **Creative Team** | Creative production | **Built** | Creative Director + Brand Compliance debate copy + image prompt + video prompt until compliant |
 | **Diagnosis Team** | Campaign troubleshooting | Planned | Performance Analyst + Creative Analyst + Audience Strategist debate root cause of underperformance |
 | **Learning Team** | Bi-weekly learning | Planned | Creative Analyst + Campaign Analyst find cross-domain insights neither would discover alone |
 
@@ -2060,7 +2076,9 @@ src/teams/
 - [x] Debate history (debateLog, debateRationale, debateRounds) saved to creative_briefs
 - [x] Strategy Team integrated into pipeline (Phase D replacement)
 - [x] Cost tracked per team activation in `usage_logs`
-- [ ] Creative Team built and integrated
+- [x] Creative Team runs end-to-end with peer-to-peer debate (Creative Director + Brand Compliance)
+- [x] Creative Team produces reviewed copy + image prompt + video prompt with compliance notes
+- [x] Creative Team integrated into pipeline Phase F (with single-agent fallback)
 - [ ] Diagnosis Team built and integrated
 - [ ] Learning Team built and integrated
 
@@ -2125,7 +2143,8 @@ Marketing Agent/
 │   │       └── digest.schema.ts
 │   │
 │   ├── teams/                                ← Phase 9: Agent Teams
-│   │   └── strategy-team.service.ts          ← Strategist vs Contrarian debate (CLI)
+│   │   ├── strategy-team.service.ts          ← Strategist vs Contrarian debate (CLI)
+│   │   └── creative-team.service.ts          ← Creative Director vs Brand Compliance (CLI)
 │   │
 │   ├── creative/
 │   │   ├── creative.module.ts
@@ -2183,13 +2202,7 @@ Marketing Agent/
 │   ├── CLAUDE.md
 │   ├── mcp.json
 │   ├── settings.local.json         (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
-│   ├── agents/                          ← (empty — Strategy Team prompts are inline in strategy-team.service.ts)
-│   │   # Planned (not yet created):
-│   │   # strategist.md, contrarian.md, customer-advocate.md (Strategy Team)
-│   │   # creative-director.md, copywriter.md, brand-checker.md (Creative Team)
-│   │   # performance-analyst.md, creative-analyst.md, audience-strategist.md (Diagnosis Team)
-│   │   # marketing-strategist.md, campaign-analyst.md (Learning Team)
-│   │   # perf-marketing-expert.md (persistent single agent)
+│   ├── agents/                          ← (empty — team prompts are inline in service files)
 │   └── skills/
 │       ├── paid-ads/
 │       ├── ad-creative/

@@ -5,6 +5,7 @@ import { CompaniesService } from '../../companies/companies.service';
 import { CopyWriterService } from '../copy-writer/copy-writer.service';
 import { ImageGeneratorService } from '../image-generator/image-generator.service';
 import { VideoGeneratorService } from '../video-generator/video-generator.service';
+import { CreativeTeamService } from '../../teams/creative-team.service';
 import { CreativePackage, CreativePackageDocument } from '../schemas/creative-package.schema';
 import { SlackService } from '../../delivery/slack.service';
 
@@ -28,6 +29,7 @@ export class CreativeProducerService {
     private readonly copyWriter: CopyWriterService,
     private readonly imageGenerator: ImageGeneratorService,
     private readonly videoGenerator: VideoGeneratorService,
+    private readonly creativeTeam: CreativeTeamService,
     private readonly slackService: SlackService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
@@ -59,20 +61,53 @@ export class CreativeProducerService {
     this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId}`);
 
     try {
-      // Run all 3 independently — partial results are always saved
-      const [copyResult, imageResult, videoResult] = await Promise.allSettled([
-        this.copyWriter.generate(brief, company, runId),
-        this.imageGenerator.generate(brief, company, runId),
-        this.videoGenerator.generate(brief, company, runId),
-      ]);
+      // Try Creative Team first (peer-to-peer debate: Creative Director + Brand Compliance)
+      // Produces copy + image prompt + video prompt in one reviewed package
+      // Falls back to single-agent approach if team fails
+      let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
+      let image: { imagePrompt: string; imageUrl: string } | null = null;
+      let video: { videoPrompt: string; videoUrl: string } | null = null;
 
-      const copyPackage = copyResult.status === 'fulfilled' ? copyResult.value : null;
-      const image = imageResult.status === 'fulfilled' ? imageResult.value : null;
-      const video = videoResult.status === 'fulfilled' ? videoResult.value : null;
+      try {
+        this.logger.log(`Creative Team starting for briefId=${briefId}`);
+        const teamResult = await this.creativeTeam.run(brief, company, runId);
 
-      if (copyResult.status === 'rejected') this.logger.error(`CopyWriter failed: ${copyResult.reason}`);
-      if (imageResult.status === 'rejected') this.logger.error(`ImageGenerator failed: ${imageResult.reason}`);
-      if (videoResult.status === 'rejected') this.logger.error(`VideoGenerator failed: ${videoResult.reason}`);
+        copyPackage = {
+          variants: teamResult.variants,
+          selectedIndex: teamResult.selectedIndex,
+          selectionReason: teamResult.selectionReason,
+        };
+
+        // Use team's reviewed image prompt → generate actual image
+        const imageResult = await this.imageGenerator.generateFromPrompt(
+          teamResult.imagePrompt, company, runId,
+        );
+        image = imageResult;
+
+        // Store team's reviewed video prompt
+        video = { videoPrompt: teamResult.videoPrompt, videoUrl: '' };
+
+        this.logger.log(
+          `Creative Team done: briefId=${briefId} variants=${teamResult.variants.length} rounds=${teamResult.debateRounds}`,
+        );
+      } catch (teamErr: any) {
+        this.logger.warn(`Creative Team failed, falling back to single-agent: ${teamErr.message}`);
+
+        // Fallback: run all 3 independently
+        const [copyResult, imageResult, videoResult] = await Promise.allSettled([
+          this.copyWriter.generate(brief, company, runId),
+          this.imageGenerator.generate(brief, company, runId),
+          this.videoGenerator.generate(brief, company, runId),
+        ]);
+
+        copyPackage = copyResult.status === 'fulfilled' ? copyResult.value : null;
+        image = imageResult.status === 'fulfilled' ? imageResult.value : null;
+        video = videoResult.status === 'fulfilled' ? videoResult.value : null;
+
+        if (copyResult.status === 'rejected') this.logger.error(`CopyWriter failed: ${copyResult.reason}`);
+        if (imageResult.status === 'rejected') this.logger.error(`ImageGenerator failed: ${imageResult.reason}`);
+        if (videoResult.status === 'rejected') this.logger.error(`VideoGenerator failed: ${videoResult.reason}`);
+      }
 
       const allFailed = !copyPackage && !image && !video;
       const status = allFailed ? 'failed' : 'completed';
