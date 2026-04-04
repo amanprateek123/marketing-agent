@@ -1,4 +1,4 @@
-# BriefOS — Autonomous AI Marketing Agent
+# Marketing Agent — Autonomous AI Marketing Agent
 
 > **Stack:** Node.js + NestJS + TypeScript + Claude Code SDK (`@anthropic-ai/claude-agent-sdk`) + MongoDB + BullMQ + Redis + Meta Ads MCP
 >
@@ -14,9 +14,9 @@
 
 ## System Architecture
 
-### What BriefOS Does
+### What Marketing Agent Does
 
-A company registers once. From that point, BriefOS autonomously runs weekly intelligence gathering, generates ad creatives, launches Meta Ads campaigns, monitors performance every 6 hours, and improves itself monthly by learning from results. No human in the loop — except to override when needed.
+A company registers once. From that point, Marketing Agent autonomously runs weekly intelligence gathering, generates ad creatives, launches Meta Ads campaigns, monitors performance every 6 hours, and improves itself monthly by learning from results. No human in the loop — except to override when needed.
 
 ### End-to-End Flow
 
@@ -38,32 +38,15 @@ WEEKLY PIPELINE (Monday 9 AM IST — BullMQ cron)
 ══════════════════════════════════════════════════════════════════════════
 
   ┌─── PHASE A: Signal Collection ─────────────────────────── ~15 min ───┐
-  │                                                                       │
-  │  Scout Team (Phase 9 — Agent Team, single query() call)               │
-  │  ┌───────────────────────────────────────────────────────────────┐    │
-  │  │  Intelligence Lead (team lead + Instagram scout)              │    │
-  │  │       │                                                       │    │
-  │  │       ├── TeamCreate("scout-{runId}")                         │    │
-  │  │       │                                                       │    │
-  │  │       ├── Spawns 3 teammates in parallel (Agent tool):        │    │
-  │  │       │   ┌──────────┐  ┌──────────┐  ┌──────────┐           │    │
-  │  │       │   │  Reddit  │  │ Twitter  │  │ YouTube  │           │    │
-  │  │       │   │  Scout   │  │  Scout   │  │  Scout   │           │    │
-  │  │       │   │ WebSearch│  │ WebSearch│  │ WebSearch│           │    │
-  │  │       │   │ WebFetch │  │ WebFetch │  │ WebFetch │           │    │
-  │  │       │   └────┬─────┘  └────┬─────┘  └────┬─────┘           │    │
-  │  │       │        │             │             │                  │    │
-  │  │       │        └──── SendMessage(findings) ────┘              │    │
-  │  │       │                      │                                │    │
-  │  │       ├── Scouts Instagram itself (parallel with teammates)   │    │
-  │  │       ├── Receives 3 SendMessage responses                    │    │
-  │  │       ├── Cross-validates signals across platforms             │    │
-  │  │       ├── Filters manufactured hype                           │    │
-  │  │       ├── TeamDelete (cleanup)                                │    │
-  │  │       └── Returns ranked JSON: topSignals + viralTrends       │    │
-  │  └───────────────────────────────────────────────────────────────┘    │
-  │                                                                       │
-  │  Fallback: if Scout Team fails → 4 parallel single-agent scouts       │
+  │  4 scouts run in parallel (each is a separate query() call):          │
+  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐             │
+  │  │Instagram │  │  Reddit  │  │ Twitter  │  │ YouTube  │             │
+  │  │  Scout   │  │  Scout   │  │  Scout   │  │  Scout   │             │
+  │  │WebSearch │  │WebSearch │  │WebSearch │  │WebSearch │             │
+  │  │WebFetch  │  │WebFetch  │  │WebFetch  │  │WebFetch  │             │
+  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘             │
+  │  Each returns: trending_topics + viral_trends + format_insights       │
+  │  Saved to: scout_outputs + scout_signals (dedup tracking)             │
   └───────────────────────────────────────────────────────────────────────┘
        │
        ▼
@@ -84,10 +67,26 @@ WEEKLY PIPELINE (Monday 9 AM IST — BullMQ cron)
   └───────────────────────────────────────────────────────────────────────┘
        │
        ▼
-  ┌─── PHASE D: Idea Pool ────────────────────────────────── ~5 min ────┐
-  │  Reads: coordinator synthesis + research + company.learnings          │
-  │  Generates N intelligence briefs (campaign ideas)                     │
-  │  Selects 1 winner → CreativeBrief with hook, keyMessage, audience     │
+  ┌─── PHASE D: Strategy Team (Phase 9 — Agent Team) ───── ~3-5 min ────┐
+  │  Peer-to-peer debate via claude -p CLI + AGENT_TEAMS=1                │
+  │  ┌───────────────────────────────────────────────────────────────┐    │
+  │  │  Strategist (team lead)           Contrarian (teammate)       │    │
+  │  │       │                                │                      │    │
+  │  │  R1:  │── proposes 5 ideas ──────────▶│                      │    │
+  │  │       │                                │── challenges/        │    │
+  │  │       │◀── endorses each idea ────────│   endorses each      │    │
+  │  │  R2:  │── defends or concedes ───────▶│                      │    │
+  │  │       │                                │── concedes or        │    │
+  │  │       │◀── doubles down ──────────────│   doubles down       │    │
+  │  │       │        ...continues until consensus (max 5 rounds)    │    │
+  │  │       │                                                       │    │
+  │  │  Winner = idea that survived the debate                       │    │
+  │  └───────────────────────────────────────────────────────────────┘    │
+  │                                                                       │
+  │  Input: coordinator signals + competitor research + market research    │
+  │         + company.learnings (what worked/failed before)               │
+  │  Output: 5 battle-tested briefs + 1 winner + debate rationale         │
+  │  Saved: creative_briefs (with debateLog + debateRationale)            │
   │  Human team can override selection via digest                         │
   └───────────────────────────────────────────────────────────────────────┘
        │
@@ -196,13 +195,16 @@ PROMPT ARCHITECTURE
 ├── Prompts regenerated when learnings update (monthly)
 └── 14 skills from .claude/skills/ baked into prompts by PromptGenerator
 
-AGENT TEAMS (Phase 9)
-├── Requires: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
-├── NestJS calls query() ONCE for team lead → lead orchestrates internally
-├── Lead uses Agent tool (name + team_name) to spawn teammates
-├── Teammates communicate via SendMessage (peer-to-peer)
-├── Fallback: if team fails → single-agent approach (Phase 2-7 code)
-└── Team logic lives in .claude/agents/*.md, NOT in TypeScript
+AGENT TEAMS (Phase 9 — Strategy Team)
+├── Requires: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 + tmux
+├── Uses CLI (claude -p) NOT SDK query() — SDK lacks InboxPoller for message routing
+├── CLI's InboxPoller re-enters the lead session when teammate messages arrive
+├── Lead spawns Contrarian via Agent tool (name + team_name + run_in_background)
+├── Peer-to-peer debate: Strategist ↔ Contrarian via SendMessage, up to 5 rounds
+├── Works best when both agents start with the SAME context (no timing issues)
+├── Does NOT work for parallel collection (scouts) — only for debate/critique
+├── Debate history saved to creative_briefs.debateLog in MongoDB
+└── Cost: ~$1 per debate run
 
 PIPELINE RESILIENCE
 ├── DAG state machine — each phase checks if already complete before running
@@ -223,8 +225,8 @@ AppModule
 ├── CompaniesModule ──────────────── CompaniesService + PromptGenerator + LiveContextBuilder
 │     ↑ used by pipeline, teams
 ├── PipelineModule ───────────────── PipelineOrchestrator + Scouts + Coordinator
-│     ├── uses: ClaudeModule          + IdeaPool + DigestWriter
-│     ├── uses: CompaniesModule       + TeamOrchestrator + TeamFallback
+│     ├── uses: ClaudeModule          + IdeaPool + DigestWriter + StrategyTeam
+│     ├── uses: CompaniesModule
 │     ├── uses: CreativeModule
 │     ├── uses: CampaignsModule
 │     └── uses: DeliveryModule
@@ -294,10 +296,10 @@ learning_runs          │ Monthly learning records
 npm install -g @nestjs/cli
 
 # Create project
-nest new briefos --strict --package-manager npm
+nest new Marketing Agent --strict --package-manager npm
 
 # Navigate into project
-cd briefos
+cd Marketing Agent
 ```
 
 ### 2. Install Core Dependencies
@@ -431,7 +433,7 @@ src/
 **What to build:**
 
 - `database.module.ts` — async MongoDB connection using config service
-- Ensure connection uses `briefos` database name
+- Ensure connection uses `Marketing Agent` database name
 - Add connection event logging (connected, error, disconnected)
 
 ### Step 1.3 — Companies Module
@@ -1931,8 +1933,8 @@ CMD ["node", "dist/main.js"]
 3. Clone repo + copy .env
 4. `docker compose up -d`
 5. Configure Nginx reverse proxy:
-   - `api.briefos.io` → `:3000`
-   - `n8n.briefos.io` → `:5678`
+   - `api.Marketing Agent.io` → `:3000`
+   - `n8n.Marketing Agent.io` → `:5678`
 6. SSL via Certbot
 7. Verify all services healthy
 
@@ -1951,380 +1953,123 @@ Run the security-reviewer.md agent from `.claude/agents/` against the full codeb
 
 ---
 
-## Phase 9 — Agent Teams Architecture (In Progress)
+## Phase 9 — Agent Teams Architecture
 
-> **Goal:** Replace sequential single-agent pipeline stages with collaborative agent teams that debate, challenge each other, and converge on better decisions. Uses Claude Code SDK experimental agent teams feature.
+> **Goal:** Add peer-to-peer agent debate to pipeline stages where collaborative decision-making produces better outcomes than single-agent scoring.
 >
-> **Build after:** Phase 8 (full pipeline running with real campaign data)
+> **Status:** Strategy Team built and verified. Other teams planned.
 >
-> **Requires:** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.local.json` — **already set**
+> **Requires:** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `.claude/settings.local.json` + tmux installed
 
-### How Agent Teams Actually Work
+### How Agent Teams Work (Verified April 2026)
 
-**Verified via testing (April 2026):**
+**Technical architecture:**
+- NestJS spawns `claude -p` CLI (NOT SDK `query()`) via `child_process.spawn`
+- CLI runs with `--permission-mode bypassPermissions` + `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+- Lead agent calls `TeamCreate` → spawns teammate via `Agent` tool (with `name`, `team_name`, `run_in_background: true`)
+- Teammate runs in a tmux session, communicates via file-based inboxes
+- CLI's `InboxPoller` re-enters the lead session when teammate messages arrive
+- `--output-format stream-json` enables real-time logging of all tool calls and messages
 
-- `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` unlocks `TeamCreate`, `Agent` (with `name` + `team_name` params), and `SendMessage` as tools available to any Claude agent session
-- NestJS calls `ClaudeService.runAgent()` **once** for the lead agent — that's it
-- The lead agent internally orchestrates the team using these tools:
-  1. `TeamCreate({ team_name: "scout-team" })` — creates team config
-  2. `Agent({ name: "reddit-scout", team_name: "scout-team", run_in_background: true, prompt: "..." })` — spawns each teammate
-  3. Teammates run in parallel, send results back via `SendMessage({ to: "team-lead", message: "..." })`
-  4. Lead synthesizes and returns final output to NestJS
+**Why CLI instead of SDK `query()`:**
+The SDK's `query()` runs headless without the InboxPoller — teammates spawn but messages never route back. The CLI's `-p` mode includes the full InboxPoller that detects active teammates and re-enters the lead session when messages arrive. Verified via 6 test runs in April 2026.
 
-```
-NestJS BullMQ job
-    ↓
-ClaudeService.runAgent({ agent: 'intelligence-lead', prompt: '...' })  ← single query() call
-    ↓
-Lead Agent (intelligence-lead.md system prompt)
-    ├── TeamCreate({ team_name: "scout-team" })
-    ├── Agent({ name: "reddit-scout", team_name: "scout-team", run_in_background: true })
-    ├── Agent({ name: "twitter-scout", team_name: "scout-team", run_in_background: true })
-    ├── Agent({ name: "youtube-scout", team_name: "scout-team", run_in_background: true })
-    │       ↓ scouts run in parallel, each does WebSearch/WebFetch
-    │       ↓ each calls SendMessage({ to: "team-lead", message: findings })
-    ├── Lead receives all responses, cross-validates, synthesizes
-    └── Returns structured JSON output
-    ↓
-query() returns to NestJS — writes to MongoDB
-```
+**What works vs. what doesn't:**
 
-**Key facts:**
-- No CLI subprocess needed from NestJS — `query()` is sufficient
-- `team-orchestrator.service.ts` is a thin wrapper — team logic lives in agent `.md` files
-- The `Agent` tool's `name` + `team_name` params are what enable peer-to-peer messaging
-- **One unconfirmed piece:** background teammate reliably receiving `SendMessage` mid-run — validate with Scout Team end-to-end test first
-
-### Overview
-
-Agent teams are groups of independent Claude Code sessions that share a task list and can message each other directly (peer-to-peer). Unlike subagents that only report back to a parent, agent teammates run in parallel, do independent work, and report findings back to the lead via `SendMessage`.
-
-**4 Agent Teams + 1 persistent single agent replace key pipeline stages:**
-
-| Team | Stage | Replaces | Why |
-|---|---|---|---|
-| **Scout Team** | Signal collection + synthesis | 4 scouts + coordinator (Phase 2) | Scouts cross-validate signals in real-time, kill manufactured hype before coordinator |
-| **Strategy Team** | Idea selection | Rule-based winner selection (Phase 2) | Ideas are debated rather than scored by rigid rules — budget goes to battle-tested ideas |
-| **Creative Team** | Copy production | Single copywriter (Phase 4) | Copy is iterated through critique rather than self-selected on first draft |
-| **Learning Team** | Bi-weekly learning | Separate creative + campaign learners (Phase 7) | Analysts discuss cross-domain insights neither would find alone |
-
-**1 Persistent Single Agent (enhanced):**
-
-| Agent | Stage | Enhancement |
+| Use Case | Works? | Why |
 |---|---|---|
-| **Performance Marketing Expert** | Every 6h audit | Replaces rule-based optimizer. Escalates to Diagnosis Team when uncertain |
+| **Debate/critique** (Strategy Team) | Yes | Both agents start with same context, react to each other. No timing issues. |
+| **Parallel collection** (Scout Team) | No | Scouts finish at different times, can't wait for each other's broadcasts. Lead exits before scouts respond. |
 
----
+**The pattern:** Agent teams work when all agents start with the **same data** and **debate it**. They don't work when agents need to independently collect data and then cross-validate.
 
-### Pipeline with Agent Teams
+### Strategy Team (Built + Verified)
 
-```
-WEEKLY PIPELINE (Monday 9 AM IST)
-═══════════════════════════════════════════════════════════
-
-SCOUT TEAM — Agent Team (4 agents)                ~15 min
-  Lead:      Intelligence Lead (also scouts Instagram)
-  Teammates: Reddit Scout, Twitter Scout, YouTube Scout
-
-  Flow:
-    1. Each scout collects signals from their platform (parallel tasks)
-    2. Scouts share findings — cross-validate across platforms
-    3. Filter manufactured hype ("this is brand-pushed, not organic")
-    4. Intelligence Lead synthesizes into ranked top 5-7 signals
-       with multi-platform confirmation scores
-
-  Input:  company config, recently-covered signals (dedup TTL)
-  Output: cross-validated signals + weekly_signals doc written
-          to company.signals.weekly for fast feedback loop
-      ↓
-Competitor Research (subagent, WebSearch + WebFetch)   ~5 min
-Market Research     (subagent, WebSearch + WebFetch)
-
-      ↓
-STRATEGY TEAM — Agent Team (3 agents)                ~15 min
-  Lead:      Strategist (uses past learnings + crossDomain insights)
-  Teammates: Contrarian, Customer Advocate
-
-  Flow:
-    1. Reads signals + research + company.signals.weekly (fast feedback)
-    2. Each teammate proposes their best campaign idea
-    3. Contrarian attacks weak ideas ("this trend is already saturated")
-    4. Customer Advocate grounds in ICP pain points
-    5. Strategist uses past learnings to pick winner
-    6. Consensus on single idea with battle-tested rationale
-
-  Input:  signals, research docs, company.learnings, company.signals.weekly
-  Output: 1 CreativeBrief + N IntelligenceBriefs with rationale
-      ↓
-Digest Writer (single agent) → Slack                   ~3 min
-
-      ↓
-CREATIVE TEAM — Agent Team (3 agents)                ~15 min
-  Lead:      Creative Director
-  Teammates: Copywriter, Brand Checker
-
-  Shared Task List:
-    Task 1: Draft 3 copy variants         → Copywriter
-    Task 2: Review + critique drafts      → Creative Director
-    Task 3: Compliance + Meta spec check  → Brand Checker
-    Task 4: Revise based on feedback      → Copywriter
-    Task 5: Final approval                → Creative Director
-
-  Flow (2-round iteration):
-    Round 1 — Copywriter drafts, Director critiques, Brand Checker flags
-    Round 2 — Copywriter revises, Director approves
-
-  Fallback: if team fails → existing CopyWriter single agent (unchanged)
-
-  Input:  winning brief, company.learnings.creative, brand guidelines
-  Output: 3 reviewed copy variants + primary selection
-
-      ↓
-Image + Video (parallel subagents)                     ~5 min
-      ↓
-TypeScript Safety Rails → Campaign Creator             ~5 min
-
-                                              TOTAL ~63 min
-
-═══════════════════════════════════════════════════════════
-EVERY 6 HOURS — Campaign Monitoring
-═══════════════════════════════════════════════════════════
-
-Campaign Auditor (single agent, Meta Ads MCP)          ~3 min
-      ↓
-TypeScript Safety Rails (hard limits — non-negotiable):
-  CTR < 0.3% after 72h → FORCE PAUSE
-  Frequency > 4.0      → FORCE PAUSE
-  Budget exceeded       → FORCE PAUSE
-      ↓
-Performance Marketing Expert (single agent)            ~5 min
-  Reviews metrics + company.signals.weekly + learnings
-  Actions: adjust budgets, shift ad sets, swap creatives
-  Writes: company.signals.weekly (rolling 7-day observations)
-      ↓
-  Confident? → execute actions
-  Uncertain? ↓
-
-DIAGNOSIS TEAM — Agent Team (3 agents, on-demand)    ~10 min
-  Lead:      Performance Analyst
-  Teammates: Creative Analyst, Audience Strategist
-
-  Flow:
-    1. Perf Analyst shares the anomaly ("ROAS dropped 40% overnight")
-    2. Creative Analyst evaluates ad-level signals (hook CTR, watch time)
-    3. Audience Strategist evaluates targeting signals (frequency, reach)
-    4. Team debates root cause — each tries to disprove others' theory
-    5. Consensus diagnosis + specific optimization actions
-
-  Input:  campaign metrics, creative package, audience config, learnings
-  Output: root cause + fix plan → executed by Perf Expert
-
-═══════════════════════════════════════════════════════════
-BI-WEEKLY — Every Other Monday, 3 AM IST
-═══════════════════════════════════════════════════════════
-
-LEARNING TEAM — Agent Team (3 agents)               ~20 min
-  Lead:      Marketing Strategist
-  Teammates: Creative Analyst, Campaign Analyst
-
-  Flow:
-    1. Creative Analyst reviews: hook styles, formats, CTAs, visual patterns
-    2. Campaign Analyst reviews: audiences, budgets, timing, ROAS patterns
-    3. Analysts share findings — look for cross-domain correlations
-       ("question hooks × broad audiences = 4.1x ROAS — neither of us
-        would have found this alone")
-    4. Strategist synthesizes into actionable cross-domain insights
-    5. Update all learnings + regenerate ALL agent prompts
-
-  Input:  all campaigns + creatives + briefs from last 2 weeks
-          + company.signals.weekly observations from Perf Expert
-  Output:
-    company.learnings.creative   (updated)
-    company.learnings.campaign   (updated)
-    company.learnings.crossDomain (NEW — cross-domain combos)
-    Prompt regeneration for all 17 agent definitions
-```
-
----
-
-### Fast Feedback Loop (New Data Flow)
+Replaces the single-agent Idea Pool + rule-based `selectWinner()` with a 2-agent peer-to-peer debate.
 
 ```
-Performance Marketing Expert (every 6h)
-  → writes: company.signals.weekly
-    (rolling 7-day observations: "urgency hooks declining", "broad CTR up")
-        ↓
-Scout Team reads company.signals.weekly before synthesis
-Strategy Team reads company.signals.weekly before debate
-Learning Team reads company.signals.weekly as additional input
-        ↓
-Next week's campaign incorporates this week's live signal data
-without waiting for bi-weekly Learning Team
+NestJS (Phase D of pipeline)
+    ↓
+StrategyTeamService.run()
+    ↓
+child_process.spawn('claude', ['-p', prompt, '--permission-mode', 'bypassPermissions'])
+    ↓
+┌──────────────────────────────────────────────────────┐
+│  Strategist (team lead)         Contrarian           │
+│       │                              │               │
+│  R1:  │── proposes 5 ideas ────────▶│               │
+│       │                              │── challenges/ │
+│       │◀── endorses each idea ──────│   endorses    │
+│  R2:  │── defends or concedes ─────▶│               │
+│       │                              │── concedes/   │
+│       │◀── or doubles down ─────────│   doubles down│
+│       │        ...until consensus (max 5 rounds)     │
+│       │                                              │
+│  Winner = idea that survived the debate              │
+└──────────────────────────────────────────────────────┘
+    ↓
+Returns: 5 briefs + 1 winner + debateLog + debateRationale
+Saves to: creative_briefs (with debate history) + intelligence_briefs
+Cost: ~$1 per debate run
 ```
 
----
+**Input:** Coordinator signals + competitor research + market research + company.learnings
+**Output:** 5 battle-tested campaign briefs, 1 selected winner with debate rationale
 
-### Agent Definitions Required (`.claude/agents/`)
+**What the debate produces that rule-based selection can't:**
+- Contrarian challenges saturated ideas ("this angle is what AstroTalk already did")
+- Strategist defends or concedes based on counter-arguments
+- Ideas get simplified mid-debate (e.g. 5-language execution → 2-language after challenge)
+- Winner emerges from genuine argument, not rigid priority rules
+- Full debate history saved to MongoDB for audit + learning
 
-17 reusable agent definitions. Each is a markdown file with system prompt, tools, and model. Referenced by name when spawning teammates.
-
-| File | Role | Used In | Tools |
-|---|---|---|---|
-| `intelligence-lead.md` | Scout Team lead + Instagram scout | Scout Team | WebSearch, WebFetch |
-| `reddit-scout.md` | Reddit signal collector | Scout Team | WebSearch, WebFetch |
-| `twitter-scout.md` | Twitter/X signal collector | Scout Team | WebSearch, WebFetch |
-| `youtube-scout.md` | YouTube signal collector | Scout Team | WebSearch, WebFetch |
-| `strategist.md` | Strategy Team lead | Strategy Team | None |
-| `contrarian.md` | Challenges ideas | Strategy Team | None |
-| `customer-advocate.md` | ICP perspective | Strategy Team | None |
-| `creative-director.md` | Creative Team lead | Creative Team | None |
-| `copywriter.md` | Ad copy drafting | Creative Team | None |
-| `brand-checker.md` | Compliance + Meta spec review | Creative Team | None |
-| `performance-analyst.md` | Diagnosis Team lead | Diagnosis Team | None |
-| `creative-analyst.md` | Ad creative pattern analysis | Diagnosis + Learning | None |
-| `audience-strategist.md` | Targeting pattern analysis | Diagnosis Team | None |
-| `marketing-strategist.md` | Learning Team lead | Learning Team | None |
-| `campaign-analyst.md` | Campaign data analysis | Learning Team | None |
-| `perf-marketing-expert.md` | Ongoing campaign optimization | Every 6h (single) | Meta MCP |
-
----
-
-### New Files to Create
+### Files (Built)
 
 ```
 src/teams/
-  team-orchestrator.service.ts    — Thin wrapper: calls ClaudeService.runAgent() with lead agent
-  team-fallback.service.ts        — Fallback to single-agent if team fails (timeout or error)
-
-.claude/agents/
-  intelligence-lead.md
-  reddit-scout.md
-  twitter-scout.md
-  youtube-scout.md
-  strategist.md
-  contrarian.md
-  customer-advocate.md
-  creative-director.md
-  copywriter.md
-  brand-checker.md
-  performance-analyst.md
-  creative-analyst.md
-  audience-strategist.md
-  marketing-strategist.md
-  campaign-analyst.md
-  perf-marketing-expert.md
+  strategy-team.service.ts        — Strategist + Contrarian debate via CLI
 ```
 
-### NestJS Implementation Pattern
-
-```typescript
-// team-orchestrator.service.ts — thin wrapper, no team logic here
-async runScoutTeam(company: Company): Promise<ScoutOutput> {
-  return this.claudeService.runAgent({
-    agent: 'intelligence-lead',   // loads .claude/agents/intelligence-lead.md
-    prompt: this.liveContextBuilder.buildScoutPrompt(company),
-    allowedTools: ['TeamCreate', 'Agent', 'SendMessage', 'WebSearch', 'WebFetch'],
-  });
-  // Team creation, teammate spawning, SendMessage — all happens inside intelligence-lead.md
-}
-
-// intelligence-lead.md system prompt instructs Claude to:
-// 1. TeamCreate({ team_name: "scout-team" })
-// 2. Agent({ name: "reddit-scout", team_name: "scout-team", run_in_background: true, prompt: "..." })
-// 3. Agent({ name: "twitter-scout", ... }), Agent({ name: "youtube-scout", ... })
-// 4. Wait for SendMessage responses from each teammate
-// 5. Cross-validate and return structured JSON
-```
-
-### Files to Update
+### Files Updated
 
 | File | Change |
 |---|---|
-| `claude/claude.types.ts` | Add team agent types + PERFORMANCE_MARKETING_EXPERT |
-| `pipeline/scouts/scout-base.service.ts` | Replace with `TeamOrchestratorService.runScoutTeam()` |
-| `pipeline/coordinator/coordinator.service.ts` | Merged into `intelligence-lead.md` system prompt |
-| `pipeline/idea-pool/idea-pool.service.ts` | Replace winner selection with Strategy Team |
-| `creative/copy-writer/copy-writer.service.ts` | Wrap with Creative Team, fallback on failure |
-| `campaigns/campaign-auditor/campaign-optimizer.service.ts` | Replace rule-based with Perf Expert |
-| `learning/campaign-learning.service.ts` | Merge into Learning Team (future) |
-| `learning/creative-learning.service.ts` | Merge into Learning Team (future) |
-| `scheduler/scheduler.service.ts` | Add bi-weekly Learning Team cron |
-| `companies/schemas/company.schema.ts` | Add `learnings.crossDomain`, `signals.weekly` fields |
-| `.claude/settings.local.json` | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — **already set, verified working** |
+| `claude/claude.types.ts` | Added `SCOUT_TEAM_LEAD`, `STRATEGY_TEAM_LEAD`, `TEAM_LEAD_AGENTS` |
+| `pipeline/pipeline-orchestrator.service.ts` | Phase D uses `StrategyTeamService` instead of `IdeaPoolService` |
+| `pipeline/pipeline.module.ts` | Registered `StrategyTeamService` |
+| `pipeline/schemas/creative-brief.schema.ts` | Added `debateRounds`, `debateLog`, `debateRationale` fields |
+| `companies/schemas/company.schema.ts` | Added `signals: CompanySignals` field |
+| `companies/schemas/company.types.ts` | Added `CompanySignals`, `WeeklySignals`, `intelligenceLead` prompt |
 
----
+### Future Teams (Planned, not built)
 
-### New MongoDB Schema Fields
-
-```typescript
-// company.schema.ts additions
-learnings: {
-  creative: { ... },       // existing
-  campaign: { ... },       // existing
-  crossDomain: {           // NEW — cross-domain combos from Learning Team
-    insights: [{
-      combo: string,       // e.g. "question_hook × broad_audience"
-      avgROAS: number,
-      sampleSize: number,
-      confidence: 'low' | 'medium' | 'high',
-      recommendation: string,
-    }],
-    version: number,
-    lastUpdated: Date,
-  }
-},
-signals: {
-  weekly: {                // NEW — rolling 7d observations from Perf Expert
-    observations: string[],
-    lastUpdated: Date,
-  }
-}
-```
-
----
-
-### Cost Summary
-
-| Component | Type | Frequency | Est. Cost/Week |
+| Team | Stage | Status | Why agent teams fit |
 |---|---|---|---|
-| Scout Team | Agent Team (4) | 1x | $4–8 |
-| Research | Subagents (2) | 1x | $0.50 |
-| Strategy Team | Agent Team (3) | 1x | $2–6 |
-| Digest Writer | Single (1) | 1x | $0.50 |
-| Creative Team | Agent Team (3) | 1x | $2–6 |
-| Image + Video | Subagents (2) | 1x | $0.50 |
-| Campaign Creator | Single (1) | 1x | $0.50 |
-| Auditor + Perf Expert | Single (1) | 28x | $2–4 |
-| Diagnosis Team | Agent Team (3) | ~2x/week | $4–12 |
-| Learning Team | Agent Team (3) | 0.5x/week | $1–3 |
-| **Total** | | | **$18–45/week** |
-
----
+| **Creative Team** | Copy production | Planned | Creative Director + Copywriter + Brand Checker iterate through critique rounds |
+| **Diagnosis Team** | Campaign troubleshooting | Planned | Performance Analyst + Creative Analyst + Audience Strategist debate root cause of underperformance |
+| **Learning Team** | Bi-weekly learning | Planned | Creative Analyst + Campaign Analyst find cross-domain insights neither would discover alone |
 
 ### Phase 9 Exit Criteria
 
-- [x] `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` confirmed in settings — verified April 2026
+- [x] `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` confirmed in settings
 - [x] `TeamCreate`, `Agent` (with `name`+`team_name`), `SendMessage` tools confirmed available
-- [ ] Scout Team end-to-end test — validate background teammate receives `SendMessage` mid-run
-- [ ] All 16 agent definition files created in `.claude/agents/`
-- [ ] Scout Team runs end-to-end, cross-validates signals correctly
-- [ ] Strategy Team debates and selects a winning idea with rationale
-- [ ] Creative Team iterates copy through 2 rounds and approves
-- [ ] Creative Team falls back to single copywriter on team failure
-- [ ] Performance Marketing Expert writes `company.signals.weekly` after every audit
-- [ ] Diagnosis Team activates only when Perf Expert flags uncertainty
-- [ ] Learning Team runs bi-weekly and produces `crossDomain` insights
-- [ ] `company.learnings.crossDomain` schema live and populated
-- [ ] `company.signals.weekly` read by Scout Team and Strategy Team
-- [ ] Prompt regeneration updates all 16+ prompts after Learning Team run
-- [ ] Cost tracked per team activation in `usage_logs`
+- [x] tmux installed for teammate spawning
+- [x] CLI `-p` mode confirmed working for agent teams (SDK `query()` does not work)
+- [x] Strategy Team runs end-to-end with peer-to-peer debate (2+ rounds)
+- [x] Strategy Team produces battle-tested ideas with debate rationale
+- [x] Debate history (debateLog, debateRationale, debateRounds) saved to creative_briefs
+- [x] Strategy Team integrated into pipeline (Phase D replacement)
+- [x] Cost tracked per team activation in `usage_logs`
+- [ ] Creative Team built and integrated
+- [ ] Diagnosis Team built and integrated
+- [ ] Learning Team built and integrated
 
 ---
 
 ## Project Structure (Actual — as built)
 
 ```
-briefos/
+Marketing Agent/
 ├── src/
 │   ├── main.ts
 │   ├── app.module.ts
@@ -2380,9 +2125,7 @@ briefos/
 │   │       └── digest.schema.ts
 │   │
 │   ├── teams/                                ← Phase 9: Agent Teams
-│   │   ├── teams.module.ts
-│   │   ├── team-orchestrator.service.ts      ← 1 query() → lead runs team
-│   │   └── team-fallback.service.ts          ← Fallback decision logic
+│   │   └── strategy-team.service.ts          ← Strategist vs Contrarian debate (CLI)
 │   │
 │   ├── creative/
 │   │   ├── creative.module.ts
@@ -2440,11 +2183,7 @@ briefos/
 │   ├── CLAUDE.md
 │   ├── mcp.json
 │   ├── settings.local.json         (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)
-│   ├── agents/
-│   │   ├── intelligence-lead.md     ← Scout Team lead (Phase 9, built)
-│   │   ├── reddit-scout.md          ← Scout Team (Phase 9, built)
-│   │   ├── twitter-scout.md         ← Scout Team (Phase 9, built)
-│   │   └── youtube-scout.md         ← Scout Team (Phase 9, built)
+│   ├── agents/                          ← (empty — Strategy Team prompts are inline in strategy-team.service.ts)
 │   │   # Planned (not yet created):
 │   │   # strategist.md, contrarian.md, customer-advocate.md (Strategy Team)
 │   │   # creative-director.md, copywriter.md, brand-checker.md (Creative Team)
@@ -2494,7 +2233,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 # ──────────────────────────────────────
 # MongoDB
 # ──────────────────────────────────────
-MONGO_URI=mongodb://localhost:27017/briefos
+MONGO_URI=mongodb://localhost:27017/Marketing Agent
 
 # ──────────────────────────────────────
 # Redis (BullMQ)
@@ -2504,7 +2243,7 @@ REDIS_URL=redis://localhost:6379
 # ──────────────────────────────────────
 # n8n Delivery
 # ──────────────────────────────────────
-N8N_WEBHOOK_URL=https://n8n.yourdomain.com/webhook/briefos
+N8N_WEBHOOK_URL=https://n8n.yourdomain.com/webhook/Marketing Agent
 N8N_WEBHOOK_SECRET=your-hmac-secret
 
 # ──────────────────────────────────────
@@ -2537,7 +2276,7 @@ META_ADS_ACCOUNT_ID=
 # ──────────────────────────────────────
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
-AWS_S3_BUCKET=briefos-creatives
+AWS_S3_BUCKET=Marketing Agent-creatives
 AWS_REGION=ap-south-1
 
 # ──────────────────────────────────────
@@ -2557,7 +2296,7 @@ YOUTUBE_API_KEY=...
 version: '3.8'
 
 services:
-  briefos:
+  Marketing Agent:
     build: .
     ports:
       - "3000:3000"
@@ -2841,9 +2580,9 @@ Friday:
   [ ] Code review (use typescript-reviewer.md agent)
   [ ] Verify exit criteria met
   [ ] Document any decisions or deviations
-  [ ] Update BRIEFOS.md if architecture changed
+  [ ] Update Marketing Agent.md if architecture changed
 ```
 
 ---
 
-*This document is the single source of truth for building BriefOS. Update it as decisions change.*
+*This document is the single source of truth for building Marketing Agent. Update it as decisions change.*

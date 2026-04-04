@@ -49,6 +49,16 @@ export class CreativeBrief {
 
   @Prop({ default: '' })
   selectionReason: string;
+
+  // Phase 9 — Strategy Team debate data
+  @Prop({ type: Number, default: null })
+  debateRounds: number;
+
+  @Prop({ type: [Object], default: [] })
+  debateLog: { round: number; from: string; summary: string }[];
+
+  @Prop({ type: String, default: null })
+  debateRationale: string;
 }
 
 export const CreativeBriefSchema = SchemaFactory.createForClass(CreativeBrief);

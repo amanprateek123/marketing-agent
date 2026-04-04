@@ -23,8 +23,7 @@ import { DigestWriterService } from './digest-writer.service';
 import { PipelineOrchestratorService } from './pipeline-orchestrator.service';
 import { PipelineController } from './pipeline.controller';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
-import { TeamOrchestratorService } from '../teams/team-orchestrator.service';
-import { TeamFallbackService } from '../teams/team-fallback.service';
+import { StrategyTeamService } from '../teams/strategy-team.service';
 
 @Module({
   imports: [
@@ -55,8 +54,7 @@ import { TeamFallbackService } from '../teams/team-fallback.service';
     IdeaPoolService,
     DigestWriterService,
     PipelineOrchestratorService,
-    TeamOrchestratorService,
-    TeamFallbackService,
+    StrategyTeamService,
   ],
   exports: [
     PipelineOrchestratorService,
