@@ -2094,8 +2094,8 @@ src/teams/
 | **Strategy Team** | D — Idea selection | Strategist + Contrarian | ~$1 | **Built** |
 | **Creative Team** | F — Creative production | Creative Director + Brand Compliance | ~$0.82 | **Built** |
 | **Campaign Review Team** | G — Pre-launch review | Campaign Strategist + Performance Analyst | ~$0.62 | **Built** |
-| **Diagnosis Team** | Monitoring — Troubleshooting | TBD | TBD | Planned |
-| **Learning Team** | Monthly — Pattern extraction | TBD | TBD | Planned |
+| **Diagnosis Team** | Monitoring — Troubleshooting | Performance Analyst + Creative Analyst | ~$0.60 | Planned — build after 5+ live campaigns with metrics |
+| **Learning Team** | Monthly — Pattern extraction | Marketing Strategist + Campaign Analyst | ~$1.00 | Planned — build after 30 days of campaign data |
 
 Total agent team cost per pipeline run: **~$2.44**
 
@@ -2118,8 +2118,8 @@ Total agent team cost per pipeline run: **~$2.44**
 - [x] Campaign saved as `pending_approval` → Slack notification with full review
 - [x] Human approval required via `POST /campaigns/:id/approve` before Meta launch
 - [x] Rejected campaigns notified to Slack with reason + debate log
-- [ ] Diagnosis Team built and integrated
-- [ ] Learning Team built and integrated
+- [ ] Diagnosis Team — build after 5+ live campaigns. Activates when Campaign Auditor flags uncertainty (e.g. "ROAS dropped 40% overnight — why?"). Performance Analyst + Creative Analyst debate root cause: is it creative fatigue, audience saturation, or timing? Uses same CLI peer-to-peer pattern. Prerequisite: real campaign metrics in MongoDB.
+- [ ] Learning Team — build after 30 days of campaign data. Runs bi-weekly. Marketing Strategist + Campaign Analyst extract cross-domain patterns (e.g. "question hooks × broad audiences = 4.1x ROAS"). Updates company.learnings + regenerates all agent prompts. Prerequisite: 10+ completed campaigns with performance data.
 
 ---
 
