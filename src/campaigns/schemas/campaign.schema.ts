@@ -19,7 +19,7 @@ export class Campaign {
   @Prop({ default: '' })
   creativePackageId: string;
 
-  @Prop({ index: true, default: '' })
+  @Prop({ index: true, sparse: true, default: '' })
   metaCampaignId: string;
 
   @Prop({ required: true, default: 'pending_approval' })

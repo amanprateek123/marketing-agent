@@ -138,7 +138,7 @@ export class CreativeProducerService {
       if (!allFailed) {
         const slackWebhook = company.delivery?.slackWebhook;
         if (slackWebhook) {
-          const selectedCopy = copyPackage?.variants[copyPackage.selectedIndex];
+          const selectedCopy = copyPackage?.variants?.[copyPackage?.selectedIndex ?? 0];
           const copyLine = selectedCopy
             ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
             : '';

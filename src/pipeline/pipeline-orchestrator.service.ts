@@ -15,7 +15,7 @@ import { RedditScout } from './scouts/reddit.scout';
 import { TwitterScout } from './scouts/twitter.scout';
 import { YoutubeScout } from './scouts/youtube.scout';
 import { CoordinatorService, CoordinatorResult } from './coordinator.service';
-import { IdeaPoolResult } from './idea-pool.service';
+import { IdeaPoolService, IdeaPoolResult } from './idea-pool.service';
 import { DigestWriterService } from './digest-writer.service';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
@@ -44,6 +44,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
     private readonly campaignCreatorService: CampaignCreatorService,
     private readonly campaignsService: CampaignsService,
     private readonly strategyTeam: StrategyTeamService,
+    private readonly ideaPoolService: IdeaPoolService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
     @InjectModel(ScoutOutput.name)
@@ -129,8 +130,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
     return { runId, status: 'pending', resumed: false };
   }
 
-  async getStatus(runId: string): Promise<PipelineRunDocument | null> {
-    return this.pipelineRunModel.findOne({ runId }).lean().exec();
+  async getStatus(tenantId: string, runId: string): Promise<PipelineRunDocument | null> {
+    return this.pipelineRunModel.findOne({ tenantId, runId }).lean().exec();
   }
 
   async regenerateDigest(tenantId: string, runId: string): Promise<void> {
@@ -271,7 +272,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
         .lean()
         .exec();
 
-      let ideaPoolResult: IdeaPoolResult;
+      let ideaPoolResult!: IdeaPoolResult;
 
       if (existingBrief) {
         this.logger.log(`[${runId}] Phase D: skipped — idea pool already complete`);
@@ -298,10 +299,37 @@ export class PipelineOrchestratorService implements OnModuleInit {
         };
       } else {
         await update('idea_pool_running', 'idea_pool');
-        this.logger.log(`[${runId}] Phase D: Strategy Team (idea generation + debate)`);
-        ideaPoolResult = await this.strategyTeam.run(
-          company, runId, coordinatorResult, competitorResearch, marketResearch,
-        );
+
+        // Try Strategy Team (peer-to-peer debate) with retry + fallback
+        let teamSucceeded = false;
+        for (let attempt = 1; attempt <= 2 && !teamSucceeded; attempt++) {
+          try {
+            this.logger.log(`[${runId}] Phase D: Strategy Team attempt ${attempt}/2`);
+            const teamResult = await this.strategyTeam.run(
+              company, runId, coordinatorResult, competitorResearch, marketResearch,
+            );
+
+            // Validate: did a real debate happen?
+            if (teamResult.briefs.length > 0 && teamResult.selectedBriefId) {
+              ideaPoolResult = teamResult;
+              teamSucceeded = true;
+              this.logger.log(`[${runId}] Phase D done (Strategy Team) — ${teamResult.briefs.length} ideas, winner selected`);
+            } else {
+              this.logger.warn(`[${runId}] Strategy Team returned empty/invalid result on attempt ${attempt}`);
+            }
+          } catch (err: any) {
+            this.logger.warn(`[${runId}] Strategy Team attempt ${attempt} failed: ${err.message}`);
+          }
+        }
+
+        // Fallback: single-agent IdeaPool
+        if (!teamSucceeded) {
+          this.logger.warn(`[${runId}] Phase D: falling back to single-agent IdeaPool`);
+          ideaPoolResult = await this.ideaPoolService.run(
+            company, runId, coordinatorResult, competitorResearch, marketResearch,
+          );
+          this.logger.log(`[${runId}] Phase D done (IdeaPool fallback) — ${ideaPoolResult.briefs.length} ideas`);
+        }
       }
 
       // ── Phase E: Digest ───────────────────────────────────────────────────

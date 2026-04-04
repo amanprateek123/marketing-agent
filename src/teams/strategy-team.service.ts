@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
+import { runTeamViaCli, CliResult } from './team-cli.util';
 import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
@@ -11,16 +11,6 @@ import { CreativeBrief, CreativeBriefDocument } from '../pipeline/schemas/creati
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CoordinatorResult } from '../pipeline/coordinator.service';
 import { IdeaPoolResult } from '../pipeline/idea-pool.service';
-
-interface CliResult {
-  result: string;
-  total_cost_usd: number;
-  num_turns: number;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-  };
-}
 
 /**
  * Strategy Team — 2-agent debate (Strategist + Contrarian) via CLI.
@@ -62,7 +52,8 @@ export class StrategyTeamService {
       company, runId, coordinatorResult, competitorResearch, marketResearch, ideasPerRun,
     );
 
-    const cliResult = await this.runTeamViaCli(prompt);
+    const teamName = `strategy-${runId}`;
+    const cliResult = await runTeamViaCli(prompt, teamName, 'Strategy');
 
     // Log usage
     await this.usageLogModel.create({
@@ -223,7 +214,7 @@ STEP 5: Continue the debate. The Contrarian may concede, double down, or propose
     b) You've done 5 rounds — make your final call
   - Each round: read their message, respond with counter-arguments or agreements
 
-STEP 6: Once debate is settled, call TeamDelete to clean up.
+STEP 6: Once debate is settled, call TeamDelete to clean up. If TeamDelete fails, SKIP IT — do not retry. Cleanup will be handled automatically. Proceed directly to the output.
 
 STEP 7: Return ONLY this JSON (no markdown, no explanation):
 {
@@ -287,129 +278,6 @@ RULES:
 - The Contrarian MUST see all ideas before you pick a winner
 - Do NOT pick the winner before the debate — let it emerge from the argument
     `.trim();
-  }
-
-  private runTeamViaCli(prompt: string): Promise<CliResult> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(
-        'claude',
-        [
-          '-p', prompt,
-          '--output-format', 'stream-json',
-          '--verbose',
-          '--permission-mode', 'bypassPermissions',
-          '--dangerously-skip-permissions',
-        ],
-        {
-          env: {
-            ...process.env,
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-          },
-          cwd: process.cwd(),
-        },
-      );
-
-      let lastResult: CliResult | null = null;
-      let buffer = '';
-
-      child.stdout.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line);
-            this.logStreamMessage(msg);
-
-            if (msg.type === 'result') {
-              lastResult = {
-                result: msg.result ?? '',
-                total_cost_usd: msg.total_cost_usd ?? 0,
-                num_turns: msg.num_turns ?? 0,
-                usage: {
-                  input_tokens: msg.usage?.input_tokens ?? 0,
-                  output_tokens: msg.usage?.output_tokens ?? 0,
-                },
-              };
-            }
-          } catch {
-            // non-JSON line
-          }
-        }
-      });
-
-      child.stderr.on('data', (chunk: Buffer) => {
-        const text = chunk.toString().trim();
-        if (text) this.logger.warn(`[CLI stderr] ${text}`);
-      });
-
-      const timeout = setTimeout(() => {
-        child.kill('SIGTERM');
-        reject(new Error('Strategy Team timed out after 10 minutes'));
-      }, 10 * 60 * 1000);
-
-      child.on('close', (code) => {
-        clearTimeout(timeout);
-        this.logger.log(`[Strategy Team] CLI process exited with code ${code}`);
-        if (lastResult) {
-          resolve(lastResult);
-        } else {
-          reject(new Error(`CLI exited with code ${code} and no result`));
-        }
-      });
-
-      child.on('exit', (code) => {
-        clearTimeout(timeout);
-        if (lastResult && !child.killed) {
-          resolve(lastResult);
-        }
-      });
-
-      child.on('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-  }
-
-  private logStreamMessage(msg: any): void {
-    const type = msg.type;
-    const subtype = msg.subtype ?? '';
-
-    if (type === 'system' && subtype === 'init') {
-      this.logger.log(`[Strategy] Session started | model: ${msg.model}`);
-      return;
-    }
-
-    if (type === 'assistant') {
-      const blocks: any[] = msg.message?.content ?? [];
-      for (const block of blocks) {
-        if (block.type === 'tool_use') {
-          const input = JSON.stringify(block.input ?? {}).slice(0, 150);
-          this.logger.log(`[Strategy] 🔧 ${block.name}(${input})`);
-        }
-        if (block.type === 'text' && block.text?.trim()) {
-          this.logger.log(`[Strategy] 💬 ${block.text.slice(0, 250)}`);
-        }
-      }
-      return;
-    }
-
-    if (type === 'user') {
-      const toolResult = msg.tool_use_result;
-      if (toolResult) {
-        if (toolResult.team_name || toolResult.from) {
-          this.logger.log(`[Strategy] 📨 ${JSON.stringify(toolResult).slice(0, 250)}`);
-        }
-      }
-      return;
-    }
-
-    if (type === 'result') {
-      this.logger.log(`[Strategy] 🏁 Result: turns=${msg.num_turns} cost=$${msg.total_cost_usd?.toFixed(4)} status=${subtype}`);
-    }
   }
 
   private parseOutput(content: string): any {

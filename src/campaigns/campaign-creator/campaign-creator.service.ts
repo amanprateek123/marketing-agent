@@ -54,52 +54,67 @@ export class CampaignCreatorService {
       `Safety checks passed — running campaign review: tenantId=${company.tenantId} briefId=${brief.briefId}`,
     );
 
-    // ── Campaign Review Team — debate before launch ──────────────────────────
+    // ── Campaign Review Team — debate before launch (retry + fallback) ─────
     let finalBudget = brief.suggestedBudget;
     let review: CampaignReviewOutput | null = null;
-    try {
-      review = await this.campaignReviewTeam.review(
-        {
-          topic: brief.topic,
-          angle: brief.angle,
-          platform: brief.platform,
-          format: brief.format,
-          audience: brief.audience,
-          hook: brief.hook,
-          keyMessage: brief.keyMessage,
-          conversionBridge: brief.conversionBridge,
-          suggestedBudget: brief.suggestedBudget,
-        },
-        creativePackage,
-        company,
-        runId,
-      );
 
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        this.logger.log(`Campaign Review Team attempt ${attempt}/2 | tenant: ${company.tenantId}`);
+        review = await this.campaignReviewTeam.review(
+          {
+            topic: brief.topic,
+            angle: brief.angle,
+            platform: brief.platform,
+            format: brief.format,
+            audience: brief.audience,
+            hook: brief.hook,
+            keyMessage: brief.keyMessage,
+            conversionBridge: brief.conversionBridge,
+            suggestedBudget: brief.suggestedBudget,
+          },
+          creativePackage,
+          company,
+          runId,
+        );
+
+        // Validate: did a real review happen?
+        if (review && review.debateRounds > 0) {
+          break; // valid review
+        }
+
+        this.logger.warn(`Campaign Review returned invalid result on attempt ${attempt}`);
+        review = null;
+      } catch (err: any) {
+        this.logger.warn(`Campaign Review attempt ${attempt} failed: ${err.message}`);
+        review = null;
+      }
+    }
+
+    if (review) {
       if (!review.approved) {
         this.logger.warn(`Campaign Review Team rejected campaign: ${review.debateRationale}`);
 
-        // Notify Slack about rejection
         const slackWebhook = company.delivery?.slackWebhook;
         if (slackWebhook) {
           await this.slackService.sendMessage(
             slackWebhook,
             company.tenantId,
-            `❌ *Campaign Rejected by Review Team*\n\n*Topic:* ${brief.topic}\n*Budget:* ₹${brief.suggestedBudget}\n\n*Reason:* ${review.debateRationale}\n\n*Debate Log:*\n${review.debateLog.map(d => `• R${d.round} [${d.from}]: ${d.summary}`).join('\n')}`,
+            `❌ *Campaign Rejected by Review Team*\n\n*Topic:* ${brief.topic}\n*Budget:* ₹${brief.suggestedBudget}\n\n*Reason:* ${review.debateRationale}\n\n*Debate Log:*\n${review.debateLog?.map(d => `• R${d.round} [${d.from}]: ${d.summary}`).join('\n') ?? 'No debate log'}`,
           );
         }
 
         throw new Error(`Campaign rejected by review team: ${review.debateRationale}`);
       }
 
-      if (review.adjustments.budgetAdjusted) {
+      if (review?.adjustments?.budgetAdjusted) {
         finalBudget = review.adjustments.recommendedBudget;
         this.logger.log(`Budget adjusted: ₹${brief.suggestedBudget} → ₹${finalBudget}`);
       }
 
       this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds}`);
-    } catch (reviewErr: any) {
-      if (reviewErr.message.includes('rejected by review team')) throw reviewErr;
-      this.logger.warn(`Campaign Review Team failed, proceeding with original config: ${reviewErr.message}`);
+    } else {
+      this.logger.warn(`Campaign Review Team failed after 2 attempts — proceeding with original budget ₹${finalBudget}`);
     }
 
     // ── Save as pending_approval — do NOT launch yet ─────────────────────────
@@ -154,13 +169,13 @@ export class CampaignCreatorService {
     campaignId: string,
     company: CompanyDocument,
   ): Promise<CampaignDocument> {
-    const campaign = await this.campaignModel.findById(campaignId).exec();
-    if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+    const campaign = await this.campaignModel.findOne({
+      _id: campaignId,
+      tenantId: company.tenantId,
+    }).exec();
+    if (!campaign) throw new Error(`Campaign ${campaignId} not found for tenant ${company.tenantId}`);
     if (campaign.status !== 'pending_approval') {
       throw new Error(`Campaign ${campaignId} is not pending approval (status: ${campaign.status})`);
-    }
-    if (campaign.tenantId !== company.tenantId) {
-      throw new Error('Tenant mismatch');
     }
 
     const systemPrompt = company.prompts?.campaignCreator ?? CAMPAIGN_CREATOR_FALLBACK_PROMPT;
@@ -216,7 +231,7 @@ META_CAMPAIGN_ID: <id>`,
       `Campaign LAUNCHED: tenantId=${company.tenantId} metaCampaignId=${metaCampaignId} budget=₹${campaign.budget}`,
     );
 
-    return (await this.campaignModel.findById(campaignId).lean().exec()) as any;
+    return (await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).lean().exec()) as any;
   }
 
   private buildApprovalMessage(

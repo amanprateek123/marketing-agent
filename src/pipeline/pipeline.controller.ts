@@ -57,12 +57,15 @@ export class PipelineController {
   }
 
   /**
-   * GET /api/v1/pipeline/runs/:runId
+   * GET /api/v1/pipeline/:tenantId/runs/:runId
    * Poll for pipeline status.
    */
-  @Get('runs/:runId')
-  async getStatus(@Param('runId') runId: string) {
-    const run = await this.orchestrator.getStatus(runId);
+  @Get(':tenantId/runs/:runId')
+  async getStatus(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+  ) {
+    const run = await this.orchestrator.getStatus(tenantId, runId);
     if (!run) throw new NotFoundException(`Run ${runId} not found`);
     return run;
   }
