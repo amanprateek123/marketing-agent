@@ -106,11 +106,17 @@ export interface CompanySignals {
   weekly: WeeklySignals;
 }
 
+export type CampaignStrategy = 'conservative' | 'balanced' | 'experimental';
+
 export interface PipelineConfig {
   mode: 'daily' | 'weekly';
   ideasPerRun: number;       // how many ideas to generate per run (1-10)
   autoSwitch: boolean;       // auto switch daily → weekly after cold start
   coldStartDays: number;     // days to run daily before switching (default 14)
+  campaignStrategy: CampaignStrategy;  // controls risk tolerance for all teams
+  // conservative: only proven winners — hooks, audiences, formats with data
+  // balanced (default): proven winners + 1 new test idea per run
+  // experimental: all new ideas, maximum testing, higher risk
 }
 
 export interface CreativeLearnings {

@@ -306,6 +306,14 @@ ${learningsContext}
 
 ${liveContext}
 
+CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
+${(() => {
+  const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
+  if (strategy === 'conservative') return `- CONSERVATIVE MODE: Only use proven winners. Every idea must use a hook style, audience segment, or format with past performance data (confidence: medium or high). No untested ideas. Prioritize lowest CPA over highest reach.`;
+  if (strategy === 'experimental') return `- EXPERIMENTAL MODE: Prioritize new ideas and untested angles. At least 3 of ${ideasPerRun} ideas should use new hook styles, new audience segments, or new formats. Accept higher risk for higher potential. Test budget should be 30-40% of total.`;
+  return `- BALANCED MODE: Mix proven winners with new tests. At least 2 ideas should use proven hooks/audiences/formats. At least 1 idea should test something new (new hook style, new audience, or new angle). This is the default — steady ROAS + continuous learning.`;
+})()}
+
 RULES:
 - EVERY idea must sell a specific product from the catalog above
 - Match trends to products using their trendKeywords — if a trend doesn't connect to any product, skip it

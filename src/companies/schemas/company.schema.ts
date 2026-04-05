@@ -146,6 +146,7 @@ export class Company {
       ideasPerRun: 5,
       autoSwitch: true,
       coldStartDays: 14,
+      campaignStrategy: 'balanced',
     }),
   })
   pipelineConfig: PipelineConfig;

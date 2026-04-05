@@ -278,6 +278,14 @@ IMPORTANT — adSets rules:
 
 ${liveContext}
 
+CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
+${(() => {
+  const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
+  if (strategy === 'conservative') return `- CONSERVATIVE MODE: Start with minimum viable budget. Only use proven audiences (confidence: medium/high). Tight pause rules. No broad/experimental ad sets. Scale slowly (10% max).`;
+  if (strategy === 'experimental') return `- EXPERIMENTAL MODE: Allocate 30-40% budget to broad/new audiences. Looser pause rules (give ads more time to find signal). Higher tolerance for initial CPA. Test multiple audience types.`;
+  return `- BALANCED MODE: 50-70% budget on proven audiences, 20-30% on broad/new test. Standard pause rules. Scale proven ad sets 20% after 48h if ROAS > 2x.`;
+})()}
+
 RULES:
 - TypeScript safety checks already passed (budget caps, forbidden topics) — don't re-check those
 - Focus on STRATEGIC decisions: is this the right budget to START with? Right audience? Right timing?

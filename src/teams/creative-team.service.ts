@@ -223,6 +223,14 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
 
 ${liveContext}
 
+CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
+${(() => {
+  const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
+  if (strategy === 'conservative') return `- CONSERVATIVE MODE: Use proven hook styles from past learnings only. Stick to visual formats that have worked before. Minimize creative risk — safe, on-brand, tested patterns.`;
+  if (strategy === 'experimental') return `- EXPERIMENTAL MODE: Try bold, untested hook styles. Push creative boundaries — unusual visuals, provocative angles. At least 1 variant should be genuinely risky/different from anything tried before.`;
+  return `- BALANCED MODE: 2 variants should use proven hook styles from learnings. 1 variant should test a new hook style or creative angle. This gives reliable performance + fresh creative data.`;
+})()}
+
 RULES:
 - The image and video prompts must visually match the winning copy variant's mood and message
 - Every copy variant must be different in hookStyle — don't write 3 variations of the same hook
