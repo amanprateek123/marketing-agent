@@ -2121,6 +2121,23 @@ Total agent team cost per pipeline run: **~$2.44**
 - [ ] Diagnosis Team — build after 5+ live campaigns. Activates when Campaign Auditor flags uncertainty (e.g. "ROAS dropped 40% overnight — why?"). Performance Analyst + Creative Analyst debate root cause: is it creative fatigue, audience saturation, or timing? Uses same CLI peer-to-peer pattern. Prerequisite: real campaign metrics in MongoDB.
 - [ ] Learning Team — build after 30 days of campaign data. Runs bi-weekly. Marketing Strategist + Campaign Analyst extract cross-domain patterns (e.g. "question hooks × broad audiences = 4.1x ROAS"). Updates company.learnings + regenerates all agent prompts. Prerequisite: 10+ completed campaigns with performance data.
 
+### Production Hardening (TODO)
+
+**Do now (server is exposed):**
+- [ ] BullMQ concurrency: 1 — prevent parallel pipeline runs from colliding on shared resources (tmux, ~/.claude/teams/)
+- [ ] API key authentication guard — endpoints have zero auth, anyone with the URL can trigger pipelines that cost real money
+
+**Do before going live with Meta Ads:**
+- [ ] Encrypt Meta credentials at rest — `company.meta.accessToken` is stored as plain text in MongoDB. Use AES-256 encryption, key in env only
+- [ ] Pipeline timeout — if full pipeline takes >30 minutes, kill and mark failed. Prevent stuck runs from consuming resources indefinitely
+
+**Do before second client:**
+- [ ] Per-tenant API key quota — track Claude API spend per tenant, alert if exceeding budget
+- [ ] Rate limit API endpoints — prevent accidental spam triggers (NestJS @Throttle)
+- [ ] Webhook signature verification — validate Slack webhook responses
+- [ ] Log rotation — agent team streaming logs grow fast, need rotation/cleanup
+- [ ] Per-tenant BullMQ queues — separate pipeline/audit/learning queues per tenant for full isolation
+
 ---
 
 ## Project Structure (Actual — as built)
