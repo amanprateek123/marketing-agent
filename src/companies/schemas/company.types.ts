@@ -25,6 +25,13 @@ export interface DeliveryConfig {
   notionDatabaseId?: string;
 }
 
+export interface MetaAdsConfig {
+  accessToken: string;    // Meta Ads API access token (per tenant)
+  accountId: string;      // Meta Ads account ID (e.g. act_123456)
+  pixelId?: string;       // Meta Pixel for conversion tracking
+  pageId?: string;        // Facebook Page ID for ad identity
+}
+
 export interface CompanyPrompts {
   instagramScout: string;
   redditScout: string;

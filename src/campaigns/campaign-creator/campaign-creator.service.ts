@@ -178,6 +178,10 @@ export class CampaignCreatorService {
       throw new Error(`Campaign ${campaignId} is not pending approval (status: ${campaign.status})`);
     }
 
+    if (!company.meta?.accessToken || !company.meta?.accountId) {
+      throw new Error(`Meta Ads credentials not configured for tenant ${company.tenantId}. Set company.meta.accessToken and company.meta.accountId.`);
+    }
+
     const systemPrompt = company.prompts?.campaignCreator ?? CAMPAIGN_CREATOR_FALLBACK_PROMPT;
 
     const result = await this.claudeService.runAgent({
@@ -186,6 +190,12 @@ export class CampaignCreatorService {
       systemPrompt,
       liveContext: this.liveContextBuilder.build(company),
       userMessage: `Create and launch a Meta Ads campaign with the following details:
+
+META ADS CREDENTIALS (use these for this tenant):
+  Access Token: ${company.meta.accessToken}
+  Account ID: ${company.meta.accountId}
+  ${company.meta.pixelId ? `Pixel ID: ${company.meta.pixelId}` : ''}
+  ${company.meta.pageId ? `Page ID: ${company.meta.pageId}` : ''}
 
 Campaign Name: META_${company.primaryObjective.toUpperCase()}_${campaign.objective}_${new Date().toISOString().split('T')[0]}
 Budget: ₹${campaign.budget}

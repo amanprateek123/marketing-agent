@@ -5,6 +5,7 @@ import {
   Service,
   Promotion,
   DeliveryConfig,
+  MetaAdsConfig,
   CompanyPrompts,
   CompanyLearnings,
   CompanySignals,
@@ -83,6 +84,10 @@ export class Company {
   // ─── Delivery ───────────────────────────────────────────────────────────────
   @Prop({ type: Object, default: {} })
   delivery: DeliveryConfig;
+
+  // ─── Meta Ads (per-tenant credentials) ─────────────────────────────────────
+  @Prop({ type: Object, default: null })
+  meta: MetaAdsConfig | null;
 
   // ─── Marketing Requirements ─────────────────────────────────────────────────
   @Prop({ required: true })

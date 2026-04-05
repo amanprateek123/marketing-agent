@@ -2,7 +2,7 @@
   "mcpServers": {
     "meta-ads": {
       "command": "npx",
-      "args": ["-y", "@pipeboard/meta-ads-mcp"],
+      "args": ["-y", "meta-ads-mcp"],
       "env": {
         "META_ADS_ACCESS_TOKEN": "${META_ADS_ACCESS_TOKEN}",
         "META_ADS_ACCOUNT_ID": "${META_ADS_ACCOUNT_ID}"
