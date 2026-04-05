@@ -2169,6 +2169,52 @@ Total agent team cost per pipeline run: **~$2.44**
 - [ ] Multi-language creative variants — Tamil, Telugu, etc. based on product.languages
 - [ ] A/B test framework — systematic hook style testing per product per audience
 
+### Competitive Advantage Features (vs AdStellar)
+
+> These features differentiate BriefOS from creative-tool competitors. Build in order of competitive impact.
+
+**Feature 1: Winners Hub + feedback loop (build after first campaign)**
+- [ ] New `winners` MongoDB collection — stores winning creatives, headlines, audiences, hook styles with ROAS/CPA/CTR data
+- [ ] Auditor writes to winners when a creative/audience/hook hits a ROAS threshold
+- [ ] Strategy Team reads winners before proposing ideas — proven combos get priority
+- [ ] Creative Team reads winning hooks before writing copy — starts from what works
+- [ ] Campaign Review reads winning audiences before setting ad sets — data-driven targeting
+- Why it beats competitors: Their winners hub is static storage. Ours feeds back into every decision automatically.
+
+**Feature 2: Auto-optimization loop (build after 5 campaigns)**
+- [ ] Auditor upgrade: per-ad-set + per-ad metrics from Meta every 6h (first 48h: every 2h)
+- [ ] Pause losing ads within ad sets (not whole campaigns)
+- [ ] Scale winning ad sets (budget shift between ad sets)
+- [ ] Generate replacement creatives for paused ads (trigger Creative Team for new variants)
+- [ ] 48h cooldown after any budget change (prevent learning phase resets)
+- [ ] Creative fatigue detection: if CTR drops >40% from first-48h baseline → flag for refresh
+- Why it beats competitors: They launch and walk away. We launch, learn, replace losers, and scale winners continuously.
+
+**Feature 3: Bulk variation mode (build after auto-optimization)**
+- [ ] Campaign Review Team outputs N ad sets × M variants (not fixed 3×3)
+- [ ] MetaAdsService creates all combinations programmatically
+- [ ] Support 5-6 creative variants per ad set
+- [ ] Combinatorial mode: N creatives × M audiences × K headlines = all permutations
+- Why it beats competitors: Match their 36-ad velocity while maintaining autonomous optimization.
+
+**Feature 4: Strategy controls (DONE)**
+- [x] `campaignStrategy: conservative | balanced | experimental` on PipelineConfig (default: balanced)
+- [x] All 3 teams adjust behavior based on mode — risk tolerance, budget allocation, creative boldness
+
+**Feature 5: Predictive campaign scoring (build after 30 days / 10+ campaigns)**
+- [ ] Pre-launch agent predicts ROAS from historical data (company.learnings + winners collection)
+- [ ] Outputs confidence score + recommended budget + risk assessment
+- [ ] Runs before Campaign Review Team — gives the debate data-backed starting point
+- [ ] "Based on 12 past campaigns: predicted ROAS 2.1-2.8x, confidence: medium"
+- Why it beats competitors: Nobody does pre-launch performance prediction from proprietary historical data.
+
+**Moat advantages to protect (don't compromise while building new features):**
+- Brand voice schema — every agent enforces the same tone
+- Causal learning — knows WHY something won, not just THAT it won
+- TypeScript safety rails — LLM can't override budget caps
+- Multi-tenant agency architecture — each client has own schema, voice, history
+- DAG orchestration with retry — pipeline failures recover gracefully
+
 ### Production Hardening (TODO)
 
 **Do now (server is exposed):**
