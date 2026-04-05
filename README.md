@@ -2121,6 +2121,41 @@ Total agent team cost per pipeline run: **~$2.44**
 - [ ] Diagnosis Team — build after 5+ live campaigns. Activates when Campaign Auditor flags uncertainty (e.g. "ROAS dropped 40% overnight — why?"). Performance Analyst + Creative Analyst debate root cause: is it creative fatigue, audience saturation, or timing? Uses same CLI peer-to-peer pattern. Prerequisite: real campaign metrics in MongoDB.
 - [ ] Learning Team — build after 30 days of campaign data. Runs bi-weekly. Marketing Strategist + Campaign Analyst extract cross-domain patterns (e.g. "question hooks × broad audiences = 4.1x ROAS"). Updates company.learnings + regenerates all agent prompts. Prerequisite: 10+ completed campaigns with performance data.
 
+### Phase 10 — Product-Centric Campaign System (Next)
+
+> **Goal:** Transform BriefOS from "trend content generator" to "product marketing system." Every campaign should sell a specific product to a specific audience using a trending hook.
+
+**Build now (basics to get campaigns launching on Meta):**
+
+- [ ] Rich product schema — add to each product: `landingUrl`, `languages[]`, `trendKeywords[]`, `differentiators[]`, `audienceSegments[]`, `metaAudiences[]`, `performance{}`
+- [ ] Update 91Astrology products with real data (Nadi Report, Match Making, Career Report with actual prices, URLs, languages)
+- [ ] Update Strategy Team prompt — receives product catalog, matches trends to products, output includes which product to sell
+- [ ] Update Creative Team prompt — receives product details (price, landing URL, languages, differentiators), product-specific CTAs
+- [ ] Update Campaign Review Team — outputs structured ad set config with audience IDs, budget splits, targeting per ad set
+- [ ] Structured ad set creation — Campaign Creator builds campaign + ad sets + ads on Meta via MCP (not just bare campaign)
+- [ ] Upload creative assets (image/video) to Meta ad library before creating ads
+
+**Build after 5 campaigns launched on Meta:**
+
+- [ ] Meta audience sync — pull existing custom/lookalike audiences from Meta API into MongoDB, map to products. Run weekly before pipeline
+- [ ] Per-ad-set and per-ad metrics — auditor fetches granular metrics (which hook is winning, which audience converts)
+- [ ] Ad-level optimization — pause losing ads, scale winning hooks, shift budget between ad sets
+- [ ] Performance Marketing Expert rewrite — real optimization decisions at ad set + ad level, not just campaign-level rule checks
+
+**Build after 50+ conversions per product:**
+
+- [ ] Audience initialization agent — auto-generates initial audience hypotheses for new products using AI + company data + competitor research
+- [ ] Audience confidence tracking — hypothesis (0-20 conv) → low (20-50) → medium (50-100) → high (100+). System scales budget based on confidence
+- [ ] Cross-product audience borrowing — new product borrows proven audiences from similar existing products
+- [ ] Per-audience performance tracking — which audience segment converts best for which product at what CPA
+
+**Build after 30 days of data:**
+
+- [ ] Diagnosis Team — 2-agent debate when campaigns underperform. Root cause analysis: creative fatigue vs audience saturation vs timing
+- [ ] Learning Team upgrade — extracts cross-domain patterns (hook style × audience × product → ROAS). Updates company.learnings + regenerates prompts
+- [ ] Multi-language creative variants — Tamil, Telugu, etc. based on product.languages
+- [ ] A/B test framework — systematic hook style testing per product per audience
+
 ### Production Hardening (TODO)
 
 **Do now (server is exposed):**
