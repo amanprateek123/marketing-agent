@@ -170,6 +170,32 @@ export class StrategyTeamService {
       )
       .join('\n');
 
+    const activeProducts = (company.products ?? []).filter(p => p.active);
+    const productCatalog = activeProducts.map(p => {
+      const segments = (p.audienceSegments ?? []).map(s =>
+        `    - ${s.name} (${s.confidence}${s.conversions ? `, ${s.conversions} conversions, CPA ₹${s.avgCPA}` : ''}): ${s.description}`
+      ).join('\n');
+      const metaAud = (p.metaAudiences ?? []).map(a =>
+        `    - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name}`
+      ).join('\n');
+      const perf = p.performance;
+      const perfLine = perf?.totalConversions
+        ? `Performance: ${perf.totalConversions} conversions, CPA ₹${perf.avgCPA}, ROAS ${perf.avgROAS}x (${perf.confidenceLevel})`
+        : 'Performance: no data yet';
+
+      return `  ${p.name} — ₹${p.price} ${p.currency}
+    ${p.description}
+    Landing: ${p.landingUrl ?? 'not set'}
+    Languages: ${(p.languages ?? []).join(', ') || 'not set'}
+    Trend keywords: ${(p.trendKeywords ?? []).join(', ')}
+    Differentiators: ${(p.differentiators ?? []).join(' | ')}
+    ${perfLine}
+    Audience segments:
+${segments || '    none defined'}
+    Meta audiences:
+${metaAud || '    none linked'}`;
+    }).join('\n\n');
+
     const learningsContext = learnings ? `
 PAST LEARNINGS (what worked and what didn't):
 - Winning hooks: ${learnings.creative?.winningHooks?.join(', ') || 'none yet'}
@@ -201,7 +227,7 @@ DEBATE PROTOCOL:
 - MAX 5 rounds of back-and-forth. If no consensus by round 5, send your final ranking and let the Strategist decide.
 - Send all messages to 'team-lead'. Respond IMMEDIATELY when you receive a message."
 
-STEP 3: Propose ${ideasPerRun} campaign ideas based on the data below. Send them to the Contrarian via SendMessage(to: "contrarian"). Label this as "ROUND 1".
+STEP 3: Propose ${ideasPerRun} campaign ideas based on the data below. EVERY idea MUST sell a specific product from the catalog. Match trends to products using their trendKeywords. Send them to the Contrarian via SendMessage(to: "contrarian"). Label this as "ROUND 1".
 
 STEP 4: The Contrarian will challenge or endorse each idea. When you receive their response:
   - If you AGREE with a challenge → kill or weaken that idea
@@ -222,12 +248,15 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
     {
       "topic": "...",
       "angle": "...",
+      "product": "Nadi Report",
+      "productPrice": 999,
+      "targetSegment": "career_anxious",
       "platform": "instagram|youtube|twitter|reddit",
       "format": "reel|carousel|thread|video|image",
-      "audience": "...",
+      "audience": "full audience description",
       "hook": "opening line or visual hook",
       "keyMessage": "what the audience should believe after seeing this",
-      "conversionBridge": "how this leads to a sale or sign-up",
+      "conversionBridge": "how this leads to buying the specific product",
       "suggestedBudget": 0,
       "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight",
       "sourcePlatforms": ["instagram", "youtube"],
@@ -252,7 +281,13 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
 Mark exactly 1 brief as "selected": true — the winner.
 
 ═══════════════════════════════════════════════════════
-DATA FOR IDEA GENERATION
+PRODUCT CATALOG — every idea MUST sell one of these
+═══════════════════════════════════════════════════════
+
+${productCatalog || 'No products configured.'}
+
+═══════════════════════════════════════════════════════
+TRENDING SIGNALS (from scouts + coordinator)
 ═══════════════════════════════════════════════════════
 
 COORDINATOR SIGNALS (cross-validated from 4 platforms):
@@ -272,9 +307,13 @@ ${learningsContext}
 ${liveContext}
 
 RULES:
-- Generate ideas from 3 sources: coordinator signals, competitor gaps, market insights
+- EVERY idea must sell a specific product from the catalog above
+- Match trends to products using their trendKeywords — if a trend doesn't connect to any product, skip it
+- The "product" and "targetSegment" fields are REQUIRED for every brief
+- The "conversionBridge" must mention the product name, price, and how the trend connects to buying it
 - At least 1 idea must exploit a competitor vulnerability
 - At least 1 idea must be tied to the #1 coordinator signal
+- Prefer products with higher confidence performance data — proven products get priority over hypothesis-stage products
 - The Contrarian MUST see all ideas before you pick a winner
 - Do NOT pick the winner before the debate — let it emerge from the argument
     `.trim();

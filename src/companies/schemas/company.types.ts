@@ -1,9 +1,52 @@
+export interface AudienceSegment {
+  name: string;                    // e.g. "career_anxious"
+  description: string;             // e.g. "25-40 professionals worried about career"
+  ageMin: number;
+  ageMax: number;
+  gender: 'all' | 'male' | 'female';
+  interests: string[];             // Meta interest targeting keywords
+  triggers: string[];              // what events make this audience search (seasonal, news)
+  confidence: 'hypothesis' | 'low' | 'medium' | 'high';
+  conversions: number;             // tracked over time
+  avgCPA: number | null;           // tracked over time
+}
+
+export interface MetaAudience {
+  id: string;                      // Meta audience ID
+  name: string;                    // e.g. "Nadi_Report_Nov'25_Customer"
+  type: 'custom' | 'lookalike';
+  lookalikePercent?: number;       // 1, 2, 3 for lookalike audiences
+  linkedSegment?: string;          // maps to audienceSegment.name
+}
+
+export interface ProductPerformance {
+  totalConversions: number;
+  avgCPA: number | null;
+  avgROAS: number | null;
+  bestHookStyle: string | null;
+  bestPlatform: string | null;
+  confidenceLevel: 'hypothesis' | 'low' | 'medium' | 'high';
+}
+
 export interface Product {
   name: string;
   price: number;
   currency: string;
   description: string;
   active: boolean;
+
+  // Product marketing data
+  landingUrl?: string;
+  languages?: string[];              // e.g. ["hindi", "english", "tamil"]
+  trendKeywords?: string[];          // keywords that connect trends to this product
+  differentiators?: string[];        // what makes this product unique vs competitors
+
+  // Audience data
+  audienceSegments?: AudienceSegment[];
+  metaAudiences?: MetaAudience[];
+
+  // Performance data (populated by Learning Team over time)
+  performance?: ProductPerformance;
 }
 
 export interface Service {

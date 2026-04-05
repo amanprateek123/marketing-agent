@@ -2127,10 +2127,11 @@ Total agent team cost per pipeline run: **~$2.44**
 
 **Build now (basics to get campaigns launching on Meta):**
 
-- [ ] Rich product schema — add to each product: `landingUrl`, `languages[]`, `trendKeywords[]`, `differentiators[]`, `audienceSegments[]`, `metaAudiences[]`, `performance{}`
-- [ ] Update 91Astrology products with real data (Nadi Report, Match Making, Career Report with actual prices, URLs, languages)
-- [ ] Update Strategy Team prompt — receives product catalog, matches trends to products, output includes which product to sell
-- [ ] Update Creative Team prompt — receives product details (price, landing URL, languages, differentiators), product-specific CTAs
+- [x] Rich product schema — `Product` type with `AudienceSegment`, `MetaAudience`, `ProductPerformance` interfaces. Fields: `landingUrl`, `languages[]`, `trendKeywords[]`, `differentiators[]`, `audienceSegments[]`, `metaAudiences[]`, `performance{}`
+- [x] 91Astrology products updated with real data — Nadi Report (₹999, 56 conversions, 5 Meta audiences) + Match Making (₹1,499, 12 conversions, 2 Meta audiences)
+- [x] Strategy Team prompt — receives full product catalog with performance data, must match trends to products, output includes `product` and `targetSegment` fields
+- [x] Creative Team prompt — receives product details (name, price, landing URL, languages, differentiators), enforces product-specific CTAs
+- [x] Campaign Review Team prompt — receives product Meta audiences with IDs, audience segments with confidence levels, past performance data per product
 - [ ] Update Campaign Review Team — outputs structured ad set config with audience IDs, budget splits, targeting per ad set
 - [ ] Structured ad set creation — Campaign Creator builds campaign + ad sets + ads on Meta via MCP (not just bare campaign)
 - [ ] Upload creative assets (image/video) to Meta ad library before creating ads

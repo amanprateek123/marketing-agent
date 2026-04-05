@@ -143,6 +143,23 @@ BRIEF:
   Key Message: ${brief.keyMessage}
   Conversion Bridge: ${brief.conversionBridge}
 
+${(() => {
+  const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+  if (!product) return 'PRODUCT: not specified — use company info for CTA';
+  return `PRODUCT BEING SOLD:
+  Name: ${product.name}
+  Price: ₹${product.price}
+  Landing URL: ${product.landingUrl ?? 'not set'}
+  Languages: ${(product.languages ?? []).join(', ') || 'Hindi, English'}
+  Differentiators: ${(product.differentiators ?? []).join(' | ') || 'not set'}
+  Target segment: ${(brief as any).targetSegment ?? 'general'}
+
+  IMPORTANT: Every copy variant MUST:
+  - Mention the product name ("${product.name}")
+  - Include the price (₹${product.price})
+  - CTA must drive to the specific product, not generic "learn more"`;
+})()}
+
 Brand Guidelines: ${company.brandGuidelines || 'Not specified'}
 Tone: ${company.tone}
 Avoid: ${company.avoid?.join(', ') || 'nothing specified'}

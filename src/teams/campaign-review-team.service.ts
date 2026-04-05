@@ -171,6 +171,28 @@ CAMPAIGN TO REVIEW:
   Image: ${creativePackage?.imageUrl ? 'Generated' : 'Pending'}
   Video: ${creativePackage?.videoUrl ? 'Generated' : 'Pending'}
 
+${(() => {
+  const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+  if (!product) return 'PRODUCT: not specified';
+  const segments = (product.audienceSegments ?? []).map(s =>
+    `  - ${s.name} (${s.confidence}${s.avgCPA ? `, CPA ₹${s.avgCPA}` : ''}): ${s.description}, age ${s.ageMin}-${s.ageMax}`
+  ).join('\n');
+  const metaAud = (product.metaAudiences ?? []).map(a =>
+    `  - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name} (id: ${a.id})`
+  ).join('\n');
+  const perf = product.performance;
+  return `PRODUCT BEING SOLD:
+  ${product.name} — ₹${product.price}
+  Landing: ${product.landingUrl ?? 'not set'}
+  Past performance: ${perf?.totalConversions ?? 0} conversions, CPA ₹${perf?.avgCPA ?? 'N/A'}, ROAS ${perf?.avgROAS ?? 'N/A'}x (${perf?.confidenceLevel ?? 'no data'})
+
+AVAILABLE AUDIENCE SEGMENTS:
+${segments || '  none defined'}
+
+AVAILABLE META AUDIENCES (use these IDs for ad sets):
+${metaAud || '  none linked — use Advantage+ broad'}`;
+})()}
+
 ${campaignLearnings}
 ${causalInsights}
 
