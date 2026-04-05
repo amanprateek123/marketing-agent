@@ -93,6 +93,47 @@ export class Campaign {
 
   @Prop({ type: [Object], default: [] })
   reviewDebateLog: { round: number; from: string; summary: string }[];
+
+  // Structured campaign config from Campaign Review Team
+  @Prop({ type: Object, default: null })
+  campaignConfig: {
+    budget: number;
+    objective: string;
+    conversionEvent: string;
+    conversionValue: number;
+    adSets: {
+      name: string;
+      budgetPercent: number;
+      audienceType: string;
+      metaAudienceId?: string;
+      excludeAudienceIds?: string[];
+      ageMin?: number;
+      ageMax?: number;
+      gender?: string;
+      geoLocations?: string[];
+      interests?: string[];
+      optimizationGoal: string;
+      ads: number[];
+    }[];
+    scaleRules: string;
+    pauseRules: string;
+  };
+
+  // Meta ad set + ad IDs (populated after launch)
+  @Prop({ type: [Object], default: [] })
+  adSets: {
+    metaAdSetId: string;
+    name: string;
+    budgetPercent: number;
+    audienceType: string;
+    status: string;
+    ads: {
+      metaAdId: string;
+      copyVariantIndex: number;
+      hookStyle: string;
+      status: string;
+    }[];
+  }[];
 }
 
 export const CampaignSchema = SchemaFactory.createForClass(Campaign);

@@ -13,7 +13,9 @@ import { CommonModule } from '../common/common.module';
 import { LearningModule } from '../learning/learning.module';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
+import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { DeliveryModule } from '../delivery/delivery.module';
+import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 
 @Module({
   imports: [
@@ -21,6 +23,7 @@ import { DeliveryModule } from '../delivery/delivery.module';
       { name: Campaign.name, schema: CampaignSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
+      { name: CreativePackage.name, schema: CreativePackageSchema },
     ]),
     ClaudeModule,
     CompaniesModule,
@@ -29,7 +32,7 @@ import { DeliveryModule } from '../delivery/delivery.module';
     DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService],
+  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService, MetaAdsService],
   exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService],
 })
 export class CampaignsModule {}

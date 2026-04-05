@@ -7,16 +7,38 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { runTeamViaCli, CliResult } from './team-cli.util';
 
+export interface AdSetConfig {
+  name: string;
+  budgetPercent: number;
+  audienceType: 'lookalike' | 'advantage_plus' | 'retarget' | 'interest' | 'custom';
+  metaAudienceId?: string;          // Meta audience ID for lookalike/retarget/custom
+  excludeAudienceIds?: string[];    // audiences to exclude (e.g. past buyers)
+  ageMin?: number;
+  ageMax?: number;
+  gender?: 'all' | 'male' | 'female';
+  geoLocations?: string[];          // country codes e.g. ["IN"]
+  interests?: string[];             // Meta interest targeting
+  optimizationGoal: string;         // e.g. "OFFSITE_CONVERSIONS"
+  ads: number[];                    // indices into copy variants (e.g. [0, 1, 2])
+}
+
+export interface StructuredCampaignConfig {
+  budget: number;
+  objective: string;                // e.g. "OUTCOME_SALES"
+  conversionEvent: string;          // e.g. "Purchase"
+  conversionValue: number;          // revenue per conversion
+  adSets: AdSetConfig[];
+  scaleRules: string;
+  pauseRules: string;
+}
+
 export interface CampaignReviewOutput {
   approved: boolean;
+  campaign: StructuredCampaignConfig;
   adjustments: {
     budgetAdjusted: boolean;
     originalBudget: number;
     recommendedBudget: number;
-    targetingNotes: string;
-    timingNotes: string;
-    scaleRules: string;
-    pauseRules: string;
   };
   debateRounds: number;
   debateLog: { round: number; from: string; summary: string }[];
@@ -184,13 +206,15 @@ ${(() => {
   return `PRODUCT BEING SOLD:
   ${product.name} — ₹${product.price}
   Landing: ${product.landingUrl ?? 'not set'}
+  Conversion event: ${product.conversionEvent ?? 'Purchase'} (each conversion = ₹${product.conversionValue ?? product.price})
   Past performance: ${perf?.totalConversions ?? 0} conversions, CPA ₹${perf?.avgCPA ?? 'N/A'}, ROAS ${perf?.avgROAS ?? 'N/A'}x (${perf?.confidenceLevel ?? 'no data'})
 
 AVAILABLE AUDIENCE SEGMENTS:
 ${segments || '  none defined'}
 
-AVAILABLE META AUDIENCES (use these IDs for ad sets):
-${metaAud || '  none linked — use Advantage+ broad'}`;
+AVAILABLE META AUDIENCES (use these EXACT IDs in adSets config):
+${metaAud || '  none linked — use Advantage+ broad'}
+  IMPORTANT: Use the actual Meta audience IDs above in your adSets[].metaAudienceId field.`;
 })()}
 
 ${campaignLearnings}
@@ -206,24 +230,51 @@ STEP 5: Once agreed, call TeamDelete to clean up. If TeamDelete fails, SKIP IT �
 STEP 6: Return ONLY this JSON (no markdown, no explanation):
 {
   "approved": true,
+  "campaign": {
+    "budget": ${brief.suggestedBudget},
+    "objective": "OUTCOME_SALES",
+    "conversionEvent": "${(() => { const p = (company.products ?? []).find(pr => pr.name === (brief as any).product); return p?.conversionEvent ?? 'Purchase'; })()}",
+    "conversionValue": ${(() => { const p = (company.products ?? []).find(pr => pr.name === (brief as any).product); return p?.conversionValue ?? brief.suggestedBudget; })()},
+    "adSets": [
+      {
+        "name": "descriptive name",
+        "budgetPercent": 50,
+        "audienceType": "lookalike|advantage_plus|retarget|interest|custom",
+        "metaAudienceId": "use actual Meta audience ID from the list above, or omit for advantage_plus",
+        "excludeAudienceIds": ["past buyer audience ID to exclude"],
+        "ageMin": 25,
+        "ageMax": 42,
+        "geoLocations": ["IN"],
+        "optimizationGoal": "OFFSITE_CONVERSIONS",
+        "ads": [0, 1, 2]
+      }
+    ],
+    "scaleRules": "specific rules e.g. ROAS > 2x AND CTR > 0.8% after 48h → scale 20%",
+    "pauseRules": "specific rules e.g. CTR < 0.5% after ₹1,500 spent → pause"
+  },
   "adjustments": {
     "budgetAdjusted": true/false,
     "originalBudget": ${brief.suggestedBudget},
-    "recommendedBudget": 0,
-    "targetingNotes": "any targeting adjustments agreed upon",
-    "timingNotes": "any timing considerations",
-    "scaleRules": "when to auto-scale budget (e.g. ROAS > 2x after 48h → scale 20%)",
-    "pauseRules": "when to auto-pause (e.g. CTR < 0.5% after 72h → pause)"
+    "recommendedBudget": 0
   },
   "debateRounds": 2,
   "debateLog": [
     {"round": 1, "from": "strategist", "summary": "proposed campaign config"},
-    {"round": 1, "from": "analyst", "summary": "challenged budget, suggested starting lower"},
-    {"round": 2, "from": "strategist", "summary": "agreed to reduce, set scale rules"},
-    {"round": 2, "from": "analyst", "summary": "approved with adjustments"}
+    {"round": 1, "from": "analyst", "summary": "challenged budget"},
+    {"round": 2, "from": "strategist", "summary": "adjusted"},
+    {"round": 2, "from": "analyst", "summary": "approved"}
   ],
-  "debateRationale": "2-3 sentence summary of what was debated and agreed"
+  "debateRationale": "2-3 sentence summary"
 }
+
+IMPORTANT — adSets rules:
+- Create 2-3 ad sets minimum. Never launch with just 1 ad set.
+- Each ad set MUST have a different audience (don't duplicate targeting).
+- Use real Meta audience IDs from the list above — don't invent IDs.
+- If no Meta audiences exist, use audienceType "advantage_plus" for broad and "interest" for targeted.
+- Always exclude past buyer audiences from prospecting ad sets.
+- "ads": [0, 1, 2] means all 3 copy variants run in every ad set — Meta optimizes which wins.
+- budgetPercent across all ad sets must sum to 100.
 
 ${liveContext}
 

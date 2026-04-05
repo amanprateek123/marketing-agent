@@ -2,13 +2,21 @@ import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Campaign, CampaignDocument } from './schemas/campaign.schema';
+import { CreativePackage, CreativePackageDocument } from '../creative/schemas/creative-package.schema';
 
 @Injectable()
 export class CampaignsService {
   constructor(
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(CreativePackage.name)
+    private readonly creativePackageModel: Model<CreativePackageDocument>,
   ) {}
+
+  async findCreativePackage(creativePackageId: string): Promise<CreativePackageDocument | null> {
+    if (!creativePackageId) return null;
+    return this.creativePackageModel.findById(creativePackageId).lean().exec() as any;
+  }
 
   async findAll(tenantId: string): Promise<CampaignDocument[]> {
     return this.campaignModel.find({ tenantId }).sort({ launchedAt: -1 }).lean().exec();

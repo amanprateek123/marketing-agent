@@ -41,6 +41,12 @@ export interface Product {
   trendKeywords?: string[];          // keywords that connect trends to this product
   differentiators?: string[];        // what makes this product unique vs competitors
 
+  // Conversion tracking
+  conversionEvent?: string;          // Meta pixel event: "Purchase", "Lead", "CompleteRegistration", "Subscribe", or custom event name
+  conversionValue?: number;          // revenue per conversion (e.g. 999 for ₹999 product) — used for ROAS calculation
+  customEventName?: string;          // if conversionEvent is "CustomEvent", this is the event name
+  pixelId?: string;                  // Meta Pixel ID if different from company.meta.pixelId
+
   // Audience data
   audienceSegments?: AudienceSegment[];
   metaAudiences?: MetaAudience[];

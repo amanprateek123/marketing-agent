@@ -146,7 +146,7 @@ WEEKLY PIPELINE (Monday 9 AM IST — BullMQ cron)
   │  │  Review: "Start conservative, scale if ROAS >2x" │                   │
   │  │  Targeting: 6 metros, 25-42 age range            │                   │
   │  │                                                   │                   │
-  │  │  POST /campaigns/:id/approve to launch            │                   │
+  │  │  POST /api/v1/campaigns/:tenantId/:id/approve      │                   │
   │  └─────────────────────────────────────────────────┘                   │
   │                                                                        │
   │  Step 4: Human approves → Meta Ads MCP → LIVE campaign                 │
@@ -269,8 +269,9 @@ AppModule
 ├── CreativeModule ───────────────── CreativeProducer + CopyWriter + ImageGen + VideoGen
 │     └── uses: ClaudeModule
 ├── CampaignsModule ──────────────── CampaignCreator + SafetyChecks + Auditor + Optimizer
-│     ├── uses: ClaudeModule          + CampaignReviewTeam
-│     └── uses: DeliveryModule (Slack approval notifications)
+│     ├── uses: ClaudeModule          + CampaignReviewTeam + MetaAdsService
+│     ├── uses: DeliveryModule (Slack approval notifications)
+│     └── uses: LearningModule (learning triggers on pause/day 7/30)
 ├── LearningModule ───────────────── CampaignLearning + CreativeLearning
 │     ├── uses: ClaudeModule
 │     └── uses: CompaniesModule
@@ -293,7 +294,7 @@ intelligence_briefs    │ N candidate campaign ideas
 creative_briefs        │ Selected winner
 digests                │ Formatted reports
 creative_packages      │ Copy + image + video assets
-campaigns              │ Meta Ads campaign data
+campaigns              │ Meta Ads campaign + review data + ad sets + ads
 action_logs            │ Autonomous decision audit trail
 usage_logs             │ Per-agent token + cost tracking
 learning_runs          │ Monthly learning records
@@ -384,7 +385,7 @@ touch .claude/mcp.json
   "mcpServers": {
     "meta-ads": {
       "command": "npx",
-      "args": ["-y", "@pipeboard/meta-ads-mcp"],
+      "args": ["-y", "meta-ads-mcp"],
       "env": {
         "META_ADS_ACCESS_TOKEN": "${META_ADS_ACCESS_TOKEN}",
         "META_ADS_ACCOUNT_ID": "${META_ADS_ACCOUNT_ID}"
@@ -2064,9 +2065,13 @@ Cost: ~$1 per debate run
 
 ```
 src/teams/
+  team-cli.util.ts                — Shared CLI runner + force cleanup for all teams
   strategy-team.service.ts        — Strategist + Contrarian debate via CLI (Phase D)
   creative-team.service.ts        — Creative Director + Brand Compliance debate via CLI (Phase F)
-  campaign-review-team.service.ts — Campaign Strategist + Performance Analyst debate via CLI (Phase G)
+  campaign-review-team.service.ts — Campaign Strategist + Performance Analyst → structured ad set config (Phase G)
+
+src/campaigns/meta-ads/
+  meta-ads.service.ts             — Direct Meta Graph API: campaign + ad sets + ads with rollback + retry
 ```
 
 ### Files Updated
@@ -2080,12 +2085,14 @@ src/teams/
 | `creative/creative-producer/creative-producer.service.ts` | Tries `CreativeTeamService` first, falls back to single-agent |
 | `creative/image-generator/image-generator.service.ts` | Added `generateFromPrompt()` for pre-reviewed prompts |
 | `creative/creative.module.ts` | Registered `CreativeTeamService` |
-| `campaigns/campaign-creator/campaign-creator.service.ts` | Review team + human approval before Meta launch |
+| `campaigns/campaign-creator/campaign-creator.service.ts` | Review team + human approval + MetaAdsService for structured launch |
+| `campaigns/meta-ads/meta-ads.service.ts` | **New** — Direct Meta Graph API: campaign + ad sets + ads with rollback + retry |
 | `campaigns/campaigns.controller.ts` | Added `POST /approve` endpoint |
-| `campaigns/campaigns.module.ts` | Registered `CampaignReviewTeamService` |
-| `campaigns/schemas/campaign.schema.ts` | Added `pending_approval` status, review fields, `approvedAt` |
-| `companies/schemas/company.schema.ts` | Added `signals: CompanySignals` field |
-| `companies/schemas/company.types.ts` | Added `CompanySignals`, `WeeklySignals`, `intelligenceLead` prompt |
+| `campaigns/campaigns.service.ts` | Added `findCreativePackage()` |
+| `campaigns/campaigns.module.ts` | Registered `CampaignReviewTeamService` + `MetaAdsService` |
+| `campaigns/schemas/campaign.schema.ts` | Added `pending_approval` status, review fields, `campaignConfig`, `adSets[]`, `approvedAt` |
+| `companies/schemas/company.schema.ts` | Added `signals: CompanySignals`, `meta: MetaAdsConfig` |
+| `companies/schemas/company.types.ts` | Added `Product` (rich schema with audiences, Meta audiences, performance), `MetaAdsConfig`, `CompanySignals` |
 
 ### All Agent Teams
 
@@ -2132,9 +2139,14 @@ Total agent team cost per pipeline run: **~$2.44**
 - [x] Strategy Team prompt — receives full product catalog with performance data, must match trends to products, output includes `product` and `targetSegment` fields
 - [x] Creative Team prompt — receives product details (name, price, landing URL, languages, differentiators), enforces product-specific CTAs
 - [x] Campaign Review Team prompt — receives product Meta audiences with IDs, audience segments with confidence levels, past performance data per product
-- [ ] Update Campaign Review Team — outputs structured ad set config with audience IDs, budget splits, targeting per ad set
-- [ ] Structured ad set creation — Campaign Creator builds campaign + ad sets + ads on Meta via MCP (not just bare campaign)
-- [ ] Upload creative assets (image/video) to Meta ad library before creating ads
+- [x] Update Campaign Review Team — outputs structured ad set config (`StructuredCampaignConfig`) with audience IDs, budget splits, targeting per ad set, conversion events
+- [x] MetaAdsService — direct Meta Graph API calls for campaign + ad sets + ads creation (not Claude/MCP)
+- [x] Rollback on partial failure — deletes campaign (cascades) + dangling creatives
+- [x] Retry with exponential backoff on transient Meta errors (codes 2, 17, 341)
+- [x] Idempotency protection — prevents double-launch on duplicate /approve calls
+- [x] All 3 copy variants run as separate ads per ad set (A/B testing)
+- [x] Conversion event tracking per product (Purchase, Lead, custom events)
+- [ ] Upload creative assets (image/video) to Meta ad library before creating ads (image hash upload built, video upload pending)
 
 **Build after 5 campaigns launched on Meta:**
 
@@ -2235,6 +2247,7 @@ Marketing Agent/
 │   │       └── digest.schema.ts
 │   │
 │   ├── teams/                                ← Phase 9: Agent Teams
+│   │   ├── team-cli.util.ts                  ← Shared CLI runner + force cleanup for all teams
 │   │   ├── strategy-team.service.ts          ← Strategist vs Contrarian debate (CLI)
 │   │   ├── creative-team.service.ts          ← Creative Director vs Brand Compliance (CLI)
 │   │   └── campaign-review-team.service.ts   ← Campaign Strategist vs Performance Analyst (CLI)
@@ -2262,9 +2275,11 @@ Marketing Agent/
 │   │   ├── campaign-creator/
 │   │   │   ├── campaign-creator.service.ts
 │   │   │   └── safety-checks.ts
-│   │   └── campaign-auditor/
-│   │       ├── campaign-auditor.service.ts
-│   │       └── campaign-optimizer.service.ts
+│   │   ├── campaign-auditor/
+│   │   │   ├── campaign-auditor.service.ts
+│   │   │   └── campaign-optimizer.service.ts
+│   │   └── meta-ads/
+│   │       └── meta-ads.service.ts           ← Direct Meta Graph API (campaign + ad sets + ads)
 │   │
 │   ├── learning/
 │   │   ├── learning.module.ts
@@ -2373,7 +2388,7 @@ KLING_API_KEY=...
 #   For production: use a System User token (doesn't expire)
 # META_ADS_ACCOUNT_ID — Meta Business Manager → Accounts → Ad Accounts
 #   Copy the Account ID (format: act_XXXXXXXXX)
-# Test connection after filling in: npx @pipeboard/meta-ads-mcp
+# Test connection after filling in: npx meta-ads-mcp
 META_ADS_ACCESS_TOKEN=
 META_ADS_ACCOUNT_ID=
 

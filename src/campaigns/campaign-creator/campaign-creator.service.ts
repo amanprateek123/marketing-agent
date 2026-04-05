@@ -1,10 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
-import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { ActionLoggerService } from '../../common/action-logger/action-logger.service';
 import { CampaignsService } from '../campaigns.service';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
@@ -12,23 +10,18 @@ import { CreativeBriefDocument } from '../../pipeline/schemas/creative-brief.sch
 import { CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
+import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { SlackService } from '../../delivery/slack.service';
-
-const CAMPAIGN_CREATOR_FALLBACK_PROMPT = `You are a Meta Ads campaign specialist.
-Your job is to create and launch Meta Ads campaigns using the Meta Ads MCP tools.
-Always use 70/30 audience split: 70% proven/lookalike audience, 30% broad test audience.
-Follow exact naming conventions provided. Never exceed the specified budget.`;
 
 @Injectable()
 export class CampaignCreatorService {
   private readonly logger = new Logger(CampaignCreatorService.name);
 
   constructor(
-    private readonly claudeService: ClaudeService,
     private readonly campaignsService: CampaignsService,
-    private readonly liveContextBuilder: LiveContextBuilder,
     private readonly actionLogger: ActionLoggerService,
     private readonly campaignReviewTeam: CampaignReviewTeamService,
+    private readonly metaAdsService: MetaAdsService,
     private readonly slackService: SlackService,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
@@ -112,7 +105,12 @@ export class CampaignCreatorService {
         this.logger.log(`Budget adjusted: ₹${brief.suggestedBudget} → ₹${finalBudget}`);
       }
 
-      this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds}`);
+      // Use campaign config budget if available
+      if (review?.campaign?.budget) {
+        finalBudget = review.campaign.budget;
+      }
+
+      this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds} | adSets: ${review.campaign?.adSets?.length ?? 0}`);
     } else {
       this.logger.warn(`Campaign Review Team failed after 2 attempts — proceeding with original budget ₹${finalBudget}`);
     }
@@ -132,6 +130,7 @@ export class CampaignCreatorService {
       reviewNotes: review?.debateRationale ?? '',
       reviewAdjustments: review?.adjustments ?? undefined,
       reviewDebateLog: review?.debateLog ?? [],
+      campaignConfig: review?.campaign ?? undefined,
     });
 
     await this.actionLogger.log({
@@ -178,52 +177,100 @@ export class CampaignCreatorService {
       throw new Error(`Campaign ${campaignId} is not pending approval (status: ${campaign.status})`);
     }
 
+    // Idempotency: prevent double-launch on duplicate /approve calls
+    if (campaign.metaCampaignId) {
+      throw new Error(`Campaign ${campaignId} already launched (metaCampaignId: ${campaign.metaCampaignId})`);
+    }
+
     if (!company.meta?.accessToken || !company.meta?.accountId) {
       throw new Error(`Meta Ads credentials not configured for tenant ${company.tenantId}. Set company.meta.accessToken and company.meta.accountId.`);
     }
 
-    const systemPrompt = company.prompts?.campaignCreator ?? CAMPAIGN_CREATOR_FALLBACK_PROMPT;
+    const config = (campaign as any).campaignConfig;
+    if (!config || !config.adSets || config.adSets.length === 0) {
+      throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
+    }
 
-    const result = await this.claudeService.runAgent({
-      tenantId: company.tenantId,
-      agentType: AgentType.CAMPAIGN_CREATOR,
-      systemPrompt,
-      liveContext: this.liveContextBuilder.build(company),
-      userMessage: `Create and launch a Meta Ads campaign with the following details:
+    // Load creative package for copy variants + image
+    const creativePackage = campaign.creativePackageId
+      ? await this.campaignsService.findCreativePackage(campaign.creativePackageId)
+      : null;
 
-META ADS CREDENTIALS (use these for this tenant):
-  Access Token: ${company.meta.accessToken}
-  Account ID: ${company.meta.accountId}
-  ${company.meta.pixelId ? `Pixel ID: ${company.meta.pixelId}` : ''}
-  ${company.meta.pageId ? `Page ID: ${company.meta.pageId}` : ''}
+    const copyVariants = creativePackage?.copyVariants ?? [];
+    const imageUrl = creativePackage?.imageUrl ?? '';
 
-Campaign Name: META_${company.primaryObjective.toUpperCase()}_${campaign.objective}_${new Date().toISOString().split('T')[0]}
-Budget: ₹${campaign.budget}
-Objective: ${campaign.objective}
-Geography: ${company.geography}
-Brief ID: ${campaign.briefId}
+    // Find the product for landing URL
+    const product = (company.products ?? []).find(p => p.conversionEvent === config.conversionEvent);
+    const landingUrl = product?.landingUrl ?? company.products?.[0]?.landingUrl ?? '';
 
-Review Notes: ${(campaign as any).reviewNotes ?? 'None'}
-Targeting: ${(campaign as any).reviewAdjustments?.targetingNotes ?? 'Default'}
-Scale Rules: ${(campaign as any).reviewAdjustments?.scaleRules ?? 'None set'}
-Pause Rules: ${(campaign as any).reviewAdjustments?.pauseRules ?? 'None set'}
+    const campaignName = `META_${company.primaryObjective.toUpperCase()}_${campaign.objective}_${new Date().toISOString().split('T')[0]}`;
 
-Use 70/30 split: 70% proven/lookalike audience, 30% broad test audience.
-After creating the campaign, return the Meta campaign ID in this format:
-META_CAMPAIGN_ID: <id>`,
-      maxTurns: 15,
-      runId: campaign.runId,
+    // Upload image to Meta if available
+    let imageHash: string | undefined;
+    if (imageUrl && !imageUrl.startsWith('data:')) {
+      try {
+        imageHash = await this.metaAdsService.uploadImage(
+          imageUrl, company.meta.accountId, company.meta.accessToken,
+        );
+      } catch (err: any) {
+        this.logger.warn(`Image upload failed (proceeding without image): ${err.message}`);
+      }
+    }
+
+    // Launch: campaign → ad sets → ads via Meta Graph API
+    const launchResult = await this.metaAdsService.launchCampaign({
+      accountId: company.meta.accountId,
+      accessToken: company.meta.accessToken,
+      pageId: company.meta.pageId,
+      pixelId: product?.pixelId ?? company.meta.pixelId,
+      campaignName,
+      budget: campaign.budget,
+      objective: config.objective ?? 'OUTCOME_SALES',
+      conversionEvent: config.conversionEvent ?? 'Purchase',
+      adSets: config.adSets,
+      copyVariants: copyVariants.length > 0 ? copyVariants : [
+        { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
+      ],
+      imageHash,
+      landingUrl,
     });
 
-    const metaCampaignId = this.extractMetaCampaignId(result.content) ?? `mock_${Date.now()}`;
+    // Only activate if all expected ads were created
+    const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
+    const expectedAds = config.adSets.reduce((s: number, a: any) => s + (a.ads?.length ?? 0), 0);
 
+    if (totalAdsCreated >= expectedAds && totalAdsCreated > 0) {
+      await this.metaAdsService.activateCampaign(
+        launchResult.campaignId, company.meta.accessToken,
+      );
+      this.logger.log(`Campaign activated: ${totalAdsCreated}/${expectedAds} ads created`);
+    } else {
+      this.logger.warn(
+        `Campaign NOT activated: only ${totalAdsCreated}/${expectedAds} ads created — saved as draft`,
+      );
+    }
+
+    // Save all Meta IDs to MongoDB
     await this.campaignModel.updateOne(
       { _id: campaignId },
       {
         status: 'active',
-        metaCampaignId,
+        metaCampaignId: launchResult.campaignId,
         launchedAt: new Date(),
         approvedAt: new Date(),
+        adSets: launchResult.adSets.map(as => ({
+          metaAdSetId: as.adSetId,
+          name: as.name,
+          budgetPercent: config.adSets.find((c: any) => c.name === as.name)?.budgetPercent ?? 0,
+          audienceType: config.adSets.find((c: any) => c.name === as.name)?.audienceType ?? '',
+          status: 'active',
+          ads: as.ads.map(ad => ({
+            metaAdId: ad.adId,
+            copyVariantIndex: ad.copyVariantIndex,
+            hookStyle: copyVariants[ad.copyVariantIndex]?.hookStyle ?? '',
+            status: 'active',
+          })),
+        })),
       },
     );
 
@@ -233,12 +280,12 @@ META_CAMPAIGN_ID: <id>`,
       agent: AgentType.CAMPAIGN_CREATOR,
       action: 'campaign_launched',
       reason: `Human approved → launched on Meta with budget ₹${campaign.budget}`,
-      outcome: `Meta campaign ID: ${metaCampaignId}`,
+      outcome: `Meta campaign ID: ${launchResult.campaignId} | adSets: ${launchResult.adSets.length} | ads: ${launchResult.adSets.reduce((s, a) => s + a.ads.length, 0)}`,
       metadata: { campaignId, briefId: campaign.briefId },
     });
 
     this.logger.log(
-      `Campaign LAUNCHED: tenantId=${company.tenantId} metaCampaignId=${metaCampaignId} budget=₹${campaign.budget}`,
+      `Campaign LAUNCHED: tenantId=${company.tenantId} metaCampaignId=${launchResult.campaignId} budget=₹${campaign.budget} adSets=${launchResult.adSets.length}`,
     );
 
     return (await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).lean().exec()) as any;
@@ -255,15 +302,19 @@ META_CAMPAIGN_ID: <id>`,
       ? `*Budget:* ₹${finalBudget} (adjusted from ₹${review.adjustments.originalBudget} by Campaign Review Team)`
       : `*Budget:* ₹${finalBudget}`;
 
+    const adSetSummary = review?.campaign?.adSets?.map(
+      a => `  • ${a.name} (${a.budgetPercent}% — ${a.audienceType})`
+    ).join('\n') ?? '';
+
     const reviewBlock = review
       ? `
 *Campaign Review Team (${review.debateRounds} rounds):*
 ${review.debateRationale}
 
-*Targeting:* ${review.adjustments.targetingNotes}
-*Scale Rules:* ${review.adjustments.scaleRules}
-*Pause Rules:* ${review.adjustments.pauseRules}
-*Timing:* ${review.adjustments.timingNotes}`
+*Ad Sets:*
+${adSetSummary || '  No ad sets configured'}
+*Scale Rules:* ${review.campaign?.scaleRules ?? 'not set'}
+*Pause Rules:* ${review.campaign?.pauseRules ?? 'not set'}`
       : '_No review team data — using original config._';
 
     return `🚀 *Campaign Ready for Approval*
@@ -281,8 +332,4 @@ To launch this campaign, call:
 Or reply here to discuss changes.`;
   }
 
-  private extractMetaCampaignId(content: string): string | null {
-    const match = content.match(/META_CAMPAIGN_ID:\s*([^\s\n]+)/);
-    return match ? match[1] : null;
-  }
 }
