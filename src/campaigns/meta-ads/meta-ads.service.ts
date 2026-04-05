@@ -412,6 +412,46 @@ export class MetaAdsService {
     }
   }
 
+  // ─── Optimization actions (used by auditor) ─────────────────────────────────
+
+  /**
+   * Pause an individual ad.
+   */
+  async pauseAd(adId: string, accessToken: string): Promise<void> {
+    await this.metaApiCall('POST', `${META_API_BASE}/${adId}`, {
+      status: 'PAUSED',
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad paused: ${adId}`);
+  }
+
+  /**
+   * Pause an entire ad set.
+   */
+  async pauseAdSet(adSetId: string, accessToken: string): Promise<void> {
+    await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
+      status: 'PAUSED',
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad set paused: ${adSetId}`);
+  }
+
+  /**
+   * Update ad set daily budget (in INR rupees, converted to paise).
+   */
+  async updateAdSetBudget(
+    adSetId: string,
+    newDailyBudgetINR: number,
+    accessToken: string,
+  ): Promise<void> {
+    const budgetPaise = Math.round(newDailyBudgetINR * 100);
+    await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
+      daily_budget: budgetPaise,
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad set budget updated: ${adSetId} → ₹${newDailyBudgetINR}/day`);
+  }
+
   // ─── Retry wrapper for transient Meta API errors ────────────────────────────
 
   private async metaApiCall(

@@ -63,4 +63,54 @@ export class CampaignsController {
     if (!campaign) throw new NotFoundException('Campaign not found');
     return campaign;
   }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/pending-actions
+   * List pending audit actions for a campaign.
+   */
+  @Get(':tenantId/:campaignId/pending-actions')
+  async getPendingActions(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    return (campaign as any).pendingActions?.filter((a: any) => a.status === 'pending') ?? [];
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/approve
+   * Approve a pending audit action — executes immediately.
+   */
+  @Post(':tenantId/:campaignId/actions/:actionId/approve')
+  async approveAction(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('actionId') actionId: string,
+  ) {
+    try {
+      const result = await this.campaignsService.executeAction(tenantId, campaignId, actionId);
+      return { success: true, ...result };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/override
+   * Override (skip) a pending audit action — it won't auto-execute.
+   */
+  @Post(':tenantId/:campaignId/actions/:actionId/override')
+  async overrideAction(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('actionId') actionId: string,
+  ) {
+    try {
+      await this.campaignsService.overrideAction(tenantId, campaignId, actionId);
+      return { success: true, message: 'Action overridden — will not execute' };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
 }

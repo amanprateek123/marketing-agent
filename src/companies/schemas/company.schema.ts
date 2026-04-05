@@ -147,6 +147,8 @@ export class Company {
       autoSwitch: true,
       coldStartDays: 14,
       campaignStrategy: 'balanced',
+      pauseGracePeriodHours: 12,
+      scaleRequiresApproval: true,
     }),
   })
   pipelineConfig: PipelineConfig;

@@ -1,14 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { v4 as uuidv4 } from 'uuid';
 import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { CompaniesService } from '../../companies/companies.service';
 import { ActionLoggerService } from '../../common/action-logger/action-logger.service';
 import { CampaignsService } from '../campaigns.service';
-import { CampaignDocument } from '../schemas/campaign.schema';
+import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { CampaignOptimizerService, CampaignMetrics } from './campaign-optimizer.service';
+import { MetaMetricsService, FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
+import { MetaAdsService } from '../meta-ads/meta-ads.service';
+import { SlackService } from '../../delivery/slack.service';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
 import { CreativeLearningService } from '../../learning/creative-learning.service';
 import { CampaignLearningService } from '../../learning/campaign-learning.service';
@@ -33,8 +37,13 @@ export class CampaignAuditorService {
     private readonly actionLogger: ActionLoggerService,
     private readonly creativeLearning: CreativeLearningService,
     private readonly campaignLearning: CampaignLearningService,
+    private readonly metaMetrics: MetaMetricsService,
+    private readonly metaAds: MetaAdsService,
+    private readonly slackService: SlackService,
     @InjectModel(IntelligenceBrief.name)
     private readonly briefModel: Model<IntelligenceBriefDocument>,
+    @InjectModel(Campaign.name)
+    private readonly campaignModel: Model<CampaignDocument>,
   ) {}
 
   async audit(tenantId: string): Promise<AuditResult> {
@@ -139,42 +148,300 @@ export class CampaignAuditorService {
     return result;
   }
 
+  /**
+   * Fetch metrics directly from Meta Graph API (no Claude needed).
+   * Also runs ad-level analysis: fatigue detection, per-ad-set optimization.
+   */
   private async fetchMetrics(
     campaign: CampaignDocument,
     company: CompanyDocument,
   ): Promise<CampaignMetrics> {
-    const result = await this.claudeService.runAgent({
-      tenantId: company.tenantId,
-      agentType: AgentType.CAMPAIGN_AUDITOR,
-      systemPrompt: `You are a Meta Ads analyst. Fetch campaign metrics using the Meta Ads MCP tools and return them as JSON.
-Always return a JSON object with these exact fields:
-{ "spend": number, "impressions": number, "clicks": number, "conversions": number, "roas": number, "ctr": number, "cpc": number, "frequency": number }`,
-      liveContext: '',
-      userMessage: `Fetch the current performance metrics for Meta campaign ID "${campaign.metaCampaignId}".
-Return the metrics as a JSON object with fields: spend, impressions, clicks, conversions, roas, ctr, cpc, frequency.`,
-      maxTurns: 5,
-    });
+    if (!company.meta?.accessToken || !campaign.metaCampaignId) {
+      this.logger.warn(`Cannot fetch metrics: missing Meta credentials or campaign ID`);
+      return { spend: 0, impressions: 0, clicks: 0, conversions: 0, roas: 0, ctr: 0, cpc: 0, frequency: 0 };
+    }
 
-    return this.parseMetrics(result.content);
+    // Find product for conversion value
+    const product = (company.products ?? []).find(p => p.active);
+    const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+
+    // Fetch full metrics hierarchy: campaign → ad sets → ads
+    const full = await this.metaMetrics.fetchFullMetrics(
+      campaign.metaCampaignId,
+      company.meta.accessToken,
+      conversionValue,
+    );
+
+    // Save per-ad-set and per-ad metrics to MongoDB
+    await this.saveAdLevelMetrics(campaign, full, company);
+
+    // Run ad-level optimizations
+    await this.runAdLevelAudit(campaign, full, company);
+
+    // Execute any expired pending actions
+    await this.executePendingActions(campaign, company);
+
+    return {
+      spend: full.campaign.spend,
+      impressions: full.campaign.impressions,
+      clicks: full.campaign.clicks,
+      conversions: full.campaign.conversions,
+      roas: full.campaign.roas,
+      ctr: full.campaign.ctr,
+      cpc: full.campaign.cpc,
+      frequency: full.campaign.frequency,
+    };
   }
 
-  private parseMetrics(content: string): CampaignMetrics {
-    try {
-      const jsonMatch = content.match(/```json\n?([\s\S]*?)\n?```/) ?? content.match(/\{[\s\S]*?\}/);
-      const raw = jsonMatch ? JSON.parse(jsonMatch[1] ?? jsonMatch[0]) : {};
-      return {
-        spend: raw.spend ?? 0,
-        impressions: raw.impressions ?? 0,
-        clicks: raw.clicks ?? 0,
-        conversions: raw.conversions ?? 0,
-        roas: raw.roas ?? 0,
-        ctr: raw.ctr ?? 0,
-        cpc: raw.cpc ?? 0,
-        frequency: raw.frequency ?? 0,
+  /**
+   * Save per-ad-set and per-ad metrics to the campaign document.
+   */
+  private async saveAdLevelMetrics(
+    campaign: CampaignDocument,
+    full: FullCampaignMetrics,
+    company: CompanyDocument,
+  ): Promise<void> {
+    const adSets = (campaign as any).adSets ?? [];
+    if (adSets.length === 0) return;
+
+    for (const adSet of adSets) {
+      const metaAdSet = full.adSets.find(a => a.adSetId === adSet.metaAdSetId);
+      if (!metaAdSet) continue;
+
+      adSet.metrics = {
+        spend: metaAdSet.spend,
+        impressions: metaAdSet.impressions,
+        clicks: metaAdSet.clicks,
+        conversions: metaAdSet.conversions,
+        ctr: metaAdSet.ctr,
+        cpc: metaAdSet.cpc,
+        cpa: metaAdSet.cpa,
+        frequency: metaAdSet.frequency,
+        reach: metaAdSet.reach,
       };
-    } catch {
-      this.logger.warn('Failed to parse metrics JSON — using zeros');
-      return { spend: 0, impressions: 0, clicks: 0, conversions: 0, roas: 0, ctr: 0, cpc: 0, frequency: 0 };
+
+      for (const ad of adSet.ads) {
+        const metaAd = metaAdSet.ads.find(a => a.adId === ad.metaAdId);
+        if (!metaAd) continue;
+
+        ad.metrics = {
+          spend: metaAd.spend,
+          impressions: metaAd.impressions,
+          clicks: metaAd.clicks,
+          conversions: metaAd.conversions,
+          ctr: metaAd.ctr,
+          cpc: metaAd.cpc,
+        };
+
+        // Set CTR baseline from first 48h
+        const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
+        const ageHours = ageMs / (1000 * 60 * 60);
+        if (!ad.ctrBaseline && ageHours >= 48 && metaAd.ctr > 0) {
+          ad.ctrBaseline = metaAd.ctr;
+          ad.baselineSetAt = new Date();
+        }
+      }
+    }
+
+    await this.campaignModel.updateOne(
+      { _id: campaign._id },
+      { adSets, lastAuditedAt: new Date() },
+    );
+  }
+
+  /**
+   * Run ad-level optimizations: fatigue detection, zero-conversion ads, winning ad sets.
+   */
+  private async runAdLevelAudit(
+    campaign: CampaignDocument,
+    full: FullCampaignMetrics,
+    company: CompanyDocument,
+  ): Promise<void> {
+    const gracePeriodHours = company.pipelineConfig?.pauseGracePeriodHours ?? 12;
+    const scaleRequiresApproval = company.pipelineConfig?.scaleRequiresApproval ?? true;
+    const adSets = (campaign as any).adSets ?? [];
+
+    for (const adSet of adSets) {
+      if (adSet.status !== 'active') continue;
+      const metaAdSet = full.adSets.find(a => a.adSetId === adSet.metaAdSetId);
+      if (!metaAdSet) continue;
+
+      for (const ad of adSet.ads) {
+        if (ad.status !== 'active') continue;
+        const metaAd = metaAdSet.ads.find(a => a.adId === ad.metaAdId);
+        if (!metaAd) continue;
+
+        // Creative fatigue: CTR dropped >40% from baseline
+        if (ad.ctrBaseline && ad.ctrBaseline > 0 && metaAd.ctr > 0) {
+          const dropPercent = ((ad.ctrBaseline - metaAd.ctr) / ad.ctrBaseline) * 100;
+          if (dropPercent > 40) {
+            await this.createPendingAction(campaign, company, {
+              type: 'pause_ad',
+              targetId: ad.metaAdId,
+              targetName: `${adSet.name} — Variant ${ad.copyVariantIndex + 1} (${ad.hookStyle})`,
+              reason: `Creative fatigue: CTR dropped ${dropPercent.toFixed(0)}% from baseline (${ad.ctrBaseline.toFixed(2)}% → ${metaAd.ctr.toFixed(2)}%)`,
+              metrics: { ctrBaseline: ad.ctrBaseline, currentCtr: metaAd.ctr, dropPercent },
+              gracePeriodHours,
+            });
+          }
+        }
+
+        // Zero conversions after significant spend
+        if (metaAd.conversions === 0 && metaAd.spend > 1500) {
+          await this.createPendingAction(campaign, company, {
+            type: 'pause_ad',
+            targetId: ad.metaAdId,
+            targetName: `${adSet.name} — Variant ${ad.copyVariantIndex + 1} (${ad.hookStyle})`,
+            reason: `Zero conversions after ₹${metaAd.spend.toFixed(0)} spend`,
+            metrics: { spend: metaAd.spend, conversions: 0, ctr: metaAd.ctr },
+            gracePeriodHours,
+          });
+        }
+      }
+
+      // Ad set level: high ROAS → recommend scale
+      if (metaAdSet.conversions >= 3 && metaAdSet.cpa > 0) {
+        const product = (company.products ?? []).find(p => p.active);
+        const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+        const roas = conversionValue > 0 ? (metaAdSet.conversions * conversionValue) / metaAdSet.spend : 0;
+
+        if (roas > (company.scaleIfROASAbove ?? 2)) {
+          const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
+          if (ageMs > 48 * 60 * 60 * 1000) { // only after 48h
+            await this.createPendingAction(campaign, company, {
+              type: 'scale_adset',
+              targetId: adSet.metaAdSetId,
+              targetName: adSet.name,
+              reason: `ROAS ${roas.toFixed(1)}x after 48h+ with ${metaAdSet.conversions} conversions. Recommend +20% budget.`,
+              metrics: { roas, conversions: metaAdSet.conversions, cpa: metaAdSet.cpa, spend: metaAdSet.spend },
+              gracePeriodHours: scaleRequiresApproval ? 999999 : gracePeriodHours, // never auto-execute if approval required
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Create a pending action with grace period. Sends Slack notification.
+   */
+  private async createPendingAction(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    action: {
+      type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative';
+      targetId: string;
+      targetName: string;
+      reason: string;
+      metrics: Record<string, number>;
+      gracePeriodHours: number;
+    },
+  ): Promise<void> {
+    const pendingActions = (campaign as any).pendingActions ?? [];
+
+    // Don't duplicate — check if action already exists for this target
+    const existing = pendingActions.find(
+      (a: any) => a.targetId === action.targetId && a.type === action.type && a.status === 'pending',
+    );
+    if (existing) return;
+
+    const actionId = uuidv4();
+    const now = new Date();
+    const executeAt = new Date(now.getTime() + action.gracePeriodHours * 60 * 60 * 1000);
+
+    pendingActions.push({
+      actionId,
+      type: action.type,
+      targetId: action.targetId,
+      targetName: action.targetName,
+      reason: action.reason,
+      metrics: action.metrics,
+      recommendedAt: now,
+      executeAt,
+      status: 'pending',
+    });
+
+    await this.campaignModel.updateOne(
+      { _id: campaign._id },
+      { pendingActions },
+    );
+
+    // Slack notification
+    const slackWebhook = company.delivery?.slackWebhook;
+    if (slackWebhook) {
+      const icon = action.type.includes('pause') ? '⚠️' : '📈';
+      const autoMsg = action.gracePeriodHours < 999999
+        ? `\nWill auto-execute in ${action.gracePeriodHours}h unless overridden.`
+        : '\nRequires manual approval.';
+
+      await this.slackService.sendMessage(
+        slackWebhook,
+        company.tenantId,
+        `${icon} *Audit Recommendation*\n\n*Action:* ${action.type.replace('_', ' ')}\n*Target:* ${action.targetName}\n*Reason:* ${action.reason}\n*Metrics:* ${JSON.stringify(action.metrics)}${autoMsg}\n\nApprove: \`POST /api/v1/campaigns/${company.tenantId}/${(campaign as any)._id}/actions/${actionId}/approve\`\nOverride: \`POST /api/v1/campaigns/${company.tenantId}/${(campaign as any)._id}/actions/${actionId}/override\``,
+      );
+    }
+
+    this.logger.log(
+      `Pending action created: ${action.type} on ${action.targetName} | grace: ${action.gracePeriodHours}h | reason: ${action.reason}`,
+    );
+  }
+
+  /**
+   * Execute pending actions whose grace period has expired.
+   */
+  private async executePendingActions(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+  ): Promise<void> {
+    const pendingActions = (campaign as any).pendingActions ?? [];
+    const now = new Date();
+    let updated = false;
+
+    for (const action of pendingActions) {
+      if (action.status !== 'pending') continue;
+      if (new Date(action.executeAt) > now) continue;
+
+      try {
+        if (action.type === 'pause_ad') {
+          await this.metaAds.pauseAd(action.targetId, company.meta!.accessToken);
+          // Update ad status in campaign document
+          for (const adSet of (campaign as any).adSets ?? []) {
+            const ad = adSet.ads.find((a: any) => a.metaAdId === action.targetId);
+            if (ad) ad.status = 'paused';
+          }
+        } else if (action.type === 'pause_adset') {
+          await this.metaAds.pauseAdSet(action.targetId, company.meta!.accessToken);
+          const adSet = ((campaign as any).adSets ?? []).find((a: any) => a.metaAdSetId === action.targetId);
+          if (adSet) adSet.status = 'paused';
+        } else if (action.type === 'scale_adset') {
+          // Scale requires approval — should never auto-execute
+          continue;
+        }
+
+        action.status = 'executed';
+        action.executedAt = now;
+        updated = true;
+
+        await this.actionLogger.log({
+          tenantId: company.tenantId,
+          agent: AgentType.CAMPAIGN_AUDITOR,
+          action: `auto_${action.type}`,
+          reason: `Grace period expired — ${action.reason}`,
+          outcome: `${action.type} executed on ${action.targetName}`,
+          metadata: { actionId: action.actionId, targetId: action.targetId },
+        });
+
+        this.logger.log(`Pending action executed: ${action.type} on ${action.targetName}`);
+      } catch (err: any) {
+        this.logger.error(`Failed to execute pending action: ${err.message}`);
+      }
+    }
+
+    if (updated) {
+      await this.campaignModel.updateOne(
+        { _id: campaign._id },
+        { pendingActions, adSets: (campaign as any).adSets },
+      );
     }
   }
 

@@ -119,7 +119,7 @@ export class Campaign {
     pauseRules: string;
   };
 
-  // Meta ad set + ad IDs (populated after launch)
+  // Meta ad set + ad IDs (populated after launch, updated by auditor)
   @Prop({ type: [Object], default: [] })
   adSets: {
     metaAdSetId: string;
@@ -127,12 +127,48 @@ export class Campaign {
     budgetPercent: number;
     audienceType: string;
     status: string;
+    metrics?: {
+      spend: number;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      ctr: number;
+      cpc: number;
+      cpa: number;
+      frequency: number;
+      reach: number;
+    };
     ads: {
       metaAdId: string;
       copyVariantIndex: number;
       hookStyle: string;
       status: string;
+      metrics?: {
+        spend: number;
+        impressions: number;
+        clicks: number;
+        conversions: number;
+        ctr: number;
+        cpc: number;
+      };
+      ctrBaseline?: number;          // first 48h average CTR (for fatigue detection)
+      baselineSetAt?: Date;
     }[];
+  }[];
+
+  // Pending optimization actions (auditor recommends, human approves or grace period expires)
+  @Prop({ type: [Object], default: [] })
+  pendingActions: {
+    actionId: string;
+    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative';
+    targetId: string;                 // Meta ad/adset ID
+    targetName: string;
+    reason: string;
+    metrics: Record<string, number>;  // relevant metrics at time of recommendation
+    recommendedAt: Date;
+    executeAt: Date;                  // recommendedAt + gracePeriod
+    status: 'pending' | 'executed' | 'overridden' | 'expired';
+    executedAt?: Date;
   }[];
 }
 

@@ -75,4 +75,51 @@ export class CampaignsService {
       { ...metrics, lastAuditedAt: new Date() },
     );
   }
+
+  async executeAction(
+    tenantId: string,
+    campaignId: string,
+    actionId: string,
+  ): Promise<{ type: string; targetName: string }> {
+    const campaign = await this.campaignModel.findOne({ tenantId, _id: campaignId }).exec();
+    if (!campaign) throw new Error('Campaign not found');
+
+    const pendingActions = (campaign as any).pendingActions ?? [];
+    const action = pendingActions.find((a: any) => a.actionId === actionId);
+    if (!action) throw new Error('Action not found');
+    if (action.status !== 'pending') throw new Error(`Action already ${action.status}`);
+
+    // Mark as executed — actual Meta API call happens in auditor's executePendingActions
+    action.status = 'executed';
+    action.executedAt = new Date();
+    action.executeAt = new Date(); // trigger immediate execution on next audit
+
+    await this.campaignModel.updateOne(
+      { tenantId, _id: campaignId },
+      { pendingActions },
+    );
+
+    return { type: action.type, targetName: action.targetName };
+  }
+
+  async overrideAction(
+    tenantId: string,
+    campaignId: string,
+    actionId: string,
+  ): Promise<void> {
+    const campaign = await this.campaignModel.findOne({ tenantId, _id: campaignId }).exec();
+    if (!campaign) throw new Error('Campaign not found');
+
+    const pendingActions = (campaign as any).pendingActions ?? [];
+    const action = pendingActions.find((a: any) => a.actionId === actionId);
+    if (!action) throw new Error('Action not found');
+    if (action.status !== 'pending') throw new Error(`Action already ${action.status}`);
+
+    action.status = 'overridden';
+
+    await this.campaignModel.updateOne(
+      { tenantId, _id: campaignId },
+      { pendingActions },
+    );
+  }
 }

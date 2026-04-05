@@ -117,6 +117,8 @@ export interface PipelineConfig {
   // conservative: only proven winners — hooks, audiences, formats with data
   // balanced (default): proven winners + 1 new test idea per run
   // experimental: all new ideas, maximum testing, higher risk
+  pauseGracePeriodHours: number;     // hours before auto-pausing a flagged ad/ad set (default: 12)
+  scaleRequiresApproval: boolean;    // scaling budget always needs human approval (default: true)
 }
 
 export interface CreativeLearnings {
