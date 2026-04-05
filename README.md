@@ -161,18 +161,29 @@ EVERY 6 HOURS — Campaign Monitoring (BullMQ cron)
 
   CampaignAuditorService
        │
-       ├── Fetches live metrics from Meta Ads (MCP)
+       ├── MetaMetricsService → direct Graph API (no Claude, ~2 sec)
+       │   ├── Per-campaign: spend, ROAS, frequency
+       │   ├── Per-ad-set: CPA, CTR, reach, conversions
+       │   └── Per-ad: CTR, clicks, conversions (which hook wins?)
        │
-       ├── TypeScript Safety Rails (FORCE — non-negotiable):
-       │   ├── CTR < 0.3% after 72h    → FORCE PAUSE
+       ├── Save ALL metrics to MongoDB (campaign + ad sets + ads)
+       │
+       ├── TIER 1 — Auto-execute (TypeScript, non-negotiable):
+       │   ├── Budget exceeded          → FORCE PAUSE
        │   ├── Frequency > 4.0         → FORCE PAUSE
-       │   └── Budget exceeded          → FORCE PAUSE
+       │   └── Weekly cap hit           → FORCE PAUSE
        │
-       ├── CampaignOptimizerService (Claude agent):
-       │   ├── Reviews metrics + learnings
-       │   ├── Auto-pauses underperformers
-       │   ├── Auto-scales winners (≤ maxBudgetScalePercent)
-       │   └── Updates campaign status in MongoDB
+       ├── TIER 2 — Delayed auto-execute (grace period + Slack):
+       │   ├── Creative fatigue (CTR dropped >40% from 48h baseline)
+       │   │   → Slack notify → 12h grace → auto-pause if not overridden
+       │   ├── Zero conversions after ₹1,500 spend
+       │   │   → Slack notify → 12h grace → auto-pause if not overridden
+       │   └── Low ROAS after 5 days → recommend pause ad set
+       │
+       ├── TIER 3 — Approval required (Slack, never auto-executes):
+       │   └── ROAS > 2x after 48h → recommend scale +20% (needs human)
+       │
+       ├── Execute expired pending actions (grace period passed)
        │
        └── Writes performance back to creative briefs (for learning)
 
@@ -2151,9 +2162,14 @@ Total agent team cost per pipeline run: **~$2.44**
 **Build after 5 campaigns launched on Meta:**
 
 - [ ] Meta audience sync — pull existing custom/lookalike audiences from Meta API into MongoDB, map to products. Run weekly before pipeline
-- [ ] Per-ad-set and per-ad metrics — auditor fetches granular metrics (which hook is winning, which audience converts)
-- [ ] Ad-level optimization — pause losing ads, scale winning hooks, shift budget between ad sets
-- [ ] Performance Marketing Expert rewrite — real optimization decisions at ad set + ad level, not just campaign-level rule checks
+- [x] Per-ad-set and per-ad metrics — MetaMetricsService fetches granular metrics directly from Meta Graph API (no Claude)
+- [x] Ad-level optimization — pause losing ads (zero conversions after ₹1,500), scale winning ad sets (ROAS > 2x after 48h)
+- [x] Creative fatigue detection — CTR baseline set at 48h, flags ads with >40% CTR drop
+- [x] Pending actions system — 3-tier: auto-execute safety, delayed auto-execute with grace period, approval-required for scaling
+- [x] Slack notifications for every audit recommendation with approve/override URLs
+- [x] API endpoints: GET /pending-actions, POST /actions/:id/approve, POST /actions/:id/override
+- [x] Pipeline config: pauseGracePeriodHours (default: 12), scaleRequiresApproval (default: true)
+- [ ] Performance Marketing Expert rewrite — full agent-based optimization decisions (future)
 
 **Build after 50+ conversions per product:**
 
@@ -2181,13 +2197,14 @@ Total agent team cost per pipeline run: **~$2.44**
 - [ ] Campaign Review reads winning audiences before setting ad sets — data-driven targeting
 - Why it beats competitors: Their winners hub is static storage. Ours feeds back into every decision automatically.
 
-**Feature 2: Auto-optimization loop (build after 5 campaigns)**
-- [ ] Auditor upgrade: per-ad-set + per-ad metrics from Meta every 6h (first 48h: every 2h)
-- [ ] Pause losing ads within ad sets (not whole campaigns)
-- [ ] Scale winning ad sets (budget shift between ad sets)
+**Feature 2: Auto-optimization loop (PARTIALLY BUILT)**
+- [x] Auditor upgrade: per-ad-set + per-ad metrics from Meta every 6h via MetaMetricsService (direct API, no Claude)
+- [x] Pause losing ads within ad sets (zero conversions after ₹1,500 spend → pending action with grace period)
+- [x] Scale winning ad sets (ROAS > 2x after 48h → recommend scale, requires human approval)
+- [x] Creative fatigue detection: CTR baseline at 48h, flags ads with >40% drop
+- [x] Pending actions with 3 tiers: auto-execute safety, delayed auto-execute (12h grace), approval-required scaling
 - [ ] Generate replacement creatives for paused ads (trigger Creative Team for new variants)
 - [ ] 48h cooldown after any budget change (prevent learning phase resets)
-- [ ] Creative fatigue detection: if CTR drops >40% from first-48h baseline → flag for refresh
 - Why it beats competitors: They launch and walk away. We launch, learn, replace losers, and scale winners continuously.
 
 **Feature 3: Bulk variation mode (build after auto-optimization)**
@@ -2325,7 +2342,8 @@ Marketing Agent/
 │   │   │   ├── campaign-auditor.service.ts
 │   │   │   └── campaign-optimizer.service.ts
 │   │   └── meta-ads/
-│   │       └── meta-ads.service.ts           ← Direct Meta Graph API (campaign + ad sets + ads)
+│   │       ├── meta-ads.service.ts           ← Direct Meta Graph API (campaign + ad sets + ads)
+│   │       └── meta-metrics.service.ts       ← Direct Meta Graph API (per-ad-set + per-ad metrics)
 │   │
 │   ├── learning/
 │   │   ├── learning.module.ts
@@ -2559,6 +2577,9 @@ volumes:
 | `GET` | `/api/v1/campaigns/:tenantId/:campaignId` | 5 | Campaign detail + audit log |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/approve` | 9 | Human approves reviewed campaign → launches on Meta |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/pause` | 5 | Manual override pause |
+| `GET` | `/api/v1/campaigns/:tenantId/:campaignId/pending-actions` | 10 | List pending audit actions |
+| `POST` | `/api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/approve` | 10 | Approve pending action → execute immediately |
+| `POST` | `/api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/override` | 10 | Override (skip) pending action |
 | `GET` | `/api/v1/reports/:tenantId/weekly` | 3 | Latest weekly digest |
 | `GET` | `/api/v1/reports/:tenantId/performance` | 6 | Campaign performance summary |
 | `GET` | `/api/v1/actions/:tenantId` | 3 | Full action log with reasoning |
