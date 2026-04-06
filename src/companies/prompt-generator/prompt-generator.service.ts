@@ -235,6 +235,28 @@ export class PromptGeneratorService {
       geography: company.geography,
       language: company.language,
       primaryObjective: company.primaryObjective,
+      // Product catalog — so prompts understand what the company sells
+      products: (company.products ?? []).filter(p => p.active).map(p => ({
+        name: p.name,
+        price: p.price,
+        currency: p.currency,
+        description: p.description,
+        differentiators: p.differentiators,
+        trendKeywords: p.trendKeywords,
+        languages: p.languages,
+      })),
+      // Past learnings — so prompts incorporate what worked before
+      learnings: company.learnings ? {
+        winningHooks: company.learnings.creative?.winningHooks,
+        losingHooks: company.learnings.creative?.losingHooks,
+        winningFormats: company.learnings.creative?.winningFormats,
+        topAudiences: company.learnings.campaign?.audienceScores
+          ? Object.entries(company.learnings.campaign.audienceScores)
+              .sort(([,a],[,b]) => b - a)
+              .slice(0, 5)
+              .map(([k,v]) => `${k}: ${v}`)
+          : [],
+      } : null,
     };
   }
 

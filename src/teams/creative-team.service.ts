@@ -13,7 +13,7 @@ export interface CreativeTeamOutput {
   selectedIndex: number;
   selectionReason: string;
   imagePrompt: string;
-  videoPrompt: string;
+  videoPrompt: string;        // complete prompt: visuals + voiceover + captions + music
   complianceNotes: string;
   debateRounds: number;
   debateLog: { round: number; from: string; summary: string }[];
@@ -181,13 +181,16 @@ b) IMAGE PROMPT — for AI image generation (Gemini):
    - Describe: lighting, color palette, composition, mood, focal point
    - 2-3 sentences
 
-c) VIDEO PROMPT — for AI video generation (Kling AI):
+c) VIDEO PROMPT — complete video ad prompt (for Hygen or similar):
    - Vertical 9:16, 15-20 seconds
-   - Describe: opening shot, middle scene, closing shot
-   - Color grade, mood, camera movement
-   - Visual storytelling only (no spoken dialogue)
+   - Include EVERYTHING in one prompt — visuals + voiceover + captions + music
+   - Describe: opening shot, middle scene, closing shot with camera movement
+   - Include voiceover script in Hinglish timed to scenes (e.g. "narrator says: ...")
+   - Include text overlays/captions that appear on screen (3-6 words each)
+   - Include background music/sound direction (style, tempo, mood)
+   - Color grade and mood
    - First 0.5 seconds MUST have motion (no static opening)
-   - 3-5 sentences
+   - The prompt should produce a COMPLETE video ad ready for Meta — with sound, voice, and captions
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 
@@ -210,7 +213,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
   "selectedIndex": 0,
   "selectionReason": "why this variant is the strongest",
   "imagePrompt": "detailed image generation prompt...",
-  "videoPrompt": "detailed video generation prompt...",
+  "videoPrompt": "complete video ad prompt with visuals + voiceover + captions + music — ready for Hygen",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [

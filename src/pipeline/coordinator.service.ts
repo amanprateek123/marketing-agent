@@ -129,7 +129,7 @@ Return your full research findings.
       systemPrompt,
       liveContext,
       userMessage,
-      maxTurns: 8,
+      maxTurns: 15,
     });
 
     await this.researchOutputModel.create({
