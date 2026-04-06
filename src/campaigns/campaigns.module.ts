@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Campaign, CampaignSchema } from './schemas/campaign.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
@@ -15,6 +15,9 @@ import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { MetaMetricsService } from './meta-ads/meta-metrics.service';
+import { MetaLearningImporterService } from './meta-ads/meta-learning-importer.service';
+import { PatternCalculatorService } from './meta-ads/pattern-calculator.service';
+import { CampaignCaseStudy, CampaignCaseStudySchema } from './schemas/campaign-case-study.schema';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 
@@ -25,15 +28,16 @@ import { CreativePackage, CreativePackageSchema } from '../creative/schemas/crea
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
       { name: CreativePackage.name, schema: CreativePackageSchema },
+      { name: CampaignCaseStudy.name, schema: CampaignCaseStudySchema },
     ]),
     ClaudeModule,
-    CompaniesModule,
+    forwardRef(() => CompaniesModule),
     CommonModule,
     LearningModule,
     DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService],
-  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService],
+  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService],
+  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService],
 })
 export class CampaignsModule {}

@@ -1,9 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompaniesController } from './companies.controller';
 import { CompaniesService } from './companies.service';
 import { Company, CompanySchema } from './schemas/company.schema';
 import { ClaudeModule } from '../claude/claude.module';
+import { CampaignsModule } from '../campaigns/campaigns.module';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { LiveContextBuilder } from './prompt-generator/live-context.builder';
 
@@ -13,6 +14,7 @@ import { LiveContextBuilder } from './prompt-generator/live-context.builder';
       { name: Company.name, schema: CompanySchema },
     ]),
     ClaudeModule,
+    forwardRef(() => CampaignsModule),
   ],
   controllers: [CompaniesController],
   providers: [CompaniesService, PromptGeneratorService, LiveContextBuilder],

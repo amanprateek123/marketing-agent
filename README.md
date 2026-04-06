@@ -309,6 +309,7 @@ campaigns              │ Meta Ads campaign + review data + ad sets + ads
 action_logs            │ Autonomous decision audit trail
 usage_logs             │ Per-agent token + cost tracking
 learning_runs          │ Monthly learning records
+campaign_case_studies   │ Historical campaign case studies (patterns + lessons)
 ```
 
 ---
@@ -2077,12 +2078,18 @@ Cost: ~$1 per debate run
 ```
 src/teams/
   team-cli.util.ts                — Shared CLI runner + force cleanup for all teams
-  strategy-team.service.ts        — Strategist + Contrarian debate via CLI (Phase D)
-  creative-team.service.ts        — Creative Director + Brand Compliance debate via CLI (Phase F)
-  campaign-review-team.service.ts — Campaign Strategist + Performance Analyst → structured ad set config (Phase G)
+  strategy-team.service.ts        — Strategist + Contrarian debate via CLI (Phase D) + case studies
+  creative-team.service.ts        — Creative Director + Brand Compliance debate via CLI (Phase F) + case studies
+  campaign-review-team.service.ts — Campaign Strategist + Performance Analyst → structured ad set config (Phase G) + case studies
 
 src/campaigns/meta-ads/
   meta-ads.service.ts             — Direct Meta Graph API: campaign + ad sets + ads with rollback + retry
+  meta-metrics.service.ts         — Direct Meta Graph API: per-ad-set + per-ad metrics for auditor
+  meta-learning-importer.service.ts — Pulls 2 years of Meta data, generates case studies via Claude
+  pattern-calculator.service.ts   — TypeScript math: hook/format/audience/seasonal statistics
+
+src/campaigns/schemas/
+  campaign-case-study.schema.ts   — Case study documents from historical campaigns
 ```
 
 ### Files Updated
@@ -2103,7 +2110,13 @@ src/campaigns/meta-ads/
 | `campaigns/campaigns.module.ts` | Registered `CampaignReviewTeamService` + `MetaAdsService` |
 | `campaigns/schemas/campaign.schema.ts` | Added `pending_approval` status, review fields, `campaignConfig`, `adSets[]`, `approvedAt` |
 | `companies/schemas/company.schema.ts` | Added `signals: CompanySignals`, `meta: MetaAdsConfig` |
-| `companies/schemas/company.types.ts` | Added `Product` (rich schema with audiences, Meta audiences, performance), `MetaAdsConfig`, `CompanySignals` |
+| `companies/schemas/company.types.ts` | Added `Product` (rich schema with audiences, Meta audiences, performance), `MetaAdsConfig`, `CompanySignals`, `CampaignStrategy` |
+| `companies/companies.controller.ts` | Added `POST /import-learnings` endpoint |
+| `companies/companies.module.ts` | Added `forwardRef(CampaignsModule)` for learning importer access |
+| `companies/prompt-generator/prompt-generator.service.ts` | Injects product catalog + learnings into prompt generation |
+| `pipeline/pipeline.controller.ts` | Added `POST /produce/:briefId` for tenant idea approval |
+| `pipeline/digest-writer.service.ts` | Digest CTA shows produce URLs for non-winner ideas |
+| `pipeline/coordinator.service.ts` | Increased competitor research `maxTurns` to 15 |
 
 ### All Agent Teams
 
@@ -2189,13 +2202,41 @@ Total agent team cost per pipeline run: **~$2.44**
 
 > These features differentiate BriefOS from creative-tool competitors. Build in order of competitive impact.
 
-**Feature 1: Winners Hub + feedback loop (build after first campaign)**
-- [ ] New `winners` MongoDB collection — stores winning creatives, headlines, audiences, hook styles with ROAS/CPA/CTR data
-- [ ] Auditor writes to winners when a creative/audience/hook hits a ROAS threshold
-- [ ] Strategy Team reads winners before proposing ideas — proven combos get priority
-- [ ] Creative Team reads winning hooks before writing copy — starts from what works
-- [ ] Campaign Review reads winning audiences before setting ad sets — data-driven targeting
-- Why it beats competitors: Their winners hub is static storage. Ours feeds back into every decision automatically.
+**Feature 1: Campaign Memory — Two-Layer Learning System (BUILT)**
+
+Replaces Winners Hub with a smarter two-layer approach. Imported from Meta historical data (2 years).
+
+*Layer 1: Pattern Memory (TypeScript math, no Claude) — always in prompt:*
+- [x] `PatternCalculatorService` — calculates statistics from raw Meta data per product
+- [x] Hook performance: win rate per hook style across all ads
+- [x] Format performance: conversion share per format (Reels vs Feed vs Stories)
+- [x] Audience performance: avg ROAS per audience type
+- [x] Demographic insights: top converting age × gender segment
+- [x] Seasonal patterns: which months have peak ROAS
+- [x] Budget insights: optimal daily budget range
+- [x] Confidence levels based on sample size (low/medium/high)
+- [x] Saved to `company.learnings` → flows into ALL agents via LiveContextBuilder
+
+*Layer 2: Case Study Memory (Claude-generated from raw data) — injected per team:*
+- [x] `MetaLearningImporterService` — pulls all campaigns + ad sets + ads + demographics from Meta
+- [x] Claude generates a case study per campaign: what worked, what failed, lesson learned
+- [x] Stored in `campaign_case_studies` MongoDB collection
+- [x] Strategy Team: 12 recent + seasonal match case studies (debate context)
+- [x] Creative Team: 7 case studies focused on hooks/formats that worked/failed
+- [x] Campaign Review Team: 7 case studies focused on budget/audience performance
+- [x] Agents reason over real stories, not just aggregated statistics
+
+*Endpoint:* `POST /api/v1/companies/:tenantId/import-learnings`
+- Runs once on tenant registration, then monthly for refresh
+- Pulls all Meta data → calculates patterns → generates case studies → saves both
+
+- Why it beats competitors: AdStellar stores past winners. BriefOS learns PATTERNS from past data and applies them to NEW ideas. Plus case studies give agents context for WHY things worked, enabling better debates.
+
+**Feature 1b: Tenant Idea Approval (BUILT)**
+- [x] `POST /pipeline/:tenantId/runs/:runId/produce/:briefId` — tenant picks any idea from digest, triggers Phases F-G
+- [x] Digest CTA on Slack shows produce URLs for all non-winner ideas
+- [x] System auto-produces the winner + tenant can produce extras as separate campaigns
+- Why it matters: Tenant isn't locked into the system's pick — they can run multiple ideas from the same intelligence pipeline.
 
 **Feature 2: Auto-optimization loop (PARTIALLY BUILT)**
 - [x] Auditor upgrade: per-ad-set + per-ad metrics from Meta every 6h via MetaMetricsService (direct API, no Claude)
@@ -2341,9 +2382,14 @@ Marketing Agent/
 │   │   ├── campaign-auditor/
 │   │   │   ├── campaign-auditor.service.ts
 │   │   │   └── campaign-optimizer.service.ts
+│   │   ├── schemas/
+│   │   │   ├── campaign.schema.ts            ← + adSets[], campaignConfig, pendingActions[]
+│   │   │   └── campaign-case-study.schema.ts ← Case studies from historical Meta data
 │   │   └── meta-ads/
 │   │       ├── meta-ads.service.ts           ← Direct Meta Graph API (campaign + ad sets + ads)
-│   │       └── meta-metrics.service.ts       ← Direct Meta Graph API (per-ad-set + per-ad metrics)
+│   │       ├── meta-metrics.service.ts       ← Direct Meta Graph API (per-ad-set + per-ad metrics)
+│   │       ├── meta-learning-importer.service.ts ← Pulls historical data, generates case studies
+│   │       └── pattern-calculator.service.ts ← TypeScript math: hook/format/audience statistics
 │   │
 │   ├── learning/
 │   │   ├── learning.module.ts
@@ -2557,6 +2603,7 @@ volumes:
 | `action_logs` | Every autonomous decision with reasoning | `tenantId + timestamp`, `tenantId + agent` |
 | `usage_logs` | Every Claude API call (per-agent cost tracking) | `tenantId + timestamp`, `tenantId + agent` |
 | `learning_runs` | Monthly learning analysis records | `tenantId + version` |
+| `campaign_case_studies` | Historical campaign case studies (what worked/failed/lessons) | `tenantId + product` |
 
 ---
 
@@ -2590,6 +2637,8 @@ volumes:
 | `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/creative-team-test` | 9 | Test Creative Team debate with existing brief |
 | `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/campaign-review-test` | 9 | Test Campaign Review → save pending → Slack |
 | `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/generate-digest` | 9 | Generate digest from Strategy Team output |
+| `POST` | `/api/v1/pipeline/:tenantId/runs/:runId/produce/:briefId` | 10 | Tenant produces any idea from digest as separate campaign |
+| `POST` | `/api/v1/companies/:tenantId/import-learnings` | 10 | Import Meta historical data → patterns + case studies |
 
 ---
 

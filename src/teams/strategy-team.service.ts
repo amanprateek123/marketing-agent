@@ -11,6 +11,7 @@ import { CreativeBrief, CreativeBriefDocument } from '../pipeline/schemas/creati
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CoordinatorResult } from '../pipeline/coordinator.service';
 import { IdeaPoolResult } from '../pipeline/idea-pool.service';
+import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
 /**
  * Strategy Team — 2-agent debate (Strategist + Contrarian) via CLI.
@@ -28,6 +29,7 @@ export class StrategyTeamService {
 
   constructor(
     private readonly liveContextBuilder: LiveContextBuilder,
+    private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(IntelligenceBrief.name)
     private readonly intelligenceBriefModel: Model<IntelligenceBriefDocument>,
     @InjectModel(CreativeBrief.name)
@@ -48,7 +50,7 @@ export class StrategyTeamService {
 
     this.logger.log(`Strategy Team starting | tenant: ${tenantId} | run: ${runId}`);
 
-    const prompt = this.buildPrompt(
+    const prompt = await this.buildPrompt(
       company, runId, coordinatorResult, competitorResearch, marketResearch, ideasPerRun,
     );
 
@@ -152,15 +154,53 @@ export class StrategyTeamService {
     };
   }
 
-  private buildPrompt(
+  private async buildPrompt(
     company: CompanyDocument,
     runId: string,
     coordinator: CoordinatorResult,
     competitorResearch: string,
     marketResearch: string,
     ideasPerRun: number,
-  ): string {
+  ): Promise<string> {
     const liveContext = this.liveContextBuilder.build(company);
+
+    // Get relevant case studies from past campaigns
+    let caseStudyContext = '';
+    try {
+      const caseStudies = await this.metaLearningImporter.getRelevantCaseStudies(
+        company.tenantId,
+        { limit: 12 },
+      );
+      if (caseStudies.length > 0) {
+        const recentStudies = caseStudies.slice(0, 12);
+        const currentMonth = new Date().getMonth();
+        const seasonalStudies = caseStudies.filter(cs => {
+          if (!cs.dateRange) return false;
+          const csMonth = new Date(cs.dateRange.split(' ')[0]).getMonth();
+          return csMonth === currentMonth;
+        }).slice(0, 3);
+
+        // Combine: recent + seasonal, deduplicate
+        const allStudies = [...recentStudies];
+        for (const ss of seasonalStudies) {
+          if (!allStudies.find(s => s.campaignName === ss.campaignName)) {
+            allStudies.push(ss);
+          }
+        }
+
+        caseStudyContext = `
+PAST CAMPAIGN CASE STUDIES (from ${allStudies.length} campaigns):
+${allStudies.slice(0, 15).map((cs, i) => `
+  Case ${i + 1}: ${cs.campaignName} (${cs.dateRange})
+    Product: ${cs.product} | Spend: ₹${cs.totalSpend} | Conversions: ${cs.totalConversions}
+    What worked: ${cs.whatWorked?.hooks?.join(', ') || 'unknown'} hooks, ${cs.whatWorked?.audiences?.join(', ') || 'unknown'} audiences, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}
+    What failed: ${cs.whatFailed?.reason || 'nothing notable'}
+    Lesson: ${cs.lesson}
+`).join('')}`;
+      }
+    } catch {
+      // Case studies not available yet — continue without them
+    }
     const learnings = company.learnings;
 
     const topSignals = coordinator.topSignals
@@ -305,6 +345,8 @@ ${marketResearch}
 ${learningsContext}
 
 ${liveContext}
+
+${caseStudyContext}
 
 CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
 ${(() => {

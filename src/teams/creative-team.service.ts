@@ -7,6 +7,7 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CopyVariant } from '../creative/schemas/creative-package.schema';
 import { runTeamViaCli, CliResult } from './team-cli.util';
+import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
 export interface CreativeTeamOutput {
   variants: CopyVariant[];
@@ -35,6 +36,7 @@ export class CreativeTeamService {
 
   constructor(
     private readonly liveContextBuilder: LiveContextBuilder,
+    private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(UsageLog.name)
     private readonly usageLogModel: Model<UsageLog>,
   ) {}
@@ -56,7 +58,7 @@ export class CreativeTeamService {
     const tenantId = company.tenantId;
     this.logger.log(`Creative Team starting | tenant: ${tenantId} | run: ${runId}`);
 
-    const prompt = this.buildPrompt(brief, company, runId);
+    const prompt = await this.buildPrompt(brief, company, runId);
     const cliResult = await runTeamViaCli(prompt, `creative-${runId}`, 'Creative');
 
     await this.usageLogModel.create({
@@ -77,7 +79,7 @@ export class CreativeTeamService {
     return this.parseOutput(cliResult.result);
   }
 
-  private buildPrompt(
+  private async buildPrompt(
     brief: {
       topic: string;
       angle: string;
@@ -90,8 +92,23 @@ export class CreativeTeamService {
     },
     company: CompanyDocument,
     runId: string,
-  ): string {
+  ): Promise<string> {
     const liveContext = this.liveContextBuilder.build(company);
+
+    // Get relevant creative case studies
+    let caseStudyContext = '';
+    try {
+      const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+      const caseStudies = await this.metaLearningImporter.getRelevantCaseStudies(
+        company.tenantId,
+        { product: product?.name, limit: 7 },
+      );
+      if (caseStudies.length > 0) {
+        caseStudyContext = `
+PAST CREATIVE CASE STUDIES (what hooks/formats worked and failed):
+${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.whatWorked?.hooks?.join(', ') || 'unknown'} hooks worked (CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}). ${cs.whatFailed?.reason || ''} Lesson: ${cs.lesson}`).join('\n')}`;
+      }
+    } catch { /* case studies not available yet */ }
     const creative = company.learnings?.creative;
 
     const learningsBlock = creative
@@ -225,6 +242,8 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
 }
 
 ${liveContext}
+
+${caseStudyContext}
 
 CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
 ${(() => {

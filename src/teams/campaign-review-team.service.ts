@@ -6,6 +6,7 @@ import { LiveContextBuilder } from '../companies/prompt-generator/live-context.b
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { runTeamViaCli, CliResult } from './team-cli.util';
+import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
 export interface AdSetConfig {
   name: string;
@@ -61,6 +62,7 @@ export class CampaignReviewTeamService {
 
   constructor(
     private readonly liveContextBuilder: LiveContextBuilder,
+    private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(UsageLog.name)
     private readonly usageLogModel: Model<UsageLog>,
   ) {}
@@ -84,7 +86,7 @@ export class CampaignReviewTeamService {
     const tenantId = company.tenantId;
     this.logger.log(`Campaign Review Team starting | tenant: ${tenantId} | run: ${runId}`);
 
-    const prompt = this.buildPrompt(brief, creativePackage, company, runId);
+    const prompt = await this.buildPrompt(brief, creativePackage, company, runId);
     const cliResult = await runTeamViaCli(prompt, `review-${runId}`, 'Campaign Review');
 
     await this.usageLogModel.create({
@@ -105,7 +107,7 @@ export class CampaignReviewTeamService {
     return this.parseOutput(cliResult.result);
   }
 
-  private buildPrompt(
+  private async buildPrompt(
     brief: {
       topic: string;
       angle: string;
@@ -120,9 +122,24 @@ export class CampaignReviewTeamService {
     creativePackage: any,
     company: CompanyDocument,
     runId: string,
-  ): string {
+  ): Promise<string> {
     const liveContext = this.liveContextBuilder.build(company);
     const learnings = company.learnings;
+
+    // Get relevant campaign case studies for budget/audience decisions
+    let caseStudyContext = '';
+    try {
+      const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+      const caseStudies = await this.metaLearningImporter.getRelevantCaseStudies(
+        company.tenantId,
+        { product: product?.name, limit: 7 },
+      );
+      if (caseStudies.length > 0) {
+        caseStudyContext = `
+PAST CAMPAIGN CASE STUDIES (budget/audience learnings):
+${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: spend ₹${cs.totalSpend}, ${cs.totalConversions} conversions, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}, audiences: ${cs.whatWorked?.audiences?.join(', ') || 'unknown'}. Lesson: ${cs.lesson}`).join('\n')}`;
+      }
+    } catch { /* case studies not available yet */ }
 
     const campaignLearnings = learnings?.campaign
       ? `
@@ -277,6 +294,8 @@ IMPORTANT — adSets rules:
 - budgetPercent across all ad sets must sum to 100.
 
 ${liveContext}
+
+${caseStudyContext}
 
 CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
 ${(() => {

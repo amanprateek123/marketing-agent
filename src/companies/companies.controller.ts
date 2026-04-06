@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { CompaniesService } from './companies.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
+import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
 
@@ -21,6 +22,7 @@ export class CompaniesController {
   constructor(
     private readonly companiesService: CompaniesService,
     private readonly promptGenerator: PromptGeneratorService,
+    private readonly metaLearningImporter: MetaLearningImporterService,
   ) {}
 
   @Post()
@@ -84,5 +86,30 @@ export class CompaniesController {
     );
 
     return { tenantId, message: 'Prompt regeneration started.' };
+  }
+
+  /**
+   * POST /api/v1/companies/:tenantId/import-learnings
+   * Imports historical campaign data from Meta and generates case studies.
+   * Call once on registration, then monthly for refresh.
+   */
+  @Post(':tenantId/import-learnings')
+  async importLearnings(@Param('tenantId') tenantId: string) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+
+    if (!company.meta?.accessToken || !company.meta?.accountId) {
+      return { error: 'Meta credentials not configured. Set company.meta.accessToken and accountId first.' };
+    }
+
+    this.logger.log(`Starting Meta learning import for ${tenantId}`);
+
+    const result = await this.metaLearningImporter.importLearnings(company);
+
+    return {
+      tenantId,
+      campaignsProcessed: result.campaignsProcessed,
+      caseStudiesGenerated: result.caseStudies,
+      message: `Imported ${result.caseStudies} case studies from ${result.campaignsProcessed} campaigns.`,
+    };
   }
 }
