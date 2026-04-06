@@ -122,6 +122,8 @@ export class CampaignCreatorService {
       tenantId: company.tenantId,
       runId,
       briefId: brief.briefId,
+      topic: brief.topic ?? '',
+      angle: brief.angle ?? '',
       creativePackageId: creativePackage?._id?.toString() ?? '',
       metaCampaignId: '',
       status: 'pending_approval',

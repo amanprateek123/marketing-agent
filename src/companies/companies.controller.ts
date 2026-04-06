@@ -89,9 +89,18 @@ export class CompaniesController {
   }
 
   /**
+   * GET /api/v1/companies/:tenantId/case-studies
+   * Returns campaign case studies for the learnings page.
+   */
+  @Get(':tenantId/case-studies')
+  async getCaseStudies(@Param('tenantId') tenantId: string) {
+    return this.metaLearningImporter.getRelevantCaseStudies(tenantId, { limit: 50 });
+  }
+
+  /**
    * POST /api/v1/companies/:tenantId/import-learnings
-   * Imports historical campaign data from Meta and generates case studies.
-   * Call once on registration, then monthly for refresh.
+   * Starts a queue-based import of historical campaign data from Meta.
+   * Returns immediately with importId — poll /import-status for progress.
    */
   @Post(':tenantId/import-learnings')
   async importLearnings(@Param('tenantId') tenantId: string) {
@@ -103,13 +112,25 @@ export class CompaniesController {
 
     this.logger.log(`Starting Meta learning import for ${tenantId}`);
 
-    const result = await this.metaLearningImporter.importLearnings(company);
+    const result = await this.metaLearningImporter.startImport(company);
 
     return {
       tenantId,
-      campaignsProcessed: result.campaignsProcessed,
-      caseStudiesGenerated: result.caseStudies,
-      message: `Imported ${result.caseStudies} case studies from ${result.campaignsProcessed} campaigns.`,
+      importId: result.importId,
+      totalCampaigns: result.totalCampaigns,
+      totalBatches: result.totalBatches,
+      message: result.totalCampaigns > 0
+        ? `Import started: ${result.totalCampaigns} campaigns in ${result.totalBatches} batches. Poll /import-status for progress.`
+        : 'No campaigns with spend > ₹500 found.',
     };
+  }
+
+  /**
+   * GET /api/v1/companies/:tenantId/import-status
+   * Returns the current status of the Meta learning import.
+   */
+  @Get(':tenantId/import-status')
+  async getImportStatus(@Param('tenantId') tenantId: string) {
+    return this.metaLearningImporter.getImportStatus(tenantId);
   }
 }

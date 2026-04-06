@@ -9,6 +9,7 @@ import { CreativeProducerService } from './creative-producer/creative-producer.s
 import { CreativeController } from './creative.controller';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
+import { CampaignsModule } from '../campaigns/campaigns.module';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
@@ -22,6 +23,7 @@ import { CreativeTeamService } from '../teams/creative-team.service';
     ]),
     ClaudeModule,
     CompaniesModule,
+    CampaignsModule,
     DeliveryModule,
   ],
   controllers: [CreativeController],

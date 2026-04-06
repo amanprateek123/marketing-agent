@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { LearningRun, LearningRunSchema } from './schemas/learning-run.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
@@ -19,7 +19,7 @@ import { CommonModule } from '../common/common.module';
       { name: CreativePackage.name, schema: CreativePackageSchema },
     ]),
     ClaudeModule,
-    CompaniesModule,
+    forwardRef(() => CompaniesModule),
     CommonModule,
   ],
   providers: [CreativeLearningService, CampaignLearningService],

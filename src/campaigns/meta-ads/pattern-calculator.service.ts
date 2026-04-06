@@ -84,6 +84,7 @@ export class PatternCalculatorService {
   calculatePatterns(
     enrichedCampaigns: any[],
     products: { name: string; price: number }[],
+    conversionTypes?: Set<string>,
   ): ProductPatterns[] {
     const results: ProductPatterns[] = [];
 
@@ -96,7 +97,7 @@ export class PatternCalculatorService {
 
       if (productCampaigns.length === 0) continue;
 
-      const patterns = this.calculateForProduct(product, productCampaigns);
+      const patterns = this.calculateForProduct(product, productCampaigns, conversionTypes);
       results.push(patterns);
     }
 
@@ -112,6 +113,7 @@ export class PatternCalculatorService {
       const generalPatterns = this.calculateForProduct(
         { name: 'General', price: 0 },
         unmatchedCampaigns,
+        conversionTypes,
       );
       results.push(generalPatterns);
     }
@@ -122,6 +124,7 @@ export class PatternCalculatorService {
   private calculateForProduct(
     product: { name: string; price: number },
     campaigns: any[],
+    conversionTypes?: Set<string>,
   ): ProductPatterns {
     const allAds: any[] = [];
     const allAdSets: any[] = [];
@@ -132,7 +135,8 @@ export class PatternCalculatorService {
     for (const campaign of campaigns) {
       const insights = campaign.insights ?? {};
       const spend = parseFloat(insights.spend ?? '0');
-      const conversions = this.extractConversions(insights.actions);
+      const campaignConvTypes = campaign.conversionTypes ?? conversionTypes;
+      const conversions = this.extractConversions(insights.actions, campaignConvTypes);
       totalSpend += spend;
       totalConversions += conversions;
 
@@ -141,6 +145,7 @@ export class PatternCalculatorService {
           ...ad,
           campaignName: campaign.name,
           startTime: campaign.start_time,
+          conversionTypes: campaignConvTypes,
         });
       }
 
@@ -148,10 +153,11 @@ export class PatternCalculatorService {
         allAdSets.push({
           ...adSet,
           campaignName: campaign.name,
+          conversionTypes: campaignConvTypes,
         });
       }
 
-      allDemographics.push(...(campaign.demographics ?? []));
+      allDemographics.push(...(campaign.demographics ?? []).map((d: any) => ({ ...d, conversionTypes: campaignConvTypes })));
     }
 
     const avgCPA = totalConversions > 0 ? totalSpend / totalConversions : 0;
@@ -223,7 +229,7 @@ export class PatternCalculatorService {
       const hookStyle = this.inferHookStyle(ad.ad_name ?? ad.name ?? '');
       const ctr = parseFloat(ad.ctr ?? '0');
       const spend = parseFloat(ad.spend ?? '0');
-      const conversions = this.extractConversions(ad.actions);
+      const conversions = this.extractConversions(ad.actions, ad.conversionTypes);
       const cpa = conversions > 0 ? spend / conversions : 0;
 
       if (!hookMap.has(hookStyle)) {
@@ -256,7 +262,7 @@ export class PatternCalculatorService {
     for (const ad of ads) {
       const format = this.inferFormat(ad.ad_name ?? ad.name ?? '', ad.campaignName ?? '');
       const ctr = parseFloat(ad.ctr ?? '0');
-      const conversions = this.extractConversions(ad.actions);
+      const conversions = this.extractConversions(ad.actions, ad.conversionTypes);
 
       if (!formatMap.has(format)) {
         formatMap.set(format, { totalCTR: 0, conversions: 0, count: 0 });
@@ -284,7 +290,7 @@ export class PatternCalculatorService {
     for (const adSet of adSets) {
       const audienceType = this.inferAudienceType(adSet.adset_name ?? adSet.name ?? '');
       const spend = parseFloat(adSet.spend ?? '0');
-      const conversions = this.extractConversions(adSet.actions);
+      const conversions = this.extractConversions(adSet.actions, adSet.conversionTypes);
 
       if (!audienceMap.has(audienceType)) {
         audienceMap.set(audienceType, { totalSpend: 0, totalConversions: 0, count: 0 });
@@ -313,7 +319,7 @@ export class PatternCalculatorService {
 
     for (const d of demographics) {
       const key = `${d.gender}_${d.age}`;
-      const conversions = this.extractConversions(d.actions);
+      const conversions = this.extractConversions(d.actions, d.conversionTypes);
       const spend = parseFloat(d.spend ?? '0');
 
       if (!demoMap.has(key)) {
@@ -359,7 +365,7 @@ export class PatternCalculatorService {
       if (!c.start_time) continue;
       const month = new Date(c.start_time).getMonth();
       const spend = parseFloat(c.insights?.spend ?? '0');
-      const conversions = this.extractConversions(c.insights?.actions);
+      const conversions = this.extractConversions(c.insights?.actions, c.conversionTypes);
 
       if (!monthMap.has(month)) {
         monthMap.set(month, { totalSpend: 0, totalConversions: 0, count: 0 });
@@ -392,7 +398,7 @@ export class PatternCalculatorService {
     for (const adSet of adSets) {
       const dailyBudget = parseFloat(adSet.daily_budget ?? '0') / 100; // paise to rupees
       const spend = parseFloat(adSet.spend ?? '0');
-      const conversions = this.extractConversions(adSet.actions);
+      const conversions = this.extractConversions(adSet.actions, adSet.conversionTypes);
       if (dailyBudget > 0 && conversions > 0) {
         budgetPerformance.push({ budget: dailyBudget, cpa: spend / conversions });
       }
@@ -473,13 +479,41 @@ export class PatternCalculatorService {
     return 'other';
   }
 
-  private extractConversions(actions: any[] | undefined): number {
-    if (!actions) return 0;
-    const purchase = actions.find(
-      (a: any) => a.action_type === 'purchase' ||
-        a.action_type === 'offsite_conversion.fb_pixel_purchase' ||
-        a.action_type === 'offsite_conversion',
-    );
-    return parseInt(purchase?.value ?? '0', 10);
+  private extractConversions(actions: any[] | undefined, conversionTypes?: Set<string>): number {
+    if (!actions || actions.length === 0) return 0;
+
+    if (conversionTypes && conversionTypes.size > 0) {
+      // Custom conversions first (offsite_conversion.custom.*)
+      const customActions = actions.filter(
+        a => a.action_type.startsWith('offsite_conversion.custom.') && conversionTypes.has(a.action_type),
+      );
+      if (customActions.length > 0) {
+        return customActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
+      }
+
+      // Step 2: Custom pixel event names (e.g. NADI_REPORT_PURCHASE_COMPLETED)
+      const STANDARD_EVENTS = new Set(['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
+        'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial']);
+
+      const customEventActions = actions.filter(
+        a => !a.action_type.startsWith('offsite_conversion.custom.')
+          && !STANDARD_EVENTS.has(a.action_type)
+          && conversionTypes.has(a.action_type),
+      );
+      if (customEventActions.length > 0) {
+        return customEventActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
+      }
+
+      // Step 3: Standard events fallback — priority order
+      const PRIORITY = ['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
+        'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial'];
+      for (const type of PRIORITY) {
+        if (!conversionTypes.has(type)) continue;
+        const action = actions.find(a => a.action_type === type);
+        if (action && parseInt(action.value ?? '0', 10) > 0) return parseInt(action.value, 10);
+      }
+    }
+
+    return 0;
   }
 }

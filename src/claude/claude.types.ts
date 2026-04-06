@@ -19,6 +19,8 @@ export enum AgentType {
   STRATEGY_TEAM_LEAD = 'strategy_team_lead',
   CREATIVE_TEAM_LEAD = 'creative_team_lead',
   CAMPAIGN_REVIEW_LEAD = 'campaign_review_lead',
+  // Learning
+  CASE_STUDY_GENERATOR = 'case_study_generator',
 }
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
@@ -26,6 +28,7 @@ export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 // Agents that use Haiku (cheap, single-turn, formatting tasks)
 export const HAIKU_AGENTS: AgentType[] = [
   AgentType.MARKET_RESEARCH,
+  AgentType.CASE_STUDY_GENERATOR,
 ];
 
 // Phase 9 team leads — get TeamCreate, Agent, SendMessage on top of web tools
@@ -45,6 +48,7 @@ export const NO_TOOL_AGENTS: AgentType[] = [
   AgentType.LEARNING_AGENT,
   AgentType.CREATIVE_LEARNING_AGENT,
   AgentType.CAMPAIGN_LEARNING_AGENT,
+  AgentType.CASE_STUDY_GENERATOR,
 ];
 
 export interface RunAgentParams {

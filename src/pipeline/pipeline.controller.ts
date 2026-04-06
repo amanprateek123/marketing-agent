@@ -16,9 +16,13 @@ import { CoordinatorOutput } from './schemas/coordinator-output.schema';
 import { ResearchOutput } from './schemas/research-output.schema';
 import { CreativeBrief } from './schemas/creative-brief.schema';
 import { IntelligenceBrief } from './schemas/intelligence-brief.schema';
+import { ScoutOutput } from './schemas/scout-output.schema';
+import { Digest } from './schemas/digest.schema';
+import { PipelineRun } from './schemas/pipeline-run.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
 import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
 import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
 
@@ -27,6 +31,7 @@ export class PipelineController {
   constructor(
     private readonly orchestrator: PipelineOrchestratorService,
     private readonly companiesService: CompaniesService,
+    private readonly campaignsService: CampaignsService,
     private readonly strategyTeam: StrategyTeamService,
     private readonly digestWriter: DigestWriterService,
     private readonly creativeTeam: CreativeTeamService,
@@ -43,7 +48,74 @@ export class PipelineController {
     private readonly creativeBriefModel: Model<CreativeBrief>,
     @InjectModel(IntelligenceBrief.name)
     private readonly intelligenceBriefModel: Model<IntelligenceBrief>,
+    @InjectModel(ScoutOutput.name)
+    private readonly scoutOutputModel: Model<ScoutOutput>,
+    @InjectModel(Digest.name)
+    private readonly digestModel: Model<Digest>,
+    @InjectModel(PipelineRun.name)
+    private readonly pipelineRunModel: Model<PipelineRun>,
   ) {}
+
+  /**
+   * GET /api/v1/pipeline/:tenantId/runs
+   * List all pipeline runs for a tenant, newest first.
+   */
+  @Get(':tenantId/runs')
+  async listRuns(@Param('tenantId') tenantId: string) {
+    const runs = await this.pipelineRunModel
+      .find({ tenantId })
+      .sort({ startedAt: -1 })
+      .limit(20)
+      .lean()
+      .exec();
+    return runs;
+  }
+
+  /**
+   * GET /api/v1/pipeline/:tenantId/runs/:runId/full
+   * Returns the complete pipeline run data — all sub-documents bundled in one response.
+   * Used by the dashboard Run Detail page.
+   */
+  @Get(':tenantId/runs/:runId/full')
+  async getRunFull(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+  ) {
+    const run = await this.orchestrator.getStatus(tenantId, runId);
+    if (!run) throw new NotFoundException(`Run ${runId} not found`);
+
+    const [scouts, coordinator, research, briefs, creativeBrief, digests, campaign] =
+      await Promise.all([
+        this.scoutOutputModel.find({ tenantId, runId }).lean().exec(),
+        this.coordinatorOutputModel.findOne({ tenantId, runId }).lean().exec(),
+        this.researchOutputModel.find({ tenantId, runId }).lean().exec(),
+        this.intelligenceBriefModel.find({ tenantId, runId }).sort({ finalScore: -1 }).lean().exec(),
+        this.creativeBriefModel.findOne({ tenantId, runId }).lean().exec(),
+        this.digestModel.find({ tenantId, runId }).lean().exec(),
+        this.campaignsService.findByRunId(tenantId, runId),
+      ]);
+
+    // Attach creative package to campaign data
+    let creativePackage = null;
+    if (creativeBrief) {
+      creativePackage = await this.creativePackageModel
+        .findOne({ tenantId, briefId: (creativeBrief as any).briefId })
+        .lean()
+        .exec();
+    }
+
+    return {
+      run,
+      scouts,
+      coordinator,
+      research,
+      briefs,
+      creativeBrief,
+      creativePackage,
+      campaign,
+      digests,
+    };
+  }
 
   /**
    * POST /api/v1/pipeline/:tenantId/trigger

@@ -11,7 +11,7 @@ import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { CompaniesService } from '../companies/companies.service';
 
-@Controller('api/v1/campaigns')
+@Controller('campaigns')
 export class CampaignsController {
   constructor(
     private readonly campaignsService: CampaignsService,
@@ -94,6 +94,25 @@ export class CampaignsController {
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/reject
+   * Reject a pending campaign — marks it as failed without launching.
+   */
+  @Post(':tenantId/:campaignId/reject')
+  async reject(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body('reason') reason: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if ((campaign as any).status !== 'pending_approval') {
+      throw new BadRequestException('Only pending_approval campaigns can be rejected');
+    }
+    await this.campaignsService.reject(tenantId, campaignId, reason ?? 'Rejected by tenant');
+    return { success: true, message: 'Campaign rejected' };
   }
 
   /**

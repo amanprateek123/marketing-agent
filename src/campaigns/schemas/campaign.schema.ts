@@ -17,6 +17,12 @@ export class Campaign {
   briefId: string;
 
   @Prop({ default: '' })
+  topic: string;
+
+  @Prop({ default: '' })
+  angle: string;
+
+  @Prop({ default: '' })
   creativePackageId: string;
 
   @Prop({ index: true, sparse: true, default: '' })

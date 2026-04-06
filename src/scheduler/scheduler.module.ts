@@ -11,19 +11,21 @@ import { SchedulerService } from './scheduler.service';
 import { PipelineProcessor } from './pipeline.processor';
 import { AuditProcessor } from './audit.processor';
 import { LearningProcessor } from './learning.processor';
+import { MetaLearningProcessor } from './meta-learning.processor';
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: QUEUES.PIPELINE }),
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_AUDIT }),
     BullModule.registerQueue({ name: QUEUES.MONTHLY_LEARNING }),
+    BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
     MongooseModule.forFeature([{ name: PipelineRun.name, schema: PipelineRunSchema }]),
     CompaniesModule,
     PipelineModule,
     CampaignsModule,
     LearningModule,
   ],
-  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor],
+  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor],
   exports: [SchedulerService],
 })
 export class SchedulerModule {}
