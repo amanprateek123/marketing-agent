@@ -70,7 +70,7 @@ export class DigestWriterService {
     }
 
     // ── 3. CTA ────────────────────────────────────────────────────────────────
-    const ctaContent = this.buildCta(company, ideaPoolResult);
+    const ctaContent = this.buildCta(company, ideaPoolResult, runId);
     await this.digestModel.create({
       tenantId, runId, type: 'cta', content: ctaContent, delivered: false,
     });
@@ -184,12 +184,17 @@ Write a focused content brief in Slack markdown format:
   }
 
   // ── CTA — no LLM needed ────────────────────────────────────────────────────
-  private buildCta(_company: CompanyDocument, ideaPool: IdeaPoolResult): string {
+  private buildCta(company: CompanyDocument, ideaPool: IdeaPoolResult, runId: string): string {
     const recommended = ideaPool.briefs.find((b) => b.briefId === ideaPool.selectedBriefId);
     const platform = recommended?.platform ?? 'your chosen platform';
     const format = recommended?.format ?? 'content';
 
-    return `✅ *Next step*\nReview the ${ideaPool.briefs.length} ideas above and pick one to produce. The recommended idea is a ${platform} ${format}. Reply here or tag the creative team to get started.`;
+    const ideaLinks = ideaPool.briefs
+      .filter(b => b.briefId !== ideaPool.selectedBriefId && b.briefId)
+      .map((b, i) => `  ${i + 1}. *${b.topic}* → \`POST /api/v1/pipeline/${company.tenantId}/runs/${runId}/produce/${b.briefId}\``)
+      .join('\n');
+
+    return `✅ *Next step*\nThe recommended idea (${platform} ${format}) is already in production.\n\n${ideaLinks ? `*Want to run another idea?* Pick any:\n${ideaLinks}` : ''}`;
   }
 
   private weekLabel(): string {

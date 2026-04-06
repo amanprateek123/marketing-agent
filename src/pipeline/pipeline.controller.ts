@@ -19,6 +19,7 @@ import { IntelligenceBrief } from './schemas/intelligence-brief.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
 import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
 import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
+import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
 
 @Controller('pipeline')
@@ -31,6 +32,7 @@ export class PipelineController {
     private readonly creativeTeam: CreativeTeamService,
     private readonly campaignReviewTeam: CampaignReviewTeamService,
     private readonly campaignCreator: CampaignCreatorService,
+    private readonly creativeProducer: CreativeProducerService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackage>,
     @InjectModel(CoordinatorOutput.name)
@@ -278,6 +280,93 @@ export class PipelineController {
         status: campaign.status,
         budget: campaign.budget,
         message: 'Campaign pending approval. Check Slack or call POST /api/v1/campaigns/' + tenantId + '/' + (campaign as any)._id.toString() + '/approve to launch.',
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/pipeline/:tenantId/runs/:runId/produce/:briefId
+   * Tenant picks any idea from the digest and triggers creative production + campaign review.
+   * The system's auto-selected winner runs automatically. This endpoint lets tenants
+   * run additional ideas as separate campaigns.
+   */
+  @Post(':tenantId/runs/:runId/produce/:briefId')
+  async produceIdea(
+    @Param('tenantId') tenantId: string,
+    @Param('runId') runId: string,
+    @Param('briefId') briefId: string,
+  ) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+
+      // Find the intelligence brief
+      const brief = await this.intelligenceBriefModel
+        .findOne({ tenantId, runId, briefId })
+        .lean()
+        .exec();
+      if (!brief) throw new Error(`Idea ${briefId} not found in run ${runId}`);
+
+      const produceRunId = `produce-${briefId.slice(0, 8)}-${Date.now()}`;
+
+      // Save as creative brief first (so campaign creator can find it)
+      await this.creativeBriefModel.create({
+        tenantId,
+        runId: produceRunId,
+        briefId,
+        topic: brief.topic,
+        angle: brief.angle,
+        platform: brief.platform,
+        format: brief.format,
+        audience: brief.audience,
+        hook: (brief as any).hook ?? '',
+        keyMessage: (brief as any).keyMessage ?? '',
+        conversionBridge: (brief as any).conversionBridge ?? '',
+        suggestedBudget: brief.suggestedBudget,
+        finalScore: brief.finalScore,
+        selected: true,
+        selectionReason: 'Manually selected by tenant from digest',
+      });
+
+      // Phase F: Creative production
+      const creativePackage = await this.creativeProducer.produce(
+        tenantId,
+        briefId,
+        produceRunId,
+        {
+          topic: brief.topic,
+          angle: brief.angle,
+          platform: brief.platform,
+          format: brief.format,
+          audience: brief.audience,
+          hook: (brief as any).hook ?? '',
+          keyMessage: (brief as any).keyMessage ?? '',
+          conversionBridge: (brief as any).conversionBridge ?? '',
+        },
+      );
+
+      // Phase G: Campaign creation (review + pending approval)
+      const creativeBrief = await this.creativeBriefModel
+        .findOne({ tenantId, runId: produceRunId, briefId })
+        .lean()
+        .exec();
+
+      const campaign = await this.campaignCreator.create(
+        creativeBrief as any,
+        creativePackage,
+        company,
+        produceRunId,
+      );
+
+      return {
+        success: true,
+        runId: produceRunId,
+        briefId,
+        topic: brief.topic,
+        campaignId: (campaign as any)._id.toString(),
+        status: campaign.status,
+        message: `Idea "${brief.topic}" is now in creative production + campaign review. Check Slack for approval.`,
       };
     } catch (err: any) {
       throw new BadRequestException(err.message);
