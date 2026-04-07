@@ -126,6 +126,20 @@ export class CompaniesController {
   }
 
   /**
+   * POST /api/v1/companies/:tenantId/finalize-import
+   * Re-runs finalize on the latest import without re-enriching — useful after code fixes.
+   */
+  @Post(':tenantId/finalize-import')
+  async finalizeImport(@Param('tenantId') tenantId: string) {
+    const latest = await this.metaLearningImporter.getImportStatus(tenantId);
+    if (!latest || latest.status === 'none') {
+      return { error: 'No import found for this tenant' };
+    }
+    await this.metaLearningImporter.finalizeImport(latest.importId);
+    return { success: true, importId: latest.importId };
+  }
+
+  /**
    * GET /api/v1/companies/:tenantId/import-status
    * Returns the current status of the Meta learning import.
    */

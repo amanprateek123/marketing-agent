@@ -11,6 +11,9 @@ export class Campaign {
   @Prop({ required: true, index: true })
   tenantId: string;
 
+  @Prop({ default: '' })
+  name: string;
+
   @Prop({ index: true, default: '' })
   runId: string;
 
@@ -133,6 +136,36 @@ export class Campaign {
     scaleRules: string;
     pauseRules: string;
   };
+
+  // Raw Meta adsets + ads — populated during sync, shown on dashboard
+  @Prop({ type: [Object], default: [] })
+  metaAdSets: {
+    id: string;
+    name: string;
+    status: string;
+    audienceType: string;
+    dailyBudget: number;
+    lifetimeBudget: number;
+    optimizationGoal: string;
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cpa: number;
+    frequency: number;
+    ads: {
+      id: string;
+      name: string;
+      hookStyle: string;
+      format: string;
+      spend: number;
+      impressions: number;
+      clicks: number;
+      ctr: number;
+      cpc: number;
+    }[];
+  }[];
 
   // Meta ad set + ad IDs (populated after launch, updated by auditor)
   @Prop({ type: [Object], default: [] })

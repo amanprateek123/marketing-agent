@@ -776,7 +776,7 @@ export class MetaLearningImporterService {
         { timeout: 30000 },
       ).catch(() => ({ data: { data: [] } })),
       axios.get(
-        `${META_API_BASE}/${campaign.id}/insights?fields=ad_name,ad_id,spend,impressions,clicks,ctr,cpc,actions&level=ad&date_preset=maximum&access_token=${accessToken}`,
+        `${META_API_BASE}/${campaign.id}/insights?fields=ad_name,ad_id,adset_id,spend,impressions,clicks,ctr,cpc,actions&level=ad&date_preset=maximum&access_token=${accessToken}`,
         { timeout: 30000 },
       ).catch(() => ({ data: { data: [] } })),
       axios.get(
@@ -864,7 +864,19 @@ Rules:
       const jsonStr = fenceMatch
         ? fenceMatch[1].trim()
         : result.content.slice(result.content.indexOf('['), result.content.lastIndexOf(']') + 1);
-      return JSON.parse(jsonStr);
+      const parsed = JSON.parse(jsonStr);
+      // Sanitize numeric fields — Claude sometimes returns "Unknown" or null
+      return parsed.map((cs: any) => ({
+        ...cs,
+        durationDays: typeof cs.durationDays === 'number' ? cs.durationDays : 0,
+        totalSpend: typeof cs.totalSpend === 'number' ? cs.totalSpend : parseFloat(cs.totalSpend) || 0,
+        totalConversions: typeof cs.totalConversions === 'number' ? cs.totalConversions : parseInt(cs.totalConversions) || 0,
+        whatWorked: {
+          ...cs.whatWorked,
+          bestCPA: typeof cs.whatWorked?.bestCPA === 'number' ? cs.whatWorked.bestCPA : parseFloat(cs.whatWorked?.bestCPA) || 0,
+          bestROAS: typeof cs.whatWorked?.bestROAS === 'number' ? cs.whatWorked.bestROAS : parseFloat(cs.whatWorked?.bestROAS) || 0,
+        },
+      }));
     } catch {
       this.logger.warn('Failed to parse case studies JSON');
       return [];
