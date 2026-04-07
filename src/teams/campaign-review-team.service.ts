@@ -128,18 +128,33 @@ export class CampaignReviewTeamService {
 
     // Get relevant campaign case studies for budget/audience decisions
     let caseStudyContext = '';
+    let audiencePerfContext = '';
     try {
       const product = (company.products ?? []).find(p => p.name === (brief as any).product);
-      const caseStudies = await this.metaLearningImporter.getRelevantCaseStudies(
-        company.tenantId,
-        { product: product?.name, limit: 7 },
-      );
+      const [caseStudies, audiencePerf] = await Promise.all([
+        this.metaLearningImporter.getRelevantCaseStudies(company.tenantId, { product: product?.name, limit: 7 }),
+        this.metaLearningImporter.getAudiencePerformanceSummary(company.tenantId),
+      ]);
+
       if (caseStudies.length > 0) {
         caseStudyContext = `
 PAST CAMPAIGN CASE STUDIES (budget/audience learnings):
-${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: spend ₹${cs.totalSpend}, ${cs.totalConversions} conversions, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}, audiences: ${cs.whatWorked?.audiences?.join(', ') || 'unknown'}. Lesson: ${cs.lesson}`).join('\n')}`;
+${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: spend ₹${cs.totalSpend}, ${cs.totalConversions} conversions, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}, winning audiences: ${cs.whatWorked?.audiences?.join(', ') || 'unknown'}. Lesson: ${cs.lesson}`).join('\n')}`;
       }
-    } catch { /* case studies not available yet */ }
+
+      if (Object.keys(audiencePerf.byType).length > 0) {
+        const sorted = Object.entries(audiencePerf.byType)
+          .filter(([, d]) => d.conversions > 0)
+          .sort(([, a], [, b]) => a.avgCPA - b.avgCPA);
+        if (sorted.length > 0) {
+          audiencePerfContext = `
+AUDIENCE TYPE PERFORMANCE (from ${Object.values(audiencePerf.byType).reduce((s, d) => s + d.adSetCount, 0)} historical ad sets):
+${sorted.map(([type, d]) => `  - ${type}: avg CPA ₹${d.avgCPA}, CTR ${d.avgCTR}%, ${d.conversions} conversions, ₹${d.totalSpend} total spend (${d.adSetCount} ad sets)`).join('\n')}
+
+USE THIS TO: allocate higher budget % to audience types with lowest CPA. Match these types to the Meta audience IDs listed below.`;
+        }
+      }
+    } catch (err: any) { this.logger.warn(`Learnings unavailable for ${company.tenantId}: ${err.message}`); }
 
     const campaignLearnings = learnings?.campaign
       ? `
@@ -234,6 +249,7 @@ ${metaAud || '  none linked — use Advantage+ broad'}
   IMPORTANT: Use the actual Meta audience IDs above in your adSets[].metaAudienceId field.`;
 })()}
 
+${audiencePerfContext}
 ${campaignLearnings}
 ${causalInsights}
 

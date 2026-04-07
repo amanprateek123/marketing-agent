@@ -84,10 +84,22 @@ export class MetaAdsService {
   ): Promise<string> {
     this.logger.log(`Uploading image to Meta: accountId=${accountId}`);
 
+    let payload: any;
+
+    if (imageUrl.startsWith('data:')) {
+      // Base64 data URL — extract raw base64 and send as bytes
+      const base64 = imageUrl.split(',')[1];
+      if (!base64) throw new Error('Invalid base64 data URL');
+      payload = { bytes: base64, access_token: accessToken };
+    } else {
+      // Regular URL — Meta fetches it directly
+      payload = { url: imageUrl, access_token: accessToken };
+    }
+
     const response = await this.metaApiCall(
       'POST',
       `${META_API_BASE}/${accountId}/adimages`,
-      { url: imageUrl, access_token: accessToken },
+      payload,
     );
 
     const images = response.data?.images;

@@ -7,6 +7,7 @@ import axios from 'axios';
 import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CampaignCaseStudy as CaseStudyModel, CampaignCaseStudyDocument } from '../schemas/campaign-case-study.schema';
 import { MetaLearningImport, MetaLearningImportDocument } from '../schemas/meta-learning-import.schema';
 import { EnrichedCampaign, EnrichedCampaignDocument } from '../schemas/enriched-campaign.schema';
@@ -64,6 +65,8 @@ export class MetaLearningImporterService {
     private readonly patternCalculator: PatternCalculatorService,
     private readonly companiesService: CompaniesService,
     private readonly campaignSync: CampaignSyncService,
+    @InjectModel(Campaign.name)
+    private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(CaseStudyModel.name)
     private readonly caseStudyModel: Model<CampaignCaseStudyDocument>,
     @InjectModel(MetaLearningImport.name)
@@ -505,6 +508,48 @@ export class MetaLearningImporterService {
     }
 
     return studies;
+  }
+
+  /**
+   * Aggregate ad set performance by audience type from synced campaign data.
+   * Used by Campaign Review Team to make data-driven audience decisions.
+   */
+  async getAudiencePerformanceSummary(tenantId: string): Promise<{
+    byType: Record<string, { avgCPA: number; avgCTR: number; totalSpend: number; adSetCount: number; conversions: number }>;
+  }> {
+    const campaigns = await this.campaignModel
+      .find({ tenantId, 'metaAdSets.0': { $exists: true } })
+      .select('metaAdSets')
+      .lean()
+      .exec();
+
+    const byType: Record<string, { totalSpend: number; totalCTR: number; conversions: number; count: number }> = {};
+
+    for (const campaign of campaigns) {
+      for (const adSet of (campaign as any).metaAdSets ?? []) {
+        if ((adSet.spend ?? 0) < 100) continue; // skip negligible spend
+        const type = adSet.audienceType || 'other';
+        if (!byType[type]) byType[type] = { totalSpend: 0, totalCTR: 0, conversions: 0, count: 0 };
+        byType[type].totalSpend += adSet.spend ?? 0;
+        byType[type].totalCTR += adSet.ctr ?? 0;
+        byType[type].conversions += adSet.conversions ?? 0;
+        byType[type].count++;
+      }
+    }
+
+    const result: Record<string, any> = {};
+    for (const [type, data] of Object.entries(byType)) {
+      if (data.count === 0) continue;
+      result[type] = {
+        avgCPA: data.conversions > 0 ? Math.round(data.totalSpend / data.conversions) : 0,
+        avgCTR: Math.round((data.totalCTR / data.count) * 100) / 100,
+        totalSpend: Math.round(data.totalSpend),
+        adSetCount: data.count,
+        conversions: data.conversions,
+      };
+    }
+
+    return { byType: result };
   }
 
   // ─── Private: Meta API data pulling ─────────────────────────────────────────

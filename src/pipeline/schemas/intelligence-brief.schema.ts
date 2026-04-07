@@ -14,6 +14,9 @@ export class IntelligenceBrief {
   @Prop({ index: true })
   briefId: string;
 
+  @Prop({ default: '' })
+  product: string;
+
   @Prop({ required: true })
   topic: string;
 

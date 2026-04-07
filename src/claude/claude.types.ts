@@ -33,6 +33,9 @@ export const HAIKU_AGENTS: AgentType[] = [
   AgentType.YOUTUBE_SCOUT,
   AgentType.MARKET_RESEARCH,
   AgentType.CASE_STUDY_GENERATOR,
+  AgentType.COORDINATOR,          // signal scoring — structured output, no deep reasoning
+  AgentType.DIGEST_WRITER,        // summarization — no reasoning needed
+  AgentType.CREATIVE_LEARNING_AGENT, // pattern matching on structured JSON
 ];
 
 // Phase 9 team leads — get TeamCreate, Agent, SendMessage on top of web tools

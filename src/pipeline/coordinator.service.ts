@@ -269,12 +269,12 @@ Include 5–10 top signals. Use exactly these field names: topic, platforms, com
   }
 
   private extractTopSignals(content: string): CoordinatorResult['topSignals'] {
-    // Try to parse a JSON block if the agent included one
+    // Try JSON block first
     const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
     if (jsonMatch) {
       try {
         const parsed = JSON.parse(jsonMatch[1]);
-        const signals = parsed.topSignals ?? parsed.top_signals ?? parsed.signals ?? [];
+        const signals = parsed.topSignals ?? parsed.top_signals ?? parsed.signals ?? parsed.topics ?? [];
         if (Array.isArray(signals) && signals.length > 0) {
           return signals.slice(0, 10).map((s: any) => ({
             topic: String(s.topic ?? s.title ?? s.id ?? ''),
@@ -286,13 +286,33 @@ Include 5–10 top signals. Use exactly these field names: topic, platforms, com
           }));
         }
       } catch (err: any) {
-        this.logger.warn(`extractTopSignals JSON parse failed: ${err.message} — topSignals will be empty`);
+        this.logger.warn(`extractTopSignals JSON parse failed: ${err.message}`);
       }
-    } else {
-      this.logger.warn('extractTopSignals: no ```json block found in coordinator response — topSignals will be empty');
     }
 
-    // Fallback: return empty array — content is still stored in full
-    return [];
+    // Fallback: extract signals from plain text by looking for numbered topics
+    this.logger.warn('extractTopSignals: no JSON block found — attempting text extraction');
+    const textSignals: CoordinatorResult['topSignals'] = [];
+    const lines = content.split('\n');
+    for (const line of lines) {
+      const match = line.match(/^\s*\d+[\.\)]\s+(.{10,80})/);
+      if (match) {
+        textSignals.push({
+          topic: match[1].replace(/\*\*/g, '').trim(),
+          platforms: [],
+          compositeScore: 5,
+          rationale: '',
+        });
+        if (textSignals.length >= 7) break;
+      }
+    }
+
+    if (textSignals.length > 0) {
+      this.logger.warn(`extractTopSignals: recovered ${textSignals.length} signals from plain text`);
+      return textSignals;
+    }
+
+    // Hard fail — pipeline should not continue with 0 signals
+    throw new Error('Coordinator returned no parseable signals — cannot proceed with pipeline');
   }
 }

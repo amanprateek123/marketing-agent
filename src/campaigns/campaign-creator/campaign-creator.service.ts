@@ -115,6 +115,17 @@ export class CampaignCreatorService {
       this.logger.warn(`Campaign Review Team failed after 2 attempts — proceeding with original budget ₹${finalBudget}`);
     }
 
+    // ── Idempotency: don't create duplicate campaigns for same brief ──────────
+    const existingCampaign = await this.campaignModel.findOne({
+      tenantId: company.tenantId,
+      runId,
+      briefId: brief.briefId,
+    }).exec();
+    if (existingCampaign) {
+      this.logger.warn(`Campaign already exists for briefId=${brief.briefId} runId=${runId} — returning existing`);
+      return existingCampaign;
+    }
+
     // ── Save as pending_approval — do NOT launch yet ─────────────────────────
     const campaignName = `META_${company.primaryObjective.toUpperCase()}_${brief.audience}_${brief.topic}_${new Date().toISOString().split('T')[0]}`;
 
@@ -188,6 +199,10 @@ export class CampaignCreatorService {
       throw new Error(`Meta Ads credentials not configured for tenant ${company.tenantId}. Set company.meta.accessToken and company.meta.accountId.`);
     }
 
+    if (!company.meta?.pageId) {
+      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId}. Set company.meta.pageId — required for ad creative creation.`);
+    }
+
     const config = (campaign as any).campaignConfig;
     if (!config || !config.adSets || config.adSets.length === 0) {
       throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
@@ -201,15 +216,21 @@ export class CampaignCreatorService {
     const copyVariants = creativePackage?.copyVariants ?? [];
     const imageUrl = creativePackage?.imageUrl ?? '';
 
-    // Find the product for landing URL
-    const product = (company.products ?? []).find(p => p.conversionEvent === config.conversionEvent);
-    const landingUrl = product?.landingUrl ?? company.products?.[0]?.landingUrl ?? '';
+    // Find the product for landing URL — match by brief.product name first, fallback to conversionEvent
+    const creativeBrief = campaign.briefId
+      ? await this.campaignsService.findCreativeBrief(campaign.briefId)
+      : null;
+    const briefProduct = (creativeBrief as any)?.product ?? '';
+    const product = (company.products ?? []).find(p =>
+      briefProduct ? p.name === briefProduct : p.conversionEvent === config.conversionEvent,
+    ) ?? (company.products ?? [])[0];
+    const landingUrl = product?.landingUrl ?? '';
 
     const campaignName = `META_${company.primaryObjective.toUpperCase()}_${campaign.objective}_${new Date().toISOString().split('T')[0]}`;
 
-    // Upload image to Meta if available
+    // Upload image to Meta if available (supports both URL and base64 data URLs)
     let imageHash: string | undefined;
-    if (imageUrl && !imageUrl.startsWith('data:')) {
+    if (imageUrl) {
       try {
         imageHash = await this.metaAdsService.uploadImage(
           imageUrl, company.meta.accountId, company.meta.accessToken,
@@ -240,8 +261,9 @@ export class CampaignCreatorService {
     // Only activate if all expected ads were created
     const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
     const expectedAds = config.adSets.reduce((s: number, a: any) => s + (a.ads?.length ?? 0), 0);
+    const fullyLaunched = totalAdsCreated >= expectedAds && totalAdsCreated > 0;
 
-    if (totalAdsCreated >= expectedAds && totalAdsCreated > 0) {
+    if (fullyLaunched) {
       await this.metaAdsService.activateCampaign(
         launchResult.campaignId, company.meta.accessToken,
       );
@@ -256,7 +278,7 @@ export class CampaignCreatorService {
     await this.campaignModel.updateOne(
       { _id: campaignId },
       {
-        status: 'active',
+        status: fullyLaunched ? 'active' : 'paused',
         metaCampaignId: launchResult.campaignId,
         launchedAt: new Date(),
         approvedAt: new Date(),

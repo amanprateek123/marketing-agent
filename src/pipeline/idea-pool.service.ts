@@ -90,6 +90,7 @@ export class IdeaPoolService {
         tenantId,
         runId,
         briefId: b.briefId,
+        product: b.product ?? '',
         topic: b.topic,
         angle: b.angle,
         platform: b.platform,
@@ -111,6 +112,7 @@ export class IdeaPoolService {
       tenantId,
       runId,
       briefId,
+      product: winner.product ?? '',
       topic: winner.topic,
       angle: winner.angle,
       platform: winner.platform,
@@ -156,6 +158,8 @@ export class IdeaPoolService {
     ideasPerRun: number,
   ): string {
     const coordinatorSlots = Math.max(1, ideasPerRun - 2);
+    const activeProducts = (company.products ?? []).filter(p => p.active);
+    const productList = activeProducts.map(p => `  - "${p.name}" (₹${p.price}) — ${p.description?.slice(0, 80)}`).join('\n');
 
     const topSignals = coordinator.topSignals
       .slice(0, coordinatorSlots)
@@ -166,6 +170,10 @@ export class IdeaPoolService {
 
     return `
 Generate exactly ${ideasPerRun} content ideas for ${company.name} split across 3 sources.
+
+AVAILABLE PRODUCTS (each idea MUST be tied to one of these):
+${productList || '  No active products defined'}
+Use the exact product name in the "product" field of each brief.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SOURCE 1 — COORDINATOR SIGNALS (generate ${coordinatorSlots} ideas)
@@ -210,6 +218,7 @@ Return exactly ${ideasPerRun} ideas. For each idea provide:
     {
       "topic": "...",
       "angle": "...",
+      "product": "exact product name from the list above",
       "platform": "instagram|youtube|twitter|reddit",
       "format": "reel|carousel|thread|video|image",
       "audience": "...",
