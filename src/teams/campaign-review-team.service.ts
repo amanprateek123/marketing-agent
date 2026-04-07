@@ -200,6 +200,7 @@ STEP 2: Spawn the Performance Analyst via Agent tool:
     - Send all messages to 'team-lead'. Respond IMMEDIATELY."
 
 STEP 3: Send the full campaign package to the Performance Analyst via SendMessage(to: "analyst"). Label as "ROUND 1".
+CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for analyst response". This keeps you active so the analyst's reply can arrive. Do not produce any output until you receive their message.
 
 CAMPAIGN TO REVIEW:
   Topic: ${brief.topic}
@@ -253,12 +254,18 @@ ${audiencePerfContext}
 ${campaignLearnings}
 ${causalInsights}
 
-STEP 4: Wait for the Analyst's response. They will challenge budget, targeting, or timing.
-  - If you AGREE → adjust the recommendation
-  - If you DISAGREE → push back with reasoning
-  - Continue until consensus (max 5 rounds)
+STEP 4: When you receive the Analyst's response (it arrives as an incoming message):
+  - If you AGREE → adjust your recommendation, SendMessage(to: "analyst") with your revised config as "ROUND 2", then call TaskCreate(name: "round-2-pending") — do NOT output text.
+  - If you DISAGREE → push back with reasoning via SendMessage, then call TaskCreate to wait again.
+  - Continue until consensus (max 5 rounds).
+  PATIENCE: The analyst runs in the background and takes several minutes to respond. Do NOT give up or produce output on your own. Keep waiting via TaskCreate until their message arrives. Only nudge once (via SendMessage) if you have called TaskCreate 4+ times with no reply.
 
-STEP 5: Once agreed, call TeamDelete to clean up. If TeamDelete fails, SKIP IT — do not retry. Cleanup will be handled automatically. Proceed directly to the output.
+STEP 5: Once consensus is reached:
+  1. SendMessage(to: "analyst", message: {type: "shutdown_request"})
+  2. Call TaskCreate(name: "shutdown-pending", body: "waiting for shutdown confirmation") — do NOT call TeamDelete yet.
+  3. Wait for the shutdown confirmation to arrive as an incoming message.
+  4. Only after receiving confirmation: call TeamDelete.
+  If TeamDelete fails after receiving confirmation, SKIP IT — cleanup is automatic. Proceed to output.
 
 STEP 6: Return ONLY this JSON (no markdown, no explanation):
 {
@@ -320,6 +327,12 @@ ${(() => {
   if (strategy === 'experimental') return `- EXPERIMENTAL MODE: Allocate 30-40% budget to broad/new audiences. Looser pause rules (give ads more time to find signal). Higher tolerance for initial CPA. Test multiple audience types.`;
   return `- BALANCED MODE: 50-70% budget on proven audiences, 20-30% on broad/new test. Standard pause rules. Scale proven ad sets 20% after 48h if ROAS > 2x.`;
 })()}
+
+BUDGET ANCHOR RULE:
+- The proposed budget is ₹${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)}.
+- If the proposed budget is ₹0 or missing, use ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)} as the conservative starting point (25% of weekly cap).
+- NEVER set a budget above ₹${company.maxBudgetPerCampaign} (hard cap).
+- The debate adjusts UP or DOWN from this anchor — it does NOT invent a number from scratch.
 
 RULES:
 - TypeScript safety checks already passed (budget caps, forbidden topics) — don't re-check those

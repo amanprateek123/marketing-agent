@@ -275,19 +275,26 @@ DEBATE PROTOCOL:
 - Send all messages to 'team-lead'. Respond IMMEDIATELY when you receive a message."
 
 STEP 3: Propose ${ideasPerRun} campaign ideas based on the data below. EVERY idea MUST sell a specific product from the catalog. Match trends to products using their trendKeywords. Send them to the Contrarian via SendMessage(to: "contrarian"). Label this as "ROUND 1".
+CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for contrarian response". This keeps you active so their reply can arrive. Do not produce any output until you receive their message.
 
-STEP 4: The Contrarian will challenge or endorse each idea. When you receive their response:
+STEP 4: When you receive the Contrarian's response (it arrives as an incoming message):
   - If you AGREE with a challenge → kill or weaken that idea
-  - If you DISAGREE → push back with a counter-argument: "I hear you, but here's why this still works..."
-  - Send your response back to the Contrarian via SendMessage(to: "contrarian"). Label it "ROUND 2".
+  - If you DISAGREE → push back: "I hear you, but here's why this still works..."
+  - SendMessage(to: "contrarian") with your response labeled "ROUND 2", then call TaskCreate(name: "round-2-pending") — do NOT output text.
+  PATIENCE: The Contrarian runs in the background and takes several minutes to respond. Do NOT give up or produce output on your own. Keep waiting via TaskCreate until their message arrives. Only nudge once (via SendMessage) if you have called TaskCreate 4+ times with no reply.
 
-STEP 5: Continue the debate. The Contrarian may concede, double down, or propose alternatives.
-  - Keep going until one of these happens:
-    a) You both agree on the winner (consensus)
+STEP 5: Continue the debate. Each round: receive their message → respond via SendMessage → call TaskCreate to wait again.
+  - Keep going until:
+    a) You both agree on the winner (consensus — Contrarian sends {type: "consensus"})
     b) You've done 5 rounds — make your final call
-  - Each round: read their message, respond with counter-arguments or agreements
+  - Never produce output mid-debate. Always use TaskCreate to stay alive between rounds.
 
-STEP 6: Once debate is settled, call TeamDelete to clean up. If TeamDelete fails, SKIP IT — do not retry. Cleanup will be handled automatically. Proceed directly to the output.
+STEP 6: Once debate is settled:
+  1. SendMessage(to: "contrarian", message: {type: "shutdown_request"})
+  2. Call TaskCreate(name: "shutdown-pending", body: "waiting for shutdown confirmation") — do NOT call TeamDelete yet.
+  3. Wait for the shutdown confirmation to arrive as an incoming message.
+  4. Only after receiving confirmation: call TeamDelete.
+  If TeamDelete fails after receiving confirmation, SKIP IT — cleanup is automatic. Proceed to output.
 
 STEP 7: Return ONLY this JSON (no markdown, no explanation):
 {

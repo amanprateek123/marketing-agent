@@ -210,12 +210,20 @@ c) VIDEO PROMPT — complete video ad prompt (for Hygen or similar):
    - The prompt should produce a COMPLETE video ad ready for Meta — with sound, voice, and captions
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
+CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". This keeps you active so the reviewer's reply can arrive. Do not produce any output until you receive their message.
 
-STEP 5: Wait for the reviewer's response. They will approve or flag each element.
-  - If flagged: revise and send back as "ROUND 2"
-  - Keep going until everything is approved (max 5 rounds)
+STEP 5: When you receive the reviewer's response (it arrives as an incoming message):
+  - If flagged: revise the package, then SendMessage(to: "compliance") as "ROUND 2", then call TaskCreate(name: "round-2-pending") again — do NOT output text between rounds.
+  - If approved ({type: "approved"}): proceed to STEP 6.
+  - Max 5 rounds. Keep calling TaskCreate after each SendMessage to stay alive.
+  PATIENCE: The reviewer runs in the background and takes several minutes to respond. Do NOT give up or produce output on your own. Keep waiting via TaskCreate until their message arrives. Only nudge once (via SendMessage) if you have called TaskCreate 4+ times with no reply.
 
-STEP 6: Once approved, call TeamDelete to clean up. If TeamDelete fails, SKIP IT — do not retry. Cleanup will be handled automatically. Proceed directly to the output.
+STEP 6: Once the reviewer approves:
+  1. SendMessage(to: "compliance", message: {type: "shutdown_request"})
+  2. Call TaskCreate(name: "shutdown-pending", body: "waiting for shutdown confirmation") — do NOT call TeamDelete yet.
+  3. Wait for the shutdown confirmation to arrive as an incoming message.
+  4. Only after receiving confirmation: call TeamDelete.
+  If TeamDelete fails after receiving confirmation, SKIP IT — cleanup is automatic. Proceed to output.
 
 STEP 7: Return ONLY this JSON (no markdown, no explanation):
 {
