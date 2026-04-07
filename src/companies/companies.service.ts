@@ -73,7 +73,14 @@ export class CompaniesService {
       (field) => field in dto,
     );
 
-    Object.assign(company, dto);
+    const { meta, ...rest } = dto as any;
+    Object.assign(company, rest);
+
+    // Merge meta fields instead of replacing — prevents wiping accessToken when only updating pixelId
+    if (meta) {
+      company.meta = { ...(company.meta ?? {}), ...meta } as any;
+    }
+
     await company.save();
 
     this.logger.log(

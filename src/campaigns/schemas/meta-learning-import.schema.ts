@@ -33,6 +33,10 @@ export class MetaLearningImport {
   @Prop({ type: [String], default: [] })
   conversionTypes: string[];
 
+  /** Custom conversions fetched from Meta: [{id, name}] — used for product detection */
+  @Prop({ type: [Object], default: [] })
+  customConversions: { id: string; name: string }[];
+
   /** Raw campaign objects from Meta (lightweight — id, name, status, dates, budget) */
   @Prop({ type: [Object], default: [] })
   rawCampaigns: any[];

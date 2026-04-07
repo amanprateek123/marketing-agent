@@ -33,6 +33,14 @@ class DeliveryDto {
   @IsOptional() @IsString() notionDatabaseId?: string;
 }
 
+class MetaDto {
+  @IsOptional() @IsString() accessToken?: string;
+  @IsOptional() @IsString() accountId?: string;
+  @IsOptional() @IsArray() @IsString({ each: true }) accountIds?: string[];
+  @IsOptional() @IsString() pixelId?: string;
+  @IsOptional() @IsString() pageId?: string;
+}
+
 export class CreateCompanyDto {
   @IsString() @IsNotEmpty()
   tenantId: string;
@@ -90,6 +98,9 @@ export class CreateCompanyDto {
 
   @IsOptional() @IsObject() @ValidateNested() @Type(() => DeliveryDto)
   delivery?: DeliveryDto;
+
+  @IsOptional() @IsObject() @ValidateNested() @Type(() => MetaDto)
+  meta?: MetaDto;
 
   // Marketing Requirements
   @IsNumber() @Min(0)

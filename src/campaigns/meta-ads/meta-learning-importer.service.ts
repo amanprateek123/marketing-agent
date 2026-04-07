@@ -109,7 +109,7 @@ export class MetaLearningImporterService {
     this.logger.log(`Importing from ${accountIds.length} Meta account(s): ${accountIds.join(', ')}`);
 
     // Step 1: Fetch conversion types — only needed once (pixel is shared across accounts)
-    const conversionTypes = await this.fetchConversionTypes(accountIds[0], accessToken, company.meta?.pixelId);
+    const { conversionTypes, customConversions } = await this.fetchConversionData(accountIds[0], accessToken);
     this.logger.log(`Conversion types: ${[...conversionTypes].join(', ')}`);
 
     // Step 2: Pull campaigns from ALL accounts in parallel
@@ -154,6 +154,7 @@ export class MetaLearningImporterService {
       enrichedCount: 0,
       caseStudyCount: 0,
       conversionTypes: [...conversionTypes],
+      customConversions,
       rawCampaigns: campaignsWithSpend,
       startedAt: new Date(),
     });
@@ -266,18 +267,20 @@ export class MetaLearningImporterService {
    * Finalize: calculate patterns + generate case studies from all enriched data.
    */
   async finalizeImport(importId: string): Promise<void> {
-    const importDoc = await this.importModel.findById(importId).exec();
-    if (!importDoc) throw new Error(`Import ${importId} not found`);
+    // Atomic claim — only proceed if status is NOT already finalizing or completed
+    // Prevents duplicate runs when BullMQ retries the finalize job
+    const importDoc = await this.importModel.findOneAndUpdate(
+      { _id: importId, status: { $nin: ['finalizing', 'completed'] } },
+      { $set: { status: 'finalizing' } },
+      { new: true },
+    ).exec();
 
-    // Idempotency — if already completed, skip (prevents double case study generation on BullMQ retry)
-    if (importDoc.status === 'completed') {
-      this.logger.log(`Import ${importId} already completed — skipping duplicate finalize`);
+    if (!importDoc) {
+      this.logger.log(`Import ${importId} already finalizing/completed — skipping duplicate finalize`);
       return;
     }
 
     const tenantId = importDoc.tenantId;
-    await this.importModel.updateOne({ _id: importId }, { status: 'finalizing' });
-
     this.logger.log(`Finalizing import ${importId} for ${tenantId}`);
 
     const company = await this.companiesService.findByTenantId(tenantId);
@@ -289,21 +292,27 @@ export class MetaLearningImporterService {
       .lean()
       .exec();
 
-    // Restore conversionTypes as Set on each campaign
-    const enrichedCampaigns = enrichedDocs.map(d => ({
-      ...d.data,
-      conversionTypes,
-    }));
-
-    this.logger.log(`Loaded ${enrichedCampaigns.length} enriched campaigns for pattern calculation`);
-
-    // Calculate statistical patterns
     const products = (company.products ?? []).filter(p => p.active).map(p => ({
       name: p.name,
       price: p.price,
     }));
+    const customConversions: { id: string; name: string }[] = (importDoc as any).customConversions ?? [];
 
-    const productPatterns = this.patternCalculator.calculatePatterns(enrichedCampaigns, products);
+    // Restore conversionTypes + detect product for each campaign
+    const enrichedCampaigns = enrichedDocs.map(d => {
+      const campaign = { ...d.data, conversionTypes };
+      campaign.detectedProduct = this.detectProduct(campaign, customConversions, products);
+      return campaign;
+    });
+
+    this.logger.log(`Loaded ${enrichedCampaigns.length} enriched campaigns for pattern calculation`);
+    this.logger.log(
+      `Product breakdown: ${[...new Set(enrichedCampaigns.map(c => c.detectedProduct))].join(', ')}`,
+    );
+
+    // Calculate statistical patterns
+
+    const productPatterns = this.patternCalculator.calculatePatterns(enrichedCampaigns, products, conversionTypes);
 
     // Save patterns to company.learnings
     if (productPatterns.length > 0) {
@@ -314,24 +323,43 @@ export class MetaLearningImporterService {
         topicScores: {},
         creative: {
           winningHooks: bestPattern.hookPerformance
-            .filter(h => h.avgCTR > 0)
+            .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
             .sort((a, b) => b.avgCTR - a.avgCTR)
             .slice(0, 3)
             .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`),
-          losingHooks: bestPattern.hookPerformance
-            .filter(h => h.adCount >= 3)
-            .sort((a, b) => a.avgCTR - b.avgCTR)
-            .slice(0, 2)
-            .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`),
+          losingHooks: (() => {
+            const winners = new Set(
+              bestPattern.hookPerformance
+                .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
+                .sort((a, b) => b.avgCTR - a.avgCTR)
+                .slice(0, 3)
+                .map(h => h.style),
+            );
+            return bestPattern.hookPerformance
+              .filter(h => h.adCount >= 3 && !winners.has(h.style) && h.style !== 'unknown')
+              .sort((a, b) => a.avgCTR - b.avgCTR)
+              .slice(0, 2)
+              .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
+          })(),
           winningFormats: bestPattern.formatPerformance
+            .filter(f => f.format !== 'unknown')
             .sort((a, b) => b.conversionShare - a.conversionShare)
             .slice(0, 2)
             .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`),
-          losingFormats: bestPattern.formatPerformance
-            .filter(f => f.adCount >= 3)
-            .sort((a, b) => a.conversionShare - b.conversionShare)
-            .slice(0, 2)
-            .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`),
+          losingFormats: (() => {
+            const winFmts = new Set(
+              bestPattern.formatPerformance
+                .filter(f => f.format !== 'unknown')
+                .sort((a, b) => b.conversionShare - a.conversionShare)
+                .slice(0, 2)
+                .map(f => f.format),
+            );
+            return bestPattern.formatPerformance
+              .filter(f => f.adCount >= 3 && !winFmts.has(f.format) && f.format !== 'unknown')
+              .sort((a, b) => a.conversionShare - b.conversionShare)
+              .slice(0, 2)
+              .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`);
+          })(),
           ctaInsights: [],
           copyToneInsights: [],
           visualInsights: [],
@@ -359,28 +387,41 @@ export class MetaLearningImporterService {
     const syncResult = await this.campaignSync.syncFromEnrichedData(tenantId, enrichedCampaigns, conversionTypes);
     this.logger.log(`Campaign sync: ${syncResult.synced} updated, ${syncResult.created} new manual campaigns`);
 
-    // Generate case studies in batches of 5
-    const allCaseStudies: CampaignCaseStudy[] = [];
+    // Clear old case studies upfront so frontend sees fresh data as it streams in
+    await this.caseStudyModel.deleteMany({ tenantId });
+
+    // Only generate case studies for top 50 campaigns by spend — rest take too long and add little value
+    const topCampaigns = [...enrichedCampaigns]
+      .sort((a, b) => parseFloat(b.insights?.spend ?? '0') - parseFloat(a.insights?.spend ?? '0'))
+      .slice(0, 50);
+
+    this.logger.log(`Generating case studies for top ${topCampaigns.length} campaigns by spend`);
+
+    // Generate case studies in batches of 5 — save each batch immediately so frontend sees them as they arrive
+    let totalCaseStudies = 0;
     const csBatchSize = 5;
 
-    for (let i = 0; i < enrichedCampaigns.length; i += csBatchSize) {
-      const batch = enrichedCampaigns.slice(i, i + csBatchSize);
+    for (let i = 0; i < topCampaigns.length; i += csBatchSize) {
+      const batch = topCampaigns.slice(i, i + csBatchSize);
       const caseStudies = await this.generateCaseStudies(batch, company);
-      allCaseStudies.push(...caseStudies);
+
+      if (caseStudies.length > 0) {
+        await this.caseStudyModel.insertMany(
+          caseStudies.map(cs => ({ ...cs, tenantId })),
+        );
+        totalCaseStudies += caseStudies.length;
+
+        // Update count on import doc so frontend progress reflects reality
+        await this.importModel.updateOne({ _id: importId }, { caseStudyCount: totalCaseStudies });
+      }
+
       this.logger.log(
-        `Case studies: ${Math.min(i + csBatchSize, enrichedCampaigns.length)}/${enrichedCampaigns.length} campaigns processed`,
+        `Case studies: ${Math.min(i + csBatchSize, topCampaigns.length)}/${topCampaigns.length} campaigns processed (${totalCaseStudies} saved)`,
       );
-      if (i + csBatchSize < enrichedCampaigns.length) {
+
+      if (i + csBatchSize < topCampaigns.length) {
         await new Promise(r => setTimeout(r, 3000));
       }
-    }
-
-    // Save case studies (replace existing for this tenant)
-    await this.caseStudyModel.deleteMany({ tenantId });
-    if (allCaseStudies.length > 0) {
-      await this.caseStudyModel.insertMany(
-        allCaseStudies.map(cs => ({ ...cs, tenantId })),
-      );
     }
 
     // Clean up enriched campaign temp data
@@ -391,14 +432,14 @@ export class MetaLearningImporterService {
       { _id: importId },
       {
         status: 'completed',
-        caseStudyCount: allCaseStudies.length,
+        caseStudyCount: totalCaseStudies,
         completedAt: new Date(),
         rawCampaigns: [], // free memory
       },
     );
 
     this.logger.log(
-      `Import complete: ${enrichedCampaigns.length} campaigns, ${allCaseStudies.length} case studies, ${productPatterns.length} product patterns`,
+      `Import complete: ${enrichedCampaigns.length} campaigns, ${totalCaseStudies} case studies, ${productPatterns.length} product patterns`,
     );
   }
 
@@ -468,11 +509,15 @@ export class MetaLearningImporterService {
 
   // ─── Private: Meta API data pulling ─────────────────────────────────────────
 
-  private async fetchConversionTypes(
+  /**
+   * Fetch all conversion data for an account.
+   * Returns the full Set of valid action_types AND a map of custom conversion id → name
+   * (used later for product detection via promoted_object).
+   */
+  private async fetchConversionData(
     accountId: string,
     accessToken: string,
-    pixelId?: string,
-  ): Promise<Set<string>> {
+  ): Promise<{ conversionTypes: Set<string>; customConversions: { id: string; name: string }[] }> {
     const STANDARD_EVENTS = new Set([
       'purchase',
       'offsite_conversion.fb_pixel_purchase',
@@ -494,13 +539,14 @@ export class MetaLearningImporterService {
         timeout: 30000,
       });
 
-      const customConversions: any[] = res.data?.data ?? [];
+      const rawCustomConversions: any[] = res.data?.data ?? [];
 
-      if (customConversions.length === 0) {
+      if (rawCustomConversions.length === 0) {
         this.logger.log('No custom conversions found — using standard events only');
-        return STANDARD_EVENTS;
+        return { conversionTypes: STANDARD_EVENTS, customConversions: [] };
       }
 
+      const customConversions = rawCustomConversions.map(c => ({ id: String(c.id), name: String(c.name) }));
       const conversionTypes = new Set<string>();
 
       for (const conversion of customConversions) {
@@ -513,48 +559,63 @@ export class MetaLearningImporterService {
 
       for (const event of STANDARD_EVENTS) conversionTypes.add(event);
 
-      if (pixelId) {
-        try {
-          const pixelRes = await axios.get(`${META_API_BASE}/${pixelId}/stats`, {
-            params: {
-              fields: 'data',
-              access_token: accessToken,
-            },
-            timeout: 30000,
-          });
+      // Discover custom pixel events by sampling top campaigns' actions
+      // Safer than account-level or pixel/stats endpoints — uses same API we already call
+      try {
+        const since = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const until = new Date().toISOString().split('T')[0];
 
-          const buckets: any[] = pixelRes.data?.data ?? [];
-          const allEventNames = new Set<string>();
-          for (const bucket of buckets) {
-            for (const entry of bucket.data ?? []) {
-              if (entry.value) allEventNames.add(entry.value);
-            }
+        const insightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
+          params: {
+            fields: 'campaign_id,actions',
+            level: 'campaign',
+            time_range: JSON.stringify({ since, until }),
+            limit: '200',
+            access_token: accessToken,
+          },
+          timeout: 30000,
+        });
+
+        const allActionTypes = new Set<string>();
+        for (const row of insightsRes.data?.data ?? []) {
+          for (const action of row.actions ?? []) {
+            allActionTypes.add(action.action_type);
           }
-
-          const NON_CONVERSION = ['PageView', 'ViewContent', 'Search', 'AddToCart',
-            'AddToWishlist', 'InitiateCheckout', 'AddPaymentInfo', 'CHAT',
-            'ATTEMPTED', 'VIEW', 'SCROLL'];
-
-          const conversionEvents = [...allEventNames].filter(name =>
-            !NON_CONVERSION.some(skip => name.toUpperCase().includes(skip.toUpperCase())),
-          );
-
-          for (const eventName of conversionEvents) {
-            conversionTypes.add(eventName);
-          }
-
-          if (conversionEvents.length > 0) {
-            this.logger.log(`Found custom pixel conversion events: ${conversionEvents.join(', ')}`);
-          }
-        } catch (err: any) {
-          this.logger.warn(`Failed to fetch pixel custom events: ${err.message}`);
         }
+
+        const NON_CONVERSION = [
+          'link_click', 'post_engagement', 'page_engagement', 'video_view',
+          'photo_view', 'comment', 'like', 'post', 'checkin', 'rsvp',
+          'mention', 'share', 'photo', 'video', 'landing_page_view',
+          'omni_landing_page_view', 'post_interaction_gross', 'post_interaction_net',
+          'post_reaction', 'post_uncomment', 'add_to_cart', 'omni_add_to_cart',
+          'offsite_search_add_meta_leads', 'offsite_content_view_add_meta_leads',
+          'offsite_complete_registration_add_meta_leads',
+        ];
+
+        const customEvents = [...allActionTypes].filter(type =>
+          !type.startsWith('offsite_conversion.') &&
+          !type.startsWith('app_') &&
+          !type.startsWith('onsite_') &&
+          !STANDARD_EVENTS.has(type) &&
+          !NON_CONVERSION.includes(type),
+        );
+
+        for (const eventName of customEvents) {
+          conversionTypes.add(eventName);
+        }
+
+        if (customEvents.length > 0) {
+          this.logger.log(`Found custom pixel events: ${customEvents.join(', ')}`);
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to discover custom pixel events: ${err.message}`);
       }
 
-      return conversionTypes;
+      return { conversionTypes, customConversions };
     } catch (err: any) {
       this.logger.warn(`Failed to fetch custom conversions: ${err.message} — using standard events`);
-      return STANDARD_EVENTS;
+      return { conversionTypes: STANDARD_EVENTS, customConversions: [] };
     }
   }
 
@@ -631,6 +692,63 @@ export class MetaLearningImporterService {
     return spendMap;
   }
 
+  /**
+   * Detect which product a campaign was optimizing for.
+   * Uses promoted_object on ad sets (Meta's own record) + fuzzy match against company products.
+   * Falls back to campaign name match if promoted_object is absent.
+   */
+  private detectProduct(
+    campaign: any,
+    customConversions: { id: string; name: string }[],
+    products: { name: string; price: number }[],
+  ): string {
+    // Build id → name map for custom conversions
+    const ccMap = new Map(customConversions.map(c => [c.id, c.name]));
+
+    // Gather all promoted_object entries from ad sets
+    const adSets: any[] = campaign.adSets ?? [];
+    for (const adSet of adSets) {
+      const po = adSet.promoted_object;
+      if (!po) continue;
+
+      let eventName: string | undefined;
+
+      // Custom conversion: offsite_conversion.custom.<id>
+      if (po.custom_conversion_id) {
+        eventName = ccMap.get(String(po.custom_conversion_id));
+      }
+
+      // Custom event type (e.g. NADI_REPORT_PURCHASE_COMPLETED)
+      if (!eventName && po.custom_event_type) {
+        eventName = String(po.custom_event_type);
+      }
+
+      if (eventName) {
+        // Fuzzy match event name → product name
+        const normalized = eventName.toLowerCase().replace(/[_\-\.]/g, ' ');
+        for (const product of products) {
+          const productWords = product.name.toLowerCase().split(/\s+/);
+          if (productWords.some(word => word.length > 3 && normalized.includes(word))) {
+            return product.name;
+          }
+        }
+        // No product match — return the event name itself so it's still useful
+        return eventName;
+      }
+    }
+
+    // Fallback: match campaign name against product names
+    const campaignName = (campaign.name ?? '').toLowerCase();
+    for (const product of products) {
+      const productWords = product.name.toLowerCase().split(/\s+/);
+      if (productWords.some(word => word.length > 3 && campaignName.includes(word))) {
+        return product.name;
+      }
+    }
+
+    return 'unknown';
+  }
+
   enrichCampaign(
     campaign: any,
     accessToken: string,
@@ -650,7 +768,7 @@ export class MetaLearningImporterService {
         { timeout: 30000 },
       ).catch(() => ({ data: { data: [] } })),
       axios.get(
-        `${META_API_BASE}/${campaign.id}/adsets?fields=name,targeting,optimization_goal,daily_budget&limit=20&access_token=${accessToken}`,
+        `${META_API_BASE}/${campaign.id}/adsets?fields=name,targeting,optimization_goal,daily_budget,lifetime_budget,promoted_object&limit=20&access_token=${accessToken}`,
         { timeout: 30000 },
       ).catch(() => ({ data: { data: [] } })),
       axios.get(

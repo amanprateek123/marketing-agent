@@ -224,6 +224,18 @@ export class CampaignSyncService {
       return customActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
     }
 
+    // Custom pixel events (e.g. NADI_REPORT_PURCHASE_COMPLETED)
+    const STANDARD_EVENTS = new Set(['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
+      'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial']);
+    const customEventActions = actions.filter(
+      a => !a.action_type.startsWith('offsite_conversion.custom.')
+        && !STANDARD_EVENTS.has(a.action_type)
+        && conversionTypes.has(a.action_type),
+    );
+    if (customEventActions.length > 0) {
+      return customEventActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
+    }
+
     const PRIORITY = ['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
       'offsite_conversion.fb_pixel_lead', 'complete_registration'];
     for (const type of PRIORITY) {

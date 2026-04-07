@@ -89,11 +89,19 @@ export class PatternCalculatorService {
     const results: ProductPatterns[] = [];
 
     for (const product of products) {
-      // Find campaigns that match this product (by name)
-      const productCampaigns = enrichedCampaigns.filter(c =>
-        c.name.toLowerCase().includes(product.name.toLowerCase()) ||
-        c.name.toLowerCase().includes(product.name.split(' ')[0].toLowerCase()),
-      );
+      // Prefer detectedProduct (from promoted_object), fall back to name matching
+      const productCampaigns = enrichedCampaigns.filter(c => {
+        if (c.detectedProduct && c.detectedProduct !== 'unknown') {
+          return (
+            c.detectedProduct === product.name ||
+            c.detectedProduct.toLowerCase().includes(product.name.toLowerCase().split(' ')[0])
+          );
+        }
+        return (
+          c.name.toLowerCase().includes(product.name.toLowerCase()) ||
+          c.name.toLowerCase().includes(product.name.split(' ')[0].toLowerCase())
+        );
+      });
 
       if (productCampaigns.length === 0) continue;
 
@@ -141,19 +149,40 @@ export class PatternCalculatorService {
       totalConversions += conversions;
 
       for (const ad of (campaign.adInsights ?? [])) {
+        // Join with creative data to get copy body for hook inference
+        const creative = (campaign.ads ?? []).find((a: any) => a.name === ad.ad_name);
+        const copyBody = creative?.creative?.body
+          ?? creative?.creative?.object_story_spec?.link_data?.message
+          ?? creative?.creative?.object_story_spec?.video_data?.message
+          ?? '';
+        const copyTitle = creative?.creative?.title
+          ?? creative?.creative?.object_story_spec?.link_data?.name
+          ?? '';
         allAds.push({
           ...ad,
           campaignName: campaign.name,
           startTime: campaign.start_time,
           conversionTypes: campaignConvTypes,
+          copyBody,
+          copyTitle,
         });
       }
 
       for (const adSet of (campaign.adSetInsights ?? [])) {
+        // Attach ad creatives for this adset so format can be detected from creative type
+        const adSetAds = (campaign.adInsights ?? []).map((ad: any) => {
+          const creative = (campaign.ads ?? []).find((a: any) => a.name === ad.ad_name);
+          return {
+            ...ad,
+            creative: creative?.creative ?? null,
+            ctr: parseFloat(ad.ctr ?? '0'),
+          };
+        });
         allAdSets.push({
           ...adSet,
           campaignName: campaign.name,
           conversionTypes: campaignConvTypes,
+          ads: adSetAds,
         });
       }
 
@@ -165,14 +194,20 @@ export class PatternCalculatorService {
       ? (totalConversions * product.price) / totalSpend
       : 0;
 
-    // Hook performance — infer hook style from ad name
+    // Hook performance — infer hook style from ad name + copy body
     const hookPerformance = this.calculateHookPerformance(allAds);
-    const bestHook = hookPerformance.sort((a, b) => b.avgCTR - a.avgCTR)[0];
-    const worstHook = hookPerformance.sort((a, b) => a.avgCTR - b.avgCTR)[0];
+    const sortedHooksByCtr = [...hookPerformance].sort((a, b) => b.avgCTR - a.avgCTR);
+    const bestHook = sortedHooksByCtr[0];
+    const winningHookStyles = new Set(sortedHooksByCtr.slice(0, 3).map(h => h.style));
+    const worstHook = [...hookPerformance]
+      .filter(h => h.adCount >= 3 && !winningHookStyles.has(h.style))
+      .sort((a, b) => a.avgCTR - b.avgCTR)[0] ?? null;
 
-    // Format performance — infer from ad/campaign names
-    const formatPerformance = this.calculateFormatPerformance(allAds, totalConversions);
-    const bestFormat = formatPerformance.sort((a, b) => b.conversionShare - a.conversionShare)[0];
+    // Format performance — creative type from Meta + adset-level conversions (accurate)
+    const formatPerformance = this.calculateFormatPerformance(allAdSets, totalConversions);
+    const sortedFormats = [...formatPerformance].sort((a, b) => b.conversionShare - a.conversionShare);
+    const bestFormat = sortedFormats[0];
+    const winningFormats = new Set(sortedFormats.slice(0, 2).map(f => f.format));
 
     // Audience performance
     const audiencePerformance = this.calculateAudiencePerformance(allAdSets, product.price);
@@ -226,7 +261,7 @@ export class PatternCalculatorService {
     const hookMap = new Map<string, { totalCTR: number; totalCPA: number; count: number; wins: number }>();
 
     for (const ad of ads) {
-      const hookStyle = this.inferHookStyle(ad.ad_name ?? ad.name ?? '');
+      const hookStyle = this.inferHookStyle(ad.ad_name ?? ad.name ?? '', ad.copyBody, ad.copyTitle);
       const ctr = parseFloat(ad.ctr ?? '0');
       const spend = parseFloat(ad.spend ?? '0');
       const conversions = this.extractConversions(ad.actions, ad.conversionTypes);
@@ -254,23 +289,43 @@ export class PatternCalculatorService {
   }
 
   private calculateFormatPerformance(
-    ads: any[],
+    adSets: any[],
     totalConversions: number,
   ): ProductPatterns['formatPerformance'] {
     const formatMap = new Map<string, { totalCTR: number; conversions: number; count: number }>();
 
-    for (const ad of ads) {
-      const format = this.inferFormat(ad.ad_name ?? ad.name ?? '', ad.campaignName ?? '');
-      const ctr = parseFloat(ad.ctr ?? '0');
-      const conversions = this.extractConversions(ad.actions, ad.conversionTypes);
+    for (const adSet of adSets) {
+      const adSetConversions = this.extractConversions(adSet.actions, adSet.conversionTypes);
+      const ads: any[] = adSet.ads ?? [];
 
-      if (!formatMap.has(format)) {
-        formatMap.set(format, { totalCTR: 0, conversions: 0, count: 0 });
+      if (ads.length === 0) {
+        // No ads joined — fall back to adset name for format
+        const format = this.inferFormat(adSet.adset_name ?? adSet.name ?? '', adSet.campaignName ?? '');
+        const ctr = parseFloat(adSet.ctr ?? '0');
+        if (!formatMap.has(format)) formatMap.set(format, { totalCTR: 0, conversions: 0, count: 0 });
+        const entry = formatMap.get(format)!;
+        entry.totalCTR += ctr;
+        entry.conversions += adSetConversions;
+        entry.count++;
+        continue;
       }
-      const entry = formatMap.get(format)!;
-      entry.totalCTR += ctr;
-      entry.conversions += conversions;
-      entry.count++;
+
+      // Detect format from creative type (definitive — not name inference)
+      // Then distribute adset conversions proportionally by CTR share within adset
+      const totalCTRInAdSet = ads.reduce((sum, a) => sum + (a.ctr ?? 0), 0);
+
+      for (const ad of ads) {
+        const format = this.inferFormatFromCreative(ad.creative, ad.ad_name ?? '');
+        const ctr = ad.ctr ?? 0;
+        const ctrShare = totalCTRInAdSet > 0 ? ctr / totalCTRInAdSet : 1 / ads.length;
+        const attributedConversions = adSetConversions * ctrShare;
+
+        if (!formatMap.has(format)) formatMap.set(format, { totalCTR: 0, conversions: 0, count: 0 });
+        const entry = formatMap.get(format)!;
+        entry.totalCTR += ctr;
+        entry.conversions += attributedConversions;
+        entry.count++;
+      }
     }
 
     return Array.from(formatMap.entries()).map(([format, data]) => ({
@@ -279,6 +334,22 @@ export class PatternCalculatorService {
       avgCTR: data.count > 0 ? data.totalCTR / data.count : 0,
       adCount: data.count,
     }));
+  }
+
+  /**
+   * Detect format from creative object type — definitive, not inferred from name.
+   */
+  private inferFormatFromCreative(creative: any, adName: string): string {
+    if (!creative) return this.inferFormat(adName, '');
+
+    const spec = creative.object_story_spec;
+    if (spec?.video_data) return 'video';
+    if (spec?.link_data?.child_attachments?.length > 0) return 'carousel';
+    if (spec?.link_data) return 'image';
+
+    // creative.title/body present but no spec — likely a story or reel
+    // Fall back to name inference
+    return this.inferFormat(adName, '');
   }
 
   private calculateAudiencePerformance(
@@ -396,11 +467,23 @@ export class PatternCalculatorService {
     const budgetPerformance: { budget: number; cpa: number }[] = [];
 
     for (const adSet of adSets) {
-      const dailyBudget = parseFloat(adSet.daily_budget ?? '0') / 100; // paise to rupees
+      // daily_budget and lifetime_budget come in paise — divide by 100 for rupees
+      // Prefer daily_budget; fall back to lifetime_budget / 30 (daily equivalent)
+      const dailyBudgetRaw = parseFloat(adSet.daily_budget ?? '0');
+      const lifetimeBudgetRaw = parseFloat(adSet.lifetime_budget ?? '0');
+      const budget = dailyBudgetRaw > 0
+        ? dailyBudgetRaw / 100
+        : lifetimeBudgetRaw > 0
+          ? lifetimeBudgetRaw / 100 / 30
+          : 0;
+
       const spend = parseFloat(adSet.spend ?? '0');
       const conversions = this.extractConversions(adSet.actions, adSet.conversionTypes);
-      if (dailyBudget > 0 && conversions > 0) {
-        budgetPerformance.push({ budget: dailyBudget, cpa: spend / conversions });
+      if (budget > 0 && conversions > 0) {
+        budgetPerformance.push({ budget, cpa: spend / conversions });
+      } else if (conversions > 0 && spend > 0) {
+        // No budget set on ad set (campaign-level budget) — use spend as proxy
+        budgetPerformance.push({ budget: spend, cpa: spend / conversions });
       }
     }
 
@@ -446,14 +529,33 @@ export class PatternCalculatorService {
 
   // ─── Inference helpers ──────────────────────────────────────────────────────
 
-  private inferHookStyle(adName: string): string {
-    const lower = adName.toLowerCase();
-    if (lower.includes('question') || lower.includes('kya') || lower.includes('?')) return 'question';
-    if (lower.includes('bold') || lower.includes('claim') || lower.includes('fact')) return 'bold_claim';
-    if (lower.includes('fear') || lower.includes('worry') || lower.includes('tension')) return 'fear_then_relief';
-    if (lower.includes('story') || lower.includes('emotional') || lower.includes('personal')) return 'personal_story';
-    if (lower.includes('social') || lower.includes('proof') || lower.includes('review')) return 'social_proof';
-    if (lower.includes('ugc') || lower.includes('testimonial')) return 'ugc';
+  private inferHookStyle(adName: string, copyBody?: string, copyTitle?: string): string {
+    const combined = `${adName} ${copyBody ?? ''} ${copyTitle ?? ''}`.toLowerCase();
+
+    // UGC / testimonial — check first as most specific
+    if (/ugc|testimonial|real customer|actual customer|meri kahani|mere saath hua|meri story/.test(combined)) return 'ugc';
+
+    // Social proof — numbers, ratings, reviews
+    if (/\d+[\s,]*(?:lakh|lac|k|thousand|crore)\+?\s*(?:customer|log|review|order)|(?:4\.\d|5\.0)\s*(?:star|rating)|top rated|best seller|#1/.test(combined)) return 'social_proof';
+
+    // Question hook
+    if (/\?|kya aap|kya aapka|kya ho|kyun|kaise|kitna|kaun sa|kab|kya pata|jaante hain|did you know|are you|do you|have you/.test(combined)) return 'question';
+
+    // Fear / problem → relief
+    if (/problem|pareshaan|tension|dard|struggle|pareshan|takleef|mushkil|worry|anxious|scared|dar|bhay|crisis|failed|fail|negative|dosha|dosh|pap|grahan|sade sati|dhaiya/.test(combined)) return 'fear_then_relief';
+
+    // Curiosity / secret / reveal
+    if (/secret|hidden|jaano|discover|pata karo|reveal|untold|exclusive|insider|raaz|chhupayi|ankhon|khulasa/.test(combined)) return 'curiosity';
+
+    // Urgency / scarcity
+    if (/sirf aaj|limited|abhi|last chance|offer ends|hurry|jaldi|kal se|today only|expir|deadline|closing/.test(combined)) return 'urgency';
+
+    // Bold claim / fact
+    if (/guaranteed|100%|proven|scientific|authentic|original|genuine|sabse|best|number 1|#1|padh|fact|research|study|data/.test(combined)) return 'bold_claim';
+
+    // Personal story / emotional
+    if (/meri|mera|mere|maine|hamari|hamare|ek din|ek baar|my story|i was|i am|when i|my life|personal|changed my/.test(combined)) return 'personal_story';
+
     return 'unknown';
   }
 
