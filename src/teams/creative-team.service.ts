@@ -108,7 +108,7 @@ export class CreativeTeamService {
 PAST CREATIVE CASE STUDIES (what hooks/formats worked and failed):
 ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.whatWorked?.hooks?.join(', ') || 'unknown'} hooks worked (CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}). ${cs.whatFailed?.reason || ''} Lesson: ${cs.lesson}`).join('\n')}`;
       }
-    } catch { /* case studies not available yet */ }
+    } catch (err: any) { this.logger.warn(`Case studies unavailable for ${company.tenantId}: ${err.message}`); }
     const creative = company.learnings?.creative;
 
     const learningsBlock = creative

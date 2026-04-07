@@ -176,8 +176,13 @@ export class StrategyTeamService {
         const currentMonth = new Date().getMonth();
         const seasonalStudies = caseStudies.filter(cs => {
           if (!cs.dateRange) return false;
-          const csMonth = new Date(cs.dateRange.split(' ')[0]).getMonth();
-          return csMonth === currentMonth;
+          try {
+            // dateRange can be "Jan 2025 - Mar 2025" or "2025-01-01 - 2025-03-01"
+            const firstPart = cs.dateRange.split(/\s*[-–]\s*/)[0].trim();
+            const parsed = new Date(firstPart);
+            if (isNaN(parsed.getTime())) return false;
+            return parsed.getMonth() === currentMonth;
+          } catch { return false; }
         }).slice(0, 3);
 
         // Combine: recent + seasonal, deduplicate
@@ -198,8 +203,8 @@ ${allStudies.slice(0, 15).map((cs, i) => `
     Lesson: ${cs.lesson}
 `).join('')}`;
       }
-    } catch {
-      // Case studies not available yet — continue without them
+    } catch (err: any) {
+      this.logger.warn(`Case studies unavailable for ${company.tenantId}: ${err.message}`);
     }
     const learnings = company.learnings;
 
@@ -242,6 +247,8 @@ PAST LEARNINGS (what worked and what didn't):
 - Losing hooks: ${learnings.creative?.losingHooks?.join(', ') || 'none yet'}
 - Winning formats: ${learnings.creative?.winningFormats?.join(', ') || 'none yet'}
 - Top audience scores: ${learnings.campaign?.audienceScores ? Object.entries(learnings.campaign.audienceScores).sort(([,a],[,b]) => b - a).slice(0, 3).map(([k,v]) => `${k}: ${v}`).join(', ') : 'none yet'}
+- Budget insights: ${learnings.campaign?.budgetInsights?.join('; ') || 'none yet'}
+- Timing insights: ${learnings.campaign?.timingInsights?.join('; ') || 'none yet'}
 - Causal insights: ${learnings.causalInsights?.slice(0, 3).map(c => c.finding).join('; ') || 'none yet'}
 ` : '';
 
