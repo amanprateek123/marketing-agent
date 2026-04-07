@@ -11,6 +11,7 @@ import { CampaignCaseStudy as CaseStudyModel, CampaignCaseStudyDocument } from '
 import { MetaLearningImport, MetaLearningImportDocument } from '../schemas/meta-learning-import.schema';
 import { EnrichedCampaign, EnrichedCampaignDocument } from '../schemas/enriched-campaign.schema';
 import { PatternCalculatorService } from './pattern-calculator.service';
+import { CampaignSyncService } from './campaign-sync.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { QUEUES } from '../../scheduler/queue.constants';
 
@@ -62,6 +63,7 @@ export class MetaLearningImporterService {
     private readonly claudeService: ClaudeService,
     private readonly patternCalculator: PatternCalculatorService,
     private readonly companiesService: CompaniesService,
+    private readonly campaignSync: CampaignSyncService,
     @InjectModel(CaseStudyModel.name)
     private readonly caseStudyModel: Model<CampaignCaseStudyDocument>,
     @InjectModel(MetaLearningImport.name)
@@ -94,22 +96,42 @@ export class MetaLearningImporterService {
     );
 
     this.logger.log(`Starting Meta learning import for tenant: ${tenantId}`);
-    const { accountId, accessToken } = company.meta!;
+    const { accessToken } = company.meta!;
 
-    // Step 1: Fetch conversion types
-    const conversionTypes = await this.fetchConversionTypes(accountId, accessToken, company.meta?.pixelId);
+    // Support multiple ad accounts — fall back to single accountId if accountIds not set
+    // Normalize: Meta API requires act_ prefix on account IDs
+    const normalizeAccountId = (id: string) => id.startsWith('act_') ? id : `act_${id}`;
+    const rawAccountIds = (company.meta!.accountIds?.length ?? 0) > 0
+      ? company.meta!.accountIds!
+      : [company.meta!.accountId];
+    const accountIds = rawAccountIds.map(normalizeAccountId);
+
+    this.logger.log(`Importing from ${accountIds.length} Meta account(s): ${accountIds.join(', ')}`);
+
+    // Step 1: Fetch conversion types — only needed once (pixel is shared across accounts)
+    const conversionTypes = await this.fetchConversionTypes(accountIds[0], accessToken, company.meta?.pixelId);
     this.logger.log(`Conversion types: ${[...conversionTypes].join(', ')}`);
 
-    // Step 2: Pull all campaigns (non-deleted)
-    const rawCampaigns = await this.pullAllCampaigns(accountId, accessToken);
-    this.logger.log(`Pulled ${rawCampaigns.length} campaigns from Meta`);
+    // Step 2: Pull campaigns from ALL accounts in parallel
+    const rawCampaignArrays = await Promise.all(
+      accountIds.map(id => this.pullAllCampaigns(id, accessToken)),
+    );
+    const rawCampaigns = rawCampaignArrays.flat();
+    this.logger.log(`Pulled ${rawCampaigns.length} campaigns across ${accountIds.length} accounts`);
 
     if (rawCampaigns.length === 0) {
       return { importId: '', totalCampaigns: 0, totalBatches: 0 };
     }
 
-    // Step 3: Bulk-fetch spends — filter to campaigns with spend > ₹500
-    const spendMap = await this.fetchCampaignSpends(accountId, accessToken);
+    // Step 3: Bulk-fetch spends from ALL accounts in parallel, merge into one map
+    const spendMaps = await Promise.all(
+      accountIds.map(id => this.fetchCampaignSpends(id, accessToken)),
+    );
+    const spendMap = new Map<string, number>();
+    for (const m of spendMaps) {
+      for (const [k, v] of m) spendMap.set(k, v);
+    }
+
     const campaignsWithSpend = rawCampaigns
       .filter(c => (spendMap.get(c.id) ?? 0) > 500)
       .sort((a, b) => (spendMap.get(b.id) ?? 0) - (spendMap.get(a.id) ?? 0));
@@ -174,7 +196,7 @@ export class MetaLearningImporterService {
 
     const tenantId = importDoc.tenantId;
     const company = await this.companiesService.findByTenantId(tenantId);
-    const { accountId, accessToken } = company.meta!;
+    const { accessToken } = company.meta!;
     const conversionTypes = new Set(importDoc.conversionTypes);
 
     // Slice this batch's campaigns
@@ -192,7 +214,7 @@ export class MetaLearningImporterService {
     for (let i = 0; i < batchCampaigns.length; i += CONCURRENCY) {
       const chunk = batchCampaigns.slice(i, i + CONCURRENCY);
       const results = await Promise.allSettled(
-        chunk.map(c => this.enrichCampaign(c, accountId, accessToken, conversionTypes)),
+        chunk.map(c => this.enrichCampaign(c, accessToken, conversionTypes)),
       );
       for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
@@ -246,6 +268,12 @@ export class MetaLearningImporterService {
   async finalizeImport(importId: string): Promise<void> {
     const importDoc = await this.importModel.findById(importId).exec();
     if (!importDoc) throw new Error(`Import ${importId} not found`);
+
+    // Idempotency — if already completed, skip (prevents double case study generation on BullMQ retry)
+    if (importDoc.status === 'completed') {
+      this.logger.log(`Import ${importId} already completed — skipping duplicate finalize`);
+      return;
+    }
 
     const tenantId = importDoc.tenantId;
     await this.importModel.updateOne({ _id: importId }, { status: 'finalizing' });
@@ -326,6 +354,10 @@ export class MetaLearningImporterService {
         `Patterns saved: ${productPatterns.map(p => `${p.product} (${p.totalConversions} conv, ${p.confidenceLevel})`).join(', ')}`,
       );
     }
+
+    // Sync all enriched campaigns to campaigns collection
+    const syncResult = await this.campaignSync.syncFromEnrichedData(tenantId, enrichedCampaigns, conversionTypes);
+    this.logger.log(`Campaign sync: ${syncResult.synced} updated, ${syncResult.created} new manual campaigns`);
 
     // Generate case studies in batches of 5
     const allCaseStudies: CampaignCaseStudy[] = [];
@@ -601,16 +633,14 @@ export class MetaLearningImporterService {
 
   enrichCampaign(
     campaign: any,
-    accountId: string,
     accessToken: string,
     conversionTypes: Set<string>,
   ): Promise<any | null> {
-    return this._enrichCampaign(campaign, accountId, accessToken, conversionTypes);
+    return this._enrichCampaign(campaign, accessToken, conversionTypes);
   }
 
   private async _enrichCampaign(
     campaign: any,
-    accountId: string,
     accessToken: string,
     conversionTypes: Set<string>,
   ): Promise<any | null> {

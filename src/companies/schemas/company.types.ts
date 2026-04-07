@@ -76,8 +76,9 @@ export interface DeliveryConfig {
 
 export interface MetaAdsConfig {
   accessToken: string;    // Meta Ads API access token (per tenant)
-  accountId: string;      // Meta Ads account ID (e.g. act_123456)
-  pixelId?: string;       // Meta Pixel for conversion tracking
+  accountId: string;      // Primary Meta Ads account ID (e.g. act_123456)
+  accountIds?: string[];  // All Meta Ads account IDs — importer pulls from all of them
+  pixelId?: string;       // Meta Pixel for conversion tracking (shared across accounts)
   pageId?: string;        // Facebook Page ID for ad identity
 }
 

@@ -25,8 +25,12 @@ export enum AgentType {
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 
-// Agents that use Haiku (cheap, single-turn, formatting tasks)
+// Agents that use Haiku (cheap — scouts do data fetching, no reasoning needed)
 export const HAIKU_AGENTS: AgentType[] = [
+  AgentType.INSTAGRAM_SCOUT,
+  AgentType.REDDIT_SCOUT,
+  AgentType.TWITTER_SCOUT,
+  AgentType.YOUTUBE_SCOUT,
   AgentType.MARKET_RESEARCH,
   AgentType.CASE_STUDY_GENERATOR,
 ];

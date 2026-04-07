@@ -4,17 +4,26 @@ import { HydratedDocument } from 'mongoose';
 export type CampaignDocument = HydratedDocument<Campaign>;
 
 export type CampaignStatus = 'pending_approval' | 'active' | 'paused' | 'completed' | 'failed';
+export type CampaignSource = 'agent' | 'manual';
 
 @Schema({ collection: 'campaigns', timestamps: true })
 export class Campaign {
   @Prop({ required: true, index: true })
   tenantId: string;
 
-  @Prop({ required: true, index: true })
+  @Prop({ index: true, default: '' })
   runId: string;
 
-  @Prop({ required: true, index: true })
+  @Prop({ index: true, default: '' })
   briefId: string;
+
+  // 'agent' = launched by our system, 'manual' = synced from Meta (tenant created it)
+  @Prop({ default: 'agent', index: true })
+  source: CampaignSource;
+
+  // Last time this campaign was synced from Meta
+  @Prop()
+  syncedAt?: Date;
 
   @Prop({ default: '' })
   topic: string;

@@ -19,6 +19,7 @@ import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { MetaMetricsService } from './meta-ads/meta-metrics.service';
 import { MetaLearningImporterService } from './meta-ads/meta-learning-importer.service';
 import { PatternCalculatorService } from './meta-ads/pattern-calculator.service';
+import { CampaignSyncService } from './meta-ads/campaign-sync.service';
 import { CampaignCaseStudy, CampaignCaseStudySchema } from './schemas/campaign-case-study.schema';
 import { MetaLearningImport, MetaLearningImportSchema } from './schemas/meta-learning-import.schema';
 import { EnrichedCampaign, EnrichedCampaignSchema } from './schemas/enriched-campaign.schema';
@@ -46,7 +47,7 @@ import { QUEUES } from '../scheduler/queue.constants';
     DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService],
-  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService],
+  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService],
+  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService],
 })
 export class CampaignsModule {}

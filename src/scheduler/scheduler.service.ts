@@ -17,6 +17,7 @@ export class SchedulerService implements OnModuleInit {
     @InjectQueue(QUEUES.PIPELINE) private readonly pipelineQueue: Queue,
     @InjectQueue(QUEUES.CAMPAIGN_AUDIT) private readonly auditQueue: Queue,
     @InjectQueue(QUEUES.MONTHLY_LEARNING) private readonly learningQueue: Queue,
+    @InjectQueue(QUEUES.CAMPAIGN_SYNC) private readonly campaignSyncQueue: Queue,
     private readonly companiesService: CompaniesService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
@@ -34,6 +35,7 @@ export class SchedulerService implements OnModuleInit {
       await this.scheduleForTenant(company.tenantId, new Date((company as any).createdAt), company.pipelineConfig);
       await this.scheduleAuditForTenant(company.tenantId);
       await this.scheduleLearningForTenant(company.tenantId);
+      await this.scheduleCampaignSyncForTenant(company.tenantId);
     }
   }
 
@@ -56,6 +58,25 @@ export class SchedulerService implements OnModuleInit {
       },
     );
     this.logger.log(`Scheduled monthly learning for tenantId=${tenantId} (1st of month, 3 AM IST)`);
+  }
+
+  async scheduleCampaignSyncForTenant(tenantId: string): Promise<void> {
+    const existingJobs = await this.campaignSyncQueue.getRepeatableJobs();
+    for (const job of existingJobs) {
+      if (job.name === `campaign-sync-${tenantId}`) {
+        await this.campaignSyncQueue.removeRepeatableByKey(job.key);
+      }
+    }
+
+    await this.campaignSyncQueue.add(
+      `campaign-sync-${tenantId}`,
+      { tenantId },
+      {
+        repeat: { every: AUDIT_INTERVAL_MS }, // every 6 hours
+        jobId: `campaign-sync-${tenantId}`,
+      },
+    );
+    this.logger.log(`Scheduled campaign sync every 6h for tenantId=${tenantId}`);
   }
 
   async scheduleAuditForTenant(tenantId: string): Promise<void> {
