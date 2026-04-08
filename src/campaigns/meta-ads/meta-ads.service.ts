@@ -353,12 +353,9 @@ export class MetaAdsService {
       targeting.targeting_automation = { advantage_audience: 1 };
     }
 
-    // Interest targeting
-    if (config.interests && config.interests.length > 0) {
-      targeting.flexible_spec = [{
-        interests: config.interests.map(i => ({ name: i })),
-      }];
-    }
+    // Interest targeting — Meta requires interest IDs not names.
+    // We skip name-based interests and rely on advantage_plus or custom audiences instead.
+    // If interest IDs are ever added to product.metaAudiences, they'll be picked up via custom_audiences above.
 
     // Exclude audiences (past buyers)
     if (config.excludeAudienceIds && config.excludeAudienceIds.length > 0) {

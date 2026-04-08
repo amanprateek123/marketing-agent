@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PipelineRun, PipelineRunSchema } from './schemas/pipeline-run.schema';
 import { ScoutOutput, ScoutOutputSchema } from './schemas/scout-output.schema';
@@ -43,7 +43,7 @@ import { CreativePackage, CreativePackageSchema } from '../creative/schemas/crea
       { name: CreativePackage.name, schema: CreativePackageSchema },
     ]),
     ClaudeModule,
-    CompaniesModule,
+    forwardRef(() => CompaniesModule),
     DeliveryModule,
     CreativeModule,
     CampaignsModule,

@@ -7,9 +7,12 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { CompaniesService } from '../companies/companies.service';
+import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -17,6 +20,8 @@ export class CampaignsController {
     private readonly campaignsService: CampaignsService,
     private readonly campaignCreator: CampaignCreatorService,
     private readonly companiesService: CompaniesService,
+    @InjectModel(AuditSnapshot.name)
+    private readonly snapshotModel: Model<AuditSnapshotDocument>,
   ) {}
 
   @Get(':tenantId')
@@ -125,6 +130,34 @@ export class CampaignsController {
     }
     await this.campaignsService.reject(tenantId, campaignId, reason ?? 'Rejected by tenant');
     return { success: true, message: 'Campaign rejected' };
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/audit-snapshots
+   * Returns audit history for a campaign — last 30 snapshots sorted newest first.
+   * Each entry has: auditedAt, metrics, verdict (verdict/urgency/contextInsight/recommendedActions), adSets[]
+   */
+  @Get(':tenantId/:campaignId/audit-snapshots')
+  async getAuditSnapshots(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+
+    const snapshots = await this.snapshotModel
+      .find({ tenantId, campaignId })
+      .sort({ auditedAt: -1 })
+      .limit(30)
+      .lean()
+      .exec();
+
+    return snapshots.map(s => ({
+      auditedAt: s.auditedAt,
+      metrics: s.metrics,
+      adSets: s.adSets,
+      verdict: s.verdict,
+    }));
   }
 
   /**

@@ -73,12 +73,12 @@ export class CampaignOptimizerService {
       agent: AgentType.CAMPAIGN_AUDITOR,
       action: 'budget_scaled',
       reason: `ROAS ${metrics.roas}x exceeds ${company.scaleIfROASAbove}x threshold`,
-      outcome: `Budget increased from $${campaign.budget} to $${newBudget.toFixed(2)}`,
+      outcome: `Daily budget increased from ₹${campaign.budget}/day to ₹${newBudget.toFixed(0)}/day`,
       metadata: { metaCampaignId: campaign.metaCampaignId, oldBudget: campaign.budget, newBudget },
     });
 
     this.logger.log(
-      `Budget scaled: tenantId=${company.tenantId} metaCampaignId=${campaign.metaCampaignId} $${campaign.budget} → $${newBudget.toFixed(2)}`,
+      `Budget scaled: tenantId=${company.tenantId} metaCampaignId=${campaign.metaCampaignId} ₹${campaign.budget}/day → ₹${newBudget.toFixed(0)}/day`,
     );
   }
 }

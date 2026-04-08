@@ -64,10 +64,12 @@ export class SignalDetectorService {
       ? (sorted[0].metrics.frequency > sorted[sorted.length - 1].metrics.frequency ? 'rising' : 'stable')
       : 'insufficient_data';
 
-    const totalBudget = campaign.budget ?? 0;
-    const spendPace = totalBudget > 0
-      ? current.campaign.spend / totalBudget > 0.9 ? 'overspending'
-        : current.campaign.spend / totalBudget < 0.3 && ageDays > 3 ? 'underspending'
+    // campaign.budget = daily budget (₹/day). Compare against expected cumulative spend.
+    const dailyBudget = campaign.budget ?? 0;
+    const expectedSpendToDate = dailyBudget * Math.max(ageDays, 1);
+    const spendPace = dailyBudget > 0 && expectedSpendToDate > 0
+      ? current.campaign.spend / expectedSpendToDate > 1.15 ? 'overspending'
+        : current.campaign.spend / expectedSpendToDate < 0.5 && ageDays > 3 ? 'underspending'
         : 'on_track'
       : 'on_track';
 
@@ -123,7 +125,9 @@ export class SignalDetectorService {
     }
 
     const stuckInLearning = ageDays > coldStartDays && current.campaign.conversions === 0;
-    const budgetExhaustionRisk = totalBudget > 0 && current.campaign.spend / totalBudget > 0.85;
+    // budgetExhaustionRisk: spending >15% more than expected for the days elapsed
+    const budgetExhaustionRisk = dailyBudget > 0 && expectedSpendToDate > 0 &&
+      current.campaign.spend / expectedSpendToDate > 1.15;
 
     // ── Safety rails ─────────────────────────────────────────────────────────
     const safetyBreaches = {

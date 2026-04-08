@@ -40,7 +40,7 @@ export class CompaniesController {
       this.logger.error(`Prompt generation failed for ${company.tenantId}: ${err.message}`),
     );
 
-    // Schedule all recurring jobs for the new tenant
+    // Schedule all recurring jobs for new tenant
     Promise.all([
       this.schedulerService.scheduleForTenant(company.tenantId, new Date((company as any).createdAt), company.pipelineConfig),
       this.schedulerService.scheduleAuditForTenant(company.tenantId),

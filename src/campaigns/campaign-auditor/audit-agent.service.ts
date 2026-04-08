@@ -125,7 +125,7 @@ export class AuditAgentService {
       anomalyLines.push(`AUDIENCE FATIGUE: ${anomalies.audienceFatigue.map(a => `${a.adSetName} freq=${a.frequency.toFixed(1)}`).join(', ')}`);
     }
     if (anomalies.stuckInLearning) anomalyLines.push('STUCK IN LEARNING: 0 conversions after learning phase');
-    if (anomalies.budgetExhaustionRisk) anomalyLines.push('BUDGET EXHAUSTION: >85% of budget spent');
+    if (anomalies.budgetExhaustionRisk) anomalyLines.push('BUDGET EXHAUSTION: spending >15% above expected daily pace');
 
     // Relevant case studies
     const relevantCases = caseStudies
@@ -139,7 +139,7 @@ export class AuditAgentService {
 CAMPAIGN: ${campaign.name ?? campaign.metaCampaignId}
 Objective: ${campaign.objective}
 Age: ${age.hours}h (${age.days} days) | ${age.inLearningPhase ? 'IN LEARNING PHASE' : 'POST LEARNING PHASE'}
-Budget: ₹${campaign.budget} | Spend pace: ${signals.trends.spendPace}
+Daily Budget: ₹${campaign.budget}/day | Spend pace: ${signals.trends.spendPace}
 
 CURRENT METRICS (live from Meta):
   Spend: ₹${curr.spend?.toFixed(0) ?? 0}

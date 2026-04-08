@@ -211,7 +211,7 @@ CAMPAIGN TO REVIEW:
   Hook: ${brief.hook}
   Key Message: ${brief.keyMessage}
   Conversion Bridge: ${brief.conversionBridge}
-  Proposed Budget: ₹${brief.suggestedBudget}
+  Proposed Daily Budget: ₹${brief.suggestedBudget}/day (total across all ad sets)
   Objective: ${company.primaryObjective}
   Geography: ${company.geography}
   Max Budget Per Campaign: ₹${company.maxBudgetPerCampaign}
@@ -272,7 +272,7 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
 {
   "approved": true,
   "campaign": {
-    "budget": ${brief.suggestedBudget},
+    "budget": ${brief.suggestedBudget},    ← TOTAL DAILY BUDGET in ₹/day (e.g. 3000 = ₹3000/day total)
     "objective": "OUTCOME_SALES",
     "conversionEvent": "${(() => { const p = (company.products ?? []).find(pr => pr.name === (brief as any).product); return p?.conversionEvent ?? 'Purchase'; })()}",
     "conversionValue": ${(() => { const p = (company.products ?? []).find(pr => pr.name === (brief as any).product); return p?.conversionValue ?? brief.suggestedBudget; })()},
@@ -312,7 +312,7 @@ IMPORTANT — adSets rules:
 - Create 2-3 ad sets minimum. Never launch with just 1 ad set.
 - Each ad set MUST have a different audience (don't duplicate targeting).
 - Use real Meta audience IDs from the list above — don't invent IDs.
-- If no Meta audiences exist, use audienceType "advantage_plus" for broad and "interest" for targeted.
+- If no Meta audiences exist, use audienceType "advantage_plus" — do NOT use "interest" unless a real metaAudienceId is available. Meta requires interest IDs, not names, and we don't have them.
 - Always exclude past buyer audiences from prospecting ad sets.
 - "ads": [0, 1, 2] means all 3 copy variants run in every ad set — Meta optimizes which wins.
 - budgetPercent across all ad sets must sum to 100.
@@ -343,9 +343,14 @@ ${(() => {
 })()}
 
 BUDGET ANCHOR RULE:
-- The proposed budget is ₹${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)}.
-- If the proposed budget is ₹0 or missing, use ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)} as the conservative starting point (25% of weekly cap).
-- NEVER set a budget above ₹${company.maxBudgetPerCampaign} (hard cap).
+- The "budget" field you output is the TOTAL DAILY BUDGET across all ad sets combined (in ₹/day).
+- Meta uses daily budget per ad set. Each ad set gets: budget × (budgetPercent / 100) per day.
+  Example: budget=₹3000, ad set at 50% → ₹1500/day for that ad set.
+- Think of it as: "how much ₹ do I want this campaign to spend PER DAY in total?"
+- The proposed daily budget anchor is ₹${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)}.
+- If the proposed budget is ₹0 or missing, use ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)} as the starting point (25% of weekly cap).
+- NEVER set daily budget above ₹${company.maxBudgetPerCampaign} (hard cap per day).
+- Weekly spend estimate = daily budget × 7 days. Keep this within ₹${company.weeklyBudgetCap ?? 'not set'}.
 - The debate adjusts UP or DOWN from this anchor — it does NOT invent a number from scratch.
 
 RULES:

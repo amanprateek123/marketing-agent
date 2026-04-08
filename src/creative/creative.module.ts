@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CreativePackage, CreativePackageSchema } from './schemas/creative-package.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
@@ -23,7 +23,7 @@ import { HeygenService } from './video-generator/heygen.service';
       { name: UsageLog.name, schema: UsageLogSchema },
     ]),
     ClaudeModule,
-    CompaniesModule,
+    forwardRef(()=> CompaniesModule),
     CampaignsModule,
     DeliveryModule,
   ],

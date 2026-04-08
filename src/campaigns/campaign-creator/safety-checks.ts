@@ -25,6 +25,7 @@ export class CampaignLimitError extends Error {
 
 export class SafetyChecks {
   // Check 1: Weekly budget cap
+  // campaignBudget = daily budget (₹/day). Project 7-day spend and add to current weekly spend.
   static async checkWeeklyBudget(
     tenantId: string,
     campaignBudget: number,
@@ -32,9 +33,10 @@ export class SafetyChecks {
     campaignsService: CampaignsService,
   ): Promise<void> {
     const currentWeeklySpend = await campaignsService.getWeeklySpend(tenantId);
-    if (currentWeeklySpend + campaignBudget > company.weeklyBudgetCap) {
+    const projectedWeeklySpend = campaignBudget * 7; // daily → 7-day estimate
+    if (currentWeeklySpend + projectedWeeklySpend > company.weeklyBudgetCap) {
       throw new BudgetCapError(
-        `Weekly budget cap reached: $${currentWeeklySpend} + $${campaignBudget} > $${company.weeklyBudgetCap}`,
+        `Weekly budget cap reached: ₹${currentWeeklySpend} already spent + ₹${projectedWeeklySpend} projected (₹${campaignBudget}/day × 7) > ₹${company.weeklyBudgetCap} cap`,
       );
     }
   }

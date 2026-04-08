@@ -257,10 +257,11 @@ export class CampaignAuditorService {
       return true;
     }
 
-    // Stuck in learning with significant spend (not just 0 conversions — that's for agent to decide)
+    // Stuck in learning with significant spend — compare against expected cumulative (dailyBudget × days)
     const coldStartDays = company.pipelineConfig?.coldStartDays ?? 14;
-    if (ageDays > coldStartDays * 2 && full.campaign.conversions === 0 && spend > (campaign.budget * 0.5)) {
-      await this.pauseCampaign(campaign, company, `${Math.round(ageDays)}d with 0 conversions and ₹${spend.toFixed(0)} spent (${Math.round(spend / campaign.budget * 100)}% of budget) — safety pause`);
+    const expectedSpendToDate = (campaign.budget ?? 0) * Math.max(ageDays, 1);
+    if (ageDays > coldStartDays * 2 && full.campaign.conversions === 0 && expectedSpendToDate > 0 && spend > expectedSpendToDate * 0.5) {
+      await this.pauseCampaign(campaign, company, `${Math.round(ageDays)}d with 0 conversions and ₹${spend.toFixed(0)} spent (${Math.round(spend / expectedSpendToDate * 100)}% of expected) — safety pause`);
       return true;
     }
 
