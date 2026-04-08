@@ -21,6 +21,7 @@ export interface AdSetConfig {
   interests?: string[];             // Meta interest targeting
   optimizationGoal: string;         // e.g. "OFFSITE_CONVERSIONS"
   ads: number[];                    // indices into copy variants (e.g. [0, 1, 2])
+  creativeFormat?: 'video' | 'image' | 'both'; // which creative type to use for this ad set
 }
 
 export interface StructuredCampaignConfig {
@@ -315,6 +316,19 @@ IMPORTANT — adSets rules:
 - Always exclude past buyer audiences from prospecting ad sets.
 - "ads": [0, 1, 2] means all 3 copy variants run in every ad set — Meta optimizes which wins.
 - budgetPercent across all ad sets must sum to 100.
+
+CREATIVE FORMAT — video vs image per ad set:
+- Each ad set must have a "creativeFormat": "video" | "image" | "both" field.
+- Use past learnings to decide:
+  ${(learnings?.creative?.winningFormats ?? []).length > 0
+    ? `Winning formats from past data: ${(learnings?.creative?.winningFormats ?? []).join(', ')}`
+    : 'No format data yet — use defaults below.'}
+- Default rules if no data:
+  - lookalike / advantage_plus (cold audiences) → "video" (better scroll-stop on cold traffic)
+  - interest (warm audiences) → "both" (test image vs video)
+  - retarget (hot audiences) → "image" (faster load, user already knows you)
+- If video format is in winningFormats → prefer video for cold + warm ad sets.
+- If image format dominates learnings → prefer image across all ad sets.
 
 ${liveContext}
 

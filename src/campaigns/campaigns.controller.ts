@@ -36,16 +36,28 @@ export class CampaignsController {
 
   /**
    * POST /api/v1/campaigns/:tenantId/:campaignId/approve
+   * Body: { accountId: "act_123456" } — must be one of company.meta.accountIds
    * Human approves a pending campaign → launches on Meta Ads.
    */
   @Post(':tenantId/:campaignId/approve')
   async approve(
     @Param('tenantId') tenantId: string,
     @Param('campaignId') campaignId: string,
+    @Body('accountId') accountId: string,
   ) {
     try {
       const company = await this.companiesService.findByTenantId(tenantId);
-      const campaign = await this.campaignCreator.launch(campaignId, company);
+
+      // Validate accountId is in the tenant's allowed list
+      const allowedIds = company.meta?.accountIds ?? (company.meta?.accountId ? [company.meta.accountId] : []);
+      if (!accountId) {
+        throw new Error(`accountId is required. Available accounts: ${allowedIds.join(', ')}`);
+      }
+      if (!allowedIds.includes(accountId)) {
+        throw new Error(`accountId "${accountId}" is not in your Meta account list. Available: ${allowedIds.join(', ')}`);
+      }
+
+      const campaign = await this.campaignCreator.launch(campaignId, company, accountId);
       return { success: true, metaCampaignId: campaign.metaCampaignId, status: campaign.status };
     } catch (err: any) {
       throw new BadRequestException(err.message);

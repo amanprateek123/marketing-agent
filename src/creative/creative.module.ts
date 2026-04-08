@@ -13,6 +13,7 @@ import { CampaignsModule } from '../campaigns/campaigns.module';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
+import { HeygenService } from './video-generator/heygen.service';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { CreativeTeamService } from '../teams/creative-team.service';
   providers: [
     CopyWriterService,
     ImageGeneratorService,
+    HeygenService,
     VideoGeneratorService,
     CreativeTeamService,
     CreativeProducerService,

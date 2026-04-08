@@ -29,6 +29,9 @@ export default () => ({
   fal: {
     apiKey: process.env.FAL_API_KEY ?? '',
   },
+  heygen: {
+    apiKey: process.env.HEYGEN_API_KEY ?? '',
+  },
   youtube: {
     apiKey: process.env.YOUTUBE_API_KEY ?? '',
   },

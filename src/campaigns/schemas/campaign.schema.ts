@@ -40,6 +40,9 @@ export class Campaign {
   @Prop({ index: true, sparse: true, default: '' })
   metaCampaignId: string;
 
+  @Prop({ default: '' })
+  metaAccountId: string;   // which Meta ad account this campaign was launched on
+
   @Prop({ required: true, default: 'pending_approval' })
   status: CampaignStatus;
 
@@ -132,6 +135,7 @@ export class Campaign {
       interests?: string[];
       optimizationGoal: string;
       ads: number[];
+      creativeFormat?: 'video' | 'image' | 'both';
     }[];
     scaleRules: string;
     pauseRules: string;

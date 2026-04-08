@@ -49,6 +49,7 @@ export interface MetaCampaignConfig {
   adSets: MetaAdSetConfig[];
   copyVariants: { primaryText: string; headline: string; cta: string }[];
   imageHash?: string;
+  videoId?: string;                 // Meta video ID (uploaded before launch)
   landingUrl: string;
 }
 
@@ -114,6 +115,55 @@ export class MetaAdsService {
   }
 
   /**
+   * Upload a video to Meta's ad video library.
+   * Polls until Meta finishes processing before returning — prevents race condition
+   * where ad creative creation fails because video isn't ready yet.
+   */
+  async uploadVideo(
+    videoUrl: string,
+    accountId: string,
+    accessToken: string,
+  ): Promise<string> {
+    this.logger.log(`Uploading video to Meta: accountId=${accountId}`);
+
+    const response = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/advideos`,
+      { file_url: videoUrl, access_token: accessToken },
+    );
+
+    const videoId = response.data?.id;
+    if (!videoId) throw new Error('No video ID in Meta upload response');
+
+    this.logger.log(`Video uploaded: videoId=${videoId} — waiting for Meta processing`);
+
+    // Poll until Meta finishes processing the video (async on their side)
+    const deadline = Date.now() + 3 * 60 * 1000; // 3 min max
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 5000));
+      const statusRes = await this.metaApiCall(
+        'GET',
+        `${META_API_BASE}/${videoId}?fields=status&access_token=${accessToken}`,
+        {},
+      );
+      const status = statusRes.data?.status?.processing_progress ?? statusRes.data?.status;
+      this.logger.log(`Meta video processing: videoId=${videoId} status=${JSON.stringify(status)}`);
+      // Meta returns status.video_status = 'ready' when done
+      if (statusRes.data?.status?.video_status === 'ready') {
+        this.logger.log(`Meta video ready: videoId=${videoId}`);
+        return videoId;
+      }
+      if (statusRes.data?.status?.video_status === 'error') {
+        throw new Error(`Meta video processing failed: videoId=${videoId}`);
+      }
+    }
+
+    // If still not ready after 3min, proceed anyway — Meta may still serve it
+    this.logger.warn(`Meta video processing timeout — proceeding anyway: videoId=${videoId}`);
+    return videoId;
+  }
+
+  /**
    * Full launch: campaign → ad sets → ads.
    * Everything starts PAUSED. Call activateCampaign() to go live.
    * On partial failure, rolls back all created objects.
@@ -158,26 +208,50 @@ export class MetaAdsService {
 
         // Create ads (one per copy variant)
         const adResults: MetaLaunchResult['adSets'][0]['ads'] = [];
+        const creativeFormat = (adSetConfig as any).creativeFormat ?? 'image';
 
         for (const variantIndex of adSetConfig.ads) {
           const variant = config.copyVariants[variantIndex];
           if (!variant) continue;
 
           const adName = `${adSetConfig.name} — Variant ${variantIndex + 1}`;
-          const { adId, creativeId } = await this.createAd(
-            config.accountId,
-            config.accessToken,
-            adSetId,
-            adName,
-            variant,
-            config.imageHash,
-            config.pageId ?? '',
-            config.landingUrl,
-          );
-          created.creativeIds.push(creativeId);
-          created.adIds.push(adId);
 
-          adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+          // video-only or both → create video ad if videoId available
+          if ((creativeFormat === 'video' || creativeFormat === 'both') && config.videoId) {
+            const { adId, creativeId } = await this.createVideoAd(
+              config.accountId,
+              config.accessToken,
+              adSetId,
+              `${adName} (video)`,
+              variant,
+              config.videoId,
+              config.pageId!,
+              config.landingUrl,
+            );
+            created.creativeIds.push(creativeId);
+            created.adIds.push(adId);
+            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+          }
+
+          // image-only or both → create image ad if imageHash available
+          if ((creativeFormat === 'image' || creativeFormat === 'both') && config.imageHash) {
+            const adName2 = creativeFormat === 'both' ? `${adName} (image)` : adName;
+            const { adId, creativeId } = await this.createAd(
+              config.accountId,
+              config.accessToken,
+              adSetId,
+              adName2,
+              variant,
+              config.imageHash,
+              config.pageId ?? '',
+              config.landingUrl,
+            );
+            created.creativeIds.push(creativeId);
+            created.adIds.push(adId);
+            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+          }
+
+          // fallback: if neither image nor video available, skip this variant
         }
 
         adSetResults.push({ adSetId, name: adSetConfig.name, ads: adResults });
@@ -391,6 +465,61 @@ export class MetaAdsService {
     }
 
     this.logger.log(`Ad created: ${adId} (${adName})`);
+    return { adId, creativeId };
+  }
+
+  private async createVideoAd(
+    accountId: string,
+    accessToken: string,
+    adSetId: string,
+    adName: string,
+    copy: { primaryText: string; headline: string; cta: string },
+    videoId: string,
+    pageId: string,
+    landingUrl: string,
+  ): Promise<{ adId: string; creativeId: string }> {
+    const creativeData: any = {
+      name: `Creative — ${adName}`,
+      object_story_spec: {
+        page_id: pageId,
+        video_data: {
+          video_id: videoId,
+          message: copy.primaryText,
+          call_to_action: {
+            type: this.mapCta(copy.cta),
+            value: { link: landingUrl },
+          },
+          title: copy.headline,
+        },
+      },
+      access_token: accessToken,
+    };
+
+    const creativeResponse = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/adcreatives`,
+      creativeData,
+    );
+
+    const creativeId = creativeResponse.data?.id;
+    if (!creativeId) throw new Error(`No creative ID for video ad ${adName}`);
+
+    const adResponse = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/ads`,
+      {
+        name: adName,
+        adset_id: adSetId,
+        creative: { creative_id: creativeId },
+        status: 'PAUSED',
+        access_token: accessToken,
+      },
+    );
+
+    const adId = adResponse.data?.id;
+    if (!adId) throw new Error(`No ad ID for video ad ${adName} (dangling creative: ${creativeId})`);
+
+    this.logger.log(`Video ad created: ${adId} (${adName})`);
     return { adId, creativeId };
   }
 

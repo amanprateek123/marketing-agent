@@ -198,16 +198,23 @@ b) IMAGE PROMPT — for AI image generation (Gemini):
    - Describe: lighting, color palette, composition, mood, focal point
    - 2-3 sentences
 
-c) VIDEO PROMPT — complete video ad prompt (for Hygen or similar):
-   - Vertical 9:16, 15-20 seconds
-   - Include EVERYTHING in one prompt — visuals + voiceover + captions + music
-   - Describe: opening shot, middle scene, closing shot with camera movement
-   - Include voiceover script in Hinglish timed to scenes (e.g. "narrator says: ...")
-   - Include text overlays/captions that appear on screen (3-6 words each)
-   - Include background music/sound direction (style, tempo, mood)
-   - Color grade and mood
-   - First 0.5 seconds MUST have motion (no static opening)
-   - The prompt should produce a COMPLETE video ad ready for Meta — with sound, voice, and captions
+c) VIDEO SCRIPT — Heygen text-to-video format (strict JSON, no markdown):
+   Return as a JSON object with this exact structure:
+   {
+     "title": "short ad title",
+     "scenes": [
+       { "text": "scene 1 caption/voiceover text (Hinglish, 10-15 words max)", "duration": 4 },
+       { "text": "scene 2 caption/voiceover text", "duration": 4 },
+       { "text": "scene 3 caption/voiceover text + CTA", "duration": 5 }
+     ]
+   }
+   Rules:
+   - 3-5 scenes, total duration 15-20 seconds
+   - Each scene text is what appears as caption on screen — keep it punchy
+   - Scene 1: hook (problem or curiosity)
+   - Scene 2-3: solution / benefit
+   - Last scene: CTA with product name and price
+   - Hinglish where natural for ${company.targetAudience}
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". This keeps you active so the reviewer's reply can arrive. Do not produce any output until you receive their message.
@@ -238,7 +245,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
   "selectedIndex": 0,
   "selectionReason": "why this variant is the strongest",
   "imagePrompt": "detailed image generation prompt...",
-  "videoPrompt": "complete video ad prompt with visuals + voiceover + captions + music — ready for Hygen",
+  "videoPrompt": "{\"title\":\"ad title\",\"scenes\":[{\"text\":\"hook text\",\"duration\":4},{\"text\":\"benefit text\",\"duration\":4},{\"text\":\"CTA text\",\"duration\":5}]}",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [

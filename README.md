@@ -4,7 +4,7 @@
 >
 > **Runtime:** Node.js (bottleneck is AI API latency, not runtime speed)
 >
-> **Last Updated:** April 2026
+> **Last Updated:** April 2026 (agent_teams branch)
 
 ---
 
@@ -20,13 +20,14 @@ Human involvement is optional — every decision surfaces for approval, but the 
 
 ```
 INTELLIGENCE PIPELINE (weekly + daily crons)
-  Scout Agents (Haiku) → Coordinator → Brief Generator → Creative Team → Campaign Review
+  Scout Agents (Haiku) → Coordinator → Strategy Team → Creative Team → Campaign Review Team
 
 CAMPAIGN LIFECYCLE
   Meta Learning Import → Pattern Calculator → Campaign Sync → Auditor (6h) → Monthly Learning
 
 API LAYER
-  CompaniesController + CampaignsController → BullMQ queues → MongoDB (tenantId-scoped)
+  CompaniesController + CampaignsController + CreativeController
+    → BullMQ queues → MongoDB (tenantId-scoped)
 ```
 
 ### Agent Model Routing
@@ -35,9 +36,13 @@ API LAYER
 |---|---|
 | Instagram, Reddit, Twitter, YouTube scouts | `claude-haiku-4-5-20251001` |
 | Market Research, Case Study Generator | `claude-haiku-4-5-20251001` |
-| Coordinator, Brief Generator, Creative Team, Auditor | `claude-sonnet-4-6` |
+| Coordinator, Brief Generator, Auditor | `claude-sonnet-4-6` |
+| Strategy Team (Strategist + Contrarian) | `claude-sonnet-4-6` via `claude -p` CLI |
+| Creative Team (Creative Director + Brand Compliance) | `claude-sonnet-4-6` via `claude -p` CLI |
+| Campaign Review Team (Strategist + Performance Analyst) | `claude-sonnet-4-6` via `claude -p` CLI |
 
 All agent calls go through `ClaudeService.runAgent()` — never call `query()` directly.
+Agent teams run via `runTeamViaCli()` which shells out to `claude -p`.
 
 ---
 
@@ -61,6 +66,10 @@ Fetches and enriches up to 1 year of historical campaign data from all Meta ad a
 6. `detectProduct` maps `promoted_object.custom_conversion_id` → custom conversion name → fuzzy product match
 7. Atomic finalize guard (`findOneAndUpdate $nin`) prevents duplicate BullMQ runs
 8. Top 50 case studies by spend are saved immediately per batch — frontend sees them live as batches complete
+
+**Query helpers used by agent teams:**
+- `getRelevantCaseStudies(tenantId, { product?, limit? })` — returns top N case studies by spend, optionally filtered by product name
+- `getAudiencePerformanceSummary(tenantId)` — returns avg CPA, CTR, conversions, and total spend grouped by audience type across all historical ad sets
 
 ---
 
@@ -95,7 +104,58 @@ Keeps MongoDB in sync with Meta campaign data.
 
 ---
 
-### 4. Intelligence Pipeline
+### 4. Agent Teams System
+
+Three peer-to-peer debate teams run via `claude -p` CLI (`runTeamViaCli`). Each team spawns sub-agents that communicate via `TeamCreate` / `SendMessage` / `TeamDelete`.
+
+#### Strategy Team (`StrategyTeamService`)
+
+**Agents:** Strategist + Contrarian
+- Receives full coordinator signals, competitor research, market research, and company learnings
+- Strategist proposes top N ideas; Contrarian stress-tests each with counter-evidence
+- Debate continues up to 5 rounds until consensus on the winning idea + runner-ups
+- Pulls product-specific case studies from `MetaLearningImporterService` to score ideas
+
+**Output:** `IdeaPoolResult` — `recommendedIdea`, `runnerUpIdeas[]`, `winnerId`, `selectionReason`, `rejectedIdeas[]`
+
+#### Creative Team (`CreativeTeamService`)
+
+**Agents:** Creative Director + Brand Compliance Reviewer
+- Creative Director drafts 3 copy variants + image prompt + video prompt (visuals, voiceover, captions, music in one prompt)
+- Brand Compliance reviews for Meta ad policy, brand tone, and platform specs
+- Debate continues until the package is both high-converting AND compliant
+- Pulls winning/losing hooks and formats from `company.learnings.creative`
+
+**Output:** `CreativeTeamOutput` — `variants[]`, `selectedIndex`, `imagePrompt`, `videoPrompt`, `complianceNotes`, `debateLog[]`
+
+#### Campaign Review Team (`CampaignReviewTeamService`)
+
+**Agents:** Campaign Strategist + Performance Analyst
+- Strategist proposes the full Meta campaign config (budget, objective, ad sets, ads)
+- Performance Analyst challenges on budget sizing, audience targeting, timing, and risk
+- Debate resolves into a final `StructuredCampaignConfig`
+
+**Key behaviors:**
+- Minimum 2-3 ad sets per campaign; `budgetPercent` across all ad sets must sum to 100
+- Uses real Meta audience IDs from `product.metaAudiences` — never invents IDs
+- Past buyer audiences are excluded from prospecting ad sets
+- Injects `getAudiencePerformanceSummary()` (CPA/CTR by audience type) and `getRelevantCaseStudies()` (top 7 by spend for the product)
+- Injects causal insights from `company.learnings.causalInsights`
+- Budget anchor rule: never exceeds `company.maxBudgetPerCampaign`; if proposed budget is ₹0, defaults to 25% of weekly cap
+
+**Campaign strategy modes** (set via `company.pipelineConfig.campaignStrategy`):
+
+| Mode | Behavior |
+|---|---|
+| `conservative` | Min viable budget, only proven audiences, tight pause rules, 10% max scale |
+| `balanced` (default) | 50-70% proven audiences, 20-30% broad test, 20% scale after 48h if ROAS > 2x |
+| `experimental` | 30-40% budget on new/broad audiences, looser pause rules, higher CPA tolerance |
+
+**Output:** `CampaignReviewOutput` — `approved`, `campaign` (with `adSets[]`), `adjustments`, `debateRounds`, `debateLog[]`, `debateRationale`
+
+---
+
+### 5. Intelligence Pipeline
 
 Runs weekly (and select steps daily) to generate fresh campaign briefs.
 
@@ -103,11 +163,13 @@ Runs weekly (and select steps daily) to generate fresh campaign briefs.
 Scout Agents (parallel, Haiku)
   Instagram · Reddit · Twitter · YouTube · Market Research
        ↓
-  Brief Generator (Sonnet)
+  Coordinator (Sonnet)
        ↓
-  Creative Team (Sonnet)
+  Strategy Team (2-agent debate via CLI)
        ↓
-  Campaign Review Team (Sonnet)
+  Creative Team (2-agent debate via CLI)
+       ↓
+  Campaign Review Team (2-agent debate via CLI)
        ↓
   Campaign Auditor — 6h cron
        ↓
@@ -116,7 +178,7 @@ Scout Agents (parallel, Haiku)
 
 ---
 
-### 5. Learnings Schema
+### 6. Learnings Schema
 
 Stored on `company.learnings`, updated after each monthly aggregation.
 
@@ -138,7 +200,7 @@ Stored on `company.learnings`, updated after each monthly aggregation.
 
 ---
 
-### 6. Multi-Account Meta Support
+### 7. Multi-Account Meta Support
 
 - `company.meta.accountIds[]` — parallel fetch from all accounts
 - `company.meta.accessToken` — shared across accounts
@@ -177,6 +239,13 @@ Stored on `company.learnings`, updated after each monthly aggregation.
 | `GET` | `/api/v1/campaigns/:tenantId/:campaignId/pending-actions` | Get pending actions |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/approve` | Approve a pending action |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/override` | Override a pending action |
+
+### Creative
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/creative/:tenantId/packages/:creativePackageId` | Get creative package by ID |
+| `POST` | `/api/v1/creative/:tenantId/briefs/:briefId/approve` | Approve any idea and trigger creative production (fire-and-forget) |
 
 ---
 

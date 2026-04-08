@@ -180,6 +180,7 @@ export class CampaignCreatorService {
   async launch(
     campaignId: string,
     company: CompanyDocument,
+    accountId: string,
   ): Promise<CampaignDocument> {
     const campaign = await this.campaignModel.findOne({
       _id: campaignId,
@@ -195,8 +196,8 @@ export class CampaignCreatorService {
       throw new Error(`Campaign ${campaignId} already launched (metaCampaignId: ${campaign.metaCampaignId})`);
     }
 
-    if (!company.meta?.accessToken || !company.meta?.accountId) {
-      throw new Error(`Meta Ads credentials not configured for tenant ${company.tenantId}. Set company.meta.accessToken and company.meta.accountId.`);
+    if (!company.meta?.accessToken) {
+      throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
     }
 
     if (!company.meta?.pageId) {
@@ -215,6 +216,26 @@ export class CampaignCreatorService {
 
     const copyVariants = creativePackage?.copyVariants ?? [];
     const imageUrl = creativePackage?.imageUrl ?? '';
+    const videoUrl = creativePackage?.videoUrl ?? '';
+
+    // Validate ad sets before touching Meta API
+    for (const [i, adSet] of (config.adSets as any[]).entries()) {
+      if (!adSet.ads || adSet.ads.length === 0) {
+        throw new Error(`Ad set ${i} (${adSet.name}) has no ads configured`);
+      }
+      for (const variantIdx of adSet.ads) {
+        if (!copyVariants[variantIdx]) {
+          throw new Error(`Ad set ${i} references copy variant ${variantIdx} which does not exist (only ${copyVariants.length} variants available)`);
+        }
+      }
+      if ((adSet.creativeFormat === 'video' || adSet.creativeFormat === 'both') && !videoUrl) {
+        this.logger.warn(`Ad set ${i} (${adSet.name}) requires video but videoUrl is empty — falling back to image`);
+        adSet.creativeFormat = imageUrl ? 'image' : undefined;
+      }
+      if ((adSet.creativeFormat === 'image' || !adSet.creativeFormat) && !imageUrl) {
+        throw new Error(`Ad set ${i} (${adSet.name}) requires image but imageUrl is empty`);
+      }
+    }
 
     // Find the product for landing URL — match by brief.product name first, fallback to conversionEvent
     const creativeBrief = campaign.briefId
@@ -228,21 +249,37 @@ export class CampaignCreatorService {
 
     const campaignName = `META_${company.primaryObjective.toUpperCase()}_${campaign.objective}_${new Date().toISOString().split('T')[0]}`;
 
-    // Upload image to Meta if available (supports both URL and base64 data URLs)
+    // Upload image to Meta if available
     let imageHash: string | undefined;
     if (imageUrl) {
       try {
         imageHash = await this.metaAdsService.uploadImage(
-          imageUrl, company.meta.accountId, company.meta.accessToken,
+          imageUrl, accountId, company.meta.accessToken,
         );
       } catch (err: any) {
         this.logger.warn(`Image upload failed (proceeding without image): ${err.message}`);
       }
     }
 
+    // Upload video to Meta if available and any ad set needs it
+    const needsVideo = (config.adSets ?? []).some(
+      (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both',
+    );
+    let videoId: string | undefined;
+    if (needsVideo && videoUrl) {
+      try {
+        videoId = await this.metaAdsService.uploadVideo(
+          videoUrl, accountId, company.meta.accessToken,
+        );
+        this.logger.log(`Video uploaded to Meta: videoId=${videoId}`);
+      } catch (err: any) {
+        this.logger.warn(`Video upload failed (proceeding without video): ${err.message}`);
+      }
+    }
+
     // Launch: campaign → ad sets → ads via Meta Graph API
     const launchResult = await this.metaAdsService.launchCampaign({
-      accountId: company.meta.accountId,
+      accountId: accountId,
       accessToken: company.meta.accessToken,
       pageId: company.meta.pageId,
       pixelId: product?.pixelId ?? company.meta.pixelId,
@@ -255,6 +292,7 @@ export class CampaignCreatorService {
         { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
       ],
       imageHash,
+      videoId,
       landingUrl,
     });
 
@@ -280,6 +318,7 @@ export class CampaignCreatorService {
       {
         status: fullyLaunched ? 'active' : 'paused',
         metaCampaignId: launchResult.campaignId,
+        metaAccountId: accountId,
         launchedAt: new Date(),
         approvedAt: new Date(),
         adSets: launchResult.adSets.map(as => ({

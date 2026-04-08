@@ -1,73 +1,48 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ClaudeService } from '../../claude/claude.service';
-import { AgentType } from '../../claude/claude.types';
-import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { HeygenService } from './heygen.service';
 
 export interface VideoResult {
   videoPrompt: string;
-  videoUrl: string; // empty until fal.ai key is available
+  videoUrl: string;
 }
 
 @Injectable()
 export class VideoGeneratorService {
   private readonly logger = new Logger(VideoGeneratorService.name);
 
-  constructor(
-    private readonly claudeService: ClaudeService,
-    private readonly liveContextBuilder: LiveContextBuilder,
-  ) {}
+  constructor(private readonly heygenService: HeygenService) {}
 
-  async generate(
-    brief: {
-      topic: string;
-      angle: string;
-      platform: string;
-      format: string;
-      audience: string;
-      hook: string;
-      keyMessage: string;
-      conversionBridge: string;
-    },
-    company: CompanyDocument,
+  /**
+   * Generate a video from a Heygen-compatible script produced by the Creative Team.
+   * The script is a JSON string with { title, scenes: [{ text, duration }] }.
+   */
+  async generateFromScript(
+    videoPrompt: string,
+    tenantId: string,
     runId: string,
   ): Promise<VideoResult> {
-    // Generate and store the video prompt — API call deferred until fal.ai key available
-    const promptResult = await this.claudeService.runAgent({
-      tenantId: company.tenantId,
-      runId,
-      agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt: '',
-      liveContext: this.liveContextBuilder.build(company),
-      userMessage: `
-Write a cinematic video generation prompt for a short-form social media ad.
+    this.logger.log(`Video generation starting: tenantId=${tenantId} runId=${runId}`);
 
-BRIEF:
-Brand: ${company.name}
-Topic: ${brief.topic}
-Angle: ${brief.angle}
-Platform: ${brief.platform} | Format: ${brief.format}
-Audience: ${brief.audience}
-Hook: ${brief.hook}
-Key message: ${brief.keyMessage}
-Conversion bridge: ${brief.conversionBridge}
+    let parsed: { title: string; scenes: { text: string; duration: number }[] };
 
-Rules:
-- Vertical 9:16 format
-- 15-20 seconds duration
-- Indian aesthetic and cultural context
-- Describe: opening shot, middle scene, closing shot, color grade, mood, camera movement
-- No spoken dialogue in prompt — visual storytelling only
-- Cinematic, high quality, suitable for paid Instagram/YouTube ads
+    try {
+      parsed = JSON.parse(videoPrompt);
+    } catch {
+      throw new Error(`Invalid Heygen script — not valid JSON: ${videoPrompt.slice(0, 200)}`);
+    }
 
-Return ONLY the video prompt, nothing else. 3-5 sentences.
-      `.trim(),
-      maxTurns: 2,
+    if (!parsed.scenes || parsed.scenes.length === 0) {
+      throw new Error('Heygen script has no scenes');
+    }
+
+    const videoUrl = await this.heygenService.generateVideo({
+      title: parsed.title ?? `Ad — ${tenantId}`,
+      scenes: parsed.scenes,
+      aspectRatio: '9:16',
     });
 
-    const videoPrompt = promptResult.content.trim();
-    this.logger.log(`Video prompt generated (API deferred): tenantId=${company.tenantId} topic=${brief.topic}`);
-
-    return { videoPrompt, videoUrl: '' };
+    this.logger.log(`Video generated: tenantId=${tenantId} url=${videoUrl}`);
+    return { videoPrompt, videoUrl };
   }
 }

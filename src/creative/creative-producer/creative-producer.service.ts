@@ -84,8 +84,15 @@ export class CreativeProducerService {
         );
         image = imageResult;
 
-        // Store team's reviewed video prompt
-        video = { videoPrompt: teamResult.videoPrompt, videoUrl: '' };
+        // Generate actual video from Heygen-compatible script
+        try {
+          video = await this.videoGenerator.generateFromScript(
+            teamResult.videoPrompt, tenantId, runId,
+          );
+        } catch (videoErr: any) {
+          this.logger.warn(`Video generation failed (prompt saved): ${videoErr.message}`);
+          video = { videoPrompt: teamResult.videoPrompt, videoUrl: '' };
+        }
 
         this.logger.log(
           `Creative Team done: briefId=${briefId} variants=${teamResult.variants.length} rounds=${teamResult.debateRounds}`,
@@ -97,7 +104,7 @@ export class CreativeProducerService {
         const [copyResult, imageResult, videoResult] = await Promise.allSettled([
           this.copyWriter.generate(brief, company, runId),
           this.imageGenerator.generate(brief, company, runId),
-          this.videoGenerator.generate(brief, company, runId),
+          Promise.resolve({ videoPrompt: '', videoUrl: '' }), // video deferred to team path
         ]);
 
         copyPackage = copyResult.status === 'fulfilled' ? copyResult.value : null;
