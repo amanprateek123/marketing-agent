@@ -66,7 +66,7 @@ export class CampaignOptimizerService {
       maxTurns: 5,
     });
 
-    await this.campaignsService.updateBudget(campaign._id.toString(), newBudget);
+    await this.campaignsService.updateBudget(company.tenantId, campaign._id.toString(), newBudget);
 
     await this.actionLogger.log({
       tenantId: company.tenantId,

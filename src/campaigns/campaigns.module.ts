@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { BullModule } from '@nestjs/bullmq';
 import { Campaign, CampaignSchema } from './schemas/campaign.schema';
+import { AuditSnapshot, AuditSnapshotSchema } from './schemas/audit-snapshot.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
 import { CreativeBrief, CreativeBriefSchema } from '../pipeline/schemas/creative-brief.schema';
 import { CampaignsService } from './campaigns.service';
@@ -9,6 +10,8 @@ import { CampaignsController } from './campaigns.controller';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
 import { CampaignOptimizerService } from './campaign-auditor/campaign-optimizer.service';
+import { SignalDetectorService } from './campaign-auditor/signal-detector.service';
+import { AuditAgentService } from './campaign-auditor/audit-agent.service';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { CommonModule } from '../common/common.module';
@@ -31,6 +34,7 @@ import { QUEUES } from '../scheduler/queue.constants';
   imports: [
     MongooseModule.forFeature([
       { name: Campaign.name, schema: CampaignSchema },
+      { name: AuditSnapshot.name, schema: AuditSnapshotSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: CreativeBrief.name, schema: CreativeBriefSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
@@ -47,7 +51,7 @@ import { QUEUES } from '../scheduler/queue.constants';
     DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService],
+  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService],
   exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService],
 })
 export class CampaignsModule {}

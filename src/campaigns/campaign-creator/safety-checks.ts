@@ -48,15 +48,23 @@ export class SafetyChecks {
     }
   }
 
-  // Check 3: Forbidden topics
+  // Check 3: Forbidden topics — scan topic + hook + keyMessage
   static checkForbiddenTopics(brief: CreativeBrief, company: Company): void {
-    const forbidden = company.forbiddenTopics.find((t) =>
-      brief.topic.toLowerCase().includes(t.toLowerCase()),
-    );
-    if (forbidden) {
-      throw new ForbiddenTopicError(
-        `Brief topic "${brief.topic}" matches forbidden topic "${forbidden}"`,
+    const fieldsToCheck: { field: string; value: string }[] = [
+      { field: 'topic', value: brief.topic ?? '' },
+      { field: 'hook', value: (brief as any).hook ?? '' },
+      { field: 'keyMessage', value: (brief as any).keyMessage ?? '' },
+    ];
+
+    for (const { field, value } of fieldsToCheck) {
+      const forbidden = company.forbiddenTopics.find((t) =>
+        value.toLowerCase().includes(t.toLowerCase()),
       );
+      if (forbidden) {
+        throw new ForbiddenTopicError(
+          `Brief ${field} "${value}" matches forbidden topic "${forbidden}"`,
+        );
+      }
     }
   }
 

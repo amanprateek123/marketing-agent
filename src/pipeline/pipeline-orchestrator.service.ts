@@ -82,9 +82,9 @@ export class PipelineOrchestratorService implements OnModuleInit {
     this.logger.warn(`Found ${stuckRuns.length} stuck run(s) — recovering...`);
 
     for (const run of stuckRuns) {
-      this.logger.log(`Recovering stuck run: ${run.runId} (status: ${run.status})`);
+      this.logger.log(`Recovering stuck run: ${run.runId} tenantId=${run.tenantId} (status: ${run.status})`);
       await this.pipelineRunModel.updateOne(
-        { runId: run.runId },
+        { tenantId: run.tenantId, runId: run.runId },
         { status: 'pending', error: null },
       );
       this.executeDAG(run.tenantId, run.runId).catch((err) => {

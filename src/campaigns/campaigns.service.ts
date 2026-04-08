@@ -68,7 +68,7 @@ export class CampaignsService {
   }
 
   async findActive(tenantId: string): Promise<CampaignDocument[]> {
-    return this.campaignModel.find({ tenantId, status: 'active' }).lean().exec();
+    return this.campaignModel.find({ tenantId, status: 'active', source: 'agent' }).lean().exec();
   }
 
   async getWeeklySpend(tenantId: string): Promise<number> {
@@ -77,7 +77,7 @@ export class CampaignsService {
       .find({ tenantId, launchedAt: { $gte: weekAgo } })
       .lean()
       .exec();
-    return campaigns.reduce((sum, c) => sum + (c.budget ?? 0), 0);
+    return campaigns.reduce((sum, c) => sum + (c.spend ?? 0), 0);
   }
 
   async findByRunId(tenantId: string, runId: string): Promise<CampaignDocument | null> {
@@ -106,11 +106,12 @@ export class CampaignsService {
       .exec();
   }
 
-  async updateBudget(campaignId: string, newBudget: number): Promise<void> {
-    await this.campaignModel.updateOne({ _id: campaignId }, { budget: newBudget });
+  async updateBudget(tenantId: string, campaignId: string, newBudget: number): Promise<void> {
+    await this.campaignModel.updateOne({ tenantId, _id: campaignId }, { budget: newBudget });
   }
 
   async updateMetrics(
+    tenantId: string,
     campaignId: string,
     metrics: {
       spend: number;
@@ -123,7 +124,7 @@ export class CampaignsService {
     },
   ): Promise<void> {
     await this.campaignModel.updateOne(
-      { _id: campaignId },
+      { tenantId, _id: campaignId },
       { ...metrics, lastAuditedAt: new Date() },
     );
   }

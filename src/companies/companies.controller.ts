@@ -7,11 +7,14 @@ import {
   Param,
   HttpCode,
   HttpStatus,
+  Inject,
   Logger,
+  forwardRef,
 } from '@nestjs/common';
 import { CompaniesService } from './companies.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
+import { SchedulerService } from '../scheduler/scheduler.service';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
 
@@ -23,6 +26,8 @@ export class CompaniesController {
     private readonly companiesService: CompaniesService,
     private readonly promptGenerator: PromptGeneratorService,
     private readonly metaLearningImporter: MetaLearningImporterService,
+    @Inject(forwardRef(() => SchedulerService))
+    private readonly schedulerService: SchedulerService,
   ) {}
 
   @Post()
@@ -33,6 +38,16 @@ export class CompaniesController {
     // Fire and forget — don't block the response
     this.promptGenerator.generate(company.tenantId).catch((err) =>
       this.logger.error(`Prompt generation failed for ${company.tenantId}: ${err.message}`),
+    );
+
+    // Schedule all recurring jobs for the new tenant
+    Promise.all([
+      this.schedulerService.scheduleForTenant(company.tenantId, new Date((company as any).createdAt), company.pipelineConfig),
+      this.schedulerService.scheduleAuditForTenant(company.tenantId),
+      this.schedulerService.scheduleLearningForTenant(company.tenantId),
+      this.schedulerService.scheduleCampaignSyncForTenant(company.tenantId),
+    ]).catch((err) =>
+      this.logger.error(`Job scheduling failed for ${company.tenantId}: ${err.message}`),
     );
 
     return {

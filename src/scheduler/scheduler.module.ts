@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { MongooseModule } from '@nestjs/mongoose';
 import { CompaniesModule } from '../companies/companies.module';
@@ -22,7 +22,7 @@ import { CampaignSyncProcessor } from './campaign-sync.processor';
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_SYNC }),
     MongooseModule.forFeature([{ name: PipelineRun.name, schema: PipelineRunSchema }]),
-    CompaniesModule,
+    forwardRef(() => CompaniesModule),
     PipelineModule,
     CampaignsModule,
     LearningModule,
