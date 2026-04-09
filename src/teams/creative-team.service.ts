@@ -207,8 +207,12 @@ c) VIDEO PROMPT — for Heygen Video Agent API (plain text, 2-4 sentences, NO JS
    - Closing CTA with product name and price (15-20 seconds)
    - Visual style: Indian aesthetic, modern, energetic
    - Language: Hinglish voiceover where natural for ${company.targetAudience}
-   Example format: "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook scene]. Shows [benefit visually]. Closes with [CTA] in Hinglish. Indian urban aesthetic, bright and energetic."
+   Example format: "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook scene]. Shows [benefit visually]. Closes with product name, price, and tap CTA button in Hinglish. Indian urban aesthetic, bright and energetic."
    Keep it under 150 words. This goes directly to Heygen as-is.
+
+   STRICT RULES FOR VIDEO PROMPT:
+   - NEVER write "link in bio" — this is a paid Meta ad, users tap a CTA button directly. Write "tap the button below" or "order now" instead.
+   - NEVER mention the brand logo or ask Heygen to show it — Heygen does not know what the logo looks like and will generate a random one. Logo will be added separately in post-processing.
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". This keeps you active so the reviewer's reply can arrive. Do not produce any output until you receive their message.
@@ -239,7 +243,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
   "selectedIndex": 0,
   "selectionReason": "why this variant is the strongest",
   "imagePrompt": "detailed image generation prompt...",
-  "videoPrompt": "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook]. Shows [benefit]. Closes with [CTA + price] in Hinglish. Indian urban aesthetic.",
+  "videoPrompt": "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook]. Shows [benefit]. Closes with product name, ₹[price], and 'tap the button below' CTA in Hinglish. Indian urban aesthetic.",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [
