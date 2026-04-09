@@ -167,11 +167,9 @@ ${lines}
       );
     }
 
-    // Validate required fields
+    // Validate required fields — format_insights and hook_examples are optional, default to []
     if (!parsed.platform) throw new Error('Missing field: platform');
     if (!Array.isArray(parsed.trending_topics)) throw new Error('Missing field: trending_topics');
-    if (!Array.isArray(parsed.format_insights)) throw new Error('Missing field: format_insights');
-    if (!Array.isArray(parsed.hook_examples)) throw new Error('Missing field: hook_examples');
     if (typeof parsed.raw_summary !== 'string') throw new Error('Missing field: raw_summary');
 
     // Validate industry topics — drop only if signalScore is missing entirely

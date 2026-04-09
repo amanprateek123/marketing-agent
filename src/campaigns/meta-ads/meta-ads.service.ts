@@ -46,6 +46,8 @@ export interface MetaCampaignConfig {
   budget: number;                   // in INR (full rupees, not paise)
   objective: string;
   conversionEvent: string;
+  customEventName?: string;      // used when conversionEvent === 'CustomEvent'
+  customConversionId?: string;   // Meta Custom Conversion ID — takes priority over conversionEvent
   adSets: MetaAdSetConfig[];
   copyVariants: { primaryText: string; headline: string; cta: string }[];
   imageHash?: string;
@@ -203,6 +205,8 @@ export class MetaAdsService {
           config.budget,
           config.conversionEvent,
           config.pixelId,
+          config.customEventName,
+          config.customConversionId,
         );
         created.adSetIds.push(adSetId);
 
@@ -330,6 +334,8 @@ export class MetaAdsService {
     totalBudget: number,
     conversionEvent: string,
     pixelId?: string,
+    customEventName?: string,
+    customConversionId?: string,
   ): Promise<string> {
     // Budget: INR rupees → paise (Meta expects smallest currency unit)
     const dailyBudgetPaise = Math.round((totalBudget * config.budgetPercent / 100) * 100);
@@ -375,13 +381,22 @@ export class MetaAdsService {
     };
 
     // Pixel for conversion optimization
-    if (pixelId && conversionEvent) {
+    if (customConversionId && pixelId) {
+      // Custom Conversion (e.g. "Nadi_Purchase") — pixel + conversion ID, Meta infers event type
+      adSetData.promoted_object = {
+        pixel_id: pixelId,
+        custom_conversion_id: customConversionId,
+      };
+    } else if (pixelId && conversionEvent) {
+      // Standard or custom event
       adSetData.promoted_object = {
         pixel_id: pixelId,
         custom_event_type: this.mapConversionEvent(conversionEvent),
       };
-      // Custom events need custom_event_str
-      if (!['Purchase', 'Lead', 'CompleteRegistration', 'Subscribe'].includes(conversionEvent)) {
+      // Custom events need custom_event_str with the actual event name
+      if (conversionEvent === 'CustomEvent') {
+        adSetData.promoted_object.custom_event_str = customEventName ?? conversionEvent;
+      } else if (!['Purchase', 'Lead', 'CompleteRegistration', 'Subscribe'].includes(conversionEvent)) {
         adSetData.promoted_object.custom_event_str = conversionEvent;
       }
     }

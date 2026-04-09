@@ -212,16 +212,35 @@ export class PipelineOrchestratorService implements OnModuleInit {
         await update('scouts_running', 'scouts');
         this.logger.log(`[${runId}] Phase A: scouts starting`);
 
-        const [instagram, reddit, twitter, youtube] = await Promise.all([
+        // Use allSettled so one failing scout doesn't kill the entire pipeline
+        const [igResult, rdResult, twResult, ytResult] = await Promise.allSettled([
           this.instagramScout.execute(company, runId),
           this.redditScout.execute(company, runId),
           this.twitterScout.execute(company, runId),
           this.youtubeScout.execute(company, runId),
         ]);
 
-        this.logger.log(
-          `[${runId}] Phase A done — signals: instagram=${instagram.trending_topics.length} reddit=${reddit.trending_topics.length} twitter=${twitter.trending_topics.length} youtube=${youtube.trending_topics.length}`,
+        const scoutNames = ['instagram', 'reddit', 'twitter', 'youtube'];
+        const scoutResults = [igResult, rdResult, twResult, ytResult];
+        let successCount = 0;
+
+        for (let i = 0; i < scoutResults.length; i++) {
+          const r = scoutResults[i];
+          if (r.status === 'fulfilled') {
+            successCount++;
+          } else {
+            this.logger.error(`[${runId}] ${scoutNames[i]} scout failed (continuing): ${r.reason?.message ?? r.reason}`);
+          }
+        }
+
+        if (successCount === 0) {
+          throw new Error('All 4 scouts failed — no signals to process');
+        }
+
+        const counts = scoutResults.map((r, i) =>
+          r.status === 'fulfilled' ? `${scoutNames[i]}=${r.value.trending_topics.length}` : `${scoutNames[i]}=FAILED`
         );
+        this.logger.log(`[${runId}] Phase A done — signals: ${counts.join(' ')}`);
       }
 
       // ── Phase B: Coordinator ──────────────────────────────────────────────

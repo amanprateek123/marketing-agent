@@ -239,7 +239,7 @@ export class CampaignCreatorService {
 
     // Find the product for landing URL — match by brief.product name first, fallback to conversionEvent
     const creativeBrief = campaign.briefId
-      ? await this.campaignsService.findCreativeBrief(campaign.briefId)
+      ? await this.campaignsService.findCreativeBrief(company.tenantId, campaign.briefId)
       : null;
     const briefProduct = (creativeBrief as any)?.product ?? '';
     const product = (company.products ?? []).find(p =>
@@ -287,6 +287,8 @@ export class CampaignCreatorService {
       budget: campaign.budget,
       objective: config.objective ?? 'OUTCOME_SALES',
       conversionEvent: config.conversionEvent ?? 'Purchase',
+      customEventName: product?.customEventName,
+      customConversionId: product?.customConversionId,
       adSets: config.adSets,
       copyVariants: copyVariants.length > 0 ? copyVariants : [
         { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },

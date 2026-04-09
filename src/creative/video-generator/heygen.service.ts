@@ -1,21 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
 
 const HEYGEN_API_BASE = 'https://api.heygen.com';
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-
-export interface HeygenScene {
-  text: string;          // voiceover / caption text for this scene
-  duration: number;      // seconds (3-7 per scene)
-}
-
-export interface HeygenVideoRequest {
-  title: string;
-  scenes: HeygenScene[];
-  aspectRatio?: '9:16' | '16:9' | '1:1'; // default 9:16
-}
 
 @Injectable()
 export class HeygenService {
@@ -24,58 +13,52 @@ export class HeygenService {
   constructor(private readonly configService: ConfigService) {}
 
   /**
-   * Generate a video from scenes via Heygen text-to-video API.
-   * Polls until complete and returns the video URL.
+   * Generate a video from a text prompt via Heygen Video Agent API.
+   * No avatar or template needed — fastest path from text to video.
+   * Endpoint: POST /v1/video_agent/generate
    */
-  async generateVideo(request: HeygenVideoRequest): Promise<string> {
+  async generateVideo(prompt: string): Promise<string> {
     const apiKey = this.configService.get<string>('heygen.apiKey');
     if (!apiKey) throw new Error('HEYGEN_API_KEY not configured');
 
-    // Step 1: Submit job
-    const videoId = await this.submitJob(apiKey, request);
+    const videoId = await this.submitJob(apiKey, prompt);
     this.logger.log(`Heygen job submitted: videoId=${videoId}`);
 
-    // Step 2: Poll until complete
     const videoUrl = await this.pollUntilComplete(apiKey, videoId);
     this.logger.log(`Heygen video ready: videoId=${videoId} url=${videoUrl}`);
 
     return videoUrl;
   }
 
-  private async submitJob(apiKey: string, request: HeygenVideoRequest): Promise<string> {
-    const body = {
-      video_inputs: request.scenes.map((scene, i) => ({
-        character: null,
-        voice: null,
-        background: { type: 'color', value: '#000000' },
-        caption: {
-          text: scene.text,
-          style: 'default',
-        },
-        duration: scene.duration,
-      })),
-      aspect_ratio: request.aspectRatio ?? '9:16',
-      title: request.title,
-    };
+  private async submitJob(apiKey: string, prompt: string): Promise<string> {
+    this.logger.log(`Heygen submitting prompt (${prompt.length} chars)`);
 
-    const response = await axios.post(
-      `${HEYGEN_API_BASE}/v2/video/generate`,
-      body,
-      {
-        headers: {
-          'X-Api-Key': apiKey,
-          'Content-Type': 'application/json',
+    try {
+      const response = await axios.post(
+        `${HEYGEN_API_BASE}/v1/video_agent/generate`,
+        { prompt },
+        {
+          headers: {
+            'X-API-KEY': apiKey,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
         },
-        timeout: 30000,
-      },
-    );
+      );
 
-    const videoId = response.data?.data?.video_id;
-    if (!videoId) {
-      throw new Error(`Heygen submit failed: ${JSON.stringify(response.data).slice(0, 300)}`);
+      const videoId = response.data?.data?.video_id ?? response.data?.video_id;
+      if (!videoId) {
+        throw new Error(`Heygen submit failed — no video_id: ${JSON.stringify(response.data).slice(0, 300)}`);
+      }
+
+      return videoId;
+    } catch (err: any) {
+      if (err instanceof AxiosError && err.response) {
+        const detail = JSON.stringify(err.response.data).slice(0, 500);
+        throw new Error(`Heygen API error ${err.response.status}: ${detail}`);
+      }
+      throw err;
     }
-
-    return videoId;
   }
 
   private async pollUntilComplete(apiKey: string, videoId: string): Promise<string> {
@@ -84,12 +67,11 @@ export class HeygenService {
     while (Date.now() < deadline) {
       await this.sleep(POLL_INTERVAL_MS);
 
-      // V1 status endpoint is correct — Heygen V2 generate uses V1 for status checks
       const response = await axios.get(
         `${HEYGEN_API_BASE}/v1/video_status.get`,
         {
           params: { video_id: videoId },
-          headers: { 'X-Api-Key': apiKey },
+          headers: { 'X-API-KEY': apiKey },
           timeout: 15000,
         },
       );
@@ -104,13 +86,13 @@ export class HeygenService {
       }
 
       if (status === 'failed') {
-        throw new Error(`Heygen video generation failed: ${data?.error ?? 'unknown error'}`);
+        throw new Error(`Heygen video failed: ${data?.error ?? 'unknown error'}`);
       }
 
       this.logger.log(`Heygen polling: videoId=${videoId} status=${status}`);
     }
 
-    throw new Error(`Heygen video generation timed out after 5 minutes: videoId=${videoId}`);
+    throw new Error(`Heygen timed out after 5 minutes: videoId=${videoId}`);
   }
 
   private sleep(ms: number): Promise<void> {

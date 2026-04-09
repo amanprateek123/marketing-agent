@@ -90,7 +90,7 @@ export class CreativeProducerService {
             teamResult.videoPrompt, tenantId, runId,
           );
         } catch (videoErr: any) {
-          this.logger.warn(`Video generation failed (prompt saved): ${videoErr.message}`);
+          this.logger.error(`Video generation failed (prompt saved): ${videoErr.message}`);
           video = { videoPrompt: teamResult.videoPrompt, videoUrl: '' };
         }
 
@@ -150,7 +150,11 @@ export class CreativeProducerService {
             ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
             : '';
           const imageLine = image?.imageUrl ? '\n✅ Image generated' : '\n⚠️ Image generation failed — retry needed';
-          const videoLine = '\n⏳ Video prompt stored — awaiting API key';
+          const videoLine = video?.videoUrl
+            ? '\n✅ Video generated'
+            : video?.videoPrompt
+              ? '\n⚠️ Video generation failed — prompt saved, will retry'
+              : '\n⚠️ No video';
           await this.slackService.sendMessage(
             slackWebhook,
             tenantId,
@@ -159,7 +163,7 @@ export class CreativeProducerService {
         }
       }
 
-      return (await this.creativePackageModel.findById(pkg._id).lean().exec()) as any;
+      return (await this.creativePackageModel.findOne({ tenantId, _id: pkg._id }).lean().exec()) as any;
     } catch (err: any) {
       await this.creativePackageModel.updateOne(
         { _id: pkg._id },

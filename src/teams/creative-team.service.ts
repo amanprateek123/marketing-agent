@@ -198,23 +198,17 @@ b) IMAGE PROMPT — for AI image generation (Gemini):
    - Describe: lighting, color palette, composition, mood, focal point
    - 2-3 sentences
 
-c) VIDEO SCRIPT — Heygen text-to-video format (strict JSON, no markdown):
-   Return as a JSON object with this exact structure:
-   {
-     "title": "short ad title",
-     "scenes": [
-       { "text": "scene 1 caption/voiceover text (Hinglish, 10-15 words max)", "duration": 4 },
-       { "text": "scene 2 caption/voiceover text", "duration": 4 },
-       { "text": "scene 3 caption/voiceover text + CTA", "duration": 5 }
-     ]
-   }
-   Rules:
-   - 3-5 scenes, total duration 15-20 seconds
-   - Each scene text is what appears as caption on screen — keep it punchy
-   - Scene 1: hook (problem or curiosity)
-   - Scene 2-3: solution / benefit
-   - Last scene: CTA with product name and price
-   - Hinglish where natural for ${company.targetAudience}
+c) VIDEO PROMPT — for Heygen Video Agent API (plain text, 2-4 sentences, NO JSON):
+   Write a descriptive prompt that tells the AI video generator exactly what to create.
+   Structure:
+   - What the video is about + target audience
+   - Opening hook (problem/curiosity, 0-5 seconds)
+   - Middle: product benefit / solution (5-15 seconds)
+   - Closing CTA with product name and price (15-20 seconds)
+   - Visual style: Indian aesthetic, modern, energetic
+   - Language: Hinglish voiceover where natural for ${company.targetAudience}
+   Example format: "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook scene]. Shows [benefit visually]. Closes with [CTA] in Hinglish. Indian urban aesthetic, bright and energetic."
+   Keep it under 150 words. This goes directly to Heygen as-is.
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". This keeps you active so the reviewer's reply can arrive. Do not produce any output until you receive their message.
@@ -245,7 +239,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
   "selectedIndex": 0,
   "selectionReason": "why this variant is the strongest",
   "imagePrompt": "detailed image generation prompt...",
-  "videoPrompt": "{\"title\":\"ad title\",\"scenes\":[{\"text\":\"hook text\",\"duration\":4},{\"text\":\"benefit text\",\"duration\":4},{\"text\":\"CTA text\",\"duration\":5}]}",
+  "videoPrompt": "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook]. Shows [benefit]. Closes with [CTA + price] in Hinglish. Indian urban aesthetic.",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [

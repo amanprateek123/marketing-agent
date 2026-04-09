@@ -113,7 +113,7 @@ Return ONLY the image prompt, nothing else.
     this.logger.log(`Calling Nano Banana API: tenantId=${tenantId}`);
 
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent`,
       {
         contents: [
           {

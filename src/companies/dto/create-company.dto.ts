@@ -18,6 +18,19 @@ class ProductDto {
   @IsString() @IsNotEmpty() currency: string;
   @IsString() description: string;
   @IsBoolean() active: boolean;
+
+  // Marketing data
+  @IsOptional() @IsString() landingUrl?: string;
+  @IsOptional() @IsArray() @IsString({ each: true }) languages?: string[];
+  @IsOptional() @IsArray() @IsString({ each: true }) trendKeywords?: string[];
+  @IsOptional() @IsArray() @IsString({ each: true }) differentiators?: string[];
+
+  // Conversion tracking
+  @IsOptional() @IsString() conversionEvent?: string;
+  @IsOptional() @IsNumber() @Min(0) conversionValue?: number;
+  @IsOptional() @IsString() customEventName?: string;
+  @IsOptional() @IsString() customConversionId?: string;
+  @IsOptional() @IsString() pixelId?: string;
 }
 
 class ServiceDto {

@@ -162,4 +162,62 @@ export class CompaniesController {
   async getImportStatus(@Param('tenantId') tenantId: string) {
     return this.metaLearningImporter.getImportStatus(tenantId);
   }
+
+  /**
+   * PUT /api/v1/companies/:tenantId/budget
+   * Update budget settings from the dashboard.
+   * Body: { weeklyBudgetCap, maxBudgetPerCampaign, maxBudgetScalePercent }
+   */
+  @Put(':tenantId/budget')
+  async updateBudgetSettings(
+    @Param('tenantId') tenantId: string,
+    @Body() body: {
+      weeklyBudgetCap?: number;
+      maxBudgetPerCampaign?: number;
+      maxBudgetScalePercent?: number;
+      targetROAS?: number;
+      targetCPA?: number;
+      pauseIfROASBelow?: number;
+      pauseIfCTRBelow?: number;
+      pauseIfFrequencyAbove?: number;
+      scaleIfROASAbove?: number;
+    },
+  ) {
+    const company = await this.companiesService.update(tenantId, body);
+    return {
+      tenantId,
+      weeklyBudgetCap: company.company.weeklyBudgetCap,
+      maxBudgetPerCampaign: company.company.maxBudgetPerCampaign,
+      maxBudgetScalePercent: company.company.maxBudgetScalePercent,
+      message: 'Budget settings updated.',
+    };
+  }
+
+  /**
+   * PUT /api/v1/companies/:tenantId/products
+   * Replace the full products array from the dashboard.
+   * Body: { products: [...] }
+   */
+  @Put(':tenantId/products')
+  async updateProducts(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { products: any[] },
+  ) {
+    const { company, needsPromptRegen } = await this.companiesService.update(tenantId, { products: body.products });
+
+    if (needsPromptRegen) {
+      this.promptGenerator.generate(tenantId).catch((err) =>
+        this.logger.error(`Prompt regeneration failed for ${tenantId}: ${err.message}`),
+      );
+    }
+
+    return {
+      tenantId,
+      products: company.products,
+      promptRegenTriggered: needsPromptRegen,
+      message: needsPromptRegen
+        ? 'Products updated. Regenerating agent prompts in background.'
+        : 'Products updated.',
+    };
+  }
 }

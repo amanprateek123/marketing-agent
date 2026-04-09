@@ -311,7 +311,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
       "hook": "opening line or visual hook",
       "keyMessage": "what the audience should believe after seeing this",
       "conversionBridge": "how this leads to buying the specific product",
-      "suggestedBudget": 0,
+      "suggestedBudget": 1500,   ← DAILY budget in ₹/day. Use past CPA data + audience size to estimate. Conservative first-run = ₹1000-2000/day. Proven audience = ₹2000-5000/day. Never exceed ₹${company.maxBudgetPerCampaign ?? 10000}/day.
       "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight",
       "sourcePlatforms": ["instagram", "youtube"],
       "urgent": false,
@@ -380,6 +380,13 @@ RULES:
 - Prefer products with higher confidence performance data — proven products get priority over hypothesis-stage products
 - The Contrarian MUST see all ideas before you pick a winner
 - Do NOT pick the winner before the debate — let it emerge from the argument
+- BUDGET RULE: suggestedBudget = DAILY budget in ₹/day (NOT total, NOT weekly). Base it on:
+  * No past data → ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.15)} (15% of weekly cap as a safe first-run test)
+  * Some past data (1-3 campaigns) → ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.20)}
+  * Strong past data + proven audience → ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.30)}
+  * Hard cap: NEVER suggest above ₹${company.maxBudgetPerCampaign ?? 10000}/day
+  * Weekly estimate = suggestedBudget × 7 — must fit within ₹${company.weeklyBudgetCap ?? 20000} weekly cap
+  * NEVER output suggestedBudget as 0
     `.trim();
   }
 

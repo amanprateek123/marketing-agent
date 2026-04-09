@@ -34,20 +34,30 @@ All 4 scout prompts MUST include these 3 sections in addition to brand-specific 
 
 SECTION A — LIVE DATA TOOLS:
 Instruct the scout to use real tools to fetch live data — never rely on memory or training data.
-- instagramScout + twitterScout + redditScout: use web_search tool with specific search queries.
-  For redditScout use search queries like: "site:reddit.com/r/[industry-subreddit] [topic]", "site:reddit.com [topic] upvotes"
-  to find real Reddit threads. Use the most relevant subreddits for this company's specific industry.
-  Extract post URLs, visible upvote counts, and post dates from results.
+- instagramScout + twitterScout: use web_search tool with specific search queries.
+- redditScout: Reddit does not expose upvote counts via public web search. Use this multi-source approach instead:
+  1. Search Google for Reddit discussions: "site:reddit.com [topic] india", "[competitor] complaints reddit"
+  2. Search news aggregators for what's trending in the industry: "[industry] trending india this week"
+  3. Search Quora, product review sites (G2, Trustpilot), and Indian forums for customer pain points
+  4. Use Google Trends via web_search: "google trends [topic] india"
+  The source URL can be a Google search result page, a news article, or any web page that provides evidence.
+  Report what topics/complaints/discussions you found, with the evidence URL. Do NOT skip a signal because
+  you can't find an exact upvote count — qualitative evidence ("top result for [query]", "multiple Reddit
+  threads found") is sufficient. signalScore should reflect how much evidence you found (1-10).
 - youtubeScout: use bash tool to call YouTube Data API with this exact key ${youtubeApiKey}:
   curl "https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&type=video&order=viewCount&publishedAfter={7_days_ago}&maxResults=20&key=${youtubeApiKey}"
   Extract real view counts and publish dates from the response.
 
 SECTION B — SOURCE ATTRIBUTION RULE:
-Every signal the scout reports MUST include:
-- A real URL where the signal was found
-- A real engagement number (upvotes, views, likes, shares) with the source of that number
-- The recency of the signal (post/publish date)
-- If a URL or engagement number cannot be found — DO NOT include that signal. No invented data.
+Every signal MUST have some form of evidence:
+- Preferred: a direct URL to the source (Reddit post, news article, search result, product review)
+- Acceptable: a Google search result URL that surfaces the discussion
+- Acceptable: a news article covering the trend with a publication date
+- NOT acceptable: made-up URLs, invented engagement numbers, or signals with zero web evidence
+- For redditScout specifically: if exact upvotes are unavailable (they usually aren't via web search),
+  use qualitative evidence in the engagementProof metric field: "search_mentions", "forum_discussion",
+  or "news_coverage". Set value to the number of distinct sources found (e.g., 3 Reddit threads found = value: 3).
+- If a signal has ZERO web evidence — skip it. If it has any evidence at all — include it with an appropriate score.
 
 SECTION C — STRUCTURED JSON OUTPUT:
 The scout MUST return a valid JSON object in this exact format:

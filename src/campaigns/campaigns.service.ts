@@ -21,9 +21,9 @@ export class CampaignsService {
     return this.creativePackageModel.findById(creativePackageId).lean().exec() as any;
   }
 
-  async findCreativeBrief(briefId: string): Promise<CreativeBrief | null> {
+  async findCreativeBrief(tenantId: string, briefId: string): Promise<CreativeBrief | null> {
     if (!briefId) return null;
-    return this.creativeBriefModel.findOne({ briefId }).lean().exec() as any;
+    return this.creativeBriefModel.findOne({ tenantId, briefId }).lean().exec() as any;
   }
 
   async findAll(tenantId: string): Promise<any[]> {

@@ -501,16 +501,16 @@ export class CampaignAuditorService {
     let written = false;
 
     if (ageDays >= 7 && !brief.performanceWritten?.day7) {
-      await this.briefModel.updateOne({ briefId: campaign.briefId }, { day7Performance: perf, 'performanceWritten.day7': true });
+      await this.briefModel.updateOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }, { day7Performance: perf, 'performanceWritten.day7': true });
       written = true;
       this.creativeLearning.runQuickScan(campaign.tenantId).catch(err => this.logger.error(`Quick scan failed: ${err.message}`));
     }
     if (ageDays >= 14 && !brief.performanceWritten?.day14) {
-      await this.briefModel.updateOne({ briefId: campaign.briefId }, { day14Performance: perf, 'performanceWritten.day14': true });
+      await this.briefModel.updateOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }, { day14Performance: perf, 'performanceWritten.day14': true });
       written = true;
     }
     if (ageDays >= 30 && !brief.performanceWritten?.day30) {
-      await this.briefModel.updateOne({ briefId: campaign.briefId }, { day30Performance: perf, 'performanceWritten.day30': true });
+      await this.briefModel.updateOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }, { day30Performance: perf, 'performanceWritten.day30': true });
       written = true;
       this.campaignLearning.runDeepRun(campaign.tenantId).catch(err => this.logger.error(`Deep run failed: ${err.message}`));
     }

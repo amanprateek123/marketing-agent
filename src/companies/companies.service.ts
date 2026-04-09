@@ -81,6 +81,11 @@ export class CompaniesService {
       company.meta = { ...(company.meta ?? {}), ...meta } as any;
     }
 
+    // Mongoose doesn't auto-detect changes to Mixed/[Object] fields — mark them explicitly
+    if ('products' in dto) company.markModified('products');
+    if ('services' in dto) company.markModified('services');
+    if ('meta' in dto) company.markModified('meta');
+
     await company.save();
 
     this.logger.log(
