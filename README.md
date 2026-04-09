@@ -1,6 +1,6 @@
 # Autonomous Marketing Agent
 
-> **Stack:** NestJS + TypeScript · MongoDB · BullMQ + Redis · Claude Code SDK · Meta Graph API v21.0 · Heygen · n8n
+> **Stack:** NestJS + TypeScript · MongoDB · BullMQ + Redis · Claude Code SDK · Meta Graph API v21.0 · Heygen · OpenAI DALL-E 3 · n8n
 >
 > **Runtime:** Node.js 20+
 >
@@ -120,21 +120,67 @@ Body: { "accountId": "act_123456789" }
 
 ### 4. Creative Format per Ad Set
 
-Campaign Review Team decides `creativeFormat: 'video' | 'image' | 'both'` per ad set based on:
-- `company.learnings.creative.winningFormats` — historical winners
-- Audience type defaults:
-  - `lookalike` / `advantage_plus` (cold) → `video` (scroll-stop)
-  - `interest` (warm) → `both` (test both)
-  - `retarget` (hot) → `image` (faster, user knows brand)
+Campaign Review Team decides `creativeFormat: 'video' | 'image' | 'both'` per ad set using data-driven logic:
 
-Video generation via Heygen:
-- Creative Team outputs Heygen-compatible JSON script: `{ title, scenes: [{ text, duration }] }`
-- Heygen generates vertical (9:16) video
-- Uploaded to Meta at launch time
+```
+DECISION LOGIC (applied in order):
+1. NO DATA → default by audience type:
+   - lookalike / advantage_plus (cold) → video
+   - interest (warm) → both
+   - retarget (hot) → image
+
+2. ONE FORMAT WINNING → winner on largest ad set, loser on smallest (never fully abandon a format)
+
+3. BOTH FORMATS WINNING → split proportionally across ad sets
+
+4. NO CLEAR WINNER → use "both" on all ad sets
+
+BUDGET CONSTRAINT: If <₹1,500/day, do not split formats (not enough signal)
+```
+
+Data source: `company.learnings.creative.winningFormats` (populated by monthly learning aggregation from imported Meta campaigns).
+
+**Video generation via Heygen:**
+- Creative Team writes a plain-text prompt describing the video concept and scenes
+- Saved as `creativePackage.videoPrompt`
+- Heygen Video Agent API (`POST /v1/video_agent/generate`) converts the prompt to a vertical (9:16) video
+- Polls `/v1/video_status.get` up to 15 minutes for completion
+- Final video URL stored in `creativePackage.videoUrl`
+
+**Image generation via OpenAI DALL-E 3:**
+- Claude (Creative Producer agent) writes a detailed image prompt from the brief
+- Saved as `creativePackage.imagePrompt`
+- DALL-E 3 API (`POST /v1/images/generations`, size `1024x1792` for 9:16) generates the image
+- Hosted URL returned (valid 1 hour from generation) — upload to S3 or use immediately at launch
+- Final image URL stored in `creativePackage.imageUrl`
 
 ---
 
-### 5. Intelligent Campaign Auditor (4 Layers)
+### 5. Conversion Tracking (3 Modes)
+
+Per product, set exactly one of these in `company.products[]`:
+
+| Mode | Fields to set | When to use |
+|---|---|---|
+| Standard Event | `conversionEvent: 'Purchase'` | Standard Meta pixel events (Purchase, Lead, etc.) |
+| Custom Event | `conversionEvent: 'CustomEvent'`, `customEventName: 'MyEvent'` | Custom pixel events via `fbq('trackCustom', ...)` |
+| Custom Conversion | `customConversionId: '123456'` | Named conversions with conditional logic (e.g. Nadi_Purchase) |
+
+**How Meta `promoted_object` is set:**
+```
+customConversionId set → { pixel_id, custom_conversion_id }
+conversionEvent = standard → { pixel_id, custom_event_type: 'PURCHASE' }
+conversionEvent = non-standard → { pixel_id, custom_event_type: 'OTHER', custom_event_str: 'MyEvent' }
+```
+
+Custom conversions take priority over `conversionEvent`. Get `customConversionId` from:
+```
+GET https://graph.facebook.com/v21.0/act_{account_id}/customconversions?fields=id,name&access_token=...
+```
+
+---
+
+### 6. Intelligent Campaign Auditor (4 Layers)
 
 Runs every 6 hours per tenant. Only monitors `source: 'agent'` campaigns.
 
@@ -212,7 +258,7 @@ Human can:
 
 ---
 
-### 6. Audit Snapshot History
+### 7. Audit Snapshot History
 
 Every audit run saves an `AuditSnapshot` to MongoDB (collection: `audit_snapshots`):
 ```
@@ -226,7 +272,7 @@ Used for trend detection (last 3 snapshots) and audit history display.
 
 ---
 
-### 7. Multi-Account Meta Support
+### 8. Multi-Account Meta Support
 
 - `company.meta.accountIds[]` — list of allowed Meta ad accounts per tenant
 - Approval endpoint requires `accountId` in request body
@@ -237,7 +283,7 @@ Used for trend detection (last 3 snapshots) and audit history display.
 
 ---
 
-### 8. Campaign Sync
+### 9. Campaign Sync
 
 Keeps MongoDB in sync with Meta.
 - `syncActiveCampaigns` — 6h cron, syncs ACTIVE and PAUSED campaigns
@@ -246,7 +292,7 @@ Keeps MongoDB in sync with Meta.
 
 ---
 
-### 9. Monthly Learning Aggregation
+### 10. Monthly Learning Aggregation
 
 Runs 1st of every month at 3 AM IST. Aggregates patterns from historical + live data into `company.learnings`:
 
@@ -276,12 +322,33 @@ Runs 1st of every month at 3 AM IST. Aggregates patterns from historical + live 
 | `POST` | `/api/v1/companies` | Create company — schedules all jobs automatically |
 | `GET` | `/api/v1/companies` | List all companies |
 | `GET` | `/api/v1/companies/:tenantId` | Get company (includes meta, learnings, signals) |
-| `PUT` | `/api/v1/companies/:tenantId` | Update company (meta fields merged, not replaced) |
+| `PUT` | `/api/v1/companies/:tenantId` | Update company fields (meta fields merged, not replaced) |
 | `POST` | `/api/v1/companies/:tenantId/regenerate` | Regenerate AI prompts |
 | `POST` | `/api/v1/companies/:tenantId/import-learnings` | Trigger Meta learning import |
 | `GET` | `/api/v1/companies/:tenantId/import-status` | Poll import progress |
 | `POST` | `/api/v1/companies/:tenantId/finalize-import` | Re-run finalize without re-enriching |
 | `GET` | `/api/v1/companies/:tenantId/case-studies` | List top 50 case studies |
+
+**Update company — product fields:**
+```json
+PUT /api/v1/companies/:tenantId
+{
+  "products": [
+    {
+      "name": "Nadi Report",
+      "price": 499,
+      "conversionValue": 499,
+      "landingUrl": "https://example.com/nadi",
+      "conversionEvent": "Purchase",
+      "customConversionId": "1234567890",
+      "customEventName": "Nadi_Purchase",
+      "pixelId": "123456789",
+      "customConversionId": "987654321"
+    }
+  ]
+}
+```
+Note: `products` uses Mongoose Mixed type — always send the full array when updating.
 
 ### Campaigns
 
@@ -300,8 +367,20 @@ Runs 1st of every month at 3 AM IST. Aggregates patterns from historical + live 
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/creative/:tenantId/packages/:creativePackageId` | Get creative package (copy variants, imageUrl, videoUrl) |
+| `GET` | `/api/v1/creative/:tenantId/packages/:creativePackageId` | Get creative package (copyVariants, imageUrl, videoUrl, imagePrompt, videoPrompt) |
+| `POST` | `/api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image` | Retry image generation (uses saved imagePrompt → DALL-E 3). Fire-and-forget — poll GET for result |
+| `POST` | `/api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-video` | Retry video generation (uses saved videoPrompt → Heygen). Fire-and-forget — poll GET for result |
 | `POST` | `/api/v1/creative/:tenantId/briefs/:briefId/approve` | Approve idea → trigger creative production (fire-and-forget) |
+
+**Regenerate endpoints — response:**
+```json
+{
+  "status": "started",
+  "creativePackageId": "...",
+  "message": "Image generation started. Poll GET /packages/:id for result."
+}
+```
+Poll `GET /packages/:id` until `imageUrl` / `videoUrl` is populated (image ~30s, video up to 15 min).
 
 ---
 
@@ -356,6 +435,20 @@ meta: {
   pixelId: string
 }
 
+// Products
+products: [
+  {
+    name: string                     // product/service name
+    price: number                    // price in INR
+    conversionValue: number          // value to report to Meta per conversion
+    landingUrl: string               // destination URL for ads
+    pixelId?: string                 // product-specific pixel (falls back to meta.pixelId)
+    conversionEvent?: string         // 'Purchase' | 'Lead' | 'CompleteRegistration' | 'CustomEvent'
+    customEventName?: string         // used when conversionEvent = 'CustomEvent'
+    customConversionId?: string      // Meta Custom Conversion ID — takes priority over conversionEvent
+  }
+]
+
 // Forbidden content
 forbiddenTopics: string[]            // checked against topic, hook, keyMessage
 ```
@@ -390,8 +483,11 @@ ANTHROPIC_API_KEY=sk-ant-...
 META_ADS_ACCESS_TOKEN=...
 META_ADS_ACCOUNT_ID=act_...
 
-# Heygen (text-to-video)
+# Heygen (text-to-video, up to 15 min per video)
 HEYGEN_API_KEY=...
+
+# OpenAI (DALL-E 3 image generation)
+OPENAI_API_KEY=sk-...
 
 # YouTube Data API (scout agent)
 YOUTUBE_API_KEY=...
@@ -424,3 +520,5 @@ npm run start:dev
 4. **Every agent call** must go through `ClaudeService.runAgent()` — never call `query()` directly
 5. **Meta field updates** always merge (never replace) to prevent wiping `accessToken`
 6. **Campaign monitoring** only covers `source: 'agent'` campaigns — manual Meta campaigns are synced but not audited
+7. **Mongoose Mixed type fields** (`products`, `services`, `meta`) require `markModified()` before `save()` or changes are silently dropped
+8. **Creative format decisions** are learning-driven — Campaign Review Team decides based on `company.learnings.creative.winningFormats`, not hardcoded rules

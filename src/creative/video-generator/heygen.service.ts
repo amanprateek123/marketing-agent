@@ -4,7 +4,7 @@ import axios, { AxiosError } from 'axios';
 
 const HEYGEN_API_BASE = 'https://api.heygen.com';
 const POLL_INTERVAL_MS = 5000;
-const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const POLL_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
 @Injectable()
 export class HeygenService {
@@ -92,7 +92,7 @@ export class HeygenService {
       this.logger.log(`Heygen polling: videoId=${videoId} status=${status}`);
     }
 
-    throw new Error(`Heygen timed out after 5 minutes: videoId=${videoId}`);
+    throw new Error(`Heygen timed out after 15 minutes: videoId=${videoId}`);
   }
 
   private sleep(ms: number): Promise<void> {

@@ -319,16 +319,31 @@ IMPORTANT — adSets rules:
 
 CREATIVE FORMAT — video vs image per ad set:
 - Each ad set must have a "creativeFormat": "video" | "image" | "both" field.
-- Use past learnings to decide:
-  ${(learnings?.creative?.winningFormats ?? []).length > 0
-    ? `Winning formats from past data: ${(learnings?.creative?.winningFormats ?? []).join(', ')}`
-    : 'No format data yet — use defaults below.'}
-- Default rules if no data:
-  - lookalike / advantage_plus (cold audiences) → "video" (better scroll-stop on cold traffic)
-  - interest (warm audiences) → "both" (test image vs video)
-  - retarget (hot audiences) → "image" (faster load, user already knows you)
-- If video format is in winningFormats → prefer video for cold + warm ad sets.
-- If image format dominates learnings → prefer image across all ad sets.
+
+FORMAT PERFORMANCE DATA:
+${(() => {
+  const winning = learnings?.creative?.winningFormats ?? [];
+  const losing = learnings?.creative?.losingFormats ?? [];
+  if (winning.length === 0 && losing.length === 0) return '  No format data yet — use defaults below.';
+  return `  Winning: ${winning.join(', ') || 'none'}
+  Losing: ${losing.join(', ') || 'none'}`;
+})()}
+
+DECISION LOGIC (apply in order):
+1. NO DATA → default by audience type:
+   - lookalike / advantage_plus → "video" (scroll-stop on cold traffic)
+   - interest → "both" (test image vs video)
+   - retarget → "image" (faster load, user already knows brand)
+
+2. ONE FORMAT CLEARLY WINNING (other not in winning list) → assign winner to largest budget ad sets. Still test the other format on the SMALLEST budget ad set — formats can behave differently per audience/angle. Never fully abandon a format.
+
+3. BOTH FORMATS WINNING → split test across ad sets. Assign "video" to one, "image" to another. Budget split should reflect performance gap (e.g. video 16% vs image 8% → give video 65%, image 35%).
+
+4. NO CLEAR WINNER (both losing or mixed signals) → use "both" on all ad sets and let Meta optimize.
+
+BUDGET CONSTRAINT: If total daily budget < ₹1,500 → do NOT split formats across ad sets. Put all budget on the winning format. Splitting below ₹1,500/day means each format gets < ₹750/day which is not enough signal to learn from.
+
+PRINCIPLE: The goal is always to gather more signal when budget allows. Never put all ad sets on the same format unless you have overwhelming evidence (5+ campaigns, >3x performance gap) OR budget is too small to split.
 
 ${liveContext}
 

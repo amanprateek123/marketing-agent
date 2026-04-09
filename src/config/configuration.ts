@@ -26,6 +26,9 @@ export default () => ({
   google: {
     aiApiKey: process.env.GOOGLE_AI_API_KEY ?? '',
   },
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY ?? '',
+  },
   fal: {
     apiKey: process.env.FAL_API_KEY ?? '',
   },

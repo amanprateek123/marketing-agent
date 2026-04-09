@@ -8,7 +8,7 @@ import axios from 'axios';
 
 export interface ImageResult {
   imagePrompt: string;
-  imageUrl: string;  // base64 data URL for now (S3 deferred)
+  imageUrl: string;  // hosted URL from OpenAI (valid for 1 hour) — S3 upload deferred
 }
 
 @Injectable()
@@ -70,13 +70,12 @@ Return ONLY the image prompt, nothing else.
     const imagePrompt = promptResult.content.trim();
     this.logger.log(`Image prompt generated: tenantId=${company.tenantId} briefTopic=${brief.topic}`);
 
-    // Step 2 — Call Nano Banana (Google Gemini Image API)
-    // Always return the prompt even if the API call fails
+    // Step 2 — Call OpenAI DALL-E 3
     let imageUrl = '';
     try {
-      imageUrl = await this.callNanoBanana(imagePrompt, company.tenantId);
+      imageUrl = await this.callDallE(imagePrompt, company.tenantId);
     } catch (err: any) {
-      this.logger.error(`Nano Banana API failed (prompt saved): ${err.message}`);
+      this.logger.error(`OpenAI image API failed (prompt saved): ${err.message}`);
     }
 
     return { imagePrompt, imageUrl };
@@ -84,7 +83,7 @@ Return ONLY the image prompt, nothing else.
 
   /**
    * Generate image from a pre-reviewed prompt (from Creative Team).
-   * Skips Claude prompt generation — goes straight to image API.
+   * Skips Claude prompt generation — goes straight to DALL-E 3.
    */
   async generateFromPrompt(
     imagePrompt: string,
@@ -95,58 +94,51 @@ Return ONLY the image prompt, nothing else.
 
     let imageUrl = '';
     try {
-      imageUrl = await this.callNanoBanana(imagePrompt, company.tenantId);
+      imageUrl = await this.callDallE(imagePrompt, company.tenantId);
     } catch (err: any) {
-      this.logger.error(`Image API failed (prompt saved): ${err.message}`);
+      this.logger.error(`OpenAI image API failed (prompt saved): ${err.message}`);
     }
 
     return { imagePrompt, imageUrl };
   }
 
-  private async callNanoBanana(prompt: string, tenantId: string): Promise<string> {
-    const apiKey = this.configService.get<string>('google.aiApiKey');
+  private async callDallE(prompt: string, tenantId: string): Promise<string> {
+    const apiKey = this.configService.get<string>('openai.apiKey');
 
     if (!apiKey) {
-      throw new Error('GOOGLE_AI_API_KEY not configured');
+      throw new Error('OPENAI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling Nano Banana API: tenantId=${tenantId}`);
+    this.logger.log(`Calling DALL-E 3: tenantId=${tenantId}`);
+
+    // DALL-E 3 max prompt length is 4000 chars — truncate if needed
+    const safePrompt = prompt.length > 4000 ? prompt.slice(0, 4000) : prompt;
 
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent`,
+      'https://api.openai.com/v1/images/generations',
       {
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-        generationConfig: {
-          responseModalities: ['TEXT', 'IMAGE'],
-        },
+        model: 'dall-e-3',
+        prompt: safePrompt,
+        n: 1,
+        size: '1024x1792',   // closest to 9:16 vertical format
+        quality: 'standard', // use 'hd' for higher quality (2x cost)
+        response_format: 'url',
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
+          'Authorization': `Bearer ${apiKey}`,
         },
         timeout: 60000,
       },
     );
 
-    const parts = response.data?.candidates?.[0]?.content?.parts ?? [];
-    const imagePart = parts.find((p: any) => p.inlineData?.mimeType?.startsWith('image/'));
-
-    if (!imagePart) {
-      this.logger.error(`Nano Banana response: ${JSON.stringify(response.data).slice(0, 500)}`);
-      throw new Error('No image returned from Nano Banana API');
+    const imageUrl = response.data?.data?.[0]?.url;
+    if (!imageUrl) {
+      throw new Error(`No image URL returned from DALL-E 3: ${JSON.stringify(response.data).slice(0, 300)}`);
     }
 
-    // Return as base64 data URL — S3 upload deferred
-    const mimeType = imagePart.inlineData.mimeType;
-    const base64 = imagePart.inlineData.data;
-    const dataUrl = `data:${mimeType};base64,${base64}`;
-
-    this.logger.log(`Image generated successfully: tenantId=${tenantId}`);
-    return dataUrl;
+    this.logger.log(`DALL-E 3 image generated: tenantId=${tenantId}`);
+    return imageUrl;
   }
 }
