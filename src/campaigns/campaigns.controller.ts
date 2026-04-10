@@ -58,7 +58,10 @@ export class CampaignsController {
       if (!accountId) {
         throw new Error(`accountId is required. Available accounts: ${allowedIds.join(', ')}`);
       }
-      if (!allowedIds.includes(accountId)) {
+      if (!accountId.startsWith('act_')) {
+        throw new Error(`accountId must start with "act_" (e.g. act_549390260260950). Got: "${accountId}"`);
+      }
+      if (!allowedIds.includes(accountId.substring(4))) {
         throw new Error(`accountId "${accountId}" is not in your Meta account list. Available: ${allowedIds.join(', ')}`);
       }
 

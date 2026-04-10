@@ -4,11 +4,12 @@ import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { S3Service } from '../../common/storage/s3.service';
 import axios from 'axios';
 
 export interface ImageResult {
   imagePrompt: string;
-  imageUrl: string;  // hosted URL from OpenAI (valid for 1 hour) — S3 upload deferred
+  imageUrl: string;  // permanent S3 URL
 }
 
 @Injectable()
@@ -19,6 +20,7 @@ export class ImageGeneratorService {
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
     private readonly configService: ConfigService,
+    private readonly s3Service: S3Service,
   ) {}
 
   async generate(
@@ -70,12 +72,12 @@ Return ONLY the image prompt, nothing else.
     const imagePrompt = promptResult.content.trim();
     this.logger.log(`Image prompt generated: tenantId=${company.tenantId} briefTopic=${brief.topic}`);
 
-    // Step 2 — Call OpenAI DALL-E 3
+    // Step 2 — Call OpenAI DALL-E 3 + upload to S3
     let imageUrl = '';
     try {
-      imageUrl = await this.callDallE(imagePrompt, company.tenantId);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId);
     } catch (err: any) {
-      this.logger.error(`OpenAI image API failed (prompt saved): ${err.message}`);
+      this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
 
     return { imagePrompt, imageUrl };
@@ -83,7 +85,7 @@ Return ONLY the image prompt, nothing else.
 
   /**
    * Generate image from a pre-reviewed prompt (from Creative Team).
-   * Skips Claude prompt generation — goes straight to DALL-E 3.
+   * Skips Claude prompt generation — goes straight to DALL-E 3 + S3.
    */
   async generateFromPrompt(
     imagePrompt: string,
@@ -94,12 +96,23 @@ Return ONLY the image prompt, nothing else.
 
     let imageUrl = '';
     try {
-      imageUrl = await this.callDallE(imagePrompt, company.tenantId);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId);
     } catch (err: any) {
-      this.logger.error(`OpenAI image API failed (prompt saved): ${err.message}`);
+      this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
 
     return { imagePrompt, imageUrl };
+  }
+
+  private async generateAndUpload(prompt: string, tenantId: string, runId: string): Promise<string> {
+    const dalleUrl = await this.callDallE(prompt, tenantId);
+
+    // Upload to S3 — DALL-E URLs expire after 1 hour, S3 URL is permanent
+    const key = `${tenantId}/images/${runId}-${Date.now()}.png`;
+    const s3Url = await this.s3Service.uploadFromUrl(dalleUrl, key, 'image/png');
+
+    this.logger.log(`Image uploaded to S3: tenantId=${tenantId} url=${s3Url}`);
+    return s3Url;
   }
 
   private async callDallE(prompt: string, tenantId: string): Promise<string> {
@@ -121,7 +134,7 @@ Return ONLY the image prompt, nothing else.
         prompt: safePrompt,
         n: 1,
         size: '1024x1792',   // closest to 9:16 vertical format
-        quality: 'standard', // use 'hd' for higher quality (2x cost)
+        quality: 'standard',
         response_format: 'url',
       },
       {

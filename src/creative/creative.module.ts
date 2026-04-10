@@ -1,5 +1,6 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { S3Service } from '../common/storage/s3.service';
 import { CreativePackage, CreativePackageSchema } from './schemas/creative-package.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
 import { CopyWriterService } from './copy-writer/copy-writer.service';
@@ -29,6 +30,7 @@ import { HeygenService } from './video-generator/heygen.service';
   ],
   controllers: [CreativeController],
   providers: [
+    S3Service,
     CopyWriterService,
     ImageGeneratorService,
     HeygenService,

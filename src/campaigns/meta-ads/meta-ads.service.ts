@@ -95,8 +95,11 @@ export class MetaAdsService {
       if (!base64) throw new Error('Invalid base64 data URL');
       payload = { bytes: base64, access_token: accessToken };
     } else {
-      // Regular URL — Meta fetches it directly
-      payload = { url: imageUrl, access_token: accessToken };
+      // Download image and send as base64 bytes — avoids app capability issues with URL fetch
+      this.logger.log(`Downloading image for base64 upload: ${imageUrl.slice(0, 80)}...`);
+      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      const base64 = Buffer.from(imgResponse.data).toString('base64');
+      payload = { bytes: base64, access_token: accessToken };
     }
 
     const response = await this.metaApiCall(
@@ -166,6 +169,49 @@ export class MetaAdsService {
   }
 
   /**
+   * Get a thumbnail image hash from a Meta video.
+   * Returns the first auto-generated thumbnail's image_hash.
+   */
+  async getVideoThumbnailHash(
+    videoId: string,
+    accountId: string,
+    accessToken: string,
+  ): Promise<string | undefined> {
+    try {
+      const response = await this.metaApiCall(
+        'GET',
+        `${META_API_BASE}/${videoId}/thumbnails?access_token=${accessToken}`,
+        {},
+      );
+      const thumbnails = response.data?.data;
+      if (!thumbnails || thumbnails.length === 0) return undefined;
+
+      // Pick the preferred thumbnail (is_preferred = true) or first one
+      const preferred = thumbnails.find((t: any) => t.is_preferred) ?? thumbnails[0];
+      const thumbUrl = preferred?.uri;
+      if (!thumbUrl) return undefined;
+
+      // Upload the thumbnail URL as an image to Meta and get the hash
+      const imgResponse = await axios.get(thumbUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      const base64 = Buffer.from(imgResponse.data).toString('base64');
+
+      const uploadResponse = await this.metaApiCall(
+        'POST',
+        `${META_API_BASE}/${accountId}/adimages`,
+        { bytes: base64, access_token: accessToken },
+      );
+      const images = uploadResponse.data?.images;
+      const firstKey = Object.keys(images ?? {})[0];
+      const hash = images?.[firstKey]?.hash;
+      this.logger.log(`Video thumbnail uploaded: hash=${hash}`);
+      return hash;
+    } catch (err: any) {
+      this.logger.warn(`Could not get video thumbnail: ${err.message}`);
+      return undefined;
+    }
+  }
+
+  /**
    * Full launch: campaign → ad sets → ads.
    * Everything starts PAUSED. Call activateCampaign() to go live.
    * On partial failure, rolls back all created objects.
@@ -231,6 +277,7 @@ export class MetaAdsService {
               config.videoId,
               config.pageId!,
               config.landingUrl,
+              config.imageHash,
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
@@ -315,6 +362,7 @@ export class MetaAdsService {
         objective,
         status: 'PAUSED',
         special_ad_categories: [],
+        is_adset_budget_sharing_enabled: false,
         access_token: accessToken,
       },
     );
@@ -347,16 +395,24 @@ export class MetaAdsService {
       },
     };
 
-    if (config.ageMin) targeting.age_min = config.ageMin;
-    if (config.ageMax) targeting.age_max = config.ageMax;
-    if (config.gender === 'male') targeting.genders = [1];
-    else if (config.gender === 'female') targeting.genders = [2];
-
     // Audience type specific targeting
     if (['lookalike', 'retarget', 'custom'].includes(config.audienceType) && config.metaAudienceId) {
       targeting.custom_audiences = [{ id: config.metaAudienceId }];
+      targeting.targeting_automation = { advantage_audience: 0 };
+      if (config.ageMin) targeting.age_min = config.ageMin;
+      if (config.ageMax) targeting.age_max = config.ageMax;
+      if (config.gender === 'male') targeting.genders = [1];
+      else if (config.gender === 'female') targeting.genders = [2];
     } else if (config.audienceType === 'advantage_plus') {
+      // Meta requires age_max >= 65 for Advantage+ — omit age/gender constraints entirely
       targeting.targeting_automation = { advantage_audience: 1 };
+    } else {
+      // interest / broad — disable advantage audience
+      targeting.targeting_automation = { advantage_audience: 0 };
+      if (config.ageMin) targeting.age_min = config.ageMin;
+      if (config.ageMax) targeting.age_max = config.ageMax;
+      if (config.gender === 'male') targeting.genders = [1];
+      else if (config.gender === 'female') targeting.genders = [2];
     }
 
     // Interest targeting — Meta requires interest IDs not names.
@@ -374,6 +430,7 @@ export class MetaAdsService {
       daily_budget: dailyBudgetPaise,
       billing_event: 'IMPRESSIONS',
       optimization_goal: config.optimizationGoal || 'OFFSITE_CONVERSIONS',
+      bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
       destination_type: 'WEBSITE',
       targeting,
       status: 'PAUSED',
@@ -382,10 +439,9 @@ export class MetaAdsService {
 
     // Pixel for conversion optimization
     if (customConversionId && pixelId) {
-      // Custom Conversion (e.g. "Nadi_Purchase") — pixel + conversion ID, Meta infers event type
+      // Custom Conversion — pixel_id + custom_conversion_id + custom_event_type: OTHER
       adSetData.promoted_object = {
-        pixel_id: pixelId,
-        custom_conversion_id: customConversionId,
+        custom_conversion_id: customConversionId
       };
     } else if (pixelId && conversionEvent) {
       // Standard or custom event
@@ -401,7 +457,7 @@ export class MetaAdsService {
       }
     }
 
-    this.logger.log(`Creating ad set: ${config.name} | daily budget: ₹${totalBudget * config.budgetPercent / 100}`);
+    this.logger.log(`Creating ad set: ${config.name} | payload: ${JSON.stringify({ ...adSetData, access_token: '[REDACTED]' })}`);
 
     const response = await this.metaApiCall(
       'POST',
@@ -489,23 +545,33 @@ export class MetaAdsService {
     videoId: string,
     pageId: string,
     landingUrl: string,
+    imageHash?: string,
   ): Promise<{ adId: string; creativeId: string }> {
+    const videoData: any = {
+      video_id: videoId,
+      message: copy.primaryText,
+      call_to_action: {
+        type: this.mapCta(copy.cta),
+        value: { link: landingUrl },
+      },
+      title: copy.headline,
+    };
+
+    // Thumbnail is required by Meta for video ads
+    if (imageHash) {
+      videoData.image_hash = imageHash;
+    }
+
     const creativeData: any = {
       name: `Creative — ${adName}`,
       object_story_spec: {
         page_id: pageId,
-        video_data: {
-          video_id: videoId,
-          message: copy.primaryText,
-          call_to_action: {
-            type: this.mapCta(copy.cta),
-            value: { link: landingUrl },
-          },
-          title: copy.headline,
-        },
+        video_data: videoData,
       },
       access_token: accessToken,
     };
+
+    this.logger.log(`Creating video creative: ${JSON.stringify({ ...creativeData, access_token: '[REDACTED]' })}`);
 
     const creativeResponse = await this.metaApiCall(
       'POST',
@@ -638,7 +704,10 @@ export class MetaAdsService {
         }
 
         // Non-retryable or last attempt — throw
-        const errorMsg = (err as AxiosError<any>)?.response?.data?.error?.message ?? err.message;
+        const fullError = (err as AxiosError<any>)?.response?.data?.error;
+        const errorMsg = fullError?.message ?? err.message;
+        const errorDetail = fullError ? JSON.stringify(fullError) : '';
+        this.logger.error(`Meta API full error: ${errorDetail}`);
         throw new Error(`Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'})`);
       }
     }

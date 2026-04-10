@@ -260,18 +260,25 @@ export class CampaignCreatorService {
         this.logger.warn(`Image upload failed (proceeding without image): ${err.message}`);
       }
     }
+    this.logger.log(`imageHash: ${imageHash ?? 'NONE'}`);
 
     // Upload video to Meta if available and any ad set needs it
     const needsVideo = (config.adSets ?? []).some(
       (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both',
     );
     let videoId: string | undefined;
+    let videoThumbnailHash: string | undefined;
     if (needsVideo && videoUrl) {
       try {
         videoId = await this.metaAdsService.uploadVideo(
           videoUrl, accountId, company.meta.accessToken,
         );
         this.logger.log(`Video uploaded to Meta: videoId=${videoId}`);
+        // Get thumbnail from video — required for video ad creatives
+        videoThumbnailHash = await this.metaAdsService.getVideoThumbnailHash(
+          videoId, accountId, company.meta.accessToken,
+        );
+        this.logger.log(`Video thumbnail hash: ${videoThumbnailHash ?? 'NONE — will use imageHash'}`);
       } catch (err: any) {
         this.logger.warn(`Video upload failed (proceeding without video): ${err.message}`);
       }
@@ -293,7 +300,7 @@ export class CampaignCreatorService {
       copyVariants: copyVariants.length > 0 ? copyVariants : [
         { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
       ],
-      imageHash,
+      imageHash: videoThumbnailHash ?? imageHash,
       videoId,
       landingUrl,
     });
