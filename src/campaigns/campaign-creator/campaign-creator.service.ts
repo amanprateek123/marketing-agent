@@ -300,7 +300,8 @@ export class CampaignCreatorService {
       copyVariants: copyVariants.length > 0 ? copyVariants : [
         { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
       ],
-      imageHash: videoThumbnailHash ?? imageHash,
+      imageHash,
+      videoThumbnailHash,
       videoId,
       landingUrl,
     });

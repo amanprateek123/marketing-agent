@@ -50,7 +50,8 @@ export interface MetaCampaignConfig {
   customConversionId?: string;   // Meta Custom Conversion ID — takes priority over conversionEvent
   adSets: MetaAdSetConfig[];
   copyVariants: { primaryText: string; headline: string; cta: string }[];
-  imageHash?: string;
+  imageHash?: string;               // real generated creative image
+  videoThumbnailHash?: string;      // thumbnail extracted from video (used only in video ads)
   videoId?: string;                 // Meta video ID (uploaded before launch)
   landingUrl: string;
 }
@@ -277,7 +278,7 @@ export class MetaAdsService {
               config.videoId,
               config.pageId!,
               config.landingUrl,
-              config.imageHash,
+              config.videoThumbnailHash ?? config.imageHash, // thumbnail for video ads only
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);

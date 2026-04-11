@@ -330,10 +330,26 @@ ${(() => {
 })()}
 
 DECISION LOGIC (apply in order):
-1. NO DATA → default by audience type:
-   - lookalike / advantage_plus → "video" (scroll-stop on cold traffic)
-   - interest → "both" (test image vs video)
-   - retarget → "image" (faster load, user already knows brand)
+1. NO DATA → think from first principles using campaign idea + audience:
+
+   STEP A — What does this audience prefer?
+   - Young audiences (18-28), impulse buyers, fashion/lifestyle → video (emotion-driven, scroll-stop)
+   - Working professionals, B2B, high-consideration purchases → image (scannable, clear info)
+   - Broad audiences (advantage_plus) with no data → video by default (better cold traffic hook)
+   - Retarget (already knows brand) → image (faster load, lower friction for decision stage)
+   - Lookalike → same format as what worked on the source audience (default video if unknown)
+
+   STEP B — What does this campaign topic/angle suggest?
+   - Product demo, transformation, testimonial, how-it-works → video (needs motion to convey value)
+   - Discount/offer, urgency, simple visual product → image (message is simple, fast to read)
+   - Emotional storytelling, lifestyle → video
+   - Feature comparison, spec-heavy, text-heavy offer → image or both
+
+   STEP C — Combine A + B:
+   - Both point to video → "video"
+   - Both point to image → "image"
+   - They conflict (e.g. young audience but simple offer) → "both" (let Meta decide)
+   - Unsure / insufficient signal → "both"
 
 2. ONE FORMAT CLEARLY WINNING (other not in winning list) → assign winner to largest budget ad sets. Still test the other format on the SMALLEST budget ad set — formats can behave differently per audience/angle. Never fully abandon a format.
 
