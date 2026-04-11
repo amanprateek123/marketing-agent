@@ -313,7 +313,7 @@ export class CampaignCreatorService {
 
     if (fullyLaunched) {
       await this.metaAdsService.activateCampaign(
-        launchResult.campaignId, company.meta.accessToken,
+        launchResult.campaignId, company.meta.accessToken, launchResult,
       );
       this.logger.log(`Campaign activated: ${totalAdsCreated}/${expectedAds} ads created`);
     } else {

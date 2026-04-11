@@ -336,13 +336,40 @@ export class MetaAdsService {
    * Activate a paused campaign (set status to ACTIVE).
    * Only call after verifying all ads were created.
    */
-  async activateCampaign(campaignId: string, accessToken: string): Promise<void> {
+  async activateCampaign(
+    campaignId: string,
+    accessToken: string,
+    launchResult?: MetaLaunchResult,
+  ): Promise<void> {
+    // Activate campaign
     await this.metaApiCall(
       'POST',
       `${META_API_BASE}/${campaignId}`,
       { status: 'ACTIVE', access_token: accessToken },
     );
     this.logger.log(`Campaign activated: ${campaignId}`);
+
+    if (!launchResult) return;
+
+    // Activate all ad sets
+    for (const adSet of launchResult.adSets) {
+      await this.metaApiCall(
+        'POST',
+        `${META_API_BASE}/${adSet.adSetId}`,
+        { status: 'ACTIVE', access_token: accessToken },
+      );
+      this.logger.log(`Ad set activated: ${adSet.adSetId} (${adSet.name})`);
+
+      // Activate all ads within each ad set
+      for (const ad of adSet.ads) {
+        await this.metaApiCall(
+          'POST',
+          `${META_API_BASE}/${ad.adId}`,
+          { status: 'ACTIVE', access_token: accessToken },
+        );
+        this.logger.log(`Ad activated: ${ad.adId}`);
+      }
+    }
   }
 
   // ─── Private: Meta API methods ──────────────────────────────────────────────
