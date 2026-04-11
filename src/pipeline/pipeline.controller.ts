@@ -252,6 +252,8 @@ export class PipelineController {
         {
           briefs: allBriefs.map((b) => ({
             briefId: b.selected ? creativeBrief.briefId : (b as any).briefId ?? '',
+            product: (b as any).product ?? '',
+            targetSegment: (b as any).targetSegment ?? '',
             topic: b.topic,
             angle: b.angle,
             platform: b.platform,

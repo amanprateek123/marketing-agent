@@ -15,6 +15,8 @@ import { MetaAdsLibraryInsights } from './schemas/meta-ads-library-output.schema
 export interface IdeaPoolResult {
   briefs: Array<{
     briefId: string;
+    product: string;
+    targetSegment: string;
     topic: string;
     angle: string;
     platform: string;
@@ -81,8 +83,19 @@ export class IdeaPoolService {
       return { briefs: [], selectedBriefId: '', selectionReason: '' };
     }
 
-    // ── Assign a unique briefId to every brief upfront ───────────────────────
-    briefs.forEach((b) => { b.briefId = uuidv4(); });
+    // ── Assign a unique briefId + resolve product name against company schema ──
+    briefs.forEach((b) => {
+      b.briefId = uuidv4();
+      const exactMatch = (company.products ?? []).find((p) => p.name === b.product);
+      const fuzzyMatch = exactMatch ?? (company.products ?? []).find(
+        (p) => p.name?.toLowerCase() === b.product?.toLowerCase(),
+      );
+      const resolved = fuzzyMatch ?? (company.products ?? []).find((p) => p.active) ?? (company.products ?? [])[0];
+      if (resolved && !exactMatch) {
+        this.logger.warn(`Idea pool product mismatch: "${b.product}" → resolved to "${resolved.name}"`);
+      }
+      b.product = resolved?.name ?? b.product;
+    });
 
     // ── Rule-based winner selection ───────────────────────────────────────────
     const winner = this.selectWinner(briefs, coordinatorResult);
@@ -138,6 +151,8 @@ export class IdeaPoolService {
     return {
       briefs: briefs.map((b) => ({
         briefId: b.briefId ?? '',
+        product: b.product ?? '',
+        targetSegment: b.targetSegment ?? '',
         topic: b.topic,
         angle: b.angle,
         platform: b.platform,

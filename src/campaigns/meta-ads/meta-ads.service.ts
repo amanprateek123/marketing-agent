@@ -340,7 +340,7 @@ export class MetaAdsService {
   async activateCampaign(
     campaignId: string,
     accessToken: string,
-    launchResult?: MetaLaunchResult,
+    launchResult: MetaLaunchResult,
   ): Promise<void> {
     // Activate campaign
     await this.metaApiCall(
@@ -349,8 +349,6 @@ export class MetaAdsService {
       { status: 'ACTIVE', access_token: accessToken },
     );
     this.logger.log(`Campaign activated: ${campaignId}`);
-
-    if (!launchResult) return;
 
     // Activate all ad sets
     for (const adSet of launchResult.adSets) {

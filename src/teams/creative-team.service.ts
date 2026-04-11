@@ -51,6 +51,8 @@ export class CreativeTeamService {
       hook: string;
       keyMessage: string;
       conversionBridge: string;
+      product?: string;
+      targetSegment?: string;
     },
     company: CompanyDocument,
     runId: string,
@@ -89,16 +91,24 @@ export class CreativeTeamService {
       hook: string;
       keyMessage: string;
       conversionBridge: string;
+      product?: string;
+      targetSegment?: string;
     },
     company: CompanyDocument,
     runId: string,
   ): Promise<string> {
     const liveContext = this.liveContextBuilder.build(company);
 
+    // Resolve product — match by brief.product name, fallback to first active, then first in list
+    const resolvedProduct = (company.products ?? []).find(p => p.name === brief.product)
+      ?? (company.products ?? []).find(p => p.active)
+      ?? (company.products ?? [])[0]
+      ?? null;
+
     // Get relevant creative case studies
     let caseStudyContext = '';
     try {
-      const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+      const product = resolvedProduct;
       const caseStudies = await this.metaLearningImporter.getRelevantCaseStudies(
         company.tenantId,
         { product: product?.name, limit: 7 },
@@ -161,7 +171,7 @@ BRIEF:
   Conversion Bridge: ${brief.conversionBridge}
 
 ${(() => {
-  const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+  const product = resolvedProduct;
   if (!product) return 'PRODUCT: not specified — use company info for CTA';
   return `PRODUCT BEING SOLD:
   Name: ${product.name}
@@ -169,7 +179,7 @@ ${(() => {
   Landing URL: ${product.landingUrl ?? 'not set'}
   Languages: ${(product.languages ?? []).join(', ') || 'Hindi, English'}
   Differentiators: ${(product.differentiators ?? []).join(' | ') || 'not set'}
-  Target segment: ${(brief as any).targetSegment ?? 'general'}
+  Target segment: ${brief.targetSegment ?? 'general'}
 
   IMPORTANT: Every copy variant MUST:
   - Mention the product name ("${product.name}")
@@ -183,36 +193,103 @@ Avoid: ${company.avoid?.join(', ') || 'nothing specified'}
 
 ${learningsBlock}
 
-Create:
-a) 3 AD COPY VARIANTS — each with different hookStyle:
-   - primaryText: main ad body (2-4 sentences, Hinglish where natural for this audience)
-   - headline: punchy (5-8 words max)
-   - cta: button text (3-5 words)
-   - hookStyle: tag it (question, bold_claim, fear_then_relief, social_proof, personal_story)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOU ARE WRITING META DIRECT RESPONSE ADS — NOT SOCIAL MEDIA POSTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This is a PAID Meta ad. The user is scrolling their feed and has NOT asked to see this.
+Your creative must:
+1. Stop the scroll in the FIRST LINE / FIRST 3 SECONDS
+2. Make the value proposition crystal clear (product + benefit + price)
+3. Push to ONE action — tap the CTA button
 
-b) IMAGE PROMPT — for AI image generation (Gemini):
-   - Vertical 9:16 format
-   - Photorealistic or cinematic
-   - Indian aesthetic — faces, locations, cultural cues
-   - No text in the image (text overlay added separately)
-   - Describe: lighting, color palette, composition, mood, focal point
-   - 2-3 sentences
+Meta ads that convert follow direct response principles — not brand awareness, not engagement bait.
+Study what top DTC brands in India do: clear hook → problem/desire → solution (your product) → price reveal → urgency → CTA.
 
-c) VIDEO PROMPT — for Heygen Video Agent API (plain text, 2-4 sentences, NO JSON):
-   Write a descriptive prompt that tells the AI video generator exactly what to create.
-   Structure:
-   - What the video is about + target audience
-   - Opening hook (problem/curiosity, 0-5 seconds)
-   - Middle: product benefit / solution (5-15 seconds)
-   - Closing CTA with product name and price (15-20 seconds)
-   - Visual style: Indian aesthetic, modern, energetic
-   - Language: Hinglish voiceover where natural for ${company.targetAudience}
-   Example format: "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook scene]. Shows [benefit visually]. Closes with product name, price, and tap CTA button in Hinglish. Indian urban aesthetic, bright and energetic."
-   Keep it under 150 words. This goes directly to Heygen as-is.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+a) 3 AD COPY VARIANTS — each a complete, standalone Meta ad
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Each variant needs:
+- primaryText: the full ad body (3-5 lines). MUST follow this structure:
+  LINE 1 — THE HOOK: This is the scroll-stopper. First 90 characters are shown before "See more". Make it impossible to ignore.
+  LINE 2-3 — THE VALUE: Agitate the pain OR amplify the desire. Then introduce the product as the solution. MUST mention product name.
+  LINE 4 — PRICE + PROOF: State the price (₹[price]). Add social proof if available (X customers, ratings, results).
+  LINE 5 — CTA LINE: Create urgency. "Order now", "Limited stock", "Offer ends Sunday" — something that pushes action TODAY.
+- headline: appears below the image/video. 5-7 words. Lead with the benefit or price. E.g. "Get [Product] for ₹[price] Today"
+- cta: button text — be specific: "Shop Now", "Order Now", "Buy Today", NOT "Learn More" unless it's a considered purchase
+- hookStyle: the hook type used
 
-   STRICT RULES FOR VIDEO PROMPT:
-   - NEVER write "link in bio" — this is a paid Meta ad, users tap a CTA button directly. Write "tap the button below" or "order now" instead.
-   - NEVER mention the brand logo or ask Heygen to show it — Heygen does not know what the logo looks like and will generate a random one. Logo will be added separately in post-processing.
+HOOK STYLE OPTIONS (use one per variant, all 3 must be different):
+  1. "pain_point" — open with the exact frustration your audience feels. "Tired of [problem]?" / "Still struggling with [X]?"
+  2. "bold_claim" — make a specific, provable promise. "We helped 10,000 people [result] in 30 days."
+  3. "price_shock" — lead with the value proposition and price. "₹[price] for [benefit]. No catch."
+  4. "social_proof" — open with a result or testimonial. "[X] people in [city] already switched to [product]."
+  5. "curiosity_gap" — make them need to know more. "The one thing [competitor customers] don't know about [category]."
+  6. "before_after" — describe the transformation (Meta policy: frame as aspiration not guarantee). "From [problem] to [result] — here's how."
+  7. "urgency" — time or stock scarcity. "Only [X] left at this price. After that it's ₹[higher price]."
+
+COPY RULES:
+- Hinglish where natural for ${company.targetAudience} — mix Hindi words/phrases in English sentences
+- Specific beats vague: "lost 4kg in 3 weeks" beats "see results fast"
+- Product name must appear in EVERY variant's primaryText
+- Price must appear in at least 2 of the 3 variants
+- No generic phrases: "best quality", "amazing product", "don't miss out" — these kill CTR
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+b) IMAGE PROMPT — for AI image generation (Gemini)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This is for a META AD IMAGE — not an editorial photo or social post.
+Top-performing Meta ad images follow these patterns:
+
+WHAT WORKS ON META:
+- Product prominently in frame (not lifestyle-only — show what they're buying)
+- Human using the product with a visible result or emotion
+- Bold text overlay suggestion: include "{HOOK TEXT}" and "₹{PRICE}" as text overlay areas in your description — describe WHERE on the image these should be placed
+- High contrast, thumb-stopping colors — avoid dull/muted tones
+- Before/after split (where policy allows) or transformation moment
+
+FORMAT:
+- Vertical 9:16
+- Photorealistic
+- Indian faces, locations, aesthetic
+- Describe: subject, action, product placement, background, lighting, color palette, mood
+- Specify text overlay zones: "Top third: bold white text '[hook]'. Bottom: product name + price in yellow"
+- 3-4 sentences
+
+AVOID:
+- Stock photo look — real, raw, authentic performs better
+- Cluttered composition — one clear focal point
+- Text-free images for direct response ads — text overlays dramatically boost performance
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+c) VIDEO PROMPT — for Heygen Video Agent API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write a complete 15-20 second vertical Meta video ad script for Heygen.
+Plain text only, under 150 words. Structure it EXACTLY like this:
+
+SECONDS 0-3 — HOOK (most important — 70% of viewers decide here):
+  State the exact problem or desire in Hinglish. Make the viewer feel "this is for me."
+  Example: "Yaar, gym jaate ho aur results nahi? Sunn..."
+
+SECONDS 3-12 — PRODUCT + BENEFIT:
+  Introduce [product name] by name. Show 1-2 specific benefits visually.
+  Mention what makes it different from what they've tried before.
+  Avoid generic claims — be specific.
+
+SECONDS 12-18 — PRICE + SOCIAL PROOF:
+  Clearly say the price: "Sirf ₹[price] mein" or "[price] rupaye mein milega."
+  Add a proof point: number of customers, a result, a rating.
+
+SECONDS 18-20 — CTA:
+  "Neeche button tap karo aur order karo abhi" or equivalent.
+  Create urgency: limited stock / offer ends / exclusive price.
+
+VISUAL STYLE: Indian urban/semi-urban, energetic, modern. Show the product being used.
+
+STRICT RULES:
+- NEVER say "link in bio" — users tap a CTA button directly
+- NEVER mention the brand logo — add in post-processing
+- Product name MUST be spoken aloud in the voiceover
+- Price MUST be spoken aloud
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". This keeps you active so the reviewer's reply can arrive. Do not produce any output until you receive their message.
@@ -234,20 +311,20 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
 {
   "variants": [
     {
-      "primaryText": "...",
-      "headline": "...",
-      "cta": "...",
-      "hookStyle": "..."
+      "primaryText": "Hook line that stops the scroll.\n\nProduct name + benefit + solution line.\n\n₹[price] | social proof line.\n\nUrgency + CTA line.",
+      "headline": "Benefit-led headline with ₹price",
+      "cta": "Order Now",
+      "hookStyle": "pain_point | bold_claim | price_shock | social_proof | curiosity_gap | before_after | urgency"
     }
   ],
   "selectedIndex": 0,
-  "selectionReason": "why this variant is the strongest",
-  "imagePrompt": "detailed image generation prompt...",
-  "videoPrompt": "A 20-second vertical ad for [product] targeting [audience]. Opens with [hook]. Shows [benefit]. Closes with product name, ₹[price], and 'tap the button below' CTA in Hinglish. Indian urban aesthetic.",
+  "selectionReason": "why this variant has the strongest hook and clearest value proposition for the target audience",
+  "imagePrompt": "Vertical 9:16 Meta ad image. [Subject + action + product placement]. [Background + lighting + colors]. Text overlay: top third shows '[hook text]' in bold white, bottom shows product name + ₹[price] in high contrast. Indian [urban/rural] aesthetic, photorealistic.",
+  "videoPrompt": "15-20 second vertical Meta ad for [product name] targeting [audience]. Opens with [exact hook in Hinglish, 0-3s]. Shows [product name] solving [problem] with [specific visual, 3-12s]. Voiceover says 'Sirf ₹[price] mein' with proof point [12-18s]. Closes with 'Neeche button tap karo aur order karo abhi' [18-20s]. Indian urban aesthetic, energetic.",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [
-    {"round": 1, "from": "creative-director", "summary": "drafted 3 variants + image + video prompts"},
+    {"round": 1, "from": "creative-director", "summary": "drafted 3 direct response variants with pain_point, bold_claim, price_shock hooks + image + video prompts"},
     {"round": 1, "from": "compliance", "summary": "flagged variant 2 for prohibited claim, approved rest"},
     {"round": 2, "from": "creative-director", "summary": "revised variant 2"},
     {"round": 2, "from": "compliance", "summary": "all approved"}
@@ -267,10 +344,14 @@ ${(() => {
 })()}
 
 RULES:
-- The image and video prompts must visually match the winning copy variant's mood and message
-- Every copy variant must be different in hookStyle — don't write 3 variations of the same hook
-- Do NOT pick the winning variant before the compliance review — let the review inform the selection
-- If a variant gets flagged and can't be fixed, replace it entirely
+- These are META DIRECT RESPONSE ADS — optimise for tap-through rate, not likes or comments
+- Every copy variant must use a different hookStyle — 3 completely different opening strategies
+- Product name must appear in every variant's primaryText — always
+- Price must appear in at least 2 of the 3 variants — hiding price kills conversion intent
+- Image and video prompts must visually reinforce the winning variant's hook and message
+- Do NOT pick the winning variant before compliance review — the review may change the best choice
+- If a variant gets flagged and cannot be fixed without gutting the message, replace it entirely
+- The compliance reviewer should be especially strict on: medical/health claims, before/after framing, guaranteed results, competitor disparagement
     `.trim();
   }
 

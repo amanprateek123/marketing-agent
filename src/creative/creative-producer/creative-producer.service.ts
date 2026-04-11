@@ -18,6 +18,8 @@ export interface BriefData {
   hook: string;
   keyMessage: string;
   conversionBridge: string;
+  product?: string;
+  targetSegment?: string;
 }
 
 @Injectable()

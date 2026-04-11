@@ -176,6 +176,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
     const ideaPoolResult: IdeaPoolResult = {
       briefs: allBriefs.map((b) => ({
         briefId: b.selected ? creativeBrief.briefId : (b.briefId ?? ''),
+        product: (b as any).product ?? '',
+        targetSegment: (b as any).targetSegment ?? '',
         topic: b.topic,
         angle: b.angle,
         platform: b.platform,
@@ -334,6 +336,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
         ideaPoolResult = {
           briefs: allBriefs.map((b) => ({
             briefId: b.selected ? existingBrief.briefId : (b.briefId ?? ''),
+            product: (b as any).product ?? '',
+            targetSegment: (b as any).targetSegment ?? '',
             topic: b.topic,
             angle: b.angle,
             platform: b.platform,
@@ -433,6 +437,8 @@ export class PipelineOrchestratorService implements OnModuleInit {
             hook: selectedBrief.hook,
             keyMessage: selectedBrief.keyMessage,
             conversionBridge: selectedBrief.conversionBridge,
+            product: selectedBrief.product,
+            targetSegment: selectedBrief.targetSegment,
           },
         );
       }

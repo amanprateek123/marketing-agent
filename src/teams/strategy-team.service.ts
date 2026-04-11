@@ -83,7 +83,20 @@ export class StrategyTeamService {
     if (briefs.length === 0) {
       throw new Error(`Strategy Team returned 0 ideas for run ${runId} — debate may have failed to produce output`);
     }
-    briefs.forEach((b: any) => { b.briefId = uuidv4(); });
+    briefs.forEach((b: any) => {
+      b.briefId = uuidv4();
+      // Validate product name — LLM may output slightly wrong casing or name
+      // Find exact match first, then case-insensitive, then first active product
+      const exactMatch = (company.products ?? []).find(p => p.name === b.product);
+      const fuzzyMatch = exactMatch ?? (company.products ?? []).find(
+        p => p.name?.toLowerCase() === b.product?.toLowerCase(),
+      );
+      const resolved = fuzzyMatch ?? (company.products ?? []).find(p => p.active) ?? (company.products ?? [])[0];
+      if (resolved && !exactMatch) {
+        this.logger.warn(`Strategy Team product mismatch: "${b.product}" → resolved to "${resolved.name}"`);
+      }
+      b.product = resolved?.name ?? b.product;
+    });
 
     const winnerId = briefs.find((b: any) => b.selected)?.briefId ?? briefs[0].briefId;
     const winner = briefs.find((b: any) => b.briefId === winnerId);
@@ -144,6 +157,8 @@ export class StrategyTeamService {
     return {
       briefs: briefs.map((b: any) => ({
         briefId: b.briefId,
+        product: b.product ?? '',
+        targetSegment: b.targetSegment ?? '',
         topic: b.topic,
         angle: b.angle,
         platform: b.platform,
