@@ -26,6 +26,7 @@ export interface MetaAdSetConfig {
   name: string;
   budgetPercent: number;
   audienceType: string;
+  creativeFormat?: 'video' | 'image' | 'both';
   metaAudienceId?: string;
   excludeAudienceIds?: string[];
   ageMin?: number;
@@ -259,7 +260,7 @@ export class MetaAdsService {
 
         // Create ads (one per copy variant)
         const adResults: MetaLaunchResult['adSets'][0]['ads'] = [];
-        const creativeFormat = (adSetConfig as any).creativeFormat ?? 'image';
+        const creativeFormat = adSetConfig.creativeFormat ?? 'image';
 
         for (const variantIndex of adSetConfig.ads) {
           const variant = config.copyVariants[variantIndex];

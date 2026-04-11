@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
-import { runTeamViaCli, CliResult } from './team-cli.util';
+import { runTeamViaCli } from './team-cli.util';
 import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
@@ -10,6 +10,8 @@ import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schema
 import { CreativeBrief, CreativeBriefDocument } from '../pipeline/schemas/creative-brief.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CoordinatorResult } from '../pipeline/coordinator.service';
+import { StructuredResearch } from '../pipeline/schemas/research-output.schema';
+import { MetaAdsLibraryInsights } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { IdeaPoolResult } from '../pipeline/idea-pool.service';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
@@ -42,8 +44,9 @@ export class StrategyTeamService {
     company: CompanyDocument,
     runId: string,
     coordinatorResult: CoordinatorResult,
-    competitorResearch: string,
-    marketResearch: string,
+    competitorResearch: StructuredResearch,
+    marketResearch: StructuredResearch,
+    adLibraryInsights: MetaAdsLibraryInsights,
   ): Promise<IdeaPoolResult> {
     const tenantId = company.tenantId;
     const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 5;
@@ -51,7 +54,7 @@ export class StrategyTeamService {
     this.logger.log(`Strategy Team starting | tenant: ${tenantId} | run: ${runId}`);
 
     const prompt = await this.buildPrompt(
-      company, runId, coordinatorResult, competitorResearch, marketResearch, ideasPerRun,
+      company, runId, coordinatorResult, competitorResearch, marketResearch, adLibraryInsights, ideasPerRun,
     );
 
     const teamName = `strategy-${runId}`;
@@ -77,13 +80,16 @@ export class StrategyTeamService {
 
     // Assign briefIds
     const briefs = parsed.briefs ?? [];
+    if (briefs.length === 0) {
+      throw new Error(`Strategy Team returned 0 ideas for run ${runId} — debate may have failed to produce output`);
+    }
     briefs.forEach((b: any) => { b.briefId = uuidv4(); });
 
-    const winnerId = briefs.find((b: any) => b.selected)?.briefId ?? briefs[0]?.briefId ?? '';
+    const winnerId = briefs.find((b: any) => b.selected)?.briefId ?? briefs[0].briefId;
     const winner = briefs.find((b: any) => b.briefId === winnerId);
 
     if (!winner) {
-      throw new Error(`Strategy Team returned no usable ideas for run ${runId}`);
+      throw new Error(`Strategy Team winner not found in briefs for run ${runId} — this is a bug`);
     }
 
     // Persist intelligence briefs
@@ -158,8 +164,9 @@ export class StrategyTeamService {
     company: CompanyDocument,
     runId: string,
     coordinator: CoordinatorResult,
-    competitorResearch: string,
-    marketResearch: string,
+    competitorResearch: StructuredResearch,
+    marketResearch: StructuredResearch,
+    adLibraryInsights: MetaAdsLibraryInsights,
     ideasPerRun: number,
   ): Promise<string> {
     const liveContext = this.liveContextBuilder.build(company);
@@ -350,11 +357,33 @@ ${topSignals || coordinator.content.slice(0, 2000)}
 FULL COORDINATOR SYNTHESIS:
 ${coordinator.content}
 
-COMPETITOR RESEARCH:
-${competitorResearch}
+COMPETITOR INSIGHTS (ranked by opportunity score):
+${competitorResearch.insights.map((i, idx) =>
+  `${idx + 1}. [score:${i.score} | urgency:${i.urgency}] ${i.insight}\n   → ${i.implication}${i.source ? `\n   source: ${i.source}` : ''}`
+).join('\n')}
+Summary: ${competitorResearch.rawSummary}
 
-MARKET RESEARCH:
-${marketResearch}
+MARKET INSIGHTS (ranked by opportunity score):
+${marketResearch.insights.map((i, idx) =>
+  `${idx + 1}. [score:${i.score} | urgency:${i.urgency}] ${i.insight}\n   → ${i.implication}${i.source ? `\n   source: ${i.source}` : ''}`
+).join('\n')}
+Summary: ${marketResearch.rawSummary}
+
+META ADS LIBRARY — WHAT COMPETITORS ARE RUNNING RIGHT NOW:
+${adLibraryInsights.competitorAds.length > 0
+  ? adLibraryInsights.competitorAds.map((a, idx) =>
+    `${idx + 1}. [score:${a.score}] ${a.competitor} — "${a.hook}" | angle: ${a.angle} | format: ${a.format} | CTA: ${a.cta} | running ~${a.estimatedDaysRunning}d`
+  ).join('\n')
+  : '  No competitor ad data available.'}
+
+META ADS GAPS — WHAT NOBODY IS DOING (your opportunities):
+${adLibraryInsights.gaps.length > 0
+  ? adLibraryInsights.gaps.map((g, idx) =>
+    `${idx + 1}. [score:${g.score} | ${g.urgency}] ${g.gap}\n   → ${g.opportunity}`
+  ).join('\n')
+  : '  No gap data available.'}
+Dominant format in category: ${adLibraryInsights.dominantFormat}
+${adLibraryInsights.rawSummary ? `Summary: ${adLibraryInsights.rawSummary}` : ''}
 
 ${learningsContext}
 

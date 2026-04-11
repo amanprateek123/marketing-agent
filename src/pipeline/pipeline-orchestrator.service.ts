@@ -6,7 +6,7 @@ import { CompaniesService } from '../companies/companies.service';
 import { PipelineRun, PipelineRunDocument } from './schemas/pipeline-run.schema';
 import { ScoutOutput, ScoutOutputDocument } from './schemas/scout-output.schema';
 import { CoordinatorOutput, CoordinatorOutputDocument } from './schemas/coordinator-output.schema';
-import { ResearchOutput, ResearchOutputDocument } from './schemas/research-output.schema';
+import { ResearchOutput, ResearchOutputDocument, StructuredResearch } from './schemas/research-output.schema';
 import { CreativeBrief, CreativeBriefDocument } from './schemas/creative-brief.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from './schemas/intelligence-brief.schema';
 import { Digest, DigestDocument } from './schemas/digest.schema';
@@ -21,6 +21,8 @@ import { CreativeProducerService } from '../creative/creative-producer/creative-
 import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { StrategyTeamService } from '../teams/strategy-team.service';
+import { MetaAdsLibraryService } from './meta-ads-library.service';
+import { MetaAdsLibraryInsights } from './schemas/meta-ads-library-output.schema';
 
 export interface TriggerPipelineResult {
   runId: string;
@@ -44,6 +46,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
     private readonly campaignCreatorService: CampaignCreatorService,
     private readonly campaignsService: CampaignsService,
     private readonly strategyTeam: StrategyTeamService,
+    private readonly metaAdsLibrary: MetaAdsLibraryService,
     private readonly ideaPoolService: IdeaPoolService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
@@ -172,7 +175,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
 
     const ideaPoolResult: IdeaPoolResult = {
       briefs: allBriefs.map((b) => ({
-        briefId: b.selected ? creativeBrief.briefId : '',
+        briefId: b.selected ? creativeBrief.briefId : (b.briefId ?? ''),
         topic: b.topic,
         angle: b.angle,
         platform: b.platform,
@@ -243,25 +246,47 @@ export class PipelineOrchestratorService implements OnModuleInit {
         this.logger.log(`[${runId}] Phase A done — signals: ${counts.join(' ')}`);
       }
 
-      // ── Phase B: Coordinator ──────────────────────────────────────────────
-      const existingCoordinator = await this.coordinatorOutputModel
-        .findOne({ tenantId, runId })
-        .lean()
-        .exec();
+      // ── Phase B + B2: Coordinator & Meta Ads Library (parallel) ─────────────
+      // Both depend only on company data + scout outputs — neither depends on the other.
+      await update('intelligence_running', 'coordinator');
+      this.logger.log(`[${runId}] Phase B+B2: coordinator + meta ads library (parallel)`);
 
-      let coordinatorResult: CoordinatorResult;
+      const [coordinatorSettled, adLibrarySettled] = await Promise.allSettled([
+        // Phase B: Coordinator
+        (async (): Promise<CoordinatorResult> => {
+          const existingCoordinator = await this.coordinatorOutputModel
+            .findOne({ tenantId, runId })
+            .lean()
+            .exec();
+          if (existingCoordinator) {
+            this.logger.log(`[${runId}] Phase B: skipped — coordinator already complete`);
+            return {
+              coordinatorOutputId: existingCoordinator._id.toString(),
+              content: existingCoordinator.content,
+              topSignals: existingCoordinator.topSignals,
+            };
+          }
+          return this.coordinatorService.run(company, runId);
+        })(),
 
-      if (existingCoordinator) {
-        this.logger.log(`[${runId}] Phase B: skipped — coordinator already complete`);
-        coordinatorResult = {
-          coordinatorOutputId: existingCoordinator._id.toString(),
-          content: existingCoordinator.content,
-          topSignals: existingCoordinator.topSignals,
-        };
+        // Phase B2: Meta Ads Library
+        this.metaAdsLibrary.runIdempotent(company, runId),
+      ]);
+
+      // Coordinator is required — fail pipeline if it errors
+      if (coordinatorSettled.status === 'rejected') {
+        throw new Error(`Coordinator failed: ${coordinatorSettled.reason?.message ?? coordinatorSettled.reason}`);
+      }
+      const coordinatorResult: CoordinatorResult = coordinatorSettled.value;
+
+      // Meta Ads Library is optional — degrade gracefully
+      let adLibraryInsights: MetaAdsLibraryInsights;
+      if (adLibrarySettled.status === 'fulfilled') {
+        adLibraryInsights = adLibrarySettled.value;
+        this.logger.log(`[${runId}] Phase B2: Meta Ads Library done | competitorAds: ${adLibraryInsights.competitorAds.length} | gaps: ${adLibraryInsights.gaps.length}`);
       } else {
-        await update('intelligence_running', 'coordinator');
-        this.logger.log(`[${runId}] Phase B: coordinator`);
-        coordinatorResult = await this.coordinatorService.run(company, runId);
+        this.logger.warn(`[${runId}] Phase B2: Meta Ads Library failed — continuing without it: ${adLibrarySettled.reason?.message ?? adLibrarySettled.reason}`);
+        adLibraryInsights = { competitorAds: [], gaps: [], dominantFormat: 'unknown', rawSummary: '' };
       }
 
       // ── Phase C: Intelligence agents ──────────────────────────────────────
@@ -270,13 +295,20 @@ export class PipelineOrchestratorService implements OnModuleInit {
         .lean()
         .exec();
 
-      let competitorResearch: string;
-      let marketResearch: string;
+      let competitorResearch: StructuredResearch;
+      let marketResearch: StructuredResearch;
+
+      const fallbackResearch = (summary: string): StructuredResearch => ({
+        insights: [{ insight: 'Research unavailable', implication: summary.slice(0, 300), urgency: 'low', score: 1 }],
+        rawSummary: summary.slice(0, 300),
+      });
 
       if (existingResearch.length >= 2) {
         this.logger.log(`[${runId}] Phase C: skipped — research already complete`);
-        competitorResearch = existingResearch.find((r) => r.type === 'competitor')?.content ?? '';
-        marketResearch = existingResearch.find((r) => r.type === 'market')?.content ?? '';
+        const existingCompetitor = existingResearch.find((r) => r.type === 'competitor');
+        const existingMarket = existingResearch.find((r) => r.type === 'market');
+        competitorResearch = existingCompetitor?.structured ?? fallbackResearch(existingCompetitor?.content ?? '');
+        marketResearch = existingMarket?.structured ?? fallbackResearch(existingMarket?.content ?? '');
       } else {
         this.logger.log(`[${runId}] Phase C: intelligence agents`);
         [competitorResearch, marketResearch] = await Promise.all([
@@ -291,7 +323,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
         .lean()
         .exec();
 
-      let ideaPoolResult!: IdeaPoolResult;
+      let ideaPoolResult: IdeaPoolResult | null = null;
 
       if (existingBrief) {
         this.logger.log(`[${runId}] Phase D: skipped — idea pool already complete`);
@@ -301,7 +333,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
           .exec();
         ideaPoolResult = {
           briefs: allBriefs.map((b) => ({
-            briefId: b.selected ? existingBrief.briefId : '',
+            briefId: b.selected ? existingBrief.briefId : (b.briefId ?? ''),
             topic: b.topic,
             angle: b.angle,
             platform: b.platform,
@@ -325,7 +357,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
           try {
             this.logger.log(`[${runId}] Phase D: Strategy Team attempt ${attempt}/2`);
             const teamResult = await this.strategyTeam.run(
-              company, runId, coordinatorResult, competitorResearch, marketResearch,
+              company, runId, coordinatorResult, competitorResearch, marketResearch, adLibraryInsights,
             );
 
             // Validate: did a real debate happen?
@@ -345,10 +377,14 @@ export class PipelineOrchestratorService implements OnModuleInit {
         if (!teamSucceeded) {
           this.logger.warn(`[${runId}] Phase D: falling back to single-agent IdeaPool`);
           ideaPoolResult = await this.ideaPoolService.run(
-            company, runId, coordinatorResult, competitorResearch, marketResearch,
+            company, runId, coordinatorResult, competitorResearch, marketResearch, adLibraryInsights,
           );
           this.logger.log(`[${runId}] Phase D done (IdeaPool fallback) — ${ideaPoolResult.briefs.length} ideas`);
         }
+      }
+
+      if (!ideaPoolResult) {
+        throw new Error(`[${runId}] Phase D failed — both Strategy Team and IdeaPool returned no result. Pipeline aborted.`);
       }
 
       // ── Phase E: Digest ───────────────────────────────────────────────────
@@ -402,9 +438,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
       }
 
       // ── Phase G: Campaign Launch ───────────────────────────────────────────
-      const existingCampaign = await this.campaignsService
-        .findAll(tenantId)
-        .then((campaigns) => campaigns.find((c) => c.runId === runId));
+      const existingCampaign = await this.campaignsService.findByRunId(tenantId, runId);
 
       if (existingCampaign) {
         this.logger.log(`[${runId}] Phase G: skipped — campaign already launched`);

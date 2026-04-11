@@ -24,6 +24,8 @@ CRITICAL RULES:
    but generic enough that price/product changes don't require regeneration.
 6. Scout prompts (instagramScout, redditScout, twitterScout, youtubeScout): 600-900 words —
    they must include all 3 required sections plus brand-specific focus areas.
+   metaAdsLibrary prompt: 400-600 words — include brand-specific focus on which competitor ads to watch for,
+   what messaging angles to flag as threats, and what gaps would be most valuable for this brand to own.
    Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter, campaignCreator): 300-500 words —
    focus on synthesis logic, scoring criteria, and brand voice.
 
@@ -156,6 +158,7 @@ Return ONLY a valid JSON object with exactly these keys:
   "coordinator": "...",
   "competitorResearch": "...",
   "marketResearch": "...",
+  "metaAdsLibrary": "...",
   "ideaPool": "...",
   "digestWriter": "...",
   "campaignCreator": "..."
@@ -172,6 +175,7 @@ const REQUIRED_PROMPT_KEYS: (keyof CompanyPrompts)[] = [
   'coordinator',
   'competitorResearch',
   'marketResearch',
+  'metaAdsLibrary',
   'ideaPool',
   'digestWriter',
   'campaignCreator',

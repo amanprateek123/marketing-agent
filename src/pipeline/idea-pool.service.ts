@@ -9,6 +9,8 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from './schemas/intelligence-brief.schema';
 import { CreativeBrief, CreativeBriefDocument } from './schemas/creative-brief.schema';
 import { CoordinatorResult } from './coordinator.service';
+import { StructuredResearch } from './schemas/research-output.schema';
+import { MetaAdsLibraryInsights } from './schemas/meta-ads-library-output.schema';
 
 export interface IdeaPoolResult {
   briefs: Array<{
@@ -45,8 +47,9 @@ export class IdeaPoolService {
     company: CompanyDocument,
     runId: string,
     coordinatorResult: CoordinatorResult,
-    competitorResearch: string,
-    marketResearch: string,
+    competitorResearch: StructuredResearch,
+    marketResearch: StructuredResearch,
+    adLibraryInsights: MetaAdsLibraryInsights,
   ): Promise<IdeaPoolResult> {
     const tenantId = company.tenantId;
     const liveContext = this.liveContextBuilder.build(company);
@@ -56,6 +59,7 @@ export class IdeaPoolService {
       coordinatorResult,
       competitorResearch,
       marketResearch,
+      adLibraryInsights,
       company,
       ideasPerRun,
     );
@@ -152,8 +156,9 @@ export class IdeaPoolService {
 
   private buildGeneratePrompt(
     coordinator: CoordinatorResult,
-    competitorResearch: string,
-    marketResearch: string,
+    competitorResearch: StructuredResearch,
+    marketResearch: StructuredResearch,
+    adLibraryInsights: MetaAdsLibraryInsights,
     company: CompanyDocument,
     ideasPerRun: number,
   ): string {
@@ -190,22 +195,43 @@ ${coordinator.content}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SOURCE 2 — COMPETITOR GAP (generate 1 idea)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-From the competitor research below, identify the single biggest gap or vulnerability
-a competitor has RIGHT NOW that ${company.name} can exploit.
+From the competitor insights below, pick the highest-score gap or vulnerability
+that ${company.name} can exploit RIGHT NOW. Use the implication as your idea direction.
 Set ideaSource to "competitor_gap".
-Set urgent: true if this gap is time-sensitive (competitor is vulnerable this week).
+Set urgent: true if urgency is "high".
 
-${competitorResearch}
+${competitorResearch.insights.map((i, idx) =>
+  `${idx + 1}. [score:${i.score} | ${i.urgency}] ${i.insight}\n   → ${i.implication}`
+).join('\n')}
+Summary: ${competitorResearch.rawSummary}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SOURCE 3 — MARKET INSIGHT (generate 1 idea)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-From the market research below, identify the strongest seasonal or trending
-market opportunity for ${company.name} right now.
+From the market insights below, pick the highest-score seasonal or trending
+opportunity for ${company.name} right now. Use the implication as your idea direction.
 Set ideaSource to "market_insight".
-Set urgent: true if this is time-sensitive (seasonal window closing soon).
+Set urgent: true if urgency is "high".
 
-${marketResearch}
+${marketResearch.insights.map((i, idx) =>
+  `${idx + 1}. [score:${i.score} | ${i.urgency}] ${i.insight}\n   → ${i.implication}`
+).join('\n')}
+Summary: ${marketResearch.rawSummary}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+META ADS LIBRARY — CONTEXT (use to sharpen ideas, not as a separate source)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${adLibraryInsights.competitorAds.length > 0
+  ? `Competitor ads running now:\n${adLibraryInsights.competitorAds.map((a, idx) =>
+    `  ${idx + 1}. ${a.competitor}: "${a.hook}" | ${a.format} | ${a.angle} | ~${a.estimatedDaysRunning}d running`
+  ).join('\n')}`
+  : '  No competitor ad data.'}
+
+${adLibraryInsights.gaps.length > 0
+  ? `Gaps nobody is exploiting:\n${adLibraryInsights.gaps.map((g, idx) =>
+    `  ${idx + 1}. [${g.urgency}] ${g.gap} → ${g.opportunity}`
+  ).join('\n')}`
+  : ''}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT

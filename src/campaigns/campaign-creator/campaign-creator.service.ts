@@ -241,7 +241,7 @@ export class CampaignCreatorService {
     const creativeBrief = campaign.briefId
       ? await this.campaignsService.findCreativeBrief(company.tenantId, campaign.briefId)
       : null;
-    const briefProduct = (creativeBrief as any)?.product ?? '';
+    const briefProduct = creativeBrief ? ((creativeBrief as any).product ?? '') : '';
     const product = (company.products ?? []).find(p =>
       briefProduct ? p.name === briefProduct : p.conversionEvent === config.conversionEvent,
     ) ?? (company.products ?? [])[0];

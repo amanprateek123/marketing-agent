@@ -8,7 +8,7 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { ScoutSignal, ScoutSignalDocument } from './schemas/scout-signal.schema';
 import { ScoutOutput, ScoutOutputDocument } from './schemas/scout-output.schema';
 import { CoordinatorOutput, CoordinatorOutputDocument } from './schemas/coordinator-output.schema';
-import { ResearchOutput, ResearchOutputDocument } from './schemas/research-output.schema';
+import { ResearchOutput, ResearchOutputDocument, StructuredResearch, ResearchInsight } from './schemas/research-output.schema';
 
 export interface CoordinatorResult {
   coordinatorOutputId: string;
@@ -105,7 +105,7 @@ export class CoordinatorService {
     company: CompanyDocument,
     runId: string,
     coordinatorContent: string,
-  ): Promise<string> {
+  ): Promise<StructuredResearch> {
     const tenantId = company.tenantId;
     const systemPrompt = company.prompts?.competitorResearch ?? '';
     const liveContext = this.liveContextBuilder.build(company);
@@ -119,7 +119,28 @@ ${coordinatorContent}
 Company competitors to analyse: ${company.competitors.join(', ')}
 
 Use web_search to find recent competitor content, campaigns, and positioning changes.
-Return your full research findings.
+
+Return ONLY a JSON object in this exact format — no markdown, no explanation:
+{
+  "insights": [
+    {
+      "insight": "one clear finding about a competitor",
+      "implication": "what this means for campaign ideas — specific action or angle to exploit",
+      "urgency": "high | medium | low",
+      "score": 8,
+      "source": "https://..."
+    }
+  ],
+  "rawSummary": "2-3 sentence summary of the overall competitive landscape"
+}
+
+Rules:
+- Maximum 5 insights, ranked by score descending (most actionable first)
+- score 8-10: competitor is vulnerable RIGHT NOW or doing something you must counter immediately
+- score 5-7: important pattern worth knowing for idea generation
+- score 1-4: background context, low urgency
+- implication must be specific — "run a testimonial video ad targeting their unhappy customers" not "create better ads"
+- urgency "high" = act this week, "medium" = this month, "low" = general awareness
     `.trim();
 
     const result = await this.claudeService.runAgent({
@@ -132,22 +153,25 @@ Return your full research findings.
       maxTurns: 15,
     });
 
+    const structured = this.parseStructuredResearch(result.content, 'competitor');
+
     await this.researchOutputModel.create({
       tenantId,
       runId,
       type: 'competitor',
+      structured,
       content: result.content,
     });
 
-    this.logger.log(`Competitor research done: tenantId=${tenantId} runId=${runId}`);
-    return result.content;
+    this.logger.log(`Competitor research done: tenantId=${tenantId} runId=${runId} | insights: ${structured.insights.length}`);
+    return structured;
   }
 
   async runMarketResearch(
     company: CompanyDocument,
     runId: string,
     coordinatorContent: string,
-  ): Promise<string> {
+  ): Promise<StructuredResearch> {
     const tenantId = company.tenantId;
     const systemPrompt = company.prompts?.marketResearch ?? '';
     const liveContext = this.liveContextBuilder.build(company);
@@ -162,7 +186,28 @@ Industry: ${company.industry}
 Target audience: ${company.targetAudience}
 
 Use web_search to find recent market data, news, and consumer behaviour trends.
-Return your full market research findings.
+
+Return ONLY a JSON object in this exact format — no markdown, no explanation:
+{
+  "insights": [
+    {
+      "insight": "one clear market finding",
+      "implication": "what this means for campaign ideas — specific angle or timing to exploit",
+      "urgency": "high | medium | low",
+      "score": 7,
+      "source": "https://..."
+    }
+  ],
+  "rawSummary": "2-3 sentence summary of the overall market landscape"
+}
+
+Rules:
+- Maximum 5 insights, ranked by score descending (most actionable first)
+- score 8-10: time-sensitive window (seasonal, news-driven, closing soon)
+- score 5-7: strong trend worth building an idea around
+- score 1-4: background context only
+- implication must be specific — "launch a Ramadan offer campaign in next 2 weeks" not "consider seasonal campaigns"
+- urgency "high" = act this week, "medium" = this month, "low" = general awareness
     `.trim();
 
     const result = await this.claudeService.runAgent({
@@ -175,15 +220,48 @@ Return your full market research findings.
       maxTurns: 6,
     });
 
+    const structured = this.parseStructuredResearch(result.content, 'market');
+
     await this.researchOutputModel.create({
       tenantId,
       runId,
       type: 'market',
+      structured,
       content: result.content,
     });
 
-    this.logger.log(`Market research done: tenantId=${tenantId} runId=${runId}`);
-    return result.content;
+    this.logger.log(`Market research done: tenantId=${tenantId} runId=${runId} | insights: ${structured.insights.length}`);
+    return structured;
+  }
+
+  private parseStructuredResearch(content: string, type: string): StructuredResearch {
+    try {
+      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
+      const jsonStr = fenceMatch ? fenceMatch[1].trim() : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
+      const parsed = JSON.parse(jsonStr);
+
+      const insights: ResearchInsight[] = (parsed.insights ?? [])
+        .filter((i: any) => i.insight && i.implication && typeof i.score === 'number')
+        .sort((a: any, b: any) => b.score - a.score)
+        .slice(0, 5);
+
+      return {
+        insights,
+        rawSummary: parsed.rawSummary ?? '',
+      };
+    } catch (err: any) {
+      this.logger.warn(`Failed to parse structured ${type} research — falling back to summary: ${err.message}`);
+      // Fallback: wrap the raw text as a single low-score insight
+      return {
+        insights: [{
+          insight: `${type} research completed`,
+          implication: content.slice(0, 500),
+          urgency: 'low',
+          score: 3,
+        }],
+        rawSummary: content.slice(0, 300),
+      };
+    }
   }
 
   private buildCoordinatorPrompt(

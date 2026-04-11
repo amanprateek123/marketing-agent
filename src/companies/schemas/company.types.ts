@@ -91,6 +91,7 @@ export interface CompanyPrompts {
   coordinator: string;
   competitorResearch: string;
   marketResearch: string;
+  metaAdsLibrary: string;
   ideaPool: string;
   digestWriter: string;
   campaignCreator: string;

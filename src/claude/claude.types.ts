@@ -15,6 +15,7 @@ export enum AgentType {
   PROMPT_GENERATOR = 'prompt_generator',
   CREATIVE_LEARNING_AGENT = 'creative_learning_agent',
   CAMPAIGN_LEARNING_AGENT = 'campaign_learning_agent',
+  META_ADS_LIBRARY = 'meta_ads_library',
   // Phase 9 — Agent Team leads
   STRATEGY_TEAM_LEAD = 'strategy_team_lead',
   CREATIVE_TEAM_LEAD = 'creative_team_lead',
@@ -36,6 +37,7 @@ export const HAIKU_AGENTS: AgentType[] = [
   AgentType.COORDINATOR,          // signal scoring — structured output, no deep reasoning
   AgentType.DIGEST_WRITER,        // summarization — no reasoning needed
   AgentType.CREATIVE_LEARNING_AGENT, // pattern matching on structured JSON
+  AgentType.META_ADS_LIBRARY,        // ad library scraping — structured output, no deep reasoning
 ];
 
 // Phase 9 team leads — get TeamCreate, Agent, SendMessage on top of web tools

@@ -171,8 +171,16 @@ export class PipelineController {
         .find({ tenantId, runId })
         .lean()
         .exec();
-      const competitorResearch = research.find((r) => r.type === 'competitor')?.content ?? '';
-      const marketResearch = research.find((r) => r.type === 'market')?.content ?? '';
+      const rawCompetitor = research.find((r) => r.type === 'competitor');
+      const rawMarket = research.find((r) => r.type === 'market');
+
+      const fallbackResearch = (summary: string) => ({
+        insights: [{ insight: 'Research unavailable', implication: summary.slice(0, 300), urgency: 'low' as const, score: 1 }],
+        rawSummary: summary.slice(0, 300),
+      });
+
+      const competitorResearch = rawCompetitor?.structured ?? fallbackResearch(rawCompetitor?.content ?? '');
+      const marketResearch = rawMarket?.structured ?? fallbackResearch(rawMarket?.content ?? '');
 
       const testRunId = `strategy-test-${Date.now()}`;
 
@@ -186,6 +194,7 @@ export class PipelineController {
         },
         competitorResearch,
         marketResearch,
+        { competitorAds: [], gaps: [], dominantFormat: 'unknown', rawSummary: '' },
       );
 
       return { success: true, runId: testRunId, result };

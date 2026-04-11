@@ -13,6 +13,8 @@ import { CompaniesModule } from '../companies/companies.module';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { CreativeModule } from '../creative/creative.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
+import { MetaAdsLibraryOutput, MetaAdsLibraryOutputSchema } from './schemas/meta-ads-library-output.schema';
+import { MetaAdsLibraryService } from './meta-ads-library.service';
 import { InstagramScout } from './scouts/instagram.scout';
 import { RedditScout } from './scouts/reddit.scout';
 import { TwitterScout } from './scouts/twitter.scout';
@@ -32,6 +34,7 @@ import { CreativePackage, CreativePackageSchema } from '../creative/schemas/crea
   imports: [
     MongooseModule.forFeature([
       { name: PipelineRun.name, schema: PipelineRunSchema },
+      { name: MetaAdsLibraryOutput.name, schema: MetaAdsLibraryOutputSchema },
       { name: ScoutOutput.name, schema: ScoutOutputSchema },
       { name: ScoutSignal.name, schema: ScoutSignalSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
@@ -50,6 +53,7 @@ import { CreativePackage, CreativePackageSchema } from '../creative/schemas/crea
   ],
   controllers: [PipelineController],
   providers: [
+    MetaAdsLibraryService,
     InstagramScout,
     RedditScout,
     TwitterScout,
