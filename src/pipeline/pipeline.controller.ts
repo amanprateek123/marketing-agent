@@ -25,6 +25,7 @@ import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-c
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
+import { MetaAdsLibraryOutput } from './schemas/meta-ads-library-output.schema';
 
 @Controller('pipeline')
 export class PipelineController {
@@ -40,6 +41,8 @@ export class PipelineController {
     private readonly creativeProducer: CreativeProducerService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackage>,
+    @InjectModel(MetaAdsLibraryOutput.name)
+    private readonly metaAdsLibraryOutputModel: Model<MetaAdsLibraryOutput>,
     @InjectModel(CoordinatorOutput.name)
     private readonly coordinatorOutputModel: Model<CoordinatorOutput>,
     @InjectModel(ResearchOutput.name)
@@ -84,7 +87,7 @@ export class PipelineController {
     const run = await this.orchestrator.getStatus(tenantId, runId);
     if (!run) throw new NotFoundException(`Run ${runId} not found`);
 
-    const [scouts, coordinator, research, briefs, creativeBrief, digests, campaign] =
+    const [scouts, coordinator, research, briefs, creativeBrief, digests, campaign, adLibrary] =
       await Promise.all([
         this.scoutOutputModel.find({ tenantId, runId }).lean().exec(),
         this.coordinatorOutputModel.findOne({ tenantId, runId }).lean().exec(),
@@ -93,6 +96,7 @@ export class PipelineController {
         this.creativeBriefModel.findOne({ tenantId, runId }).lean().exec(),
         this.digestModel.find({ tenantId, runId }).lean().exec(),
         this.campaignsService.findByRunId(tenantId, runId),
+        this.metaAdsLibraryOutputModel.findOne({ tenantId, runId }).lean().exec(),
       ]);
 
     // Attach creative package to campaign data
@@ -109,6 +113,7 @@ export class PipelineController {
       scouts,
       coordinator,
       research,
+      adLibrary: adLibrary?.insights ?? null,
       briefs,
       creativeBrief,
       creativePackage,

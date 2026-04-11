@@ -111,19 +111,19 @@ export class DigestWriterService {
       systemPrompt: company.prompts?.digestWriter ?? '',
       liveContext: this.liveContextBuilder.build(company),
       userMessage: `
-Write a market signals summary for ${company.name}'s marketing team.
+Write a paid ad intelligence summary for ${company.name}'s performance marketing team.
 
 Do NOT ask questions. Write immediately.
 
-TOP SIGNALS THIS WEEK:
+TOP SIGNALS THIS WEEK (ranked by paid ad potential):
 ${topSignals || 'General platform signals collected — no top signals ranked this run.'}
 
 Write 3-4 punchy sentences covering:
-- What is happening in the market right now
-- Which signals are most urgent and why
-- The single biggest opportunity this week
+- What's happening in the market that creates a paid ad opportunity
+- Which signals have the highest commercial/purchase intent right now
+- The single biggest Meta ad campaign opportunity this week
 
-Format as Slack markdown. No headers. 80-100 words max.
+Format as Slack markdown. No headers. 80-100 words max. Tone: performance marketer, not brand journalist.
       `.trim(),
       maxTurns: 2,
     });
@@ -152,29 +152,31 @@ Format as Slack markdown. No headers. 80-100 words max.
       systemPrompt: company.prompts?.digestWriter ?? '',
       liveContext: this.liveContextBuilder.build(company),
       userMessage: `
-Write a content brief for ${company.name}'s marketing team. This is idea ${index} of ${total}.
+Write a Meta ad campaign brief for ${company.name}'s performance marketing team. This is ad idea ${index} of ${total}.
 
 Do NOT ask questions. Write immediately.
 
 BRIEF DATA:
 Topic: ${brief.topic}
 Angle: ${brief.angle}
-Platform: ${brief.platform} | Format: ${brief.format}
-Audience: ${brief.audience}
-Hook: ${brief.hook}
+Product: ${brief.product || 'see brief'}
+Meta placement: ${brief.platform} | Ad format: ${brief.format}
+Target audience: ${brief.audience}
+Ad hook (opening line): ${brief.hook}
 Key message: ${brief.keyMessage}
 Conversion bridge: ${brief.conversionBridge}
-Budget: ₹${brief.suggestedBudget}
+Daily budget: ₹${brief.suggestedBudget}/day
 
-Write a focused content brief in Slack markdown format:
+Write a focused Meta ad campaign brief in Slack markdown format:
 - Bold topic as the header
-- 1 sentence on the angle/why this matters now
-- Hook (exact opening line or visual)
-- Key message (what the audience should believe after)
-- Conversion bridge (how it leads to a purchase)
-- Platform + format + suggested budget
+- 1 sentence on why this will convert as a paid ad right now
+- Ad hook (the exact scroll-stopping opening line)
+- Key message (what the viewer believes after seeing this ad)
+- Conversion bridge (how the ad moves them from watching → buying the product)
+- Meta placement + ad format + daily budget
 
-120-150 words max. No scores. Confident, actionable tone.
+This is a PAID META AD, not organic content. Tone: confident, direct, performance marketer.
+120-150 words max. No scores.
       `.trim(),
       maxTurns: 2,
     });

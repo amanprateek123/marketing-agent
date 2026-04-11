@@ -111,35 +111,43 @@ export class CoordinatorService {
     const liveContext = this.liveContextBuilder.build(company);
 
     const userMessage = `
-Based on this coordinator synthesis, perform deep competitor research.
+Based on this coordinator synthesis, perform deep competitor research focused on PAID AD OPPORTUNITIES.
 
 COORDINATOR SYNTHESIS:
 ${coordinatorContent}
 
 Company competitors to analyse: ${company.competitors.join(', ')}
 
-Use web_search to find recent competitor content, campaigns, and positioning changes.
+NOTE: We have a separate Meta Ads Library agent that already scrapes competitor active Meta ad creatives.
+DO NOT focus on ad creatives here. Instead, find what the Ads Library cannot surface:
+- Pricing changes, new product launches, or promotions competitors just announced
+- Customer complaints, bad reviews, or refund demands — these are attack angles for our ads
+- Positioning shifts — if a competitor is moving upmarket or downmarket, there's a gap to exploit
+- Seasonal campaigns or discount events competitors are running (to counter or out-price them)
+- Press coverage or controversies that make their audience receptive to switching
+
+Use web_search to find recent competitor news, reviews (G2, Trustpilot, Google Reviews), pricing pages, and social mentions.
 
 Return ONLY a JSON object in this exact format — no markdown, no explanation:
 {
   "insights": [
     {
       "insight": "one clear finding about a competitor",
-      "implication": "what this means for campaign ideas — specific action or angle to exploit",
+      "implication": "specific Meta ad angle to exploit this — e.g. 'run a price comparison ad targeting their unhappy customers with the search term [competitor name] alternative'",
       "urgency": "high | medium | low",
       "score": 8,
       "source": "https://..."
     }
   ],
-  "rawSummary": "2-3 sentence summary of the overall competitive landscape"
+  "rawSummary": "2-3 sentence summary of the overall competitive landscape and the single biggest paid ad opportunity against competitors"
 }
 
 Rules:
 - Maximum 5 insights, ranked by score descending (most actionable first)
-- score 8-10: competitor is vulnerable RIGHT NOW or doing something you must counter immediately
-- score 5-7: important pattern worth knowing for idea generation
+- score 8-10: competitor is vulnerable RIGHT NOW — act this week with a targeted Meta ad
+- score 5-7: important pattern worth building an ad angle around this month
 - score 1-4: background context, low urgency
-- implication must be specific — "run a testimonial video ad targeting their unhappy customers" not "create better ads"
+- implication must be a specific Meta ad tactic — audience, hook angle, or offer to run
 - urgency "high" = act this week, "medium" = this month, "low" = general awareness
     `.trim();
 
@@ -177,7 +185,7 @@ Rules:
     const liveContext = this.liveContextBuilder.build(company);
 
     const userMessage = `
-Based on this coordinator synthesis, analyse current market conditions and consumer trends.
+Based on this coordinator synthesis, find market signals with DIRECT PURCHASE INTENT that can fuel paid Meta ad campaigns.
 
 COORDINATOR SYNTHESIS:
 ${coordinatorContent}
@@ -185,28 +193,36 @@ ${coordinatorContent}
 Industry: ${company.industry}
 Target audience: ${company.targetAudience}
 
-Use web_search to find recent market data, news, and consumer behaviour trends.
+Use web_search to find signals that translate into paid ad opportunities — NOT generic trend articles.
+Focus on:
+- Urgency triggers: festivals, salary cycles, exam seasons, weather shifts, tax deadlines — anything creating a "buy now" window
+- Consumer pain points with purchase intent: complaints, unmet needs, price sensitivity signals from forums, reviews, Reddit
+- Demand spikes: search trend data, news coverage showing a category moment (e.g. "anxiety at all-time high" → sell wellness product)
+- Seasonal conversion windows: when does this audience's wallet open? What are they willing to spend on right now?
+
+Each insight must pass the "can I run a profitable Meta ad against this right now?" test.
+Skip macro trends with no clear commercial hook (e.g. "Gen Z values authenticity" — too vague to run an ad against).
 
 Return ONLY a JSON object in this exact format — no markdown, no explanation:
 {
   "insights": [
     {
-      "insight": "one clear market finding",
-      "implication": "what this means for campaign ideas — specific angle or timing to exploit",
+      "insight": "one clear market signal with purchase intent",
+      "implication": "specific Meta ad angle — e.g. 'run a limited-time offer ad in the 2 weeks before [event] targeting [audience segment] with urgency CTA'",
       "urgency": "high | medium | low",
       "score": 7,
       "source": "https://..."
     }
   ],
-  "rawSummary": "2-3 sentence summary of the overall market landscape"
+  "rawSummary": "2-3 sentence summary of the biggest paid ad opportunity in the market right now"
 }
 
 Rules:
 - Maximum 5 insights, ranked by score descending (most actionable first)
-- score 8-10: time-sensitive window (seasonal, news-driven, closing soon)
-- score 5-7: strong trend worth building an idea around
-- score 1-4: background context only
-- implication must be specific — "launch a Ramadan offer campaign in next 2 weeks" not "consider seasonal campaigns"
+- score 8-10: time-sensitive window closing soon — must act this week
+- score 5-7: strong conversion opportunity this month
+- score 1-4: background awareness only, low ad potential
+- implication must be a specific paid ad tactic: audience, offer, timing, urgency mechanic
 - urgency "high" = act this week, "medium" = this month, "low" = general awareness
     `.trim();
 
@@ -326,6 +342,7 @@ Your job:
 3. Combine both into a single ranked list (topSignals) scored 0–10
 4. A viral trend with a strong brand tie-in can outscore a weak industry signal
 5. Produce a synthesis brief that the intelligence and idea pool agents can use
+
 
 You MUST include a JSON block at the end using EXACTLY this format:
 

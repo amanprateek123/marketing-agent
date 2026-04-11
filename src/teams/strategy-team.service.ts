@@ -49,7 +49,7 @@ export class StrategyTeamService {
     adLibraryInsights: MetaAdsLibraryInsights,
   ): Promise<IdeaPoolResult> {
     const tenantId = company.tenantId;
-    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 5;
+    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 10;
 
     this.logger.log(`Strategy Team starting | tenant: ${tenantId} | run: ${runId}`);
 
@@ -275,7 +275,7 @@ PAST LEARNINGS (what worked and what didn't):
 ` : '';
 
     return `
-You ARE the Strategist. You will debate with a Contrarian to decide the best ${ideasPerRun} campaign ideas for ${company.name}.
+You ARE the Strategist. You will generate a large pool of ideas then debate with a Contrarian to find the best ${ideasPerRun} for ${company.name}.
 
 STEP 1: Call TeamCreate with team_name "strategy-${runId}"
 
@@ -284,30 +284,38 @@ STEP 2: Spawn the Contrarian via Agent tool with these EXACT parameters:
   - team_name: "strategy-${runId}"
   - run_in_background: true
   - mode: "bypassPermissions"
-  - prompt: "You are the Contrarian on the Strategy Team for ${company.name}. Your job is to challenge weak ideas and push for better ones.
+  - prompt: "You are the Contrarian on the Strategy Team for ${company.name}. Your job is to eliminate weak ideas fast and push for the strongest ${ideasPerRun}.
 
 DEBATE PROTOCOL:
-- You will receive ideas from the Strategist via SendMessage.
-- For each idea: CHALLENGE it (why it's weak/saturated/risky) or ENDORSE it (why it's strong).
-- Be tough but fair. Give specific reasons, not vague criticism.
-- When the Strategist pushes back on your challenges, EITHER concede if their argument is strong OR double down with a stronger counterpoint.
-- Keep debating until you reach genuine agreement. Don't cave easily — but don't be stubborn for no reason either.
-- When you and the Strategist agree on the winner, send a final message: {type: 'consensus', winner: 'topic name', reason: 'why we agreed'}.
-- MAX 5 rounds of back-and-forth. If no consensus by round 5, send your final ranking and let the Strategist decide.
+ROUND 1 — Quick elimination pass:
+- You receive 20-25 raw ideas from the Strategist.
+- For each idea give a quick verdict: KEEP (strong, has real conversion potential) or CUT (weak, saturated, no clear product tie-in).
+- Be ruthless. Cut at least 8-10 ideas. Give one-line reasons only in this round.
+- Send your verdict list back to the Strategist as 'ROUND 1 VERDICT'.
+
+ROUND 2-3 — Deep debate on survivors:
+- The Strategist will push back on your cuts and defend survivors.
+- For each kept idea: challenge the hook, the audience fit, the conversion bridge. Force them to be specific.
+- When the Strategist defends an idea well — concede. When they can't — cut it.
+- Goal: converge on the strongest ${ideasPerRun} ideas with 1 clear winner.
+
+FINAL — When you agree on the top ${ideasPerRun}:
+- Send {type: 'consensus', topIdeas: ['topic1', 'topic2', ...], winner: 'winning topic', reason: 'why'}.
+- MAX 5 rounds total. If no consensus by round 5, send your final top ${ideasPerRun} ranking.
 - Send all messages to 'team-lead'. Respond IMMEDIATELY when you receive a message."
 
-STEP 3: Propose ${ideasPerRun} campaign ideas based on the data below. EVERY idea MUST sell a specific product from the catalog. Match trends to products using their trendKeywords. Send them to the Contrarian via SendMessage(to: "contrarian"). Label this as "ROUND 1".
+STEP 3: Generate 20-25 raw campaign ideas drawing freely from ALL sources below — no fixed quotas per source. The best ideas win regardless of where they come from. EVERY idea MUST sell a specific product from the catalog. Send ALL ideas to the Contrarian via SendMessage(to: "contrarian"). Label this as "ROUND 1 — RAW IDEAS".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for contrarian response". This keeps you active so their reply can arrive. Do not produce any output until you receive their message.
 
-STEP 4: When you receive the Contrarian's response (it arrives as an incoming message):
-  - If you AGREE with a challenge → kill or weaken that idea
-  - If you DISAGREE → push back: "I hear you, but here's why this still works..."
+STEP 4: When you receive the Contrarian's ROUND 1 VERDICT:
+  - Accept cuts of clearly weak ideas immediately — don't waste rounds defending bad ideas
+  - Push back ONLY on cuts you genuinely disagree with — give specific data from the signals to defend
   - SendMessage(to: "contrarian") with your response labeled "ROUND 2", then call TaskCreate(name: "round-2-pending") — do NOT output text.
   PATIENCE: The Contrarian runs in the background and takes several minutes to respond. Do NOT give up or produce output on your own. Keep waiting via TaskCreate until their message arrives. Only nudge once (via SendMessage) if you have called TaskCreate 4+ times with no reply.
 
 STEP 5: Continue the debate. Each round: receive their message → respond via SendMessage → call TaskCreate to wait again.
   - Keep going until:
-    a) You both agree on the winner (consensus — Contrarian sends {type: "consensus"})
+    a) You both agree on the top ${ideasPerRun} and 1 winner (consensus — Contrarian sends {type: "consensus"})
     b) You've done 5 rounds — make your final call
   - Never produce output mid-debate. Always use TaskCreate to stay alive between rounds.
 
@@ -327,8 +335,8 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
       "product": "Nadi Report",
       "productPrice": 999,
       "targetSegment": "career_anxious",
-      "platform": "instagram|youtube|twitter|reddit",
-      "format": "reel|carousel|thread|video|image",
+      "platform": "instagram|facebook|youtube|reddit",
+      "format": "reel|carousel|video|single_image|collection",
       "audience": "full audience description",
       "hook": "opening line or visual hook",
       "keyMessage": "what the audience should believe after seeing this",
@@ -354,7 +362,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
   "debateRationale": "2-3 sentence summary of the full debate — what was argued, who pushed back on what, and why the winner won"
 }
 
-Mark exactly 1 brief as "selected": true — the winner.
+Return exactly ${ideasPerRun} briefs — the survivors after the debate. Mark exactly 1 as "selected": true — the winner.
 
 ═══════════════════════════════════════════════════════
 PRODUCT CATALOG — every idea MUST sell one of these
@@ -419,10 +427,10 @@ RULES:
 - Match trends to products using their trendKeywords — if a trend doesn't connect to any product, skip it
 - The "product" and "targetSegment" fields are REQUIRED for every brief
 - The "conversionBridge" must mention the product name, price, and how the trend connects to buying it
-- At least 1 idea must exploit a competitor vulnerability
-- At least 1 idea must be tied to the #1 coordinator signal
+- Draw from ALL sources — coordinator signals, competitor insights, market insights, Meta Ads Library gaps, past learnings. No fixed quotas. The best ideas from any source make the final cut.
+- In your raw 20-25 ideas, make sure you have attempted at least 2 ideas from competitor/Meta Ads Library sources and 2 from market insights — so no source is completely ignored before the debate culls them
 - Prefer products with higher confidence performance data — proven products get priority over hypothesis-stage products
-- The Contrarian MUST see all ideas before you pick a winner
+- The Contrarian MUST see all raw ideas before you pick a winner
 - Do NOT pick the winner before the debate — let it emerge from the argument
 - BUDGET RULE: suggestedBudget = DAILY budget in ₹/day (NOT total, NOT weekly). Base it on:
   * No past data → ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.15)} (15% of weekly cap as a safe first-run test)

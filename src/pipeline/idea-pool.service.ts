@@ -55,7 +55,7 @@ export class IdeaPoolService {
   ): Promise<IdeaPoolResult> {
     const tenantId = company.tenantId;
     const liveContext = this.liveContextBuilder.build(company);
-    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 5;
+    const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 10;
 
     const generateMessage = this.buildGeneratePrompt(
       coordinatorResult,
@@ -177,73 +177,55 @@ export class IdeaPoolService {
     company: CompanyDocument,
     ideasPerRun: number,
   ): string {
-    const coordinatorSlots = Math.max(1, ideasPerRun - 2);
+    const generationTarget = Math.max(20, ideasPerRun * 2);
     const activeProducts = (company.products ?? []).filter(p => p.active);
     const productList = activeProducts.map(p => `  - "${p.name}" (₹${p.price}) — ${p.description?.slice(0, 80)}`).join('\n');
 
     const topSignals = coordinator.topSignals
-      .slice(0, coordinatorSlots)
       .map((s, i) =>
         `Signal ${i + 1} (score: ${s.compositeScore}) — "${s.topic}" | Platforms: ${s.platforms.join(', ')} | ${s.rationale}`,
       )
       .join('\n');
 
     return `
-Generate exactly ${ideasPerRun} content ideas for ${company.name} split across 3 sources.
+Generate ~${generationTarget} raw Meta ad campaign ideas for ${company.name}, then rank and return the top ${ideasPerRun}.
 
 AVAILABLE PRODUCTS (each idea MUST be tied to one of these):
 ${productList || '  No active products defined'}
 Use the exact product name in the "product" field of each brief.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SOURCE 1 — COORDINATOR SIGNALS (generate ${coordinatorSlots} ideas)
+ALL SOURCES — draw freely from any of these
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Generate one idea per signal below. Each idea MUST directly address its signal.
-Set ideaSource to "scout_signal" or "viral_trend" based on what the signal is.
-Set signalRank to the signal number (1, 2, 3...).
+The best ideas win regardless of source. No fixed quotas.
+Attempt at least 2 ideas from competitor/Meta Ads gaps and 2 from market insights before ranking.
 
+COORDINATOR SIGNALS (cross-platform, ranked by score):
 ${topSignals || coordinator.content.slice(0, 2000)}
 
-FULL COORDINATOR SYNTHESIS (for context):
+FULL COORDINATOR SYNTHESIS:
 ${coordinator.content}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SOURCE 2 — COMPETITOR GAP (generate 1 idea)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-From the competitor insights below, pick the highest-score gap or vulnerability
-that ${company.name} can exploit RIGHT NOW. Use the implication as your idea direction.
-Set ideaSource to "competitor_gap".
-Set urgent: true if urgency is "high".
-
+COMPETITOR INSIGHTS:
 ${competitorResearch.insights.map((i, idx) =>
   `${idx + 1}. [score:${i.score} | ${i.urgency}] ${i.insight}\n   → ${i.implication}`
 ).join('\n')}
 Summary: ${competitorResearch.rawSummary}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SOURCE 3 — MARKET INSIGHT (generate 1 idea)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-From the market insights below, pick the highest-score seasonal or trending
-opportunity for ${company.name} right now. Use the implication as your idea direction.
-Set ideaSource to "market_insight".
-Set urgent: true if urgency is "high".
-
+MARKET INSIGHTS:
 ${marketResearch.insights.map((i, idx) =>
   `${idx + 1}. [score:${i.score} | ${i.urgency}] ${i.insight}\n   → ${i.implication}`
 ).join('\n')}
 Summary: ${marketResearch.rawSummary}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-META ADS LIBRARY — CONTEXT (use to sharpen ideas, not as a separate source)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+META ADS LIBRARY — COMPETITOR ADS + GAPS:
 ${adLibraryInsights.competitorAds.length > 0
   ? `Competitor ads running now:\n${adLibraryInsights.competitorAds.map((a, idx) =>
     `  ${idx + 1}. ${a.competitor}: "${a.hook}" | ${a.format} | ${a.angle} | ~${a.estimatedDaysRunning}d running`
   ).join('\n')}`
   : '  No competitor ad data.'}
-
 ${adLibraryInsights.gaps.length > 0
-  ? `Gaps nobody is exploiting:\n${adLibraryInsights.gaps.map((g, idx) =>
+  ? `\nGaps nobody is exploiting:\n${adLibraryInsights.gaps.map((g, idx) =>
     `  ${idx + 1}. [${g.urgency}] ${g.gap} → ${g.opportunity}`
   ).join('\n')}`
   : ''}
@@ -251,7 +233,7 @@ ${adLibraryInsights.gaps.length > 0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return exactly ${ideasPerRun} ideas. For each idea provide:
+Generate ~${generationTarget} ideas internally, rank by priorityScore, return only the top ${ideasPerRun}. For each idea provide:
 
 \`\`\`json
 {
@@ -260,14 +242,14 @@ Return exactly ${ideasPerRun} ideas. For each idea provide:
       "topic": "...",
       "angle": "...",
       "product": "exact product name from the list above",
-      "platform": "instagram|youtube|twitter|reddit",
-      "format": "reel|carousel|thread|video|image",
+      "platform": "instagram|facebook|youtube|reddit",
+      "format": "reel|carousel|video|single_image|collection",
       "audience": "...",
-      "hook": "opening line or visual hook",
-      "keyMessage": "what the audience should believe after seeing this",
-      "conversionBridge": "how this leads to a sale or sign-up",
+      "hook": "opening line or visual hook — for a PAID META AD, not organic content",
+      "keyMessage": "what the audience should believe after seeing this ad",
+      "conversionBridge": "how this paid ad leads directly to buying the product",
       "suggestedBudget": 0,
-      "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight",
+      "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight|meta_ads_gap",
       "sourcePlatforms": ["instagram", "youtube"],
       "signalRank": 1,
       "urgent": false,
@@ -279,24 +261,25 @@ Return exactly ${ideasPerRun} ideas. For each idea provide:
 \`\`\`
 
 Rules:
-- signalRank: 1/2/3 for coordinator signal ideas, null for competitor/market ideas
+- Generate ~${generationTarget} ideas internally across all sources, then return only the top ${ideasPerRun} ranked by priorityScore
+- signalRank: 1/2/3/etc for coordinator signal ideas, null for competitor/market/meta_ads_gap ideas
 - urgent: true only if this idea must be executed THIS WEEK
-- priorityScore: your honest 1-10 rating for this idea's potential
+- priorityScore: your honest 1-10 rating — rank by this to pick the top ${ideasPerRun}
     `.trim();
   }
 
   // ── Rule-based winner selection ─────────────────────────────────────────────
   // Priority order:
-  // 1. Urgent competitor gap (competitor is vulnerable RIGHT NOW)
+  // 1. Urgent competitor gap or meta ads gap (someone is vulnerable RIGHT NOW)
   // 2. Idea tied to Signal 1 (highest coordinator signal)
   // 3. Urgent market insight
   // 4. Idea tied to Signal 2
   // 5. Fallback: highest priorityScore
   private selectWinner(briefs: any[], coordinator: CoordinatorResult): any {
-    // 1. Urgent competitor gap
-    const urgentGap = briefs.find((b) => b.ideaSource === 'competitor_gap' && b.urgent === true);
+    // 1. Urgent competitor gap or meta ads gap
+    const urgentGap = briefs.find((b) => (b.ideaSource === 'competitor_gap' || b.ideaSource === 'meta_ads_gap') && b.urgent === true);
     if (urgentGap) {
-      urgentGap.selectionReason = urgentGap.selectionReason ?? 'Urgent competitor gap — competitor is vulnerable this week';
+      urgentGap.selectionReason = urgentGap.selectionReason ?? 'Urgent competitive gap — act this week';
       return urgentGap;
     }
 

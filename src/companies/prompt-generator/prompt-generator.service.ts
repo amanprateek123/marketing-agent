@@ -104,15 +104,21 @@ These agents receive already-collected data. They do NOT need tool usage instruc
 Focus on: synthesis logic, scoring frameworks, brand voice, decision criteria.
 
 Specific guidance per agent:
-- coordinator: How to weigh signals across platforms, what makes a signal worth escalating,
-  how to identify cross-platform consensus vs platform-specific noise.
-- competitorResearch: What competitor weaknesses and content gaps are most exploitable for THIS brand,
-  how to frame gaps as opportunities.
-- marketResearch: What market signals matter most for THIS company's category and audience.
-- ideaPool: Brand voice guidelines for idea generation, what makes an idea on-brand vs off-brand,
-  how to bridge content ideas to this company's conversion goals.
-- digestWriter: Tone and format for the weekly intelligence digest, what executives/founders of
-  THIS type of company want to see first, how to prioritize findings.
+- coordinator: How to weigh signals across platforms for PAID AD POTENTIAL (not just virality),
+  what makes a signal worth escalating to a Meta ad campaign vs organic only,
+  how to identify cross-platform commercial intent vs platform-specific entertainment noise.
+- competitorResearch: What competitor weaknesses, pricing gaps, and customer complaints are most
+  exploitable as Meta ad angles for THIS brand. Focus on what the Meta Ads Library CANNOT surface:
+  pricing, reviews, positioning shifts, product launches — not ad creatives.
+- marketResearch: What market signals have PURCHASE INTENT that map to a paid Meta ad campaign.
+  What urgency triggers, seasonal windows, and consumer pain points create a "buy now" moment
+  for THIS company's target audience.
+- ideaPool: Brand voice guidelines for META AD CAMPAIGN idea generation — what makes an idea
+  work as a paid direct response ad vs organic content. How to connect trends to product purchases.
+  Every idea must pass: "can this run as a profitable 15-second Meta ad that drives conversions?"
+- digestWriter: Tone and format for the weekly PAID AD INTELLIGENCE digest. The audience is a
+  performance marketer reviewing Meta ad campaign ideas — they want to know: what should I run
+  this week, on which Meta placement, at what budget, and why will it convert?
 
 ───────────────────────────────────────────
 CAMPAIGN CREATOR PROMPT (campaignCreator)
