@@ -44,25 +44,43 @@ export class CampaignsService {
 
   private async enrichWithTopics(tenantId: string, campaigns: any[]): Promise<any[]> {
     const missing = campaigns.filter(c => !c.topic);
-    if (missing.length === 0) return campaigns;
 
-    const briefIds = [...new Set(missing.map(c => c.briefId).filter(Boolean))];
-    const runIds = [...new Set(missing.map(c => c.runId).filter(Boolean))];
-
-    const briefs = await this.creativeBriefModel
-      .find({ tenantId, $or: [{ briefId: { $in: briefIds } }, { runId: { $in: runIds } }] })
-      .lean()
-      .exec();
-
-    const briefMap = new Map(briefs.map(b => [`${b.runId}:${b.briefId}`, b]));
+    let briefMap = new Map<string, any>();
+    if (missing.length > 0) {
+      const briefIds = [...new Set(missing.map(c => c.briefId).filter(Boolean))];
+      const runIds = [...new Set(missing.map(c => c.runId).filter(Boolean))];
+      const briefs = await this.creativeBriefModel
+        .find({ tenantId, $or: [{ briefId: { $in: briefIds } }, { runId: { $in: runIds } }] })
+        .lean()
+        .exec();
+      briefMap = new Map(briefs.map(b => [`${b.runId}:${b.briefId}`, b]));
+    }
 
     return campaigns.map(c => {
-      if (c.topic) return c;
       const brief = briefMap.get(`${c.runId}:${c.briefId}`);
+
+      // Merge adSets (our launch structure) into metaAdSets (Meta's live data) by Meta ID
+      const ourMap = new Map<string, any>((c.adSets ?? []).map((a: any) => [a.metaAdSetId, a]));
+      const mergedMetaAdSets = (c.metaAdSets ?? []).map((metaAdSet: any) => {
+        const ours: any = ourMap.get(metaAdSet.id);
+        if (!ours) return metaAdSet;
+        return {
+          ...metaAdSet,
+          budgetPercent: ours.budgetPercent,
+          audienceType: ours.audienceType,
+          ads: (metaAdSet.ads ?? []).map((metaAd: any) => {
+            const ourAd = (ours.ads ?? []).find((a: any) => a.metaAdId === metaAd.id);
+            return ourAd ? { ...metaAd, hookStyle: ourAd.hookStyle, copyVariantIndex: ourAd.copyVariantIndex } : metaAd;
+          }),
+        };
+      });
+
+      const { adSets: _stripped, ...rest } = c;
       return {
-        ...c,
-        topic: brief?.topic ?? '',
-        angle: brief?.angle ?? '',
+        ...rest,
+        topic: c.topic || brief?.topic || '',
+        angle: c.angle || brief?.angle || '',
+        metaAdSets: mergedMetaAdSets,
       };
     });
   }

@@ -127,12 +127,14 @@ export class CampaignCreatorService {
     }
 
     // ── Save as pending_approval — do NOT launch yet ─────────────────────────
-    const campaignName = `META_${company.primaryObjective.toUpperCase()}_${brief.audience}_${brief.topic}_${new Date().toISOString().split('T')[0]}`;
+    const topicSlug = brief.topic.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
+    const campaignName = `${topicSlug}_${new Date().toISOString().split('T')[0]}`;
 
     const campaign = await this.campaignModel.create({
       tenantId: company.tenantId,
       runId,
       briefId: brief.briefId,
+      name: campaignName,
       topic: brief.topic ?? '',
       angle: brief.angle ?? '',
       creativePackageId: creativePackage?._id?.toString() ?? '',
@@ -247,7 +249,8 @@ export class CampaignCreatorService {
     ) ?? (company.products ?? [])[0];
     const landingUrl = product?.landingUrl ?? '';
 
-    const campaignName = `META_${company.primaryObjective.toUpperCase()}_${campaign.objective}_${new Date().toISOString().split('T')[0]}`;
+    const topicSlug = ((campaign as any).topic ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
+    const campaignName = `${topicSlug || 'CAMPAIGN'}_${new Date().toISOString().split('T')[0]}`;
 
     // Upload image to Meta if available
     let imageHash: string | undefined;
