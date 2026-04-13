@@ -661,6 +661,17 @@ export class MetaAdsService {
   // ─── Optimization actions (used by auditor) ─────────────────────────────────
 
   /**
+   * Pause an entire campaign on Meta.
+   */
+  async pauseCampaign(campaignId: string, accessToken: string): Promise<void> {
+    await this.metaApiCall('POST', `${META_API_BASE}/${campaignId}`, {
+      status: 'PAUSED',
+      access_token: accessToken,
+    });
+    this.logger.log(`Campaign paused on Meta: ${campaignId}`);
+  }
+
+  /**
    * Pause an individual ad.
    */
   async pauseAd(adId: string, accessToken: string): Promise<void> {

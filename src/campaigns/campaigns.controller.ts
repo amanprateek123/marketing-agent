@@ -12,6 +12,7 @@ import { Model } from 'mongoose';
 import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { CompaniesService } from '../companies/companies.service';
+import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
 
 @Controller('campaigns')
@@ -20,6 +21,7 @@ export class CampaignsController {
     private readonly campaignsService: CampaignsService,
     private readonly campaignCreator: CampaignCreatorService,
     private readonly companiesService: CompaniesService,
+    private readonly metaAdsService: MetaAdsService,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
   ) {}
@@ -81,6 +83,16 @@ export class CampaignsController {
     if (!reason) throw new BadRequestException('reason is required');
     const campaign = await this.campaignsService.pause(tenantId, campaignId, reason);
     if (!campaign) throw new NotFoundException('Campaign not found');
+
+    // Also pause on Meta if campaign was launched
+    const metaCampaignId = (campaign as any).metaCampaignId;
+    if (metaCampaignId) {
+      const company = await this.companiesService.findByTenantId(tenantId);
+      if (company?.meta?.accessToken) {
+        await this.metaAdsService.pauseCampaign(metaCampaignId, company.meta.accessToken);
+      }
+    }
+
     return campaign;
   }
 
