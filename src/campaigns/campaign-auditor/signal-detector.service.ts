@@ -46,6 +46,7 @@ export class SignalDetectorService {
     current: FullCampaignMetrics,
     snapshots: AuditSnapshotDocument[],
     company: CompanyDocument,
+    weeklySpend?: number,
   ): AuditSignalPacket {
     const launchedAt = new Date(campaign.launchedAt ?? Date.now());
     const ageMs = Date.now() - launchedAt.getTime();
@@ -80,19 +81,23 @@ export class SignalDetectorService {
       ? Object.entries(audienceScores).sort(([, a], [, b]) => (b as number) - (a as number))[0][0]
       : null;
 
-    // Estimate CTR range from winning hooks data
+    // Estimate CTR range from historical audit snapshots (actual data, not parsed from text)
     let expectedCTRRange: { min: number; max: number } | null = null;
-    const winningHooks = learnings?.creative?.winningHooks ?? [];
-    if (winningHooks.length > 0) {
-      const ctrs = winningHooks.map(h => parseFloat(h.match(/(\d+\.\d+)%/)?.[1] ?? '0')).filter(v => v > 0);
-      if (ctrs.length > 0) {
-        expectedCTRRange = { min: Math.min(...ctrs) * 0.5, max: Math.max(...ctrs) * 1.2 };
-      }
+    const historicalCTRs = sorted
+      .map(s => s.metrics.ctr)
+      .filter(v => v > 0);
+    if (historicalCTRs.length >= 2) {
+      expectedCTRRange = {
+        min: Math.min(...historicalCTRs) * 0.7,
+        max: Math.max(...historicalCTRs) * 1.3,
+      };
     }
 
     const currentCTR = current.campaign.ctr;
     const currentCTRVsBenchmark = expectedCTRRange
-      ? currentCTR >= expectedCTRRange.min ? 'within' : 'below'
+      ? currentCTR >= expectedCTRRange.max ? 'above'
+        : currentCTR >= expectedCTRRange.min ? 'within'
+        : 'below'
       : 'no_benchmark';
 
     // ── Anomalies ─────────────────────────────────────────────────────────────
@@ -131,7 +136,9 @@ export class SignalDetectorService {
 
     // ── Safety rails ─────────────────────────────────────────────────────────
     const safetyBreaches = {
-      weeklyCapExceeded: false, // checked separately with DB query
+      weeklyCapExceeded: weeklySpend != null && company.weeklyBudgetCap > 0
+        ? weeklySpend > company.weeklyBudgetCap
+        : false,
       campaignCapExceeded: current.campaign.spend > (company.maxBudgetPerCampaign ?? Infinity),
     };
 

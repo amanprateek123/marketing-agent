@@ -110,6 +110,13 @@ export class CampaignCreatorService {
         finalBudget = review.campaign.budget;
       }
 
+      // Re-validate adjusted budget against safety caps — review team cannot override TypeScript limits
+      if (finalBudget > company.maxBudgetPerCampaign) {
+        this.logger.warn(`Review team budget ₹${finalBudget} exceeds cap ₹${company.maxBudgetPerCampaign} — clamping`);
+        finalBudget = company.maxBudgetPerCampaign;
+      }
+      await SafetyChecks.checkWeeklyBudget(company.tenantId, finalBudget, company, this.campaignsService);
+
       this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds} | adSets: ${review.campaign?.adSets?.length ?? 0}`);
     } else {
       this.logger.warn(`Campaign Review Team failed after 2 attempts — proceeding with original budget ₹${finalBudget}`);

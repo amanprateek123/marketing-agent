@@ -104,10 +104,20 @@ export class SchedulerService implements OnModuleInit {
     createdAt: Date,
     pipelineConfig?: { mode: string; coldStartDays: number; autoSwitch: boolean },
   ): Promise<void> {
+    const mode = pipelineConfig?.mode ?? 'daily';
     const coldStartDays = pipelineConfig?.coldStartDays ?? 14;
     const autoSwitch = pipelineConfig?.autoSwitch ?? true;
     const ageInDays = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
-    const isInColdStart = autoSwitch && ageInDays < coldStartDays;
+
+    // Determine schedule: explicit mode overrides auto-switch logic
+    let useDaily: boolean;
+    if (!autoSwitch) {
+      // Manual mode — respect the explicit setting
+      useDaily = mode === 'daily';
+    } else {
+      // Auto-switch: daily during cold start, weekly after
+      useDaily = ageInDays < coldStartDays;
+    }
 
     // Don't re-schedule if a run completed in the last 20 hours — prevents
     // BullMQ from immediately firing a missed job on server restart
@@ -121,7 +131,7 @@ export class SchedulerService implements OnModuleInit {
       this.logger.log(`Skipping immediate schedule for ${tenantId} — run completed recently`);
     }
 
-    // Remove any existing repeatable jobs for this tenant before re-scheduling
+    // Remove any existing repeatable + switch jobs for this tenant before re-scheduling
     const existingJobs = await this.pipelineQueue.getRepeatableJobs();
     for (const job of existingJobs) {
       if (job.name === `pipeline-${tenantId}`) {
@@ -129,8 +139,8 @@ export class SchedulerService implements OnModuleInit {
       }
     }
 
-    if (isInColdStart) {
-      // Daily at 9 AM IST during cold start
+    if (useDaily) {
+      // Daily at 9 AM IST
       await this.pipelineQueue.add(
         `pipeline-${tenantId}`,
         { tenantId },
@@ -139,7 +149,22 @@ export class SchedulerService implements OnModuleInit {
           jobId: `pipeline-daily-${tenantId}`,
         },
       );
-      this.logger.log(`Scheduled DAILY pipeline for ${tenantId} (cold start — ${Math.round(coldStartDays - ageInDays)}d remaining)`);
+      this.logger.log(`Scheduled DAILY pipeline for ${tenantId}`);
+
+      // If auto-switch is on, schedule a one-shot job to switch to weekly when cold start ends
+      if (autoSwitch && ageInDays < coldStartDays) {
+        const remainingMs = Math.max(0, (coldStartDays - ageInDays) * 24 * 60 * 60 * 1000);
+        await this.pipelineQueue.add(
+          `pipeline-switch-${tenantId}`,
+          { tenantId, action: 'switch_to_weekly' },
+          {
+            delay: remainingMs,
+            jobId: `pipeline-switch-${tenantId}`,
+            removeOnComplete: true,
+          },
+        );
+        this.logger.log(`Scheduled daily→weekly switch for ${tenantId} in ${Math.round(remainingMs / (24 * 60 * 60 * 1000))}d`);
+      }
     } else {
       // Weekly on Monday at 9 AM IST
       await this.pipelineQueue.add(

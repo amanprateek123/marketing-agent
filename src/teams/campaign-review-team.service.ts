@@ -127,7 +127,7 @@ export class CampaignReviewTeamService {
     const liveContext = this.liveContextBuilder.build(company);
     const learnings = company.learnings;
 
-    // Get relevant campaign case studies for budget/audience decisions
+    // ── Case studies + audience performance ───────────────────────────────────
     let caseStudyContext = '';
     let audiencePerfContext = '';
     try {
@@ -137,107 +137,38 @@ export class CampaignReviewTeamService {
         this.metaLearningImporter.getAudiencePerformanceSummary(company.tenantId),
       ]);
 
-      if (caseStudies.length > 0) {
-        caseStudyContext = `
-PAST CAMPAIGN CASE STUDIES (budget/audience learnings):
-${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: spend ₹${cs.totalSpend}, ${cs.totalConversions} conversions, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}, winning audiences: ${cs.whatWorked?.audiences?.join(', ') || 'unknown'}. Lesson: ${cs.lesson}`).join('\n')}`;
-      }
+      caseStudyContext = caseStudies.length > 0
+        ? `PAST CAMPAIGN CASE STUDIES (budget/audience learnings):
+${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: spend ₹${cs.totalSpend}, ${cs.totalConversions} conversions, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}, winning audiences: ${cs.whatWorked?.audiences?.join(', ') || 'unknown'}. Lesson: ${cs.lesson}`).join('\n')}`
+        : 'PAST CAMPAIGN CASE STUDIES: No past case studies available yet.';
 
       if (Object.keys(audiencePerf.byType).length > 0) {
         const sorted = Object.entries(audiencePerf.byType)
           .filter(([, d]) => d.conversions > 0)
           .sort(([, a], [, b]) => a.avgCPA - b.avgCPA);
         if (sorted.length > 0) {
-          audiencePerfContext = `
-AUDIENCE TYPE PERFORMANCE (from ${Object.values(audiencePerf.byType).reduce((s, d) => s + d.adSetCount, 0)} historical ad sets):
+          audiencePerfContext = `AUDIENCE TYPE PERFORMANCE (from ${Object.values(audiencePerf.byType).reduce((s, d) => s + d.adSetCount, 0)} historical ad sets):
 ${sorted.map(([type, d]) => `  - ${type}: avg CPA ₹${d.avgCPA}, CTR ${d.avgCTR}%, ${d.conversions} conversions, ₹${d.totalSpend} total spend (${d.adSetCount} ad sets)`).join('\n')}
-
-USE THIS TO: allocate higher budget % to audience types with lowest CPA. Match these types to the Meta audience IDs listed below.`;
+USE THIS TO: allocate higher budget % to audience types with lowest CPA.`;
         }
       }
-    } catch (err: any) { this.logger.warn(`Learnings unavailable for ${company.tenantId}: ${err.message}`); }
+    } catch (err: any) {
+      this.logger.warn(`Learnings unavailable for ${company.tenantId}: ${err.message}`);
+      caseStudyContext = 'PAST CAMPAIGN CASE STUDIES: Unavailable this run.';
+    }
 
-    const campaignLearnings = learnings?.campaign
-      ? `
-PAST CAMPAIGN LEARNINGS:
-- Audience scores: ${learnings.campaign.audienceScores ? Object.entries(learnings.campaign.audienceScores).sort(([,a],[,b]) => b - a).slice(0, 5).map(([k,v]) => `${k}: ${v}`).join(', ') : 'none yet'}
-- Platform ROAS: ${learnings.campaign.platformROAS ? Object.entries(learnings.campaign.platformROAS).map(([k,v]) => `${k}: ${v}`).join(', ') : 'none yet'}
-- Budget insights: ${learnings.campaign.budgetInsights?.join('; ') || 'none yet'}
-- Timing insights: ${learnings.campaign.timingInsights?.join('; ') || 'none yet'}
-- Objective insights: ${learnings.campaign.objectiveInsights?.join('; ') || 'none yet'}
-`
-      : 'No past campaign learnings yet — this may be an early campaign.';
-
-    const causalInsights = learnings?.causalInsights?.length
-      ? `CAUSAL INSIGHTS:\n${learnings.causalInsights.slice(0, 5).map(c => `- ${c.finding} (confidence: ${c.confidence}, based on ${c.dataPoints} campaigns)`).join('\n')}`
-      : '';
-
-    const selectedCopy = creativePackage?.copyVariants?.[creativePackage?.selectedCopyIndex ?? 0];
-
-    return `
-You ARE the Campaign Strategist for ${company.name}. You will review a campaign before it goes live on Meta Ads, debating with a Performance Analyst.
-
-STEP 1: Call TeamCreate with team_name "review-${runId}"
-
-STEP 2: Spawn the Performance Analyst via Agent tool:
-  - name: "analyst"
-  - team_name: "review-${runId}"
-  - run_in_background: true
-  - mode: "bypassPermissions"
-  - prompt: "You are the Performance Analyst on the Campaign Review Team for ${company.name}. Your job is to challenge campaign configs that might waste budget.
-
-    REVIEW PROTOCOL:
-    - You will receive a full campaign brief (creative + targeting + budget) via SendMessage.
-    - Evaluate based on past performance data and marketing fundamentals:
-      1. BUDGET: Is the proposed budget too high for a first run? Should we start smaller and scale?
-      2. TARGETING: Is the audience too broad or too narrow? Does it match the creative?
-      3. TIMING: Is this the right time to launch? Any conflicting events or seasonality?
-      4. RISK: What could go wrong? What's the downside if this flops?
-      5. SCALE RULES: What metrics should trigger auto-scale? What should trigger auto-pause?
-    - Be data-driven. Reference past learnings when available.
-    - Push for conservative budgets on unproven concepts, aggressive on proven ones.
-    - When the Strategist pushes back, either concede with data or hold firm with data.
-    - Max 5 rounds. When you agree, send: {type: 'consensus', approved: true/false}.
-    - Send all messages to 'team-lead'. Respond IMMEDIATELY."
-
-STEP 3: Send the full campaign package to the Performance Analyst via SendMessage(to: "analyst"). Label as "ROUND 1".
-CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for analyst response". This keeps you active so the analyst's reply can arrive. Do not produce any output until you receive their message.
-
-CAMPAIGN TO REVIEW:
-  Topic: ${brief.topic}
-  Angle: ${brief.angle}
-  Platform: ${brief.platform} | Format: ${brief.format}
-  Audience: ${brief.audience}
-  Hook: ${brief.hook}
-  Key Message: ${brief.keyMessage}
-  Conversion Bridge: ${brief.conversionBridge}
-  Proposed Daily Budget: ₹${brief.suggestedBudget}/day (total across all ad sets)
-  Objective: ${company.primaryObjective}
-  Geography: ${company.geography}
-  Max Budget Per Campaign: ₹${company.maxBudgetPerCampaign}
-  Weekly Budget Cap: ₹${company.weeklyBudgetCap}
-  Max Scale: ${company.maxBudgetScalePercent}%
-  Pause if ROAS below: ${company.pauseIfROASBelow ?? 'not set'}
-  Pause if CTR below: ${company.pauseIfCTRBelow ?? 'not set'}
-  Pause if frequency above: ${company.pauseIfFrequencyAbove ?? 'not set'}
-
-  Selected Copy:
-  ${selectedCopy ? `Headline: ${selectedCopy.headline}\nCopy: ${selectedCopy.primaryText}\nCTA: ${selectedCopy.cta}` : 'No copy available yet'}
-
-  Image: ${creativePackage?.imageUrl ? 'Generated' : 'Pending'}
-  Video: ${creativePackage?.videoUrl ? 'Generated' : 'Pending'}
-
-${(() => {
-  const product = (company.products ?? []).find(p => p.name === (brief as any).product);
-  if (!product) return 'PRODUCT: not specified';
-  const segments = (product.audienceSegments ?? []).map(s =>
-    `  - ${s.name} (${s.confidence}${s.avgCPA ? `, CPA ₹${s.avgCPA}` : ''}): ${s.description}, age ${s.ageMin}-${s.ageMax}`
-  ).join('\n');
-  const metaAud = (product.metaAudiences ?? []).map(a =>
-    `  - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name} (id: ${a.id})`
-  ).join('\n');
-  const perf = product.performance;
-  return `PRODUCT BEING SOLD:
+    // ── Product + audience data ──────────────────────────────────────────────
+    const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+    const productBlock = (() => {
+      if (!product) return 'PRODUCT: not specified';
+      const segments = (product.audienceSegments ?? []).map(s =>
+        `  - ${s.name} (${s.confidence}${s.avgCPA ? `, CPA ₹${s.avgCPA}` : ''}): ${s.description}, age ${s.ageMin}-${s.ageMax}`
+      ).join('\n');
+      const metaAud = (product.metaAudiences ?? []).map(a =>
+        `  - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name} (id: ${a.id})`
+      ).join('\n');
+      const perf = product.performance;
+      return `PRODUCT BEING SOLD:
   ${product.name} — ₹${product.price}
   Landing: ${product.landingUrl ?? 'not set'}
   Conversion event: ${product.conversionEvent ?? 'Purchase'} (each conversion = ₹${product.conversionValue ?? product.price})
@@ -249,14 +180,146 @@ ${segments || '  none defined'}
 AVAILABLE META AUDIENCES (use these EXACT IDs in adSets config):
 ${metaAud || '  none linked — use Advantage+ broad'}
   IMPORTANT: Use the actual Meta audience IDs above in your adSets[].metaAudienceId field.`;
-})()}
+    })();
 
-${audiencePerfContext}
-${campaignLearnings}
-${causalInsights}
+    // ── Compact context brief for the Analyst ────────────────────────────────
+    const analystContextBrief = `Product: ${product?.name ?? 'unknown'} (₹${product?.price ?? 'N/A'}) — ${product?.performance?.totalConversions ?? 0} conversions, CPA ₹${product?.performance?.avgCPA ?? 'N/A'}
+Budget: ₹${brief.suggestedBudget}/day proposed | Cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
+${audiencePerfContext ? 'Audience data available — see context brief.' : 'No audience performance data yet.'}`;
 
-STEP 4: When you receive the Analyst's response (it arrives as an incoming message):
-  - If you AGREE → adjust your recommendation, SendMessage(to: "analyst") with your revised config as "ROUND 2", then call TaskCreate(name: "round-2-pending") — do NOT output text.
+    // ── Selected copy ────────────────────────────────────────────────────────
+    const selectedCopy = creativePackage?.copyVariants?.[creativePackage?.selectedCopyIndex ?? 0];
+
+    // ── Strategy mode ────────────────────────────────────────────────────────
+    const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
+    const strategyMode = strategy === 'conservative'
+      ? `CONSERVATIVE MODE: Start with minimum viable budget. Only use proven audiences (confidence: medium/high). Tight pause rules. No broad/experimental ad sets. Scale slowly (10% max).`
+      : strategy === 'experimental'
+        ? `EXPERIMENTAL MODE: Allocate 30-40% budget to broad/new audiences. Looser pause rules. Higher tolerance for initial CPA. Test multiple audience types.`
+        : `BALANCED MODE: 50-70% budget on proven audiences, 20-30% on broad/new test. Standard pause rules. Scale proven ad sets 20% after 48h if ROAS > 2x.`;
+
+    // ── Format decision logic (only include full tree when no data) ──────────
+    const winningFormats = learnings?.creative?.winningFormats ?? [];
+    const losingFormats = learnings?.creative?.losingFormats ?? [];
+    const hasFormatData = winningFormats.length > 0 || losingFormats.length > 0;
+
+    const formatSection = hasFormatData
+      ? `CREATIVE FORMAT — video vs image per ad set:
+Each ad set must have "creativeFormat": "video" | "image" | "both".
+Format performance: Winning: ${winningFormats.join(', ')}. Losing: ${losingFormats.join(', ') || 'none'}.
+- Assign winning format to largest budget ad sets. Test the other on smallest budget ad set.
+- If both winning → split test across ad sets.
+- Budget < ₹1,500/day → don't split, use winning format only.`
+      : `CREATIVE FORMAT — video vs image per ad set:
+Each ad set must have "creativeFormat": "video" | "image" | "both".
+No format data yet. Decide from first principles:
+- Young/impulse/lifestyle audiences → video. Professionals/B2B → image. Broad/advantage_plus → video default. Retarget → image.
+- Demo/transformation/testimonial → video. Discount/urgency/simple product → image.
+- Conflicting signals or unsure → "both" (let Meta optimize).
+- Budget < ₹1,500/day → don't split formats, pick one.`;
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // PROMPT: Data first → Rules → Steps
+    // ═════════════════════════════════════════════════════════════════════════
+    return `
+You ARE the Campaign Strategist for ${company.name}. You will review a campaign before it goes live on Meta Ads, debating with a Performance Analyst.
+
+═══════════════════════════════════════════════════════
+CAMPAIGN TO REVIEW
+═══════════════════════════════════════════════════════
+
+Topic: ${brief.topic}
+Angle: ${brief.angle}
+Platform: ${brief.platform} | Format: ${brief.format}
+Audience: ${brief.audience}
+Hook: ${brief.hook}
+Key Message: ${brief.keyMessage}
+Conversion Bridge: ${brief.conversionBridge}
+Proposed Daily Budget: ₹${brief.suggestedBudget}/day (total across all ad sets)
+Objective: ${company.primaryObjective}
+Geography: ${company.geography}
+
+Selected Copy:
+${selectedCopy ? `  Headline: ${selectedCopy.headline}\n  Copy: ${selectedCopy.primaryText}\n  CTA: ${selectedCopy.cta}` : '  No copy available yet'}
+Image: ${creativePackage?.imageUrl ? 'Generated' : 'Pending'}
+Video: ${creativePackage?.videoUrl ? 'Generated' : 'Pending'}
+
+${productBlock}
+
+═══════════════════════════════════════════════════════
+PERFORMANCE DATA
+═══════════════════════════════════════════════════════
+
+${audiencePerfContext || 'No audience performance data yet — this may be an early campaign.'}
+
+${caseStudyContext}
+
+${liveContext}
+
+CAMPAIGN STRATEGY: ${strategyMode}
+
+═══════════════════════════════════════════════════════
+RULES
+═══════════════════════════════════════════════════════
+
+BUDGET:
+- "budget" = TOTAL DAILY BUDGET across all ad sets combined (₹/day)
+- Each ad set gets: budget × (budgetPercent / 100) per day
+- Proposed anchor: ₹${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)}/day
+- Hard cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
+- Max scale: ${company.maxBudgetScalePercent}%
+- Pause if ROAS < ${company.pauseIfROASBelow ?? 'not set'} | CTR < ${company.pauseIfCTRBelow ?? 'not set'} | Frequency > ${company.pauseIfFrequencyAbove ?? 'not set'}
+- The debate adjusts UP or DOWN from the anchor — does NOT invent from scratch
+- No past data → be conservative, start at 50-60% of proposed budget
+
+AD SETS:
+- 2-3 ad sets minimum. Each MUST have a different audience.
+- Use real Meta audience IDs from the product data — don't invent IDs.
+- No Meta audiences → use audienceType "advantage_plus" (NOT "interest" without real IDs).
+- Exclude past buyer audiences from prospecting ad sets.
+- "ads": [0, 1, 2] = all 3 copy variants per ad set — Meta optimizes.
+- budgetPercent across all ad sets must sum to 100.
+
+${formatSection}
+
+GUARDRAILS:
+- Always set specific scaleRules and pauseRules — never launch without guardrails
+- TypeScript safety checks already passed — focus on STRATEGIC decisions
+
+═══════════════════════════════════════════════════════
+STEPS
+═══════════════════════════════════════════════════════
+
+STEP 1: Call TeamCreate with team_name "review-${runId}"
+
+STEP 2: Spawn the Performance Analyst via Agent tool:
+  - name: "analyst"
+  - team_name: "review-${runId}"
+  - run_in_background: true
+  - mode: "bypassPermissions"
+  - prompt: "You are the Performance Analyst on the Campaign Review Team for ${company.name}. Your job is to challenge campaign configs that might waste budget.
+
+    REVIEW PROTOCOL:
+    - You will receive a campaign brief with a CONTEXT BRIEF containing key performance data.
+    - Use the data to challenge budget, targeting, and timing decisions.
+    - Evaluate: (1) BUDGET — too high for a first run? (2) TARGETING — too broad/narrow? (3) TIMING — right moment? (4) RISK — what if it flops? (5) GUARDRAILS — what triggers scale/pause?
+    - Be data-driven. Push for conservative budgets on unproven concepts, aggressive on proven ones.
+    - When the Strategist pushes back, either concede with data or hold firm with data.
+    - Max 5 rounds. When you agree, send: {type: 'consensus', approved: true/false}.
+    - Send all messages to 'team-lead'. Respond IMMEDIATELY."
+
+STEP 3: Send the campaign package to the Analyst via SendMessage(to: "analyst").
+
+Include a CONTEXT BRIEF at the top of your message:
+---CONTEXT BRIEF---
+${analystContextBrief}
+---END CONTEXT BRIEF---
+Then include the full campaign config you're proposing (ad sets, budgets, targeting). Label as "ROUND 1".
+
+CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for analyst response". Do not produce any output until you receive their message.
+
+STEP 4: When you receive the Analyst's response:
+  - If you AGREE → adjust, SendMessage(to: "analyst") with revised config as "ROUND 2", then call TaskCreate(name: "round-2-pending").
   - If you DISAGREE → push back with reasoning via SendMessage, then call TaskCreate to wait again.
   - Continue until consensus (max 5 rounds).
   PATIENCE: The analyst runs in the background and takes several minutes to respond. Do NOT give up or produce output on your own. Keep waiting via TaskCreate until their message arrives. Only nudge once (via SendMessage) if you have called TaskCreate 4+ times with no reply.
@@ -272,124 +335,42 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
 {
   "approved": true,
   "campaign": {
-    "budget": ${brief.suggestedBudget},    ← TOTAL DAILY BUDGET in ₹/day (e.g. 3000 = ₹3000/day total)
+    "budget": ${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)},
     "objective": "OUTCOME_SALES",
-    "conversionEvent": "${(() => { const p = (company.products ?? []).find(pr => pr.name === (brief as any).product); return p?.conversionEvent ?? 'Purchase'; })()}",
-    "conversionValue": ${(() => { const p = (company.products ?? []).find(pr => pr.name === (brief as any).product); return p?.conversionValue ?? brief.suggestedBudget; })()},
+    "conversionEvent": "${product?.conversionEvent ?? 'Purchase'}",
+    "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
     "adSets": [
       {
         "name": "descriptive name",
         "budgetPercent": 50,
         "audienceType": "lookalike|advantage_plus|retarget|interest|custom",
-        "metaAudienceId": "use actual Meta audience ID from the list above, or omit for advantage_plus",
-        "excludeAudienceIds": ["past buyer audience ID to exclude"],
+        "metaAudienceId": "actual Meta audience ID or omit for advantage_plus",
+        "excludeAudienceIds": [],
         "ageMin": 25,
         "ageMax": 42,
         "geoLocations": ["IN"],
         "optimizationGoal": "OFFSITE_CONVERSIONS",
-        "ads": [0, 1, 2]
+        "ads": [0, 1, 2],
+        "creativeFormat": "video"
       }
     ],
-    "scaleRules": "specific rules e.g. ROAS > 2x AND CTR > 0.8% after 48h → scale 20%",
-    "pauseRules": "specific rules e.g. CTR < 0.5% after ₹1,500 spent → pause"
+    "scaleRules": "specific rules — e.g. ROAS > 2x AND CTR > 0.8% after 48h → scale 20%",
+    "pauseRules": "specific rules — e.g. CTR < 0.5% after ₹1,500 spent → pause"
   },
   "adjustments": {
-    "budgetAdjusted": true/false,
+    "budgetAdjusted": false,
     "originalBudget": ${brief.suggestedBudget},
     "recommendedBudget": 0
   },
   "debateRounds": 2,
   "debateLog": [
-    {"round": 1, "from": "strategist", "summary": "proposed campaign config"},
-    {"round": 1, "from": "analyst", "summary": "challenged budget"},
-    {"round": 2, "from": "strategist", "summary": "adjusted"},
-    {"round": 2, "from": "analyst", "summary": "approved"}
+    {"round": 1, "from": "strategist", "summary": "proposed campaign config with 2 ad sets"},
+    {"round": 1, "from": "analyst", "summary": "challenged budget, suggested starting lower"},
+    {"round": 2, "from": "strategist", "summary": "adjusted budget down"},
+    {"round": 2, "from": "analyst", "summary": "approved revised config"}
   ],
   "debateRationale": "2-3 sentence summary"
 }
-
-IMPORTANT — adSets rules:
-- Create 2-3 ad sets minimum. Never launch with just 1 ad set.
-- Each ad set MUST have a different audience (don't duplicate targeting).
-- Use real Meta audience IDs from the list above — don't invent IDs.
-- If no Meta audiences exist, use audienceType "advantage_plus" — do NOT use "interest" unless a real metaAudienceId is available. Meta requires interest IDs, not names, and we don't have them.
-- Always exclude past buyer audiences from prospecting ad sets.
-- "ads": [0, 1, 2] means all 3 copy variants run in every ad set — Meta optimizes which wins.
-- budgetPercent across all ad sets must sum to 100.
-
-CREATIVE FORMAT — video vs image per ad set:
-- Each ad set must have a "creativeFormat": "video" | "image" | "both" field.
-
-FORMAT PERFORMANCE DATA:
-${(() => {
-  const winning = learnings?.creative?.winningFormats ?? [];
-  const losing = learnings?.creative?.losingFormats ?? [];
-  if (winning.length === 0 && losing.length === 0) return '  No format data yet — use defaults below.';
-  return `  Winning: ${winning.join(', ') || 'none'}
-  Losing: ${losing.join(', ') || 'none'}`;
-})()}
-
-DECISION LOGIC (apply in order):
-1. NO DATA → think from first principles using campaign idea + audience:
-
-   STEP A — What does this audience prefer?
-   - Young audiences (18-28), impulse buyers, fashion/lifestyle → video (emotion-driven, scroll-stop)
-   - Working professionals, B2B, high-consideration purchases → image (scannable, clear info)
-   - Broad audiences (advantage_plus) with no data → video by default (better cold traffic hook)
-   - Retarget (already knows brand) → image (faster load, lower friction for decision stage)
-   - Lookalike → same format as what worked on the source audience (default video if unknown)
-
-   STEP B — What does this campaign topic/angle suggest?
-   - Product demo, transformation, testimonial, how-it-works → video (needs motion to convey value)
-   - Discount/offer, urgency, simple visual product → image (message is simple, fast to read)
-   - Emotional storytelling, lifestyle → video
-   - Feature comparison, spec-heavy, text-heavy offer → image or both
-
-   STEP C — Combine A + B:
-   - Both point to video → "video"
-   - Both point to image → "image"
-   - They conflict (e.g. young audience but simple offer) → "both" (let Meta decide)
-   - Unsure / insufficient signal → "both"
-
-2. ONE FORMAT CLEARLY WINNING (other not in winning list) → assign winner to largest budget ad sets. Still test the other format on the SMALLEST budget ad set — formats can behave differently per audience/angle. Never fully abandon a format.
-
-3. BOTH FORMATS WINNING → split test across ad sets. Assign "video" to one, "image" to another. Budget split should reflect performance gap (e.g. video 16% vs image 8% → give video 65%, image 35%).
-
-4. NO CLEAR WINNER (both losing or mixed signals) → use "both" on all ad sets and let Meta optimize.
-
-BUDGET CONSTRAINT: If total daily budget < ₹1,500 → do NOT split formats across ad sets. Put all budget on the winning format. Splitting below ₹1,500/day means each format gets < ₹750/day which is not enough signal to learn from.
-
-PRINCIPLE: The goal is always to gather more signal when budget allows. Never put all ad sets on the same format unless you have overwhelming evidence (5+ campaigns, >3x performance gap) OR budget is too small to split.
-
-${liveContext}
-
-${caseStudyContext}
-
-CAMPAIGN STRATEGY MODE: ${company.pipelineConfig?.campaignStrategy ?? 'balanced'}
-${(() => {
-  const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
-  if (strategy === 'conservative') return `- CONSERVATIVE MODE: Start with minimum viable budget. Only use proven audiences (confidence: medium/high). Tight pause rules. No broad/experimental ad sets. Scale slowly (10% max).`;
-  if (strategy === 'experimental') return `- EXPERIMENTAL MODE: Allocate 30-40% budget to broad/new audiences. Looser pause rules (give ads more time to find signal). Higher tolerance for initial CPA. Test multiple audience types.`;
-  return `- BALANCED MODE: 50-70% budget on proven audiences, 20-30% on broad/new test. Standard pause rules. Scale proven ad sets 20% after 48h if ROAS > 2x.`;
-})()}
-
-BUDGET ANCHOR RULE:
-- The "budget" field you output is the TOTAL DAILY BUDGET across all ad sets combined (in ₹/day).
-- Meta uses daily budget per ad set. Each ad set gets: budget × (budgetPercent / 100) per day.
-  Example: budget=₹3000, ad set at 50% → ₹1500/day for that ad set.
-- Think of it as: "how much ₹ do I want this campaign to spend PER DAY in total?"
-- The proposed daily budget anchor is ₹${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)}.
-- If the proposed budget is ₹0 or missing, use ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)} as the starting point (25% of weekly cap).
-- NEVER set daily budget above ₹${company.maxBudgetPerCampaign} (hard cap per day).
-- Weekly spend estimate = daily budget × 7 days. Keep this within ₹${company.weeklyBudgetCap ?? 'not set'}.
-- The debate adjusts UP or DOWN from this anchor — it does NOT invent a number from scratch.
-
-RULES:
-- TypeScript safety checks already passed (budget caps, forbidden topics) — don't re-check those
-- Focus on STRATEGIC decisions: is this the right budget to START with? Right audience? Right timing?
-- Always set specific scale rules and pause rules — never launch without guardrails
-- If past learnings show this audience/format performs well, be more aggressive
-- If no past data, be conservative — start at 50-60% of proposed budget
     `.trim();
   }
 

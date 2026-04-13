@@ -44,9 +44,9 @@ export class CoordinatorService {
   ): Promise<CoordinatorResult> {
     const tenantId = company.tenantId;
 
-    // Load industry signals + scout outputs (for viral trends)
+    // Load industry signals (excluding viral — those come from scoutOutputs separately)
     const [signals, scoutOutputs] = await Promise.all([
-      this.scoutSignalModel.find({ tenantId, runId }).lean().exec(),
+      this.scoutSignalModel.find({ tenantId, runId, signalType: { $ne: 'viral' } }).lean().exec(),
       this.scoutOutputModel.find({ tenantId, runId }).lean().exec(),
     ]);
 
@@ -233,7 +233,7 @@ Rules:
       systemPrompt,
       liveContext,
       userMessage,
-      maxTurns: 6,
+      maxTurns: 12,
     });
 
     const structured = this.parseStructuredResearch(result.content, 'market');

@@ -34,15 +34,15 @@ export const HAIKU_AGENTS: AgentType[] = [
   AgentType.YOUTUBE_SCOUT,
   AgentType.MARKET_RESEARCH,
   AgentType.CASE_STUDY_GENERATOR,
-  AgentType.COORDINATOR,          // signal scoring — structured output, no deep reasoning
   AgentType.DIGEST_WRITER,        // summarization — no reasoning needed
-  AgentType.CREATIVE_LEARNING_AGENT, // pattern matching on structured JSON
   AgentType.META_ADS_LIBRARY,        // ad library scraping — structured output, no deep reasoning
 ];
 
 // Phase 9 team leads — get TeamCreate, Agent, SendMessage on top of web tools
 export const TEAM_LEAD_AGENTS: AgentType[] = [
   AgentType.STRATEGY_TEAM_LEAD,
+  AgentType.CREATIVE_TEAM_LEAD,
+  AgentType.CAMPAIGN_REVIEW_LEAD,
 ];
 
 // Agents that don't need any tools (pure text generation — no web search needed)

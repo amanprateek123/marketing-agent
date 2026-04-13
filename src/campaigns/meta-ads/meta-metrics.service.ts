@@ -70,16 +70,17 @@ export class MetaMetricsService {
     campaignId: string,
     accessToken: string,
     conversionValue: number,
+    conversionEvent?: string,
   ): Promise<FullCampaignMetrics> {
     const [campaign, adSets] = await Promise.all([
-      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue),
-      this.fetchAdSetMetrics(campaignId, accessToken),
+      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent),
+      this.fetchAdSetMetrics(campaignId, accessToken, conversionEvent),
     ]);
 
     // Fetch per-ad metrics for each ad set in parallel
     const adSetsWithAds = await Promise.all(
       adSets.map(async (adSet) => {
-        const ads = await this.fetchAdMetrics(adSet.adSetId, accessToken);
+        const ads = await this.fetchAdMetrics(adSet.adSetId, accessToken, conversionEvent);
         return { ...adSet, ads };
       }),
     );
@@ -94,6 +95,7 @@ export class MetaMetricsService {
     campaignId: string,
     accessToken: string,
     conversionValue: number,
+    conversionEvent?: string,
   ): Promise<CampaignMetrics> {
     this.logger.log(`Fetching campaign metrics: ${campaignId}`);
 
@@ -116,7 +118,7 @@ export class MetaMetricsService {
     ]);
 
     const data = insightsRes.data?.data?.[0] ?? {};
-    const conversions = this.extractConversions(data.actions);
+    const conversions = this.extractConversions(data.actions, conversionEvent);
     const spend = parseFloat(data.spend ?? '0');
 
     return {
@@ -141,6 +143,7 @@ export class MetaMetricsService {
   async fetchAdSetMetrics(
     campaignId: string,
     accessToken: string,
+    conversionEvent?: string,
   ): Promise<AdSetMetrics[]> {
     this.logger.log(`Fetching ad set metrics: campaign=${campaignId}`);
 
@@ -149,14 +152,14 @@ export class MetaMetricsService {
       {
         fields: 'adset_id,adset_name,impressions,clicks,spend,ctr,cpc,actions,frequency,reach',
         level: 'adset',
-        date_preset: 'last_7d',
+        date_preset: 'maximum',
         access_token: accessToken,
       },
     );
 
     const adSets: AdSetMetrics[] = (response.data?.data ?? []).map((d: any) => {
       const spend = parseFloat(d.spend ?? '0');
-      const conversions = this.extractConversions(d.actions);
+      const conversions = this.extractConversions(d.actions, conversionEvent);
       return {
         adSetId: d.adset_id,
         adSetName: d.adset_name ?? '',
@@ -183,19 +186,20 @@ export class MetaMetricsService {
   async fetchAdMetrics(
     adSetId: string,
     accessToken: string,
+    conversionEvent?: string,
   ): Promise<AdMetrics[]> {
     const response = await this.metaApiGet(
       `${META_API_BASE}/${adSetId}/insights`,
       {
         fields: 'ad_id,ad_name,impressions,clicks,spend,ctr,cpc,actions',
         level: 'ad',
-        date_preset: 'last_7d',
+        date_preset: 'maximum',
         access_token: accessToken,
       },
     );
 
     return (response.data?.data ?? []).map((d: any) => {
-      const conversions = this.extractConversions(d.actions);
+      const conversions = this.extractConversions(d.actions, conversionEvent);
       return {
         adId: d.ad_id,
         adName: d.ad_name ?? '',
@@ -213,14 +217,34 @@ export class MetaMetricsService {
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
 
-  private extractConversions(actions: any[] | undefined): number {
+  private extractConversions(actions: any[] | undefined, conversionEvent?: string): number {
     if (!actions) return 0;
-    const purchaseAction = actions.find(
-      (a: any) => a.action_type === 'purchase' ||
-        a.action_type === 'offsite_conversion.fb_pixel_purchase' ||
-        a.action_type === 'offsite_conversion',
+
+    // Map company conversion event to Meta action_type patterns
+    const eventMap: Record<string, string[]> = {
+      'Purchase': ['purchase', 'offsite_conversion.fb_pixel_purchase'],
+      'Lead': ['lead', 'offsite_conversion.fb_pixel_lead'],
+      'CompleteRegistration': ['complete_registration', 'offsite_conversion.fb_pixel_complete_registration'],
+      'Subscribe': ['subscribe', 'offsite_conversion.fb_pixel_subscribe'],
+      'AddToCart': ['add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart'],
+      'InitiateCheckout': ['initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout'],
+      'ViewContent': ['view_content', 'offsite_conversion.fb_pixel_view_content'],
+    };
+
+    const patterns = eventMap[conversionEvent ?? 'Purchase']
+      ?? [conversionEvent?.toLowerCase() ?? 'purchase', 'offsite_conversion'];
+
+    const match = actions.find((a: any) =>
+      patterns.some(p => a.action_type === p || a.action_type?.includes(p)),
     );
-    return parseInt(purchaseAction?.value ?? '0', 10);
+
+    // Fallback: if no match for specific event, try generic offsite_conversion
+    if (!match) {
+      const generic = actions.find((a: any) => a.action_type === 'offsite_conversion');
+      return parseInt(generic?.value ?? '0', 10);
+    }
+
+    return parseInt(match?.value ?? '0', 10);
   }
 
   private async metaApiGet(url: string, params: any): Promise<any> {

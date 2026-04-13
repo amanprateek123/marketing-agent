@@ -82,17 +82,23 @@ export class PipelineOrchestratorService implements OnModuleInit {
 
     if (stuckRuns.length === 0) return;
 
-    this.logger.warn(`Found ${stuckRuns.length} stuck run(s) — recovering...`);
+    this.logger.warn(`Found ${stuckRuns.length} stuck run(s) — recovering with staggered starts...`);
 
-    for (const run of stuckRuns) {
+    for (let i = 0; i < stuckRuns.length; i++) {
+      const run = stuckRuns[i];
       this.logger.log(`Recovering stuck run: ${run.runId} tenantId=${run.tenantId} (status: ${run.status})`);
       await this.pipelineRunModel.updateOne(
         { tenantId: run.tenantId, runId: run.runId },
         { status: 'pending', error: null },
       );
-      this.executeDAG(run.tenantId, run.runId).catch((err) => {
-        this.logger.error(`Recovery failed for ${run.runId}: ${err.message}`);
-      });
+
+      // Stagger recovery — 30s between each run to avoid thundering herd
+      const delayMs = i * 30_000;
+      setTimeout(() => {
+        this.executeDAG(run.tenantId, run.runId).catch((err) => {
+          this.logger.error(`Recovery failed for ${run.runId}: ${err.message}`);
+        });
+      }, delayMs);
     }
   }
 

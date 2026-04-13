@@ -45,7 +45,7 @@ export class SafetyChecks {
   static checkCampaignBudget(campaignBudget: number, company: Company): void {
     if (campaignBudget > company.maxBudgetPerCampaign) {
       throw new BudgetCapError(
-        `Campaign budget $${campaignBudget} exceeds max $${company.maxBudgetPerCampaign}`,
+        `Campaign budget ₹${campaignBudget} exceeds max ₹${company.maxBudgetPerCampaign}`,
       );
     }
   }

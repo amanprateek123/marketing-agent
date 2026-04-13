@@ -151,32 +151,33 @@ Return ONLY the JSON object.`,
     tenantId: string,
     packages: CreativePackageDocument[],
   ): Promise<any[]> {
-    return Promise.all(
-      packages.map(async (pkg) => {
-        const campaign = await this.campaignModel
-          .findOne({ tenantId, briefId: pkg.briefId })
-          .lean()
-          .exec();
+    const briefIds = packages.map(pkg => pkg.briefId).filter(Boolean);
+    const campaigns = await this.campaignModel
+      .find({ tenantId, briefId: { $in: briefIds } })
+      .lean()
+      .exec();
+    const campaignMap = new Map(campaigns.map(c => [c.briefId, c]));
 
-        const selectedVariant = pkg.copyVariants?.[pkg.selectedCopyIndex];
-        return {
-          briefId: pkg.briefId,
-          selectedCopy: selectedVariant
-            ? {
-                headline: selectedVariant.headline,
-                primaryText: selectedVariant.primaryText,
-                cta: selectedVariant.cta,
-                hookStyle: selectedVariant.hookStyle,
-              }
-            : null,
-          copySelectionReason: pkg.copySelectionReason,
-          ctr: campaign?.ctr ?? null,
-          clicks: campaign?.clicks ?? null,
-          impressions: campaign?.impressions ?? null,
-          spend: campaign?.spend ?? null,
-        };
-      }),
-    );
+    return packages.map((pkg) => {
+      const campaign = campaignMap.get(pkg.briefId);
+      const selectedVariant = pkg.copyVariants?.[pkg.selectedCopyIndex];
+      return {
+        briefId: pkg.briefId,
+        selectedCopy: selectedVariant
+          ? {
+              headline: selectedVariant.headline,
+              primaryText: selectedVariant.primaryText,
+              cta: selectedVariant.cta,
+              hookStyle: selectedVariant.hookStyle,
+            }
+          : null,
+        copySelectionReason: pkg.copySelectionReason,
+        ctr: campaign?.ctr ?? null,
+        clicks: campaign?.clicks ?? null,
+        impressions: campaign?.impressions ?? null,
+        spend: campaign?.spend ?? null,
+      };
+    });
   }
 
   private parseCreativeLearnings(content: string): CreativeLearnings {

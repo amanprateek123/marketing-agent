@@ -79,8 +79,7 @@ export class IdeaPoolService {
     const briefs = this.parseBriefs(generated.content);
 
     if (briefs.length === 0) {
-      this.logger.warn(`Idea pool returned no briefs: tenantId=${tenantId} runId=${runId}`);
-      return { briefs: [], selectedBriefId: '', selectionReason: '' };
+      throw new Error(`Idea pool returned no parseable briefs for tenantId=${tenantId} runId=${runId}`);
     }
 
     // ── Assign a unique briefId + resolve product name against company schema ──
@@ -195,24 +194,22 @@ ${productList || '  No active products defined'}
 Use the exact product name in the "product" field of each brief.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALL SOURCES — draw freely from any of these
+ALL INTELLIGENCE — generate ideas from ANY of these sources
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The best ideas win regardless of source. No fixed quotas.
-Attempt at least 2 ideas from competitor/Meta Ads gaps and 2 from market insights before ranking.
 
-COORDINATOR SIGNALS (cross-platform, ranked by score):
+COORDINATOR SIGNALS (cross-validated from 4 platforms, ranked by score):
 ${topSignals || coordinator.content.slice(0, 2000)}
 
 FULL COORDINATOR SYNTHESIS:
 ${coordinator.content}
 
-COMPETITOR INSIGHTS:
+COMPETITOR INSIGHTS (may have standalone opportunities the scouts didn't catch):
 ${competitorResearch.insights.map((i, idx) =>
   `${idx + 1}. [score:${i.score} | ${i.urgency}] ${i.insight}\n   → ${i.implication}`
 ).join('\n')}
 Summary: ${competitorResearch.rawSummary}
 
-MARKET INSIGHTS:
+MARKET INSIGHTS (may have standalone opportunities — seasonal windows, purchase-intent signals):
 ${marketResearch.insights.map((i, idx) =>
   `${idx + 1}. [score:${i.score} | ${i.urgency}] ${i.insight}\n   → ${i.implication}`
 ).join('\n')}
@@ -261,7 +258,10 @@ Generate ~${generationTarget} ideas internally, rank by priorityScore, return on
 \`\`\`
 
 Rules:
-- Generate ~${generationTarget} ideas internally across all sources, then return only the top ${ideasPerRun} ranked by priorityScore
+- Read ALL sources above — coordinator signals, competitor insights, market insights, Meta Ads Library
+- Generate ideas from ANY source. A competitor vulnerability is just as valid as a trending signal. A seasonal market window is just as valid as a viral trend. Best ideas win.
+- You CAN combine sources — e.g. a trending signal + a competitor gap = a stronger idea. But standalone ideas from any single source are equally valid.
+- Generate ~${generationTarget} raw ideas total, rank by priorityScore, return the top ${ideasPerRun}
 - signalRank: 1/2/3/etc for coordinator signal ideas, null for competitor/market/meta_ads_gap ideas
 - urgent: true only if this idea must be executed THIS WEEK
 - priorityScore: your honest 1-10 rating — rank by this to pick the top ${ideasPerRun}

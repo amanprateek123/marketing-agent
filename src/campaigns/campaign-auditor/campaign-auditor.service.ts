@@ -93,11 +93,13 @@ export class CampaignAuditorService {
     // ── Fetch live metrics from Meta ──────────────────────────────────────────
     const product = (company.products ?? []).find(p => p.active);
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+    const conversionEvent = product?.conversionEvent ?? 'Purchase';
 
     const full = await this.metaMetrics.fetchFullMetrics(
       campaign.metaCampaignId,
       company.meta.accessToken,
       conversionValue,
+      conversionEvent,
     );
 
     // Save ad-level metrics to campaign document
@@ -117,8 +119,11 @@ export class CampaignAuditorService {
     // Execute any expired pending actions
     await this.executePendingActions(campaign, company);
 
+    // Pre-compute weekly spend — used by both safety rails and signal detector
+    const weeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
+
     // ── Layer 1: Safety rails (TypeScript — cannot be overridden) ─────────────
-    const safetyPaused = await this.runSafetyRails(campaign, full, company);
+    const safetyPaused = await this.runSafetyRails(campaign, full, company, weeklySpend);
     if (safetyPaused) {
       result.paused++;
       return;
@@ -132,7 +137,7 @@ export class CampaignAuditorService {
       .lean()
       .exec() as AuditSnapshotDocument[];
 
-    const signals = this.signalDetector.detect(campaign, full, snapshots, company);
+    const signals = this.signalDetector.detect(campaign, full, snapshots, company, weeklySpend);
 
     // ── Save audit snapshot ───────────────────────────────────────────────────
     const snapshotData = {
@@ -232,6 +237,7 @@ export class CampaignAuditorService {
     campaign: CampaignDocument,
     full: FullCampaignMetrics,
     company: CompanyDocument,
+    weeklySpend: number,
   ): Promise<boolean> {
     const spend = full.campaign.spend;
     const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
@@ -244,7 +250,6 @@ export class CampaignAuditorService {
     }
 
     // Weekly budget cap
-    const weeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
     if (company.weeklyBudgetCap && weeklySpend > company.weeklyBudgetCap) {
       await this.pauseCampaign(campaign, company, `Weekly spend ₹${weeklySpend.toFixed(0)} exceeded weekly cap ₹${company.weeklyBudgetCap}`);
       return true;
@@ -380,7 +385,18 @@ export class CampaignAuditorService {
           const adSet = ((campaign as any).adSets ?? []).find((a: any) => a.metaAdSetId === action.targetId);
           if (adSet) adSet.status = 'paused';
         } else if (action.type === 'scale_adset') {
-          continue; // scale always requires explicit approval
+          // Scale requires explicit approval — only execute if manually approved (not grace-expired)
+          if (!manuallyApproved) continue;
+          await this.optimizer.scaleAdSet(campaign, company, action.targetId, {
+            spend: campaign.spend ?? 0,
+            impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0,
+            conversions: campaign.conversions ?? 0,
+            roas: campaign.roas ?? 0,
+            ctr: campaign.ctr ?? 0,
+            cpc: campaign.cpc ?? 0,
+            frequency: 0,
+          });
         }
 
         action.status = 'executed';

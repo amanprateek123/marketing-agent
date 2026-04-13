@@ -216,12 +216,32 @@ Return ONLY the JSON object described in your instructions.`,
     const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
 
+    const ROOT_CAUSE_PROMPT = `You are a performance marketing analyst diagnosing why a single campaign was paused.
+
+Unlike multi-campaign analysis, you have only ONE data point. You CANNOT isolate variables across campaigns.
+Instead, use the campaign's own metrics + brief + creative to identify the most likely root cause.
+
+ROOT CAUSE TYPES:
+- creative_issue: low CTR suggests the hook/copy didn't resonate (CTR < 0.5% after ₹1000+ spend)
+- audience_mismatch: decent CTR but zero/very low conversions (people clicked but didn't buy)
+- format_mismatch: campaign underperformed vs similar campaigns on a different format
+- topic_exhaustion: high frequency + declining CTR over time
+- timing_issue: sudden drop aligned with external events, not gradual decline
+- budget_issue: spend too low to exit Meta learning phase (< ₹500/day or < 50 conversions/week)
+
+CONFIDENCE RULES for single-campaign diagnosis:
+- Max confidence: 0.50 (you cannot be highly confident from one data point)
+- If metrics clearly point to one cause: 0.40-0.50
+- If ambiguous between two causes: 0.20-0.30
+
+Output ONLY a single JSON object.`;
+
     let result;
     try {
       result = await this.claudeService.runAgent({
         tenantId,
         agentType: AgentType.CAMPAIGN_LEARNING_AGENT,
-        systemPrompt: CAMPAIGN_LEARNING_PROMPT,
+        systemPrompt: ROOT_CAUSE_PROMPT,
         liveContext: '',
         userMessage: `A campaign was just paused. Diagnose the root cause.
 
@@ -296,56 +316,56 @@ Return as a single causal insight JSON:
       .lean()
       .exec();
 
-    return Promise.all(
-      briefs.map(async (brief) => {
-        const campaign = await this.campaignModel
-          .findOne({ tenantId, briefId: brief.briefId })
-          .lean()
-          .exec();
+    const briefIds = briefs.map(b => b.briefId).filter(Boolean);
 
-        const creative = await this.creativePackageModel
-          .findOne({ tenantId, briefId: brief.briefId })
-          .lean()
-          .exec();
+    const [campaigns, creatives] = await Promise.all([
+      this.campaignModel.find({ tenantId, briefId: { $in: briefIds } }).lean().exec(),
+      this.creativePackageModel.find({ tenantId, briefId: { $in: briefIds } }).lean().exec(),
+    ]);
 
-        const selectedVariant = creative?.copyVariants?.[creative?.selectedCopyIndex ?? 0];
+    const campaignMap = new Map(campaigns.map(c => [c.briefId, c]));
+    const creativeMap = new Map(creatives.map(c => [c.briefId, c]));
 
-        return {
-          briefId: brief.briefId,
-          topic: brief.topic,
-          angle: brief.angle,
-          platform: brief.platform,
-          format: brief.format,
-          audience: brief.audience,
-          hook: brief.hook,
-          creative: selectedVariant
-            ? {
-                headline: selectedVariant.headline,
-                hookStyle: selectedVariant.hookStyle,
-                cta: selectedVariant.cta,
-              }
-            : null,
-          performance: {
-            day7: brief.day7Performance,
-            day14: brief.day14Performance,
-            day30: brief.day30Performance,
-          },
-          campaign: campaign
-            ? {
-                budget: campaign.budget,
-                objective: campaign.objective,
-                status: campaign.status,
-                pauseReason: campaign.pauseReason,
-                spend: campaign.spend,
-                roas: campaign.roas,
-                ctr: campaign.ctr,
-                cpc: campaign.cpc,
-                conversions: campaign.conversions,
-              }
-            : null,
-        };
-      }),
-    );
+    return briefs.map((brief) => {
+      const campaign = campaignMap.get(brief.briefId);
+      const creative = creativeMap.get(brief.briefId);
+      const selectedVariant = creative?.copyVariants?.[creative?.selectedCopyIndex ?? 0];
+
+      return {
+        briefId: brief.briefId,
+        topic: brief.topic,
+        angle: brief.angle,
+        platform: brief.platform,
+        format: brief.format,
+        audience: brief.audience,
+        hook: brief.hook,
+        creative: selectedVariant
+          ? {
+              headline: selectedVariant.headline,
+              hookStyle: selectedVariant.hookStyle,
+              cta: selectedVariant.cta,
+            }
+          : null,
+        performance: {
+          day7: brief.day7Performance,
+          day14: brief.day14Performance,
+          day30: brief.day30Performance,
+        },
+        campaign: campaign
+          ? {
+              budget: campaign.budget,
+              objective: campaign.objective,
+              status: campaign.status,
+              pauseReason: campaign.pauseReason,
+              spend: campaign.spend,
+              roas: campaign.roas,
+              ctr: campaign.ctr,
+              cpc: campaign.cpc,
+              conversions: campaign.conversions,
+            }
+          : null,
+      };
+    });
   }
 
   private parseCampaignLearnings(content: string): {
