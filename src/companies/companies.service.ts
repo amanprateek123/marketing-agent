@@ -105,6 +105,24 @@ export class CompaniesService {
     this.logger.log(`Learnings updated for: ${tenantId} (v${learnings.version})`);
   }
 
+  async updateCreativeLearnings(tenantId: string, creative: {
+    ctaInsights: string[];
+    copyToneInsights: string[];
+    visualInsights: string[];
+  }): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.creative.ctaInsights': creative.ctaInsights,
+          'learnings.creative.copyToneInsights': creative.copyToneInsights,
+          'learnings.creative.visualInsights': creative.visualInsights,
+        },
+      },
+    );
+    this.logger.log(`Creative copy insights updated for: ${tenantId}`);
+  }
+
   async findByApiKey(apiKey: string): Promise<CompanyDocument | null> {
     return this.companyModel.findOne({ apiKey }).exec();
   }

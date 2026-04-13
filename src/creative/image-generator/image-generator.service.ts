@@ -134,7 +134,7 @@ Return ONLY the image prompt, nothing else.
         prompt: safePrompt,
         n: 1,
         size: '1024x1792',   // closest to 9:16 vertical format
-        quality: 'standard',
+        quality: 'hd',
         response_format: 'url',
       },
       {

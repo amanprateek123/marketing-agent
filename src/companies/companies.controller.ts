@@ -155,6 +155,18 @@ export class CompaniesController {
   }
 
   /**
+   * POST /api/v1/companies/:tenantId/import-creative-learnings
+   * Fetches ad copy directly from Meta API and runs Claude copy pattern analysis.
+   * Updates ctaInsights, copyToneInsights, visualInsights without a full import.
+   */
+  @Post(':tenantId/import-creative-learnings')
+  async importCreativeLearnings(@Param('tenantId') tenantId: string) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    const result = await this.metaLearningImporter.runCopyPatternAnalysis(company);
+    return { success: true, ...result, message: `Copy pattern insights updated from ${result.adsAnalyzed} ads` };
+  }
+
+  /**
    * GET /api/v1/companies/:tenantId/import-status
    * Returns the current status of the Meta learning import.
    */

@@ -6,7 +6,7 @@ import { LiveContextBuilder } from '../companies/prompt-generator/live-context.b
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CopyVariant } from '../creative/schemas/creative-package.schema';
-import { runTeamViaCli, CliResult } from './team-cli.util';
+import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
 export interface CreativeTeamOutput {
@@ -263,33 +263,33 @@ AVOID:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 c) VIDEO PROMPT — for Heygen Video Agent API
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Write a complete 15-20 second vertical Meta video ad script for Heygen.
-Plain text only, under 150 words. Structure it EXACTLY like this:
+Write a single rich text prompt describing the complete 15-20 second vertical Meta ad video.
+Heygen Video Agent takes this prompt and generates the full video — scenes, visuals, text overlays, pacing, music.
+Do NOT write a script or avatar directions. Describe the VIDEO ITSELF as if briefing a video editor.
 
-SECONDS 0-3 — HOOK (most important — 70% of viewers decide here):
-  State the exact problem or desire in Hinglish. Make the viewer feel "this is for me."
-  Example: "Yaar, gym jaate ho aur results nahi? Sunn..."
+WHAT TO INCLUDE IN THE PROMPT:
+- Overall mood and energy (e.g. "warm, emotional, high-energy")
+- Target audience and what they should feel watching this
+- Scene-by-scene visual description: what appears on screen, transitions, pacing
+- Text overlays: what text appears, where, at what moment
+- Product placement: how and when the product is shown
+- Color palette and visual style (Indian aesthetic, urban/rural, bright/moody)
+- Music style (e.g. "upbeat Indian background music", "soft emotional soundtrack")
+- Opening hook visual (first 3 seconds must stop the scroll)
+- Closing CTA visual (last 3 seconds — product + button prompt)
 
-SECONDS 3-12 — PRODUCT + BENEFIT:
-  Introduce [product name] by name. Show 1-2 specific benefits visually.
-  Mention what makes it different from what they've tried before.
-  Avoid generic claims — be specific.
+FORMAT: Write as one flowing paragraph or short bullet points. Plain text. 150-250 words.
 
-SECONDS 12-18 — PRICE + SOCIAL PROOF:
-  Clearly say the price: "Sirf ₹[price] mein" or "[price] rupaye mein milega."
-  Add a proof point: number of customers, a result, a rating.
+EXAMPLE STRUCTURE:
+"15-second vertical Meta ad for [product] targeting [audience]. Opens with [specific visual hook — e.g. 'close-up of a woman's worried face looking at her phone, soft morning light, Indian home setting']. Quick cut to [scene 2 — product reveal or benefit demonstration]. Text overlay '[hook text]' appears in bold at top. Scene 3 shows [transformation or social proof visual]. Product clearly visible throughout. Closes with [product hero shot + price text overlay '₹[price]' in large bold font + CTA text 'Order Now' at bottom]. Color palette: [warm/vibrant/minimal]. Music: [style]. Overall feel: [emotion the viewer should feel]."
 
-SECONDS 18-20 — CTA:
-  "Neeche button tap karo aur order karo abhi" or equivalent.
-  Create urgency: limited stock / offer ends / exclusive price.
-
-VISUAL STYLE: Indian urban/semi-urban, energetic, modern. Show the product being used.
-
-STRICT RULES:
-- NEVER say "link in bio" — users tap a CTA button directly
-- NEVER mention the brand logo — add in post-processing
-- Product name MUST be spoken aloud in the voiceover
-- Price MUST be spoken aloud
+RULES:
+- NO avatar, NO voiceover directions, NO script — visual-only description
+- Product must be visually prominent — shown clearly, not just implied
+- Price must appear as a TEXT OVERLAY on screen (write the exact price number)
+- First 3 seconds must describe a scroll-stopping visual, not a generic scene
+- Indian faces, locations, aesthetic — specify this explicitly
+- CTA text overlay in last 3 seconds — "Order Now" or "Shop Now" with product name
 
 STEP 4: Send the full package to the Brand Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". This keeps you active so the reviewer's reply can arrive. Do not produce any output until you receive their message.
@@ -320,7 +320,7 @@ STEP 7: Return ONLY this JSON (no markdown, no explanation):
   "selectedIndex": 0,
   "selectionReason": "why this variant has the strongest hook and clearest value proposition for the target audience",
   "imagePrompt": "Vertical 9:16 Meta ad image. [Subject + action + product placement]. [Background + lighting + colors]. Text overlay: top third shows '[hook text]' in bold white, bottom shows product name + ₹[price] in high contrast. Indian [urban/rural] aesthetic, photorealistic.",
-  "videoPrompt": "15-20 second vertical Meta ad for [product name] targeting [audience]. Opens with [exact hook in Hinglish, 0-3s]. Shows [product name] solving [problem] with [specific visual, 3-12s]. Voiceover says 'Sirf ₹[price] mein' with proof point [12-18s]. Closes with 'Neeche button tap karo aur order karo abhi' [18-20s]. Indian urban aesthetic, energetic.",
+  "videoPrompt": "15-second vertical Meta ad for [product name] targeting [audience]. Opens with [scroll-stopping visual — e.g. close-up of Indian woman looking worried, soft morning light, home setting]. Quick cut to [product being shown clearly with benefit visual]. Bold text overlay '[hook text]' at top. Scene 3 shows [transformation or social proof — happy customer, result visual]. Product prominent throughout. Closes with product hero shot, '₹[price]' in large bold text, 'Order Now' CTA at bottom. Color palette: [warm/vibrant]. Music: [upbeat Indian / soft emotional]. Overall feel: [emotion — e.g. empathetic then hopeful]. Indian faces and locations throughout.",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [

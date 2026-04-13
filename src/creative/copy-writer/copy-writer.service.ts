@@ -53,7 +53,7 @@ LOSING PATTERNS (avoid these):
       tenantId: company.tenantId,
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt: company.prompts?.ideaPool ?? '',
+      systemPrompt: '',
       liveContext: this.liveContextBuilder.build(company),
       userMessage: `
 Write 3 ad copy variants for ${company.name} for the following content brief.

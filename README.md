@@ -93,6 +93,15 @@ Fetches and enriches up to 1 year of historical campaign data from all Meta ad a
 
 ### 3. Campaign Creator
 
+**Campaign naming:**
+```
+Format: TOPIC_SLUG_DATE
+Examples: SUMMER_SALE_2026-04-13, NADI_REPORT_OFFER_2026-04-13
+```
+- Topic from brief is upper-cased, non-alphanumeric chars replaced with `_`, capped at 30 chars
+- Date is the UTC date at launch time
+- No `META_` prefix, no objective suffix
+
 **Step 1 — Create (pending_approval):**
 1. Safety checks (TypeScript, cannot be overridden by Claude):
    - Weekly budget cap not exceeded
@@ -141,16 +150,17 @@ BUDGET CONSTRAINT: If <₹1,500/day, do not split formats (not enough signal)
 Data source: `company.learnings.creative.winningFormats` (populated by monthly learning aggregation from imported Meta campaigns).
 
 **Video generation via Heygen:**
-- Creative Team writes a plain-text prompt describing the video concept and scenes
+- Creative Team writes a pure visual scene description — no avatar/voiceover directions, just what the viewer sees on screen
+- Format: `"15-second vertical Meta ad for [product] targeting [audience]. Opens with [scroll-stopping visual]. Quick cut to [product being shown]. Bold text overlay '[hook]' at top. Closes with product hero shot, '₹[price]' in large bold text, 'Order Now' CTA at bottom. Color palette: [warm/vibrant]. Music: [upbeat Indian]. Indian faces and locations throughout."`
 - Saved as `creativePackage.videoPrompt`
-- Heygen Video Agent API (`POST /v1/video_agent/generate`) converts the prompt to a vertical (9:16) video
+- Heygen Video Agent API (`POST /v1/video_agent/generate`) converts the scene description to a vertical (9:16) video
 - Polls `/v1/video_status.get` up to 15 minutes for completion
 - Final video URL stored in `creativePackage.videoUrl`
 
 **Image generation via OpenAI DALL-E 3:**
 - Claude (Creative Producer agent) writes a detailed image prompt from the brief
 - Saved as `creativePackage.imagePrompt`
-- DALL-E 3 API (`POST /v1/images/generations`, size `1024x1792` for 9:16) generates the image
+- DALL-E 3 API (`POST /v1/images/generations`, size `1024x1792` for 9:16, **quality: `hd`**) generates the image
 - Hosted URL returned (valid 1 hour from generation) — upload to S3 or use immediately at launch
 - Final image URL stored in `creativePackage.imageUrl`
 
@@ -301,7 +311,20 @@ Runs 1st of every month at 3 AM IST. Aggregates patterns from historical + live 
   "creative": {
     "winningHooks": ["bold_claim (2.54% CTR)", "question (2.36% CTR)"],
     "losingHooks": ["personal_story (1.04% CTR)"],
-    "winningFormats": ["video", "carousel"]
+    "winningFormats": ["video", "carousel"],
+    "losingFormats": ["static_image"],
+    "ctaInsights": [
+      "Direct CTAs ('Book Now', 'Order Now') outperform benefit CTAs by 2.1x",
+      "Urgency CTAs ('Limited Offer') perform best in retargeting"
+    ],
+    "copyToneInsights": [
+      "Conversational Hinglish drives 1.6x higher CTR than formal Hindi",
+      "Emotional + proof-backed copy outperforms aspirational alone"
+    ],
+    "visualInsights": [
+      "Indian faces in real-world settings increase CTR by 1.4x vs stock imagery",
+      "Price shown on creative increases conversion rate by 1.8x"
+    ]
   },
   "campaign": {
     "audienceScores": { "lookalike": 1.88, "interest": 0.35 },
@@ -310,6 +333,26 @@ Runs 1st of every month at 3 AM IST. Aggregates patterns from historical + live 
   }
 }
 ```
+
+**How each creative field is populated:**
+
+| Field | Populated by |
+|---|---|
+| `winningHooks`, `losingHooks` | Monthly learning aggregation — clusters ad hooks by CTR percentile |
+| `winningFormats`, `losingFormats` | Monthly learning aggregation — compares video vs image ROAS |
+| `ctaInsights` | `POST /import-creative-learnings` — Claude analysis of ad copy CTAs |
+| `copyToneInsights` | `POST /import-creative-learnings` — Claude analysis of copy tone patterns |
+| `visualInsights` | `POST /import-creative-learnings` — Claude analysis of creative descriptions |
+
+**Populate creative copy insights manually:**
+```bash
+POST /api/v1/companies/:tenantId/import-creative-learnings
+```
+- Fetches all ads (with copy and performance data) directly from Meta API
+- No dependency on having run `import-learnings` first
+- Claude CREATIVE_LEARNING_AGENT analyzes CTA patterns, tone, visual descriptions from top vs bottom performers
+- Saves only `ctaInsights`, `copyToneInsights`, `visualInsights` — does NOT overwrite hooks or formats
+- Safe to re-run anytime; each run fetches fresh data from Meta
 
 ---
 
@@ -328,6 +371,7 @@ Runs 1st of every month at 3 AM IST. Aggregates patterns from historical + live 
 | `GET` | `/api/v1/companies/:tenantId/import-status` | Poll import progress |
 | `POST` | `/api/v1/companies/:tenantId/finalize-import` | Re-run finalize without re-enriching |
 | `GET` | `/api/v1/companies/:tenantId/case-studies` | List top 50 case studies |
+| `POST` | `/api/v1/companies/:tenantId/import-creative-learnings` | Fetch ad copy from Meta + run Claude analysis → updates ctaInsights, copyToneInsights, visualInsights |
 
 **Update company — product fields:**
 ```json
@@ -357,7 +401,7 @@ Note: `products` uses Mongoose Mixed type — always send the full array when up
 | `GET` | `/api/v1/campaigns/:tenantId` | List all campaigns |
 | `GET` | `/api/v1/campaigns/:tenantId/:campaignId` | Get single campaign |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/approve` | Launch campaign on Meta — body: `{ accountId }` |
-| `POST` | `/api/v1/campaigns/:tenantId/:campaignId/pause` | Pause campaign — body: `{ reason }` |
+| `POST` | `/api/v1/campaigns/:tenantId/:campaignId/pause` | Pause campaign in MongoDB **and on Meta API** — body: `{ reason }` |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/reject` | Reject pending campaign — body: `{ reason }` |
 | `GET` | `/api/v1/campaigns/:tenantId/:campaignId/pending-actions` | List pending audit actions |
 | `POST` | `/api/v1/campaigns/:tenantId/:campaignId/actions/:actionId/approve` | Execute action immediately |
@@ -509,6 +553,78 @@ N8N_WEBHOOK_SECRET=...
 npm install
 npm run start:dev
 ```
+
+---
+
+---
+
+## Frontend Integration Notes
+
+### Campaign response shape
+
+Campaigns returned from `GET /api/v1/campaigns/:tenantId/:campaignId` include:
+
+```json
+{
+  "metaAdSets": [
+    {
+      "metaAdSetId": "...",
+      "name": "Lookalike 1-3% | Video",
+      "audienceType": "lookalike",
+      "dailyBudget": 500,
+      "lifetimeBudget": null,
+      "spend": 1240,
+      "conversions": 3,
+      "ctr": 2.1,
+      "roas": 2.4,
+      "frequency": 1.8,
+      "ads": [{ "metaAdId": "...", "name": "...", "ctr": 2.1, "spend": 620 }]
+    }
+  ]
+}
+```
+
+- Ad sets and ads are in a **single merged `metaAdSets` array** — there is no separate `adSets` key.
+- `metaAdSets` is populated by `CampaignSyncService` (runs every 6h) — it will be empty for newly approved campaigns until the first sync runs.
+
+### Creative package
+
+`GET /api/v1/creative/:tenantId/packages/:creativePackageId` returns:
+
+```json
+{
+  "copyVariants": [
+    { "headline": "...", "body": "...", "cta": "..." }
+  ],
+  "imageUrl": "https://...",
+  "videoUrl": "https://...",
+  "imagePrompt": "...",
+  "videoPrompt": "...",
+  "adLibrary": {
+    "adCopy": "...",
+    "headline": "...",
+    "description": "..."
+  }
+}
+```
+
+- `imageUrl` / `videoUrl` — populated asynchronously. Poll `GET /packages/:id` after triggering regenerate.
+- `adLibrary` — assembled from the winning copy variant + brief, used as fallback when Meta requires a single ad copy string.
+
+### New endpoints (added this sprint)
+
+| Endpoint | What it does |
+|---|---|
+| `POST /companies/:tenantId/import-creative-learnings` | Pulls 1225+ ads from Meta, runs Claude analysis, populates `ctaInsights` / `copyToneInsights` / `visualInsights` — takes ~30s |
+| `POST /campaigns/:tenantId/:campaignId/pause` | Now also pauses the campaign on Meta API (not just MongoDB) |
+| `POST /companies/:tenantId/finalize-import` | Re-runs finalize step for the latest import without re-enriching all campaigns |
+
+### Campaign name format change
+
+Campaign names on Meta Ads are now: `TOPIC_SLUG_DATE`
+- Example: `NADI_REPORT_OFFER_2026-04-13`
+- Previously had `META_` prefix and objective suffix — those are removed
+- Useful to know when cross-referencing campaigns in Meta Ads Manager
 
 ---
 

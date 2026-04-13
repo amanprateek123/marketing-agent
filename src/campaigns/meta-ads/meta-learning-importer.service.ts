@@ -427,6 +427,17 @@ export class MetaLearningImporterService {
       }
     }
 
+    // Analyze ad-level copy to fill ctaInsights, copyToneInsights, visualInsights
+    try {
+      const copyInsights = await this.analyzeCopyPatterns(enrichedCampaigns, company);
+      if (copyInsights) {
+        await this.companiesService.updateCreativeLearnings(tenantId, copyInsights);
+        this.logger.log(`Copy pattern insights saved for ${tenantId}`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Copy pattern analysis failed (non-fatal): ${err.message}`);
+    }
+
     // Clean up enriched campaign temp data
     await this.enrichedCampaignModel.deleteMany({ importId: new Types.ObjectId(importId) });
 
@@ -508,6 +519,105 @@ export class MetaLearningImporterService {
     }
 
     return studies;
+  }
+
+  /**
+   * Run copy pattern analysis standalone — no full import needed.
+   * Reads ad-level copy from the campaigns collection (already synced)
+   * and updates ctaInsights, copyToneInsights, visualInsights.
+   * Call this anytime without re-running the full import.
+   */
+  async runCopyPatternAnalysis(company: CompanyDocument): Promise<{ adsAnalyzed: number }> {
+    const tenantId = company.tenantId;
+
+    if (!company.meta?.accessToken || !company.meta?.accountId) {
+      throw new Error('Meta credentials not configured');
+    }
+
+    const { accessToken } = company.meta;
+    const normalizeId = (id: string) => id.startsWith('act_') ? id : `act_${id}`;
+    const accountIds = ((company.meta.accountIds?.length ?? 0) > 0
+      ? company.meta.accountIds!
+      : [company.meta.accountId]
+    ).map(normalizeId);
+
+    this.logger.log(`Fetching ad copy from Meta for copy pattern analysis: tenantId=${tenantId}`);
+
+    // Fetch ad copy + performance directly from Meta (lightweight — no enrichment)
+    const adArrays = await Promise.all(accountIds.map(id => this.fetchAdCopyFromMeta(id, accessToken)));
+    const allAds = adArrays.flat();
+
+    this.logger.log(`Fetched ${allAds.length} ads with copy data`);
+
+    // Build fake enrichedCampaigns structure that analyzeCopyPatterns expects
+    const fakeEnrichedCampaigns = [{ ads: allAds }];
+
+    const copyInsights = await this.analyzeCopyPatterns(fakeEnrichedCampaigns, company);
+    if (!copyInsights) throw new Error('Insufficient ad copy data for analysis (need at least 5 ads)');
+
+    await this.companiesService.updateCreativeLearnings(tenantId, copyInsights);
+
+    this.logger.log(`Copy pattern analysis done: tenantId=${tenantId} adsAnalyzed=${allAds.length}`);
+    return { adsAnalyzed: allAds.length };
+  }
+
+  private async fetchAdCopyFromMeta(accountId: string, accessToken: string): Promise<any[]> {
+    const allAds: any[] = [];
+    let nextUrl: string | null = null;
+
+    const fields = [
+      'id',
+      'name',
+      'creative{title,body,object_story_spec,call_to_action_type}',
+      'insights.date_preset(last_year){impressions,ctr,spend,actions}',
+    ].join(',');
+
+    try {
+      const response = await axios.get(`${META_API_BASE}/${accountId}/ads`, {
+        params: { fields, limit: 200, access_token: accessToken },
+        timeout: 30000,
+      });
+      allAds.push(...this.parseAdCopy(response.data?.data ?? []));
+      nextUrl = response.data?.paging?.next ?? null;
+    } catch (err: any) {
+      this.logger.error(`Failed to fetch ad copy for ${accountId}: ${err.message}`);
+      return [];
+    }
+
+    while (nextUrl) {
+      try {
+        const response = await axios.get(nextUrl, { timeout: 30000 });
+        allAds.push(...this.parseAdCopy(response.data?.data ?? []));
+        nextUrl = response.data?.paging?.next ?? null;
+        await new Promise(r => setTimeout(r, 300));
+      } catch { break; }
+    }
+
+    return allAds.filter(ad => (ad.impressions ?? 0) >= 500 && (ad.copyBody || ad.copyTitle));
+  }
+
+  private parseAdCopy(rawAds: any[]): any[] {
+    return rawAds.map((ad: any) => {
+      const insight = ad.insights?.data?.[0] ?? {};
+      const creative = ad.creative ?? {};
+      const storySpec = creative.object_story_spec ?? {};
+      const linkData = storySpec.link_data ?? storySpec.video_data ?? {};
+      const actions = insight.actions ?? [];
+      const conversionAction = actions.find((a: any) =>
+        ['offsite_conversion.fb_pixel_purchase', 'purchase', 'lead', 'offsite_conversion'].includes(a.action_type),
+      );
+      const conversions = parseInt(conversionAction?.value ?? '0', 10);
+      const spend = parseFloat(insight.spend ?? '0');
+
+      return {
+        copyBody: (creative.body ?? linkData.message ?? '').slice(0, 300),
+        copyTitle: (creative.title ?? linkData.name ?? '').slice(0, 100),
+        ctr: parseFloat(insight.ctr ?? '0'),
+        conversions,
+        spend,
+        impressions: parseInt(insight.impressions ?? '0', 10),
+      };
+    });
   }
 
   /**
@@ -986,6 +1096,91 @@ Rules:
           conversions: this.extractConversions(d.actions, conversionTypes),
           spend: parseFloat(d.spend ?? '0'),
         })),
+    };
+  }
+
+  private async analyzeCopyPatterns(
+    enrichedCampaigns: any[],
+    company: CompanyDocument,
+  ): Promise<{ ctaInsights: string[]; copyToneInsights: string[]; visualInsights: string[] } | null> {
+    // Flatten all ads across all campaigns, attach campaign-level metrics for context
+    const allAds: { copyBody: string; copyTitle: string; ctr: number; conversions: number; spend: number }[] = [];
+
+    for (const campaign of enrichedCampaigns) {
+      for (const ad of campaign.ads ?? []) {
+        if (!ad.copyBody && !ad.copyTitle) continue;
+        allAds.push({
+          copyBody: ad.copyBody ?? '',
+          copyTitle: ad.copyTitle ?? '',
+          ctr: ad.ctr ?? 0,
+          conversions: ad.conversions ?? 0,
+          spend: ad.spend ?? 0,
+        });
+      }
+    }
+
+    if (allAds.length < 5) {
+      this.logger.warn('Not enough ad-level copy data for pattern analysis');
+      return null;
+    }
+
+    // Sort by conversions desc, fallback to CTR — take top and bottom 40 for contrast
+    const sorted = [...allAds].sort((a, b) =>
+      b.conversions !== a.conversions ? b.conversions - a.conversions : b.ctr - a.ctr,
+    );
+    const take = Math.min(40, Math.max(5, Math.floor(sorted.length * 0.3)));
+    const topAds = sorted.slice(0, take);
+    const bottomAds = sorted.slice(-take);
+
+    const fmt = (ad: typeof allAds[0]) =>
+      `Headline: "${ad.copyTitle}" | Copy: "${ad.copyBody.slice(0, 200)}" | CTR: ${ad.ctr.toFixed(2)}% | Conversions: ${ad.conversions} | Spend: ₹${ad.spend.toFixed(0)}`;
+
+    const userMessage = `
+Analyze these Meta ads for ${company.name} (audience: ${company.targetAudience}, geography: ${company.geography}).
+
+TOP PERFORMING ADS (highest conversions):
+${topAds.map(fmt).join('\n')}
+
+BOTTOM PERFORMING ADS (lowest conversions):
+${bottomAds.map(fmt).join('\n')}
+
+Focus ONLY on:
+1. CTA PATTERNS: What call-to-action text/style appears in top ads? What appears in bottom ads?
+2. COPY TONE: What tone, language mix (Hinglish/English), emotional style do top ads use vs bottom?
+3. COPY STRUCTURE: How is price framed? Short vs long copy? First-line hook style?
+
+Return ONLY valid JSON:
+\`\`\`json
+{
+  "ctaInsights": ["specific CTA pattern from data — e.g. 'Order Now outperforms Learn More 2x in conversions'", "max 3 items"],
+  "copyToneInsights": ["specific tone pattern — e.g. 'Hinglish personal story hooks (Ek saheli ne...) drive 3x CTR vs English'", "max 4 items"],
+  "visualInsights": ["copy structure pattern — e.g. 'Ads with price in first 2 lines drive higher CTR', 'Short 3-line copy outperforms long-form for this audience', 'Personal story opening outperforms feature-list opening'", "max 3 items"]
+}
+\`\`\`
+
+Rules: SPECIFIC patterns from the actual data above. No generic advice. If no clear pattern, say "insufficient data".
+    `.trim();
+
+    const result = await this.claudeService.runAgent({
+      tenantId: company.tenantId,
+      runId: `copy-patterns-${Date.now()}`,
+      agentType: AgentType.CREATIVE_LEARNING_AGENT,
+      systemPrompt: '',
+      liveContext: '',
+      userMessage,
+      maxTurns: 2,
+    });
+
+    const fenceMatch = result.content.match(/```json\s*([\s\S]*?)```/i);
+    const raw = fenceMatch
+      ? fenceMatch[1].trim()
+      : result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1);
+
+    const parsed = JSON.parse(raw);
+    return {
+      ctaInsights: parsed.ctaInsights ?? [],
+      copyToneInsights: parsed.copyToneInsights ?? [],
+      visualInsights: parsed.visualInsights ?? [],
     };
   }
 
