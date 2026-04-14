@@ -72,8 +72,8 @@ export class CreativeController {
 
   /**
    * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-video-prompt
-   * Re-generate the video prompt using Claude (with fixed rules: no "link in bio", no logo).
-   * Saves new videoPrompt to the package. Call regenerate-video after this to generate the video.
+   * Rewrites the video prompt from scratch using brief + winning copy hook + product + learnings.
+   * Saves new videoPrompt AND generates the video. Fire-and-forget — poll GET for result.
    */
   @Post(':tenantId/packages/:creativePackageId/regenerate-video-prompt')
   async regenerateVideoPrompt(
@@ -84,46 +84,228 @@ export class CreativeController {
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
 
     const company = await this.companiesService.findByTenantId(tenantId);
-    const liveContext = this.liveContextBuilder.build(company);
 
-    const result = await this.claudeService.runAgent({
-      tenantId,
-      runId: (pkg as any).runId,
-      agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt: '',
-      liveContext,
-      userMessage: `
-Rewrite this video prompt for a Heygen Video Agent API. Fix it to follow these strict rules:
+    const brief = await this.intelligenceBriefModel
+      .findOne({ tenantId, briefId: (pkg as any).briefId })
+      .lean()
+      .exec();
 
-ORIGINAL PROMPT:
-${(pkg as any).videoPrompt}
+    if (!brief) return { error: 'No brief found for this package — cannot regenerate prompt' };
+
+    const product = (company.products ?? []).find(p => p.name === (brief as any).product)
+      ?? (company.products ?? []).find(p => p.active)
+      ?? (company.products ?? [])[0];
+
+    const selectedCopy = (pkg as any).copyVariants?.[(pkg as any).selectedCopyIndex ?? 0];
+    const hookText = selectedCopy?.primaryText?.split('\n')[0] ?? (brief as any).hook ?? '';
+    const headline = selectedCopy?.headline ?? '';
+    const cta = selectedCopy?.cta ?? 'Order Now';
+    const creative = company.learnings?.creative;
+    const visualInsights = creative?.visualInsights?.length
+      ? `Visual patterns that work: ${creative.visualInsights.join('; ')}`
+      : '';
+    const ctaInsights = creative?.ctaInsights?.length
+      ? `CTA insights: ${creative.ctaInsights.join('; ')}`
+      : '';
+
+    this.logger.log(`Regenerating video prompt from scratch: tenantId=${tenantId} packageId=${creativePackageId}`);
+
+    // Fire and forget — rewrite prompt then generate video
+    (async () => {
+      const result = await this.claudeService.runAgent({
+        tenantId,
+        runId: (pkg as any).runId,
+        agentType: AgentType.CREATIVE_PRODUCER,
+        systemPrompt: '',
+        liveContext: this.liveContextBuilder.build(company),
+        userMessage: `
+Write a scene-by-scene script for a 15-20 second vertical (9:16) Meta direct response ad video.
+
+This is the TEXT-LED JUMP-CUT format — the highest converting format on Meta for Indian audiences.
+Every 2-3 seconds = NEW SCENE with a sharp cut. Each scene has BOLD Hinglish/Hindi text + a short video clip behind it. The TEXT sells. The video creates mood.
+
+BRIEF:
+Brand: ${company.name}
+Topic: ${brief.topic}
+Angle: ${brief.angle}
+Audience: ${brief.audience}
+Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}
+Winning hook: "${hookText}"
+CTA: "${cta}"
+
+SCENE STRUCTURE:
+Scene 1 (0-3s) — HOOK: Bold Hinglish text that creates instant curiosity or hits a pain point. Viewer must think "yeh toh mere baare me hai." Video: dramatic emotional visual.
+Scene 2-3 (3-8s) — PAIN POINTS: Each scene = one relatable question/fear in short punchy Hinglish. Video: literal visual of what the text says.
+Scene 4 (8-12s) — PRODUCT REVEAL: Text introduces ${product?.name ?? 'the product'} as the answer. Video: someone using/holding the product. Close-up, real.
+Scene 5 (12-15s) — PROOF + PRICE: Social proof text + "₹${product?.price ?? '???'}". Video: happy customer or results.
+Scene 6 (15-18s) — CTA: Urgency text + "${cta}". Video: product hero shot.
+
+${visualInsights}
+${ctaInsights}
 
 RULES:
-- NEVER say "link in bio" — this is a paid Meta ad. Users tap a CTA button. Use "tap the button below" or "order now" instead.
-- NEVER mention the brand logo — Heygen doesn't know what it looks like. Logo is added separately in post-processing.
-- Keep it under 150 words.
-- Keep the same product, audience, visual style, and Hinglish voiceover tone.
-- Plain text only, no JSON.
+- "text": Hinglish/Hindi only. 3-8 words max per scene. Punchy.
+- "visual": Specific Indian scene. Describe what the camera sees — close-up/wide, lighting, action.
+- Product name and price must appear in text of at least one scene each.
+- NO English-only text. NO "link in bio". NO brand logo. NO generic intros.
 
-Return ONLY the rewritten video prompt, nothing else.
-      `.trim(),
-      maxTurns: 2,
-    });
+Return ONLY a JSON array:
+[
+  { "duration": "0-3s", "text": "Hinglish hook", "visual": "scene description", "music": "Indian music style" },
+  ...
+]
+        `.trim(),
+        maxTurns: 2,
+      });
 
-    const newVideoPrompt = result.content.trim();
+      const rawOutput = result.content.trim();
 
-    await this.creativePackageModel.updateOne(
-      { _id: creativePackageId, tenantId },
-      { $set: { videoPrompt: newVideoPrompt } },
-    );
+      // Parse scene list — save the structured version
+      let scenes: any[];
+      try {
+        const jsonMatch = rawOutput.match(/\[[\s\S]*\]/);
+        scenes = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+      } catch {
+        scenes = [];
+      }
 
-    this.logger.log(`Video prompt regenerated: tenantId=${tenantId} packageId=${creativePackageId}`);
-    return { status: 'done', creativePackageId, videoPrompt: newVideoPrompt };
+      // Save structured scene list as videoPrompt
+      const newVideoPrompt = scenes.length > 0 ? JSON.stringify(scenes, null, 2) : rawOutput;
+
+      await this.creativePackageModel.updateOne(
+        { _id: creativePackageId, tenantId },
+        { $set: { videoPrompt: newVideoPrompt } },
+      );
+
+      // Convert scene list to Heygen-compatible text prompt
+      const heygenPrompt = scenes.length > 0
+        ? `15-20 second vertical 9:16 Meta ad video. Sharp jump cuts every 2-3 seconds. Bold text overlays on every scene. Indian aesthetic throughout.\n\n${scenes.map((s: any) => `[${s.duration}] Text on screen: "${s.text}" — Visual: ${s.visual}${s.music ? ` — Music: ${s.music}` : ''}`).join('\n\n')}\n\nStyle: fast-paced, high contrast, thumb-stopping. Each scene has bold centered text overlay in white/yellow on a semi-transparent dark band. Sharp cuts between scenes — no smooth transitions.`
+        : rawOutput;
+
+      // Generate video
+      try {
+        const videoResult = await this.videoGenerator.generateFromScript(heygenPrompt, tenantId, (pkg as any).runId);
+        await this.creativePackageModel.updateOne(
+          { _id: creativePackageId, tenantId },
+          { $set: { videoUrl: videoResult.videoUrl } },
+        );
+        this.logger.log(`Video prompt regenerated + video generated: tenantId=${tenantId} packageId=${creativePackageId}`);
+      } catch (videoErr: any) {
+        this.logger.error(`Video generation failed after prompt rewrite (prompt saved): ${videoErr.message}`);
+      }
+    })().catch((err) => this.logger.error(`Video prompt regeneration failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, message: 'Video prompt regeneration started. Poll GET /packages/:id for result.' };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image-prompt
+   * Re-generate the image prompt from scratch using the brief data + new direct response specs.
+   * Saves new imagePrompt AND generates the image. Fire-and-forget — poll GET for result.
+   */
+  @Post(':tenantId/packages/:creativePackageId/regenerate-image-prompt')
+  async regenerateImagePrompt(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+  ) {
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+
+    // Find the brief for this package
+    const brief = await this.intelligenceBriefModel
+      .findOne({ tenantId, briefId: (pkg as any).briefId })
+      .lean()
+      .exec();
+
+    if (!brief) return { error: 'No brief found for this package — cannot regenerate prompt' };
+
+    const product = (company.products ?? []).find(p => p.name === (brief as any).product)
+      ?? (company.products ?? []).find(p => p.active)
+      ?? (company.products ?? [])[0];
+
+    const selectedCopy = (pkg as any).copyVariants?.[(pkg as any).selectedCopyIndex ?? 0];
+    const hookText = selectedCopy?.primaryText?.split('\n')[0] ?? (brief as any).hook ?? '';
+    const creative = company.learnings?.creative;
+    const visualInsights = creative?.visualInsights?.length
+      ? `Visual patterns that work: ${creative.visualInsights.join('; ')}`
+      : '';
+
+    this.logger.log(`Regenerating image prompt from scratch: tenantId=${tenantId} packageId=${creativePackageId}`);
+
+    // Fire and forget — rewrite prompt then generate image
+    (async () => {
+      const result = await this.claudeService.runAgent({
+        tenantId,
+        runId: (pkg as any).runId,
+        agentType: AgentType.CREATIVE_PRODUCER,
+        systemPrompt: '',
+        liveContext: this.liveContextBuilder.build(company),
+        userMessage: `
+Write an image generation prompt for a Meta direct response ad. This image must make someone STOP scrolling and TAP the ad.
+
+BRIEF:
+Brand: ${company.name}
+Topic: ${brief.topic}
+Angle: ${brief.angle}
+Platform: ${brief.platform} | Format: ${brief.format}
+Audience: ${brief.audience}
+Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}
+Hook (winning copy): "${hookText}"
+
+STEP 1 — VISUAL CENTERPIECE: Read the hook and topic above. What is the ONE visual concept that makes THIS ad unique?
+If the hook mentions a DATE/EVENT → centerpiece is that date (calendar, countdown, highlighted date — LARGE, dominating the frame)
+If the hook mentions a FEAR/PROBLEM → centerpiece is that fear visualized dramatically (filling the frame)
+If the hook mentions SOCIAL PROOF → centerpiece is the number, large and bold
+If the hook mentions a COMPARISON → centerpiece is a split visual
+The centerpiece must be the LARGEST element (60% of the frame) — NOT a small detail in the corner.
+
+STEP 2 — BUILD AROUND THE CENTERPIECE:
+- VISUAL CENTERPIECE (dominant): The concept from Step 1, unmissable at phone size
+- TEXT OVERLAY — TOP: "${hookText.slice(0, 80)}" in bold Hinglish, high contrast, readable
+- TEXT OVERLAY — BOTTOM: "${product?.name ?? 'Product'} — ₹${product?.price ?? '???'}" + CTA in large text
+- PRODUCT VISIBLE — show ${product?.name ?? 'the product'} clearly
+- INDIAN CONTEXT — real Indian faces, settings, skin tones
+- HIGH CONTRAST — thumb-stopping colors, no muted/pastel
+
+${visualInsights}
+
+Format: Vertical 9:16, photorealistic, 4-5 sentences.
+Describe: focal point, emotional tone, text overlay placement (exact words + position), product placement, colors, lighting.
+
+AVOID: generic lifestyle photos, text-free images, muted colors, stock photo look, cluttered composition.
+
+Return ONLY the image prompt, nothing else.
+        `.trim(),
+        maxTurns: 2,
+      });
+
+      const newImagePrompt = result.content.trim();
+
+      // Save new prompt
+      await this.creativePackageModel.updateOne(
+        { _id: creativePackageId, tenantId },
+        { $set: { imagePrompt: newImagePrompt } },
+      );
+
+      // Generate image from new prompt
+      const imageResult = await this.imageGenerator.generateFromPrompt(newImagePrompt, company, (pkg as any).runId);
+
+      await this.creativePackageModel.updateOne(
+        { _id: creativePackageId, tenantId },
+        { $set: { imageUrl: imageResult.imageUrl } },
+      );
+
+      this.logger.log(`Image prompt regenerated + image generated: tenantId=${tenantId} packageId=${creativePackageId}`);
+    })().catch((err) => this.logger.error(`Image prompt regeneration failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, message: 'Image prompt regeneration started. Poll GET /packages/:id for result.' };
   }
 
   /**
    * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image
-   * Retry image generation using the saved imagePrompt from the Creative Team.
+   * Retry image generation using the saved imagePrompt (does NOT rewrite the prompt).
    */
   @Post(':tenantId/packages/:creativePackageId/regenerate-image')
   async regenerateImage(

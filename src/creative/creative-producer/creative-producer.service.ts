@@ -86,10 +86,13 @@ export class CreativeProducerService {
         );
         image = imageResult;
 
+        // Convert scene list JSON to Heygen-compatible text prompt
+        const heygenPrompt = this.convertVideoPromptForHeygen(teamResult.videoPrompt);
+
         // Generate actual video from Heygen-compatible script
         try {
           video = await this.videoGenerator.generateFromScript(
-            teamResult.videoPrompt, tenantId, runId,
+            heygenPrompt, tenantId, runId,
           );
         } catch (videoErr: any) {
           this.logger.error(`Video generation failed (prompt saved): ${videoErr.message}`);
@@ -174,5 +177,45 @@ export class CreativeProducerService {
       this.logger.error(`Creative production failed: tenantId=${tenantId} briefId=${briefId} | ${err.message}`);
       throw err;
     }
+  }
+
+  /**
+   * Convert scene list JSON to a Heygen-compatible text prompt.
+   * If the input is already a string (old format), return as-is.
+   */
+  private convertVideoPromptForHeygen(videoPrompt: any): string {
+    // Already a plain string — return as-is
+    if (typeof videoPrompt === 'string') {
+      // Try parsing as JSON array in case it's a stringified scene list
+      try {
+        const parsed = JSON.parse(videoPrompt);
+        if (Array.isArray(parsed)) {
+          return this.scenesToHeygenPrompt(parsed);
+        }
+      } catch {
+        // Not JSON — plain text prompt, use as-is
+        return videoPrompt;
+      }
+      return videoPrompt;
+    }
+
+    // Already an array — convert
+    if (Array.isArray(videoPrompt)) {
+      return this.scenesToHeygenPrompt(videoPrompt);
+    }
+
+    return String(videoPrompt);
+  }
+
+  private scenesToHeygenPrompt(scenes: any[]): string {
+    const sceneDescriptions = scenes
+      .map((s: any) => `[${s.duration}] Text on screen: "${s.text}" — Visual: ${s.visual}${s.music ? ` — Music: ${s.music}` : ''}`)
+      .join('\n\n');
+
+    return `15-20 second vertical 9:16 Meta ad video. Sharp jump cuts every 2-3 seconds. Bold Hinglish/Hindi text overlays on every scene. Indian aesthetic throughout.
+
+${sceneDescriptions}
+
+Style: fast-paced, high contrast, thumb-stopping. Each scene has bold centered text overlay in white/yellow on a semi-transparent dark band. Sharp cuts between scenes — no smooth transitions. Indian faces, settings, and music throughout.`;
   }
 }

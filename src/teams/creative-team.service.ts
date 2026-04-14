@@ -137,6 +137,17 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
   Target segment: ${brief.targetSegment ?? 'general'}`;
     })();
 
+    // Visual learnings for image/video prompts
+    const creative = company.learnings?.creative;
+    const visualLearnings = (() => {
+      const lines: string[] = [];
+      if (creative?.visualInsights?.length) lines.push(`Visual patterns that work: ${creative.visualInsights.join('; ')}`);
+      if (creative?.winningHooks?.length) lines.push(`Winning hook styles (use in text overlays): ${creative.winningHooks.join(', ')}`);
+      if (creative?.losingHooks?.length) lines.push(`Losing hook styles (avoid in visuals): ${creative.losingHooks.join(', ')}`);
+      if (creative?.ctaInsights?.length) lines.push(`CTA insights: ${creative.ctaInsights.join('; ')}`);
+      return lines.length > 0 ? lines.join('\n') : 'No visual learnings yet.';
+    })();
+
     // Strategy mode
     const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
     const strategyMode = strategy === 'conservative'
@@ -211,25 +222,89 @@ COPY RULES:
 - No generic phrases: "best quality", "amazing product", "don't miss out"
 ${resolvedProduct ? `- Every variant MUST mention "${resolvedProduct.name}" and ₹${resolvedProduct.price}` : ''}
 
-━━━ b) IMAGE PROMPT — for DALL-E 3 ━━━
+━━━ b) IMAGE PROMPT — for Nano Banana (Gemini Image) ━━━
 
-Meta ad image specs:
-- Vertical 9:16, photorealistic, Indian faces/locations/aesthetic
-- Product prominently in frame — show what they're buying
-- Bold text overlay zones: describe WHERE "[hook text]" and "₹${resolvedProduct?.price ?? '[price]'}" should appear
-- High contrast, thumb-stopping colors
-- 3-4 sentences describing: subject, action, product placement, background, lighting, mood, text overlay zones
-- Avoid: stock photo look, cluttered composition, text-free images
+This image must make someone STOP scrolling and TAP the ad. It's not a brand photo — it's a direct response sales image.
 
-━━━ c) VIDEO PROMPT — for Heygen Video Agent API ━━━
+STEP 1 — IDENTIFY THE VISUAL CENTERPIECE:
+Before writing the prompt, ask yourself: "What is the ONE visual concept that makes THIS specific ad different from a generic ad for the same product?"
+Read the topic, angle, hook, and conversion bridge. The answer is in there.
 
-Describe the complete 15-20 second vertical Meta ad video. Heygen generates from this prompt.
-Do NOT write a script or avatar directions — describe the VIDEO ITSELF.
+Examples of visual centerpieces:
+- If the hook mentions a DATE/EVENT (festival, deadline, exam) → the centerpiece is that date (calendar, countdown, highlighted date)
+- If the hook mentions a COMPARISON (competitor vs us, before/after) → the centerpiece is a split visual
+- If the hook mentions a FEAR/PROBLEM → the centerpiece is that fear visualized dramatically
+- If the hook mentions SOCIAL PROOF (10,000+ users) → the centerpiece is the number, large and bold
+- If the hook mentions a SEASONAL MOMENT → the centerpiece is that season's visual symbol, prominently placed
 
-Include: mood/energy, scene-by-scene visuals, text overlays (what + where + when), product placement, color palette, music style, opening hook visual (first 3s), closing CTA visual (last 3s).
-Format: plain text, 150-250 words.
+The visual centerpiece must be the LARGEST, most prominent element in the image — not a small detail in the corner. If the ad is about Akshaya Tritiya on April 19, the calendar with April 19 circled should DOMINATE the image, not be a tiny element. If the ad is about career anxiety, a stressed face should fill the frame.
 
-Rules: NO avatar/voiceover/script. Product visually prominent. Price as TEXT OVERLAY. First 3s = scroll-stopper. Indian faces/locations. CTA overlay in last 3s.
+STEP 2 — BUILD THE IMAGE AROUND THE CENTERPIECE:
+
+IMAGE STRUCTURE (describe ALL of these):
+- VISUAL CENTERPIECE (60% of the frame): The one concept from Step 1. Make it LARGE, BOLD, unmissable. This is what the viewer sees first.
+- TEXT OVERLAY — TOP: The hook line in bold, high-contrast Hinglish text. Exact words from the copy. Must be READABLE at phone size.
+- TEXT OVERLAY — BOTTOM: Product name + "₹${resolvedProduct?.price ?? '[price]'}" + CTA. High contrast.
+- PRODUCT PLACEMENT: Where the product appears — can be integrated with the centerpiece or alongside it.
+- SUPPORTING ELEMENTS: Background, people, colors that reinforce the centerpiece's emotion — but don't compete with it.
+
+WHAT MAKES PEOPLE CLICK:
+1. The VISUAL CENTERPIECE creates instant recognition — "yeh toh mere baare me hai"
+2. TEXT OVERLAYS sell the message — hook + price, bold and readable
+3. PRODUCT is visible — the viewer knows what they're buying
+4. URGENCY or CURIOSITY in the composition — the viewer must feel "I need to tap NOW"
+5. INDIAN CONTEXT — real Indian faces, settings, cultural cues
+
+FORMAT: Vertical 9:16, photorealistic, 5-6 sentences.
+
+PAST VISUAL LEARNINGS:
+${visualLearnings}
+
+AVOID:
+- Generic images where the main concept is small/hidden — if the ad is about a specific date, that date must DOMINATE
+- Lifestyle photos with no clear focal point
+- Muted/pastel colors — they disappear in the feed
+- Cluttered composition — one centerpiece, one message
+- Stock photo aesthetic — real, raw, Indian performs better
+- Images that look "nice" but don't sell — every element must push toward the tap
+
+━━━ c) VIDEO AD — scene-by-scene script ━━━
+
+Write a 15-20 second vertical (9:16) Meta ad as a SCENE LIST. This is the text-led jump-cut format — the highest converting format on Meta for Indian audiences.
+
+HOW THIS FORMAT WORKS:
+- Every 2-3 seconds = NEW SCENE with a sharp cut (not smooth transition)
+- Each scene has: BOLD TEXT in Hinglish/Hindi (this is what sells) + a short video clip behind it (emotional wallpaper)
+- The TEXT does the selling. The video creates mood. The viewer reads, not watches.
+- 5-7 scenes total. Fast pacing. No wasted frames.
+
+SCENE STRUCTURE (follow this exact pattern):
+
+SCENE 1 (0-3s) — HOOK: Bold Hinglish text that creates instant curiosity or hits a pain point. The viewer must think "yeh toh mere baare me hai." Video: dramatic, emotional visual that matches the text.
+
+SCENE 2-3 (3-8s) — PAIN POINTS / DESIRES: Each scene = one relatable question or fear the audience has. Text is a short punchy line in Hinglish. Video: literal visual of what the text says (wedding scene for marriage question, office for career question, etc.)
+
+SCENE 4 (8-12s) — PRODUCT REVEAL: Text introduces ${resolvedProduct?.name ?? 'the product'} as the answer to all the questions above. Video: someone using/reading/holding the product. Close-up, real, authentic.
+
+SCENE 5 (12-15s) — PROOF + PRICE: Text shows social proof ("10,000+ log already use kar rahe hai") + price "₹${resolvedProduct?.price ?? '???'}". Video: happy customer or results visual.
+
+SCENE 6 (15-18s) — CTA: Text = urgency + clear action ("Abhi order karo — limited time offer"). Video: product hero shot or order screen visual.
+
+OUTPUT FORMAT — return as a JSON array inside the videoPrompt field:
+[
+  { "duration": "0-3s", "text": "Aapka future pehle se likha hua hai", "visual": "Close-up of hands opening an ancient palm leaf manuscript, warm golden light, dust particles visible", "music": "dramatic Indian classical sitar note" },
+  { "duration": "3-5s", "text": "Shadi kb hogi?", "visual": "Young Indian couple doing jaymala at a Hindu wedding, colorful mandap, guests cheering", "music": "continues" },
+  ...
+]
+
+SCENE WRITING RULES:
+- "text" field: Hinglish/Hindi. Short (3-8 words max). Punchy. Every line must make the viewer feel something.
+- "visual" field: Specific, filmable scene. Indian faces, real settings, not abstract. Describe what the CAMERA SEES — close-up/wide, lighting, colors, action.
+- "music" field: Only on scene 1 (set the mood) and if it changes. Indian music — specify style (dramatic/emotional/upbeat).
+- Scenes 1-3 must work independently — even if someone only sees 3 seconds, they get one complete thought that's worth stopping for.
+- Product name "${resolvedProduct?.name ?? 'Product'}" and price "₹${resolvedProduct?.price ?? '???'}" MUST appear in the text of at least one scene each.
+- NO English-only text. Every text line must have at least some Hindi/Hinglish.
+- NO "link in bio", NO brand logo, NO "subscribe", NO "hey guys" — this is a paid ad, not content.
 
 ═══════════════════════════════════════════════════════
 RULES
@@ -302,7 +377,10 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   "selectedIndex": 0,
   "selectionReason": "why this variant has the strongest hook and clearest value proposition",
   "imagePrompt": "Vertical 9:16 Meta ad image description...",
-  "videoPrompt": "15-second vertical Meta ad video description...",
+  "videoPrompt": [
+    { "duration": "0-3s", "text": "Hinglish hook line", "visual": "specific scene description", "music": "mood-setting Indian music" },
+    { "duration": "3-5s", "text": "Pain point question", "visual": "matching visual", "music": "continues" }
+  ],
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [
