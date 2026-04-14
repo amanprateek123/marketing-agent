@@ -5,6 +5,7 @@ import {
   IsOptional,
   IsEnum,
   IsObject,
+  IsDateString,
   ValidateNested,
   IsBoolean,
   Min,
@@ -39,6 +40,22 @@ class ServiceDto {
   @IsBoolean() active: boolean;
 }
 
+class PromotionDto {
+  @IsString() @IsNotEmpty() name: string;
+  @IsString() @IsNotEmpty() details: string;
+  @IsDateString() expiresAt: Date;
+}
+
+class PipelineConfigDto {
+  @IsOptional() @IsEnum(['daily', 'weekly']) mode?: string;
+  @IsOptional() @IsNumber() @Min(1) ideasPerRun?: number;
+  @IsOptional() @IsBoolean() autoSwitch?: boolean;
+  @IsOptional() @IsNumber() @Min(1) coldStartDays?: number;
+  @IsOptional() @IsEnum(['conservative', 'balanced', 'experimental']) campaignStrategy?: string;
+  @IsOptional() @IsNumber() @Min(1) pauseGracePeriodHours?: number;
+  @IsOptional() @IsBoolean() scaleRequiresApproval?: boolean;
+}
+
 class DeliveryDto {
   @IsOptional() @IsString() slackWebhook?: string;
   @IsOptional() @IsString() whatsappNumber?: string;
@@ -69,6 +86,9 @@ export class CreateCompanyDto {
 
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => ServiceDto)
   services?: ServiceDto[];
+
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PromotionDto)
+  activePromotions?: PromotionDto[];
 
   @IsString() @IsNotEmpty()
   targetAudience: string;
@@ -148,11 +168,6 @@ export class CreateCompanyDto {
   @IsOptional() @IsEnum(['weekly', 'biweekly'])
   runFrequency?: string;
 
-  @IsOptional() @IsObject()
-  pipelineConfig?: {
-    mode?: 'daily' | 'weekly';
-    ideasPerRun?: number;
-    autoSwitch?: boolean;
-    coldStartDays?: number;
-  };
+  @IsOptional() @IsObject() @ValidateNested() @Type(() => PipelineConfigDto)
+  pipelineConfig?: PipelineConfigDto;
 }

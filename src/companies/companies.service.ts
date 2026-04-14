@@ -36,7 +36,7 @@ export class CompaniesService {
     }
 
     const company = await this.companyModel.create({
-      ...dto,
+      ...(dto as any),
       apiKey: uuidv4(),
       prompts: null,
       learnings: null,
@@ -73,7 +73,7 @@ export class CompaniesService {
       (field) => field in dto,
     );
 
-    const { meta, ...rest } = dto as any;
+    const { meta, pipelineConfig, ...rest } = dto as any;
     Object.assign(company, rest);
 
     // Merge meta fields instead of replacing — prevents wiping accessToken when only updating pixelId
@@ -81,10 +81,17 @@ export class CompaniesService {
       company.meta = { ...(company.meta ?? {}), ...meta } as any;
     }
 
+    // Merge pipelineConfig — prevents wiping unrelated pipeline settings
+    if (pipelineConfig) {
+      company.pipelineConfig = { ...(company.pipelineConfig ?? {}), ...pipelineConfig } as any;
+    }
+
     // Mongoose doesn't auto-detect changes to Mixed/[Object] fields — mark them explicitly
     if ('products' in dto) company.markModified('products');
     if ('services' in dto) company.markModified('services');
+    if ('activePromotions' in dto) company.markModified('activePromotions');
     if ('meta' in dto) company.markModified('meta');
+    if ('pipelineConfig' in dto) company.markModified('pipelineConfig');
 
     await company.save();
 

@@ -67,6 +67,64 @@ export class CompaniesController {
     return this.companiesService.findByTenantId(tenantId);
   }
 
+  /**
+   * GET /api/v1/companies/:tenantId/settings
+   * Returns company data organized by dashboard sections.
+   */
+  @Get(':tenantId/settings')
+  async getSettings(@Param('tenantId') tenantId: string) {
+    const c = await this.companiesService.findByTenantId(tenantId);
+    return {
+      info: {
+        tenantId: c.tenantId,
+        name: c.name,
+        industry: c.industry,
+        geography: c.geography,
+        language: c.language,
+      },
+      brand: {
+        targetAudience: c.targetAudience,
+        audiencePersonas: c.audiencePersonas,
+        customerLanguage: c.customerLanguage,
+        tone: c.tone,
+        avoid: c.avoid,
+        uniqueValue: c.uniqueValue,
+        brandGuidelines: c.brandGuidelines,
+      },
+      products: c.products,
+      services: c.services,
+      activePromotions: c.activePromotions,
+      competitors: {
+        competitors: c.competitors,
+        competitorNotes: c.competitorNotes,
+        calendarContext: c.calendarContext,
+      },
+      delivery: c.delivery,
+      meta: c.meta,
+      budget: {
+        weeklyBudgetCap: c.weeklyBudgetCap,
+        maxBudgetPerCampaign: c.maxBudgetPerCampaign,
+        maxBudgetScalePercent: c.maxBudgetScalePercent,
+        primaryObjective: c.primaryObjective,
+        targetROAS: c.targetROAS,
+        targetCPA: c.targetCPA,
+        pauseIfROASBelow: c.pauseIfROASBelow,
+        pauseIfCTRBelow: c.pauseIfCTRBelow,
+        pauseIfFrequencyAbove: c.pauseIfFrequencyAbove,
+        pauseAfterDaysInLearning: c.pauseAfterDaysInLearning,
+        scaleIfROASAbove: c.scaleIfROASAbove,
+      },
+      marketing: {
+        platforms: c.platforms,
+        preferredFormats: c.preferredFormats,
+        forbiddenTopics: c.forbiddenTopics,
+        campaignsPerRun: c.campaignsPerRun,
+        runFrequency: c.runFrequency,
+      },
+      pipeline: c.pipelineConfig,
+    };
+  }
+
   @Put(':tenantId')
   async update(
     @Param('tenantId') tenantId: string,
