@@ -90,12 +90,12 @@ export class CampaignsService {
   }
 
   async getWeeklySpend(tenantId: string): Promise<number> {
-    // Sum spend from ALL active campaigns (spend is cumulative from Meta).
-    // For campaigns launched this week, use full spend.
-    // For older campaigns still running, estimate this week's portion using daily budget × days active this week.
     const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    // Only count agent-created campaigns — imported/manual campaigns are not our spend
+    // Only count active campaigns for projection — paused campaigns spend ₹0
     const campaigns = await this.campaignModel
-      .find({ tenantId, status: { $in: ['active', 'paused'] } })
+      .find({ tenantId, source: 'agent', status: 'active' })
       .lean()
       .exec();
 
@@ -105,10 +105,10 @@ export class CampaignsService {
       if (!launchedAt) continue;
 
       if (launchedAt >= weekAgo) {
-        // Launched this week — all spend is within the window
+        // Launched this week — use actual spend
         totalWeeklySpend += c.spend ?? 0;
       } else {
-        // Older campaign — estimate this week's spend using daily budget × 7
+        // Older active campaign — estimate this week's portion
         totalWeeklySpend += (c.budget ?? 0) * 7;
       }
     }
