@@ -52,6 +52,17 @@ export class CreativeProducerService {
   ): Promise<CreativePackageDocument> {
     const company = await this.companiesService.findByTenantId(tenantId);
 
+    // Check for existing package (any status) to avoid duplicates on resume
+    const existing = await this.creativePackageModel.findOne({ tenantId, briefId }).lean().exec();
+    if (existing && existing.status === 'completed') {
+      this.logger.log(`Creative production skipped — already completed for briefId=${briefId}`);
+      return existing as any;
+    }
+    if (existing) {
+      await this.creativePackageModel.deleteOne({ _id: existing._id });
+      this.logger.log(`Creative production: removing stale ${existing.status} package for briefId=${briefId}`);
+    }
+
     const pkg = await this.creativePackageModel.create({
       tenantId,
       runId,
@@ -150,21 +161,25 @@ export class CreativeProducerService {
       if (!allFailed) {
         const slackWebhook = company.delivery?.slackWebhook;
         if (slackWebhook) {
-          const selectedCopy = copyPackage?.variants?.[copyPackage?.selectedIndex ?? 0];
-          const copyLine = selectedCopy
-            ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
-            : '';
-          const imageLine = image?.imageUrl ? '\n✅ Image generated' : '\n⚠️ Image generation failed — retry needed';
-          const videoLine = video?.videoUrl
-            ? '\n✅ Video generated'
-            : video?.videoPrompt
-              ? '\n⚠️ Video generation failed — prompt saved, will retry'
-              : '\n⚠️ No video';
-          await this.slackService.sendMessage(
-            slackWebhook,
-            tenantId,
-            `🎨 *Creative ready — ${brief.topic}*${copyLine}${imageLine}${videoLine}`,
-          );
+          try {
+            const selectedCopy = copyPackage?.variants?.[copyPackage?.selectedIndex ?? 0];
+            const copyLine = selectedCopy
+              ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
+              : '';
+            const imageLine = image?.imageUrl ? '\n✅ Image generated' : '\n⚠️ Image generation failed — retry needed';
+            const videoLine = video?.videoUrl
+              ? '\n✅ Video generated'
+              : video?.videoPrompt
+                ? '\n⚠️ Video generation failed — prompt saved, will retry'
+                : '\n⚠️ No video';
+            await this.slackService.sendMessage(
+              slackWebhook,
+              tenantId,
+              `🎨 *Creative ready — ${brief.topic}*${copyLine}${imageLine}${videoLine}`,
+            );
+          } catch (slackErr: any) {
+            this.logger.error(`Slack notification failed for creative ${briefId} — package saved: ${slackErr.message}`);
+          }
         }
       }
 

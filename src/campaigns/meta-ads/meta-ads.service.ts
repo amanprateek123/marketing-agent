@@ -773,6 +773,7 @@ export class MetaAdsService {
     if (lower.includes('sign') || lower.includes('register')) return 'SIGN_UP';
     if (lower.includes('book') || lower.includes('consult')) return 'BOOK_TRAVEL';
     if (lower.includes('download') || lower.includes('install')) return 'INSTALL_MOBILE_APP';
-    return 'LEARN_MORE';
+    if (lower.includes('order')) return 'SHOP_NOW';
+    return 'SHOP_NOW';
   }
 }

@@ -48,8 +48,6 @@ export class ScoutOutput {
   @Prop({ type: Object, required: true })
   data: ScoutOutputData;
 
-  @Prop({ default: false })
-  enriched: boolean;
 }
 
 export const ScoutOutputSchema = SchemaFactory.createForClass(ScoutOutput);

@@ -28,3 +28,56 @@ Autonomous Marketing Agent is an autonomous AI marketing platform. It runs weekl
 - competitor-alternatives, customer-research, copywriting, social-content
 - continuous-learning-v2, autonomous-loops, cost-aware-llm-pipeline
 - verification-loop, iterative-retrieval, market-research
+
+## Architecture Map
+
+### Directory Structure
+```
+src/
+├── app.module.ts              # Root NestJS module
+├── main.ts                    # Bootstrap entry
+├── claude/                    # Claude SDK wrapper (runAgent, model routing, usage logging)
+├── companies/                 # Tenant CRUD, prompt generator, live context builder
+├── pipeline/                  # Intelligence pipeline (scouts → coordinator → research → strategy → digest)
+├── creative/                  # Creative production (copy writer, image gen, video gen)
+├── campaigns/                 # Campaign lifecycle (creator, auditor, optimizer, Meta Ads, sync, learning import)
+├── learning/                  # Feedback loop (creative learning, campaign learning, causal insights)
+├── teams/                     # Agent team orchestration (strategy, creative, campaign review — 2-agent debates via CLI)
+├── scheduler/                 # BullMQ processors (pipeline, audit, learning, sync)
+├── common/                    # Action logger, S3 service
+├── delivery/                  # Slack integration
+├── config/                    # Environment config loader
+└── database/                  # MongoDB connection
+```
+
+### Pipeline Phases
+- **Phase A**: 4 parallel scouts (Instagram, Reddit, Twitter, YouTube) — Haiku
+- **Phase B**: Coordinator signal synthesis + Meta Ads Library scraping — parallel
+- **Phase C**: Competitor research + Market research — parallel, Sonnet/Haiku
+- **Phase D**: Strategy Team (2-agent debate) → fallback: IdeaPool single-agent
+- **Phase E**: Digest writer → Slack delivery
+- **Phase F**: Creative Team (2-agent debate) → copy + image + video generation
+- **Phase G**: Campaign Review Team → campaign creation → human approval → Meta Ads launch
+- **Audit Loop**: Every 6h — metrics fetch, verdict, signal detection, optimization
+- **Learning Loop**: Day 7 creative scan, Day 14 performance writeback, Day 30 causal attribution
+
+### Agent Types (25 total)
+- **Haiku agents**: 4 Scouts, Market Research, Meta Ads Library, Digest Writer, Case Study Generator
+- **Sonnet agents**: Coordinator, Competitor Research, Strategy/Creative/Campaign Team Leads, Creative Producer, Copy Writer, Campaign Creator/Auditor, Learning agents, Prompt Generator
+
+### Key Patterns
+- Teams: 2-agent CLI debates (claude -p) with JSON output parsing, tmux cleanup
+- Safety: All budget/policy checks in TypeScript, Claude cannot override
+- Dedup: Scout signals hashed, 14-day TTL industry / 7-day viral
+- Async: Promise.allSettled for scouts, Promise.all for research, 5-min timeout per agent
+- Learning: Performance writeback → causal insights → prompt regeneration → improved next run
+
+### BullMQ Queues
+- PIPELINE, CAMPAIGN_AUDIT, MONTHLY_LEARNING, META_LEARNING_IMPORT, CAMPAIGN_SYNC
+
+### REST API
+- `POST /api/v1/pipeline/:tenantId/trigger` — Start pipeline run
+- `GET /api/v1/pipeline/:tenantId/runs/:runId/full` — Full run data
+- `POST /api/v1/campaigns/:tenantId/:campaignId/approve` — Human approval → Meta launch
+- `POST /api/v1/creative/:tenantId/produce` — Manual creative production
+- Plus CRUD endpoints for companies, campaigns, creative packages

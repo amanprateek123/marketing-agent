@@ -57,7 +57,7 @@ export abstract class ScoutBaseService {
           userMessage: attempt === 1
             ? userMessage
             : `${userMessage}\n\nPREVIOUS ATTEMPT FAILED: ${lastError}\nReturn ONLY valid JSON matching the required schema. Do not include any explanation before or after the JSON.`,
-          maxTurns: 20,
+          maxTurns: 10,
           runId,
         });
 
@@ -94,7 +94,6 @@ export abstract class ScoutBaseService {
       runId,
       platform: this.platform,
       data: finalOutput,
-      enriched: false,
     });
 
     // Save individual signals for dedup tracking (industry + viral)
@@ -172,7 +171,7 @@ ${lines}
     if (!Array.isArray(parsed.trending_topics)) throw new Error('Missing field: trending_topics');
     if (typeof parsed.raw_summary !== 'string') throw new Error('Missing field: raw_summary');
 
-    // Validate industry topics — drop only if signalScore is missing entirely
+    // Validate industry topics — drop if signalScore missing or below quality floor
     const validTopics = (parsed.trending_topics as TrendingTopic[]).filter((t) => {
       if (typeof t.signalScore !== 'number') {
         this.logger.warn(`Dropping signal "${t.topic}" — missing signalScore`);
@@ -185,10 +184,14 @@ ${lines}
         t.signalScore = Math.min(t.signalScore, 5);
         this.logger.warn(`Signal "${t.topic}" kept with capped score (no source URL)`);
       }
+      if (t.signalScore < 3) {
+        this.logger.warn(`Dropping signal "${t.topic}" — score ${t.signalScore} below quality floor (3)`);
+        return false;
+      }
       return true;
     });
 
-    // Validate viral trends — drop only if signalScore is missing entirely
+    // Validate viral trends — drop if signalScore missing or below quality floor
     const validViralTrends = ((parsed.viral_trends ?? []) as ViralTrend[]).filter((v) => {
       if (typeof v.signalScore !== 'number') {
         this.logger.warn(`Dropping viral trend "${v.trend}" — missing signalScore`);
@@ -198,6 +201,10 @@ ${lines}
       if (!hasSource) {
         v.signalScore = Math.min(v.signalScore, 5);
         this.logger.warn(`Viral trend "${v.trend}" kept with capped score (no source URL)`);
+      }
+      if (v.signalScore < 3) {
+        this.logger.warn(`Dropping viral trend "${v.trend}" — score ${v.signalScore} below quality floor (3)`);
+        return false;
       }
       return true;
     });
@@ -218,54 +225,64 @@ ${lines}
     topics: TrendingTopic[],
     viralTrends: ViralTrend[] = [],
   ): Promise<void> {
+    const ops: any[] = [];
+
     for (const topic of topics) {
       const hash = createHash('md5')
         .update(`${tenantId}:${this.platform}:industry:${topic.topic}:${topic.angle}`)
         .digest('hex');
 
-      await this.scoutSignalModel.updateOne(
-        { hash },
-        {
-          $set: {
-            tenantId,
-            runId,
-            platform: this.platform,
-            topic: topic.topic,
-            angle: topic.angle,
-            hash,
-            signalScore: topic.signalScore,
-            engagementProof: topic.engagementProof,
-            recency: topic.recency,
-            specificity: topic.specificity,
-            sourceQuality: topic.sourceQuality,
-            signalType: 'industry',
+      ops.push({
+        updateOne: {
+          filter: { hash },
+          update: {
+            $set: {
+              tenantId,
+              runId,
+              platform: this.platform,
+              topic: topic.topic,
+              angle: topic.angle,
+              hash,
+              signalScore: topic.signalScore,
+              engagementProof: topic.engagementProof,
+              recency: topic.recency,
+              specificity: topic.specificity,
+              sourceQuality: topic.sourceQuality,
+              signalType: 'industry',
+            },
           },
+          upsert: true,
         },
-        { upsert: true },
-      );
+      });
     }
 
     for (const trend of viralTrends) {
       const hash = createHash('md5')
-        .update(`${tenantId}:${this.platform}:viral:${trend.trend}`)
+        .update(`${tenantId}:${this.platform}:viral:${trend.trend}:${trend.brand_tie_in}`)
         .digest('hex');
 
-      await this.scoutSignalModel.updateOne(
-        { hash },
-        {
-          $set: {
-            tenantId,
-            runId,
-            platform: this.platform,
-            topic: trend.trend,
-            angle: trend.brand_tie_in,
-            hash,
-            signalScore: trend.signalScore,
-            signalType: 'viral',
+      ops.push({
+        updateOne: {
+          filter: { hash },
+          update: {
+            $set: {
+              tenantId,
+              runId,
+              platform: this.platform,
+              topic: trend.trend,
+              angle: trend.brand_tie_in,
+              hash,
+              signalScore: trend.signalScore,
+              signalType: 'viral',
+            },
           },
+          upsert: true,
         },
-        { upsert: true },
-      );
+      });
+    }
+
+    if (ops.length > 0) {
+      await this.scoutSignalModel.bulkWrite(ops);
     }
   }
 
@@ -285,7 +302,7 @@ ${lines}
         ],
       })
       .sort({ signalScore: -1 })
-      .limit(25)
+      .limit(50)
       .lean()
       .exec();
 

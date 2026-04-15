@@ -91,7 +91,13 @@ export class CampaignAuditorService {
     }
 
     // ── Fetch live metrics from Meta ──────────────────────────────────────────
-    const product = (company.products ?? []).find(p => p.active);
+    // Match product to the one this campaign is actually selling
+    const brief = campaign.briefId
+      ? await this.briefModel.findOne({ tenantId: company.tenantId, briefId: campaign.briefId }).lean().exec()
+      : null;
+    const briefProduct = brief ? (brief as any).product : '';
+    const product = (company.products ?? []).find(p => briefProduct ? p.name === briefProduct : p.active)
+      ?? (company.products ?? []).find(p => p.active);
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
 
@@ -208,11 +214,19 @@ export class CampaignAuditorService {
       }
 
       // Send Slack digest for "act" verdict
-      await this.sendAuditDigest(campaign, company, verdict, signals);
+      try {
+        await this.sendAuditDigest(campaign, company, verdict, signals);
+      } catch (slackErr: any) {
+        this.logger.error(`Audit Slack digest failed — actions still created: ${slackErr.message}`);
+      }
     } else if (verdict.verdict === 'watch') {
       // Only notify Slack if there are specific watch signals
       if (verdict.watchSignals.length > 0) {
-        await this.sendWatchNotification(campaign, company, verdict);
+        try {
+          await this.sendWatchNotification(campaign, company, verdict);
+        } catch (slackErr: any) {
+          this.logger.error(`Audit watch Slack notification failed: ${slackErr.message}`);
+        }
       }
     }
 
@@ -487,11 +501,15 @@ export class CampaignAuditorService {
 
     const slackWebhook = company.delivery?.slackWebhook;
     if (slackWebhook) {
-      await this.slackService.sendMessage(
-        slackWebhook,
-        company.tenantId,
-        `🛑 *Campaign Auto-Paused (Safety Rail)*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Reason:* ${reason}`,
-      );
+      try {
+        await this.slackService.sendMessage(
+          slackWebhook,
+          company.tenantId,
+          `🛑 *Campaign Auto-Paused (Safety Rail)*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Reason:* ${reason}`,
+        );
+      } catch (slackErr: any) {
+        this.logger.error(`Slack pause notification failed — campaign still paused: ${slackErr.message}`);
+      }
     }
 
     this.campaignLearning

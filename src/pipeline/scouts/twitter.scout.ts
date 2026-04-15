@@ -31,15 +31,15 @@ export class TwitterScout extends ScoutBaseService {
 Scout Twitter/X right now for two types of signals for ${company.name}.
 
 PART 1 — INDUSTRY SIGNALS
-Find trending conversations in Indian ${company.industry} space.
+Find trending conversations in ${company.geography} ${company.industry} space.
 Viral angles, trending hashtags, competitor mentions: ${company.competitors.join(', ')}.
 Use web_search with site:twitter.com and site:x.com queries.
 
 PART 2 — VIRAL TRENDS (trend-jacking opportunities)
-Find what is trending on Twitter India right now — regardless of industry.
-This includes: viral tweets, trending hashtags, memes, Bollywood/cricket/political moments going viral.
+Find what is trending on Twitter in ${company.geography} right now — regardless of industry.
+This includes: viral tweets, trending hashtags, memes, pop culture and sports moments going viral.
 For each trend, suggest how ${company.name} could create content riding that trend.
-Search: "trending Twitter India today", "viral tweet India this week", top India hashtags now.
+Search: "trending Twitter ${company.geography} today", "viral tweet ${company.geography} this week", top ${company.geography} hashtags now.
 
 ${this.buildExclusionBlock(recentlyCovered)}
 

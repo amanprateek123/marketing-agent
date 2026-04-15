@@ -18,6 +18,7 @@ const PROMPT_RELEVANT_FIELDS: (keyof UpdateCompanyDto)[] = [
   'services',
   'uniqueValue',
   'industry',
+  'geography',
 ];
 
 @Injectable()

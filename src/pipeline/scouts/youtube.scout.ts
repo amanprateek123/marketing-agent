@@ -35,15 +35,15 @@ export class YoutubeScout extends ScoutBaseService {
 Scout YouTube right now for two types of signals for ${company.name}.
 
 PART 1 — INDUSTRY SIGNALS
-Find high-performing Indian ${company.industry} videos published in the last 7 days.
+Find high-performing ${company.geography} ${company.industry} videos published in the last 7 days.
 Use the YouTube Data API (key in your instructions) with publishedAfter=${sevenDaysAgo}.
 Competitors to analyse: ${company.competitors.join(', ')}.
 Run multiple API queries for different search terms. Fetch video statistics for promising videos.
 
 PART 2 — VIRAL TRENDS (trend-jacking opportunities)
-Find what is massively trending on YouTube India right now — regardless of industry.
-Search YouTube API for: trending India videos, viral shorts India, top India content this week.
-Use queries like: q=trending india, q=viral india shorts, q=india meme ${sevenDaysAgo}.
+Find what is massively trending on YouTube in ${company.geography} right now — regardless of industry.
+Search YouTube API for: trending ${company.geography} videos, viral shorts ${company.geography}, top ${company.geography} content this week.
+Use queries like: q=trending ${company.geography}, q=viral ${company.geography} shorts, q=${company.geography} meme ${sevenDaysAgo}.
 For each viral trend found, suggest how ${company.name} could create a video riding that trend.
 
 ${this.buildExclusionBlock(recentlyCovered)}

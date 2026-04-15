@@ -311,18 +311,34 @@ export class PipelineOrchestratorService implements OnModuleInit {
         rawSummary: summary.slice(0, 300),
       });
 
-      if (existingResearch.length >= 2) {
+      // Check each research type independently — avoid re-running successful ones on resume
+      const existingCompetitor = existingResearch.find((r) => r.type === 'competitor');
+      const existingMarket = existingResearch.find((r) => r.type === 'market');
+
+      if (existingCompetitor && existingMarket) {
         this.logger.log(`[${runId}] Phase C: skipped — research already complete`);
-        const existingCompetitor = existingResearch.find((r) => r.type === 'competitor');
-        const existingMarket = existingResearch.find((r) => r.type === 'market');
-        competitorResearch = existingCompetitor?.structured ?? fallbackResearch(existingCompetitor?.content ?? '');
-        marketResearch = existingMarket?.structured ?? fallbackResearch(existingMarket?.content ?? '');
+        competitorResearch = existingCompetitor.structured ?? fallbackResearch(existingCompetitor.content ?? '');
+        marketResearch = existingMarket.structured ?? fallbackResearch(existingMarket.content ?? '');
       } else {
-        this.logger.log(`[${runId}] Phase C: intelligence agents`);
-        [competitorResearch, marketResearch] = await Promise.all([
-          this.coordinatorService.runCompetitorResearch(company, runId, coordinatorResult.content),
-          this.coordinatorService.runMarketResearch(company, runId, coordinatorResult.content),
+        this.logger.log(`[${runId}] Phase C: intelligence agents (competitor: ${existingCompetitor ? 'cached' : 'running'}, market: ${existingMarket ? 'cached' : 'running'})`);
+
+        // Only run what's missing — use allSettled so one failure doesn't kill both
+        const [competitorSettled, marketSettled] = await Promise.allSettled([
+          existingCompetitor
+            ? Promise.resolve(existingCompetitor.structured ?? fallbackResearch(existingCompetitor.content ?? ''))
+            : this.coordinatorService.runCompetitorResearch(company, runId, coordinatorResult.content),
+          existingMarket
+            ? Promise.resolve(existingMarket.structured ?? fallbackResearch(existingMarket.content ?? ''))
+            : this.coordinatorService.runMarketResearch(company, runId, coordinatorResult.content),
         ]);
+
+        competitorResearch = competitorSettled.status === 'fulfilled'
+          ? competitorSettled.value
+          : (() => { this.logger.error(`[${runId}] Competitor research failed (continuing): ${competitorSettled.reason?.message}`); return fallbackResearch(''); })();
+
+        marketResearch = marketSettled.status === 'fulfilled'
+          ? marketSettled.value
+          : (() => { this.logger.error(`[${runId}] Market research failed (continuing): ${marketSettled.reason?.message}`); return fallbackResearch(''); })();
       }
 
       // ── Phase D: Idea Pool ────────────────────────────────────────────────

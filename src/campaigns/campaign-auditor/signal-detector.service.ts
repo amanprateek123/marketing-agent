@@ -101,8 +101,10 @@ export class SignalDetectorService {
       : 'no_benchmark';
 
     // ── Anomalies ─────────────────────────────────────────────────────────────
+    // Flag ad sets with zero conversions after spending more than 50% of their daily budget
+    const dailyBudgetThreshold = Math.max(dailyBudget * 0.5, 500);
     const highSpendZeroConversions = current.adSets
-      .filter(as => as.conversions === 0 && as.spend > 1500)
+      .filter(as => as.conversions === 0 && as.spend > dailyBudgetThreshold)
       .map(as => ({ adSetName: as.adSetName, spend: as.spend }));
 
     const audienceFatigue = current.adSets

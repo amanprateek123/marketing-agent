@@ -89,18 +89,36 @@ export class IdeaPoolService {
       const fuzzyMatch = exactMatch ?? (company.products ?? []).find(
         (p) => p.name?.toLowerCase() === b.product?.toLowerCase(),
       );
-      const resolved = fuzzyMatch ?? (company.products ?? []).find((p) => p.active) ?? (company.products ?? [])[0];
-      if (resolved && !exactMatch) {
-        this.logger.warn(`Idea pool product mismatch: "${b.product}" → resolved to "${resolved.name}"`);
+      if (fuzzyMatch) {
+        if (!exactMatch) {
+          this.logger.warn(`Idea pool product casing mismatch: "${b.product}" → resolved to "${fuzzyMatch.name}"`);
+        }
+        b.product = fuzzyMatch.name;
+      } else {
+        this.logger.error(`Idea pool hallucinated product "${b.product}" — no match found. Dropping brief "${b.topic}".`);
+        b._invalid = true;
       }
-      b.product = resolved?.name ?? b.product;
     });
+
+    // Remove briefs with hallucinated products
+    const invalidCount = briefs.filter((b) => b._invalid).length;
+    if (invalidCount > 0) {
+      this.logger.warn(`Idea pool: dropped ${invalidCount} briefs with invalid products`);
+    }
+    const validBriefs = briefs.filter((b) => !b._invalid);
+    if (validBriefs.length === 0) {
+      throw new Error(`Idea pool: all ${briefs.length} briefs had invalid products`);
+    }
+    validBriefs.forEach((b) => delete b._invalid);
+    briefs.length = 0;
+    briefs.push(...validBriefs);
 
     // ── Rule-based winner selection ───────────────────────────────────────────
     const winner = this.selectWinner(briefs, coordinatorResult);
     const briefId = winner.briefId;
 
-    // ── Persist ───────────────────────────────────────────────────────────────
+    // ── Persist — delete any existing briefs from a prior attempt to avoid duplicates on resume
+    await this.intelligenceBriefModel.deleteMany({ tenantId, runId });
     await this.intelligenceBriefModel.insertMany(
       briefs.map((b) => ({
         tenantId,
@@ -198,10 +216,7 @@ ALL INTELLIGENCE — generate ideas from ANY of these sources
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 COORDINATOR SIGNALS (cross-validated from 4 platforms, ranked by score):
-${topSignals || coordinator.content.slice(0, 2000)}
-
-FULL COORDINATOR SYNTHESIS:
-${coordinator.content}
+${topSignals || 'No ranked signals this run.'}
 
 COMPETITOR INSIGHTS (may have standalone opportunities the scouts didn't catch):
 ${competitorResearch.insights.map((i, idx) =>
@@ -265,6 +280,7 @@ Rules:
 - signalRank: 1/2/3/etc for coordinator signal ideas, null for competitor/market/meta_ads_gap ideas
 - urgent: true only if this idea must be executed THIS WEEK
 - priorityScore: your honest 1-10 rating — rank by this to pick the top ${ideasPerRun}
+- suggestedBudget: DAILY in ₹/day. NEVER output 0. Minimum ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.10)}/day, max ₹${company.maxBudgetPerCampaign ?? 10000}/day
     `.trim();
   }
 

@@ -75,7 +75,7 @@ export class Company {
   @Prop({ type: [String], default: [] })
   platforms: string[];
 
-  @Prop({ required: true })
+  @Prop({ default: 'India' })
   geography: string;
 
   @Prop({ required: true })

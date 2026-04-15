@@ -158,7 +158,7 @@ Rules:
       systemPrompt,
       liveContext,
       userMessage,
-      maxTurns: 15,
+      maxTurns: 10,
     });
 
     const structured = this.parseStructuredResearch(result.content, 'competitor');
@@ -395,7 +395,7 @@ Include 5–10 top signals. Use exactly these field names: topic, platforms, com
         textSignals.push({
           topic: match[1].replace(/\*\*/g, '').trim(),
           platforms: [],
-          compositeScore: 5,
+          compositeScore: 8 - textSignals.length * 0.5, // descending: 8, 7.5, 7, 6.5, 6, 5.5, 5
           rationale: '',
         });
         if (textSignals.length >= 7) break;

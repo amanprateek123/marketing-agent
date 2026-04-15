@@ -86,17 +86,34 @@ export class StrategyTeamService {
     briefs.forEach((b: any) => {
       b.briefId = uuidv4();
       // Validate product name — LLM may output slightly wrong casing or name
-      // Find exact match first, then case-insensitive, then first active product
+      // Find exact match first, then case-insensitive
       const exactMatch = (company.products ?? []).find(p => p.name === b.product);
       const fuzzyMatch = exactMatch ?? (company.products ?? []).find(
         p => p.name?.toLowerCase() === b.product?.toLowerCase(),
       );
-      const resolved = fuzzyMatch ?? (company.products ?? []).find(p => p.active) ?? (company.products ?? [])[0];
-      if (resolved && !exactMatch) {
-        this.logger.warn(`Strategy Team product mismatch: "${b.product}" → resolved to "${resolved.name}"`);
+      if (fuzzyMatch) {
+        if (!exactMatch) {
+          this.logger.warn(`Strategy Team product casing mismatch: "${b.product}" → resolved to "${fuzzyMatch.name}"`);
+        }
+        b.product = fuzzyMatch.name;
+      } else {
+        this.logger.error(`Strategy Team hallucinated product "${b.product}" — no match found. Dropping brief "${b.topic}".`);
+        b._invalid = true;
       }
-      b.product = resolved?.name ?? b.product;
     });
+
+    // Remove briefs with hallucinated products
+    const invalidCount = briefs.filter((b: any) => b._invalid).length;
+    if (invalidCount > 0) {
+      this.logger.warn(`Strategy Team: dropped ${invalidCount} briefs with invalid products`);
+    }
+    const validBriefs = briefs.filter((b: any) => !b._invalid);
+    if (validBriefs.length === 0) {
+      throw new Error(`Strategy Team: all ${briefs.length} briefs had invalid products — debate failed`);
+    }
+    validBriefs.forEach((b: any) => delete b._invalid);
+    briefs.length = 0;
+    briefs.push(...validBriefs);
 
     const winnerId = briefs.find((b: any) => b.selected)?.briefId ?? briefs[0].briefId;
     const winner = briefs.find((b: any) => b.briefId === winnerId);
@@ -105,7 +122,8 @@ export class StrategyTeamService {
       throw new Error(`Strategy Team winner not found in briefs for run ${runId} — this is a bug`);
     }
 
-    // Persist intelligence briefs
+    // Persist intelligence briefs — delete any existing ones from a prior attempt to avoid duplicates on resume
+    await this.intelligenceBriefModel.deleteMany({ tenantId, runId });
     await this.intelligenceBriefModel.insertMany(
       briefs.map((b: any) => ({
         tenantId,

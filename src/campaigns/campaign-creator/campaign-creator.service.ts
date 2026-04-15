@@ -90,11 +90,15 @@ export class CampaignCreatorService {
 
         const slackWebhook = company.delivery?.slackWebhook;
         if (slackWebhook) {
-          await this.slackService.sendMessage(
-            slackWebhook,
-            company.tenantId,
-            `❌ *Campaign Rejected by Review Team*\n\n*Topic:* ${brief.topic}\n*Budget:* ₹${brief.suggestedBudget}\n\n*Reason:* ${review.debateRationale}\n\n*Debate Log:*\n${review.debateLog?.map(d => `• R${d.round} [${d.from}]: ${d.summary}`).join('\n') ?? 'No debate log'}`,
-          );
+          try {
+            await this.slackService.sendMessage(
+              slackWebhook,
+              company.tenantId,
+              `❌ *Campaign Rejected by Review Team*\n\n*Topic:* ${brief.topic}\n*Budget:* ₹${brief.suggestedBudget}\n\n*Reason:* ${review.debateRationale}\n\n*Debate Log:*\n${review.debateLog?.map(d => `• R${d.round} [${d.from}]: ${d.summary}`).join('\n') ?? 'No debate log'}`,
+            );
+          } catch (slackErr: any) {
+            this.logger.error(`Slack rejection notification failed: ${slackErr.message}`);
+          }
         }
 
         throw new Error(`Campaign rejected by review team: ${review.debateRationale}`);
@@ -168,11 +172,15 @@ export class CampaignCreatorService {
     // ── Send approval request to Slack ───────────────────────────────────────
     const slackWebhook = company.delivery?.slackWebhook;
     if (slackWebhook) {
-      await this.slackService.sendMessage(
-        slackWebhook,
-        company.tenantId,
-        this.buildApprovalMessage(brief, finalBudget, review, (campaign as any)._id.toString(), company.tenantId),
-      );
+      try {
+        await this.slackService.sendMessage(
+          slackWebhook,
+          company.tenantId,
+          this.buildApprovalMessage(brief, finalBudget, review, (campaign as any)._id.toString(), company.tenantId),
+        );
+      } catch (slackErr: any) {
+        this.logger.error(`Slack approval notification failed — campaign saved as pending_approval: ${slackErr.message}`);
+      }
     }
 
     this.logger.log(

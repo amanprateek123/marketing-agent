@@ -40,16 +40,16 @@ export class DigestWriterService {
     });
 
     if (slackWebhook) {
-      await this.slackService.sendMessage(slackWebhook, tenantId, signalsContent);
+      await this.safeSend(slackWebhook, tenantId, signalsContent);
     }
 
-    // ── 2. One digest entry + Slack message per idea ──────────────────────────
+    // ── 2. One digest entry + Slack message per idea (template — no LLM needed) ──
     for (let i = 0; i < ideaPoolResult.briefs.length; i++) {
       const brief = ideaPoolResult.briefs[i];
       const isRecommended = brief.briefId === ideaPoolResult.selectedBriefId;
 
-      const ideaContent = await this.writeIdeaBrief(
-        company, runId, brief, isRecommended, ideaPoolResult.selectionReason, i + 1, ideaPoolResult.briefs.length,
+      const ideaContent = this.formatIdeaBrief(
+        brief, isRecommended, ideaPoolResult.selectionReason, i + 1, ideaPoolResult.briefs.length,
       );
 
       await this.digestModel.create({
@@ -64,8 +64,8 @@ export class DigestWriterService {
       });
 
       if (slackWebhook) {
-        await this.slackService.sendDivider(slackWebhook, tenantId);
-        await this.slackService.sendMessage(slackWebhook, tenantId, ideaContent);
+        await this.safeDivider(slackWebhook, tenantId);
+        await this.safeSend(slackWebhook, tenantId, ideaContent);
       }
     }
 
@@ -76,8 +76,8 @@ export class DigestWriterService {
     });
 
     if (slackWebhook) {
-      await this.slackService.sendDivider(slackWebhook, tenantId);
-      await this.slackService.sendMessage(slackWebhook, tenantId, ctaContent);
+      await this.safeDivider(slackWebhook, tenantId);
+      await this.safeSend(slackWebhook, tenantId, ctaContent);
     }
 
     // Mark all delivered
@@ -131,58 +131,48 @@ Format as Slack markdown. No headers. 80-100 words max. Tone: performance market
     return `📊 *${company.name} | Weekly Intelligence — Week of ${this.weekLabel()}*\n\n${result.content}`;
   }
 
-  // ── Per-idea brief ──────────────────────────────────────────────────────────
-  private async writeIdeaBrief(
-    company: CompanyDocument,
-    runId: string,
+  // ── Per-idea brief (template — no LLM needed) ──────────────────────────────
+  private formatIdeaBrief(
     brief: IdeaPoolResult['briefs'][0],
     isRecommended: boolean,
     selectionReason: string,
     index: number,
     total: number,
-  ): Promise<string> {
-    const recommendedLine = isRecommended
-      ? `\n⭐ *System recommendation:* ${selectionReason}`
-      : '';
-
-    const result = await this.claudeService.runAgent({
-      tenantId: company.tenantId,
-      runId,
-      agentType: AgentType.DIGEST_WRITER,
-      systemPrompt: company.prompts?.digestWriter ?? '',
-      liveContext: this.liveContextBuilder.build(company),
-      userMessage: `
-Write a Meta ad campaign brief for ${company.name}'s performance marketing team. This is ad idea ${index} of ${total}.
-
-Do NOT ask questions. Write immediately.
-
-BRIEF DATA:
-Topic: ${brief.topic}
-Angle: ${brief.angle}
-Product: ${brief.product || 'see brief'}
-Meta placement: ${brief.platform} | Ad format: ${brief.format}
-Target audience: ${brief.audience}
-Ad hook (opening line): ${brief.hook}
-Key message: ${brief.keyMessage}
-Conversion bridge: ${brief.conversionBridge}
-Daily budget: ₹${brief.suggestedBudget}/day
-
-Write a focused Meta ad campaign brief in Slack markdown format:
-- Bold topic as the header
-- 1 sentence on why this will convert as a paid ad right now
-- Ad hook (the exact scroll-stopping opening line)
-- Key message (what the viewer believes after seeing this ad)
-- Conversion bridge (how the ad moves them from watching → buying the product)
-- Meta placement + ad format + daily budget
-
-This is a PAID META AD, not organic content. Tone: confident, direct, performance marketer.
-120-150 words max. No scores.
-      `.trim(),
-      maxTurns: 2,
-    });
-
+  ): string {
     const label = isRecommended ? `💡 *Idea ${index} of ${total} — RECOMMENDED*` : `💡 *Idea ${index} of ${total}*`;
-    return `${label}${recommendedLine}\n\n${result.content}`;
+    const recommendedLine = isRecommended ? `\n⭐ *System recommendation:* ${selectionReason}` : '';
+
+    const lines = [
+      label,
+      recommendedLine,
+      '',
+      `*${brief.topic} — ${brief.angle}*`,
+      brief.product ? `🛒 Product: ${brief.product}` : '',
+      brief.hook ? `🎯 Ad hook: "${brief.hook}"` : '',
+      brief.keyMessage ? `💬 Key message: ${brief.keyMessage}` : '',
+      brief.conversionBridge ? `🔗 Conversion bridge: ${brief.conversionBridge}` : '',
+      `👥 Audience: ${brief.audience}`,
+      `📍 ${brief.platform} ${brief.format} | ₹${brief.suggestedBudget}/day`,
+    ].filter(Boolean).join('\n');
+
+    return lines;
+  }
+
+  // ── Safe Slack send — digest is already persisted, delivery failure shouldn't block pipeline
+  private async safeSend(webhookUrl: string, tenantId: string, content: string): Promise<void> {
+    try {
+      await this.slackService.sendMessage(webhookUrl, tenantId, content);
+    } catch (err: any) {
+      this.logger.error(`Slack delivery failed for ${tenantId} — digest saved to DB but not delivered: ${err.message}`);
+    }
+  }
+
+  private async safeDivider(webhookUrl: string, tenantId: string): Promise<void> {
+    try {
+      await this.slackService.sendDivider(webhookUrl, tenantId);
+    } catch {
+      // divider failure is non-critical
+    }
   }
 
   // ── CTA — no LLM needed ────────────────────────────────────────────────────

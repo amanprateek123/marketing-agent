@@ -123,8 +123,8 @@ export class CreateCompanyDto {
   @IsOptional() @IsArray() @IsString({ each: true })
   platforms?: string[];
 
-  @IsString() @IsNotEmpty()
-  geography: string;
+  @IsOptional() @IsString()
+  geography?: string;
 
   @IsString() @IsNotEmpty()
   language: string;

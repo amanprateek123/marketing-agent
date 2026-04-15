@@ -299,7 +299,7 @@ Return as a single causal insight JSON:
         topicScores: existing?.topicScores ?? {},
         creative: existing?.creative ?? this.emptyCreativeLearnings(),
         campaign: existing?.campaign ?? this.emptyCampaignLearnings(),
-        causalInsights: [...(existing?.causalInsights ?? []), insight],
+        causalInsights: [...(existing?.causalInsights ?? []), insight].slice(-25),
       });
 
       this.logger.log(

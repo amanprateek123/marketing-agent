@@ -31,15 +31,15 @@ export class RedditScout extends ScoutBaseService {
 Scout Reddit right now for two types of signals for ${company.name}.
 
 PART 1 — INDUSTRY SIGNALS
-Find trending discussions in Indian ${company.industry} space.
+Find trending discussions in ${company.geography} ${company.industry} space.
 Real pain points, questions, competitor complaints from: ${company.competitors.join(', ')}.
 Use web_search with site:reddit.com queries.
 
 PART 2 — VIRAL TRENDS (trend-jacking opportunities)
-Find what topics are massively viral on Reddit India right now — regardless of industry.
-This includes: trending memes, viral posts on r/india r/bollywood r/cricket, pop culture moments.
+Find what topics are massively viral on Reddit in ${company.geography} right now — regardless of industry.
+This includes: trending memes, viral posts, pop culture moments relevant to ${company.geography}.
 For each trend, suggest how ${company.name} could create content using that trend.
-Search: "site:reddit.com trending india today", "site:reddit.com viral india this week".
+Search: "site:reddit.com trending ${company.geography} today", "site:reddit.com viral ${company.geography} this week".
 
 ${this.buildExclusionBlock(recentlyCovered)}
 

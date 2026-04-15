@@ -47,3 +47,9 @@ export class ScoutSignal {
 }
 
 export const ScoutSignalSchema = SchemaFactory.createForClass(ScoutSignal);
+
+// Compound index for loadRecentSignals query
+ScoutSignalSchema.index({ tenantId: 1, platform: 1, signalType: 1, createdAt: -1 });
+
+// TTL index — auto-delete signals older than 30 days
+ScoutSignalSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });

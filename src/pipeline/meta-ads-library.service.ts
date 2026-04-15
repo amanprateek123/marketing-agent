@@ -63,7 +63,7 @@ TARGET AUDIENCE: ${company.targetAudience}
 STEP 1 — COMPETITOR ADS
 For each competitor, search:
 - "site:facebook.com/ads/library [competitor]"
-- "[competitor] facebook ads running india 2025"
+- "[competitor] facebook ads running ${company.geography} ${new Date().getFullYear()}"
 - "[competitor] meta ads active creatives"
 
 For each significant ad found, capture:
@@ -81,7 +81,7 @@ After researching all competitors, identify:
 - Emotional triggers absent from all competitor ads
 
 STEP 3 — CATEGORY FORMAT TRENDS
-- Search: "${company.industry} best performing facebook ads india 2025"
+- Search: "${company.industry} best performing facebook ads ${company.geography} ${new Date().getFullYear()}"
 - What format dominates this category right now?
 
 Return ONLY a valid JSON object — no markdown, no explanation:
@@ -124,7 +124,7 @@ Rules:
       systemPrompt,
       liveContext,
       userMessage,
-      maxTurns: 15,
+      maxTurns: 10,
     });
 
     const insights = this.parseInsights(result.content);
@@ -168,7 +168,7 @@ Rules:
         rawSummary: parsed.rawSummary ?? '',
       };
     } catch (err: any) {
-      this.logger.warn(`Failed to parse Meta Ads Library output: ${err.message}`);
+      this.logger.error(`Failed to parse Meta Ads Library output — pipeline continues with zero competitive intelligence: ${err.message}`);
       return {
         competitorAds: [],
         gaps: [],
