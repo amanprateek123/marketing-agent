@@ -232,8 +232,9 @@ export class CampaignCreatorService {
       : null;
 
     const copyVariants = creativePackage?.copyVariants ?? [];
-    const imageUrl = creativePackage?.imageUrl ?? '';
-    const videoUrl = creativePackage?.videoUrl ?? '';
+    const images = (creativePackage as any)?.images ?? [];
+    const video = (creativePackage as any)?.video ?? null;
+    const videoUrl = video?.videoUrl ?? '';
 
     // Validate ad sets before touching Meta API
     for (const [i, adSet] of (config.adSets as any[]).entries()) {
@@ -246,11 +247,16 @@ export class CampaignCreatorService {
         }
       }
       if ((adSet.creativeFormat === 'video' || adSet.creativeFormat === 'both') && !videoUrl) {
+        const hasAnyImage = images.some((img: any) => img.imageUrl);
         this.logger.warn(`Ad set ${i} (${adSet.name}) requires video but videoUrl is empty — falling back to image`);
-        adSet.creativeFormat = imageUrl ? 'image' : undefined;
+        adSet.creativeFormat = hasAnyImage ? 'image' : undefined;
       }
-      if ((adSet.creativeFormat === 'image' || !adSet.creativeFormat) && !imageUrl) {
-        throw new Error(`Ad set ${i} (${adSet.name}) requires image but imageUrl is empty`);
+      if ((adSet.creativeFormat === 'image' || !adSet.creativeFormat)) {
+        const variantImages = adSet.ads.map((idx: number) => images.find((img: any) => img.variantIndex === idx));
+        const missingImages = variantImages.filter((img: any) => !img?.imageUrl);
+        if (missingImages.length === adSet.ads.length) {
+          throw new Error(`Ad set ${i} (${adSet.name}) requires images but none are available for variants ${adSet.ads.join(', ')}`);
+        }
       }
     }
 
@@ -267,18 +273,20 @@ export class CampaignCreatorService {
     const topicSlug = ((campaign as any).topic ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
     const campaignName = `${topicSlug || 'CAMPAIGN'}_${new Date().toISOString().split('T')[0]}`;
 
-    // Upload image to Meta if available
-    let imageHash: string | undefined;
-    if (imageUrl) {
-      try {
-        imageHash = await this.metaAdsService.uploadImage(
-          imageUrl, accountId, company.meta.accessToken,
-        );
-      } catch (err: any) {
-        this.logger.warn(`Image upload failed (proceeding without image): ${err.message}`);
+    // Upload one image per variant to Meta
+    const imageHashes: Record<number, string> = {};
+    for (const img of images) {
+      if (img.imageUrl) {
+        try {
+          const hash = await this.metaAdsService.uploadImage(img.imageUrl, accountId, company.meta.accessToken);
+          imageHashes[img.variantIndex] = hash;
+          this.logger.log(`Image uploaded for variant ${img.variantIndex}: hash=${hash}`);
+        } catch (err: any) {
+          this.logger.warn(`Image upload failed for variant ${img.variantIndex}: ${err.message}`);
+        }
       }
     }
-    this.logger.log(`imageHash: ${imageHash ?? 'NONE'}`);
+    this.logger.log(`imageHashes: ${JSON.stringify(Object.keys(imageHashes).map(k => `v${k}=${imageHashes[Number(k)].slice(0, 8)}...`))}`);
 
     // Upload video to Meta if available and any ad set needs it
     const needsVideo = (config.adSets ?? []).some(
@@ -318,7 +326,7 @@ export class CampaignCreatorService {
       copyVariants: copyVariants.length > 0 ? copyVariants : [
         { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
       ],
-      imageHash,
+      imageHashes,
       videoThumbnailHash,
       videoId,
       landingUrl,

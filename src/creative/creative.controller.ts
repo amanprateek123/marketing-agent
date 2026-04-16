@@ -53,21 +53,42 @@ export class CreativeController {
    * PATCH /api/v1/creative/:tenantId/packages/:creativePackageId
    * Manually update imageUrl and/or videoUrl on a creative package.
    */
+  /**
+   * PATCH /api/v1/creative/:tenantId/packages/:creativePackageId
+   * Manually update a specific variant's imageUrl or the video's videoUrl.
+   * Body: { variantIndex?: number, imageUrl?: string, videoUrl?: string }
+   */
   @Patch(':tenantId/packages/:creativePackageId')
   async updatePackage(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
-    @Body() body: { imageUrl?: string; videoUrl?: string },
+    @Body() body: { variantIndex?: number; imageUrl?: string; videoUrl?: string },
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
 
     const update: any = {};
-    if (body.imageUrl) update.imageUrl = body.imageUrl;
-    if (body.videoUrl) update.videoUrl = body.videoUrl;
+
+    if (body.imageUrl !== undefined) {
+      const variantIndex = body.variantIndex ?? 0;
+      // Update or push the image entry for this variant
+      const images: any[] = (pkg as any).images ?? [];
+      const existing = images.find((img: any) => img.variantIndex === variantIndex);
+      if (existing) {
+        existing.imageUrl = body.imageUrl;
+      } else {
+        images.push({ variantIndex, imagePrompt: '', imageUrl: body.imageUrl });
+      }
+      update.images = images;
+    }
+
+    if (body.videoUrl !== undefined) {
+      const currentVideo = (pkg as any).video ?? { variantIndex: 0, videoPrompt: '', videoThumbnailUrl: '' };
+      update.video = { ...currentVideo, videoUrl: body.videoUrl };
+    }
 
     await this.creativePackageModel.updateOne({ _id: creativePackageId, tenantId }, { $set: update });
-    return { status: 'updated', creativePackageId, ...update };
+    return { status: 'updated', creativePackageId };
   }
 
   /**
@@ -169,12 +190,13 @@ Return ONLY a JSON array:
         scenes = [];
       }
 
-      // Save structured scene list as videoPrompt
+      // Save structured scene list as videoPrompt inside video object
       const newVideoPrompt = scenes.length > 0 ? JSON.stringify(scenes, null, 2) : rawOutput;
+      const currentVideo = (pkg as any).video ?? { variantIndex: (pkg as any).selectedCopyIndex ?? 0, videoUrl: '', videoThumbnailUrl: '' };
 
       await this.creativePackageModel.updateOne(
         { _id: creativePackageId, tenantId },
-        { $set: { videoPrompt: newVideoPrompt } },
+        { $set: { video: { ...currentVideo, videoPrompt: newVideoPrompt } } },
       );
 
       // Convert scene list to Heygen-compatible text prompt
@@ -185,9 +207,10 @@ Return ONLY a JSON array:
       // Generate video
       try {
         const videoResult = await this.videoGenerator.generateFromScript(heygenPrompt, tenantId, (pkg as any).runId);
+        const currentVideo = (pkg as any).video ?? { variantIndex: (pkg as any).selectedCopyIndex ?? 0, videoThumbnailUrl: '' };
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
-          { $set: { videoUrl: videoResult.videoUrl } },
+          { $set: { video: { ...currentVideo, videoPrompt: newVideoPrompt, videoUrl: videoResult.videoUrl, videoThumbnailUrl: videoResult.videoThumbnailUrl } } },
         );
         this.logger.log(`Video prompt regenerated + video generated: tenantId=${tenantId} packageId=${creativePackageId}`);
       } catch (videoErr: any) {
@@ -283,18 +306,21 @@ Return ONLY the image prompt, nothing else.
 
       const newImagePrompt = result.content.trim();
 
-      // Save new prompt
-      await this.creativePackageModel.updateOne(
-        { _id: creativePackageId, tenantId },
-        { $set: { imagePrompt: newImagePrompt } },
-      );
+      const selectedIndex = (pkg as any).selectedCopyIndex ?? 0;
+      const images: any[] = (pkg as any).images ?? [];
 
       // Generate image from new prompt
       const imageResult = await this.imageGenerator.generateFromPrompt(newImagePrompt, company, (pkg as any).runId);
+      const existingIdx = images.findIndex((img: any) => img.variantIndex === selectedIndex);
+      if (existingIdx >= 0) {
+        images[existingIdx] = { variantIndex: selectedIndex, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl };
+      } else {
+        images.push({ variantIndex: selectedIndex, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl });
+      }
 
       await this.creativePackageModel.updateOne(
         { _id: creativePackageId, tenantId },
-        { $set: { imageUrl: imageResult.imageUrl } },
+        { $set: { images } },
       );
 
       this.logger.log(`Image prompt regenerated + image generated: tenantId=${tenantId} packageId=${creativePackageId}`);
@@ -307,33 +333,46 @@ Return ONLY the image prompt, nothing else.
    * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image
    * Retry image generation using the saved imagePrompt (does NOT rewrite the prompt).
    */
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image
+   * Retry image generation for a specific variant using the saved imagePrompt.
+   * Body: { variantIndex?: number } — defaults to selectedCopyIndex
+   */
   @Post(':tenantId/packages/:creativePackageId/regenerate-image')
   async regenerateImage(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { variantIndex?: number } = {},
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
 
-    const imagePrompt = (pkg as any).imagePrompt;
-    if (!imagePrompt) return { error: 'No imagePrompt saved — run full creative production first' };
+    const variantIndex = body.variantIndex ?? (pkg as any).selectedCopyIndex ?? 0;
+    const images: any[] = (pkg as any).images ?? [];
+    const imageEntry = images.find((img: any) => img.variantIndex === variantIndex);
+
+    if (!imageEntry?.imagePrompt) {
+      return { error: `No imagePrompt saved for variant ${variantIndex} — run full creative production first` };
+    }
 
     const company = await this.companiesService.findByTenantId(tenantId);
-
-    this.logger.log(`Regenerating image: tenantId=${tenantId} packageId=${creativePackageId}`);
+    this.logger.log(`Regenerating image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId}`);
 
     // Fire and forget
-    this.imageGenerator.generateFromPrompt(imagePrompt, company, (pkg as any).runId)
+    this.imageGenerator.generateFromPrompt(imageEntry.imagePrompt, company, (pkg as any).runId)
       .then(async (result) => {
+        const updatedImages = [...images];
+        const idx = updatedImages.findIndex((img: any) => img.variantIndex === variantIndex);
+        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl };
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
-          { $set: { imageUrl: result.imageUrl } },
+          { $set: { images: updatedImages } },
         );
-        this.logger.log(`Image regenerated: tenantId=${tenantId} packageId=${creativePackageId}`);
+        this.logger.log(`Image regenerated for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId}`);
       })
       .catch((err) => this.logger.error(`Image regeneration failed: ${err.message}`));
 
-    return { status: 'started', creativePackageId, message: 'Image generation started. Poll GET /packages/:id for result.' };
+    return { status: 'started', creativePackageId, variantIndex, message: 'Image generation started. Poll GET /packages/:id for result.' };
   }
 
   /**
@@ -348,17 +387,17 @@ Return ONLY the image prompt, nothing else.
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
 
-    const videoPrompt = (pkg as any).videoPrompt;
-    if (!videoPrompt) return { error: 'No videoPrompt saved — run full creative production first' };
+    const video = (pkg as any).video;
+    if (!video?.videoPrompt) return { error: 'No videoPrompt saved — run full creative production first' };
 
     this.logger.log(`Regenerating video: tenantId=${tenantId} packageId=${creativePackageId}`);
 
     // Fire and forget
-    this.videoGenerator.generateFromScript(videoPrompt, tenantId, (pkg as any).runId)
+    this.videoGenerator.generateFromScript(video.videoPrompt, tenantId, (pkg as any).runId)
       .then(async (result) => {
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
-          { $set: { videoUrl: result.videoUrl } },
+          { $set: { video: { ...video, videoUrl: result.videoUrl, videoThumbnailUrl: result.videoThumbnailUrl } } },
         );
         this.logger.log(`Video regenerated: tenantId=${tenantId} packageId=${creativePackageId}`);
       })

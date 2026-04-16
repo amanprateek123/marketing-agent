@@ -6,7 +6,7 @@ import { CopyWriterService } from '../copy-writer/copy-writer.service';
 import { ImageGeneratorService } from '../image-generator/image-generator.service';
 import { VideoGeneratorService } from '../video-generator/video-generator.service';
 import { CreativeTeamService } from '../../teams/creative-team.service';
-import { CreativePackage, CreativePackageDocument } from '../schemas/creative-package.schema';
+import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../schemas/creative-package.schema';
 import { SlackService } from '../../delivery/slack.service';
 
 export interface BriefData {
@@ -52,7 +52,7 @@ export class CreativeProducerService {
   ): Promise<CreativePackageDocument> {
     const company = await this.companiesService.findByTenantId(tenantId);
 
-    // Check for existing package (any status) to avoid duplicates on resume
+    // Check for existing package — avoid duplicates on resume
     const existing = await this.creativePackageModel.findOne({ tenantId, briefId }).lean().exec();
     if (existing && existing.status === 'completed') {
       this.logger.log(`Creative production skipped — already completed for briefId=${briefId}`);
@@ -74,14 +74,12 @@ export class CreativeProducerService {
     this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId}`);
 
     try {
-      // Try Creative Team first (peer-to-peer debate: Creative Director + Brand Compliance)
-      // Produces copy + image prompt + video prompt in one reviewed package
-      // Falls back to single-agent approach if team fails
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
-      let image: { imagePrompt: string; imageUrl: string } | null = null;
-      let video: { videoPrompt: string; videoUrl: string; videoThumbnailUrl: string } | null = null;
+      let images: ImageCreative[] = [];
+      let video: VideoCreative | null = null;
 
       try {
+        // ── Creative Team path (primary) ───────────────────────────────────────
         this.logger.log(`Creative Team starting for briefId=${briefId}`);
         const teamResult = await this.creativeTeam.run(brief, company, runId);
 
@@ -91,54 +89,99 @@ export class CreativeProducerService {
           selectionReason: teamResult.selectionReason,
         };
 
-        // Use team's reviewed image prompt → generate actual image
-        const imageResult = await this.imageGenerator.generateFromPrompt(
-          teamResult.imagePrompt, company, runId,
+        // Generate one image per copy variant in parallel
+        this.logger.log(`Generating ${teamResult.variants.length} images (one per variant): tenantId=${tenantId}`);
+        const imageResults = await Promise.allSettled(
+          teamResult.variants.map((variant: any, i: number) =>
+            this.imageGenerator.generateForVariant(
+              { topic: brief.topic, angle: brief.angle, platform: brief.platform, format: brief.format, audience: brief.audience },
+              variant,
+              i,
+              company,
+              runId,
+            ),
+          ),
         );
-        image = imageResult;
 
-        // Convert scene list JSON to Heygen-compatible text prompt
+        images = teamResult.variants.map((_: any, i: number) => {
+          const result = imageResults[i];
+          if (result.status === 'fulfilled') {
+            return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+          }
+          this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
+          return { variantIndex: i, imagePrompt: '', imageUrl: '' };
+        });
+
+        // Generate one video for the selected copy variant
+        const selectedIndex = teamResult.selectedIndex ?? 0;
         const heygenPrompt = this.convertVideoPromptForHeygen(teamResult.videoPrompt);
+        const videoPromptStr = typeof teamResult.videoPrompt === 'string'
+          ? teamResult.videoPrompt
+          : JSON.stringify(teamResult.videoPrompt);
 
-        // Generate actual video from Heygen-compatible script
         try {
-          video = await this.videoGenerator.generateFromScript(
-            heygenPrompt, tenantId, runId,
-          );
+          const videoResult = await this.videoGenerator.generateFromScript(heygenPrompt, tenantId, runId);
+          video = {
+            variantIndex: selectedIndex,
+            videoPrompt: videoPromptStr,
+            videoUrl: videoResult.videoUrl,
+            videoThumbnailUrl: videoResult.videoThumbnailUrl,
+          };
         } catch (videoErr: any) {
           this.logger.error(`Video generation failed (prompt saved): ${videoErr.message}`);
-          video = {
-            videoPrompt: typeof teamResult.videoPrompt === 'string'
-              ? teamResult.videoPrompt
-              : JSON.stringify(teamResult.videoPrompt),
-            videoUrl: '',
-            videoThumbnailUrl: '',
-          };
+          video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '' };
         }
 
         this.logger.log(
-          `Creative Team done: briefId=${briefId} variants=${teamResult.variants.length} rounds=${teamResult.debateRounds}`,
+          `Creative Team done: briefId=${briefId} variants=${teamResult.variants.length} images=${images.length} rounds=${teamResult.debateRounds}`,
         );
       } catch (teamErr: any) {
+        // ── Fallback path — single-agent ──────────────────────────────────────
         this.logger.warn(`Creative Team failed, falling back to single-agent: ${teamErr.message}`);
 
-        // Fallback: run all 3 independently
-        const [copyResult, imageResult, videoResult] = await Promise.allSettled([
-          this.copyWriter.generate(brief, company, runId),
-          this.imageGenerator.generate(brief, company, runId),
-          Promise.resolve({ videoPrompt: '', videoUrl: '', videoThumbnailUrl: '' }), // video deferred to team path
-        ]);
+        // Run copy first — images depend on having variants
+        try {
+          copyPackage = await this.copyWriter.generate(brief, company, runId);
+        } catch (copyErr: any) {
+          this.logger.error(`CopyWriter failed: ${copyErr.message}`);
+        }
 
-        copyPackage = copyResult.status === 'fulfilled' ? copyResult.value : null;
-        image = imageResult.status === 'fulfilled' ? imageResult.value : null;
-        video = videoResult.status === 'fulfilled' ? videoResult.value : null;
+        if (copyPackage?.variants?.length) {
+          // Generate one image per variant in parallel
+          const imageResults = await Promise.allSettled(
+            copyPackage.variants.map((variant: any, i: number) =>
+              this.imageGenerator.generateForVariant(
+                { topic: brief.topic, angle: brief.angle, platform: brief.platform, format: brief.format, audience: brief.audience },
+                variant,
+                i,
+                company,
+                runId,
+              ),
+            ),
+          );
+          images = copyPackage.variants.map((_: any, i: number) => {
+            const result = imageResults[i];
+            if (result.status === 'fulfilled') {
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+            }
+            this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
+            return { variantIndex: i, imagePrompt: '', imageUrl: '' };
+          });
+        } else {
+          // No variants — generate one image from brief
+          try {
+            const imgResult = await this.imageGenerator.generate(brief, company, runId);
+            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl }];
+          } catch (imgErr: any) {
+            this.logger.error(`Image generation failed: ${imgErr.message}`);
+          }
+        }
 
-        if (copyResult.status === 'rejected') this.logger.error(`CopyWriter failed: ${copyResult.reason}`);
-        if (imageResult.status === 'rejected') this.logger.error(`ImageGenerator failed: ${imageResult.reason}`);
-        if (videoResult.status === 'rejected') this.logger.error(`VideoGenerator failed: ${videoResult.reason}`);
+        // No video in fallback path
+        video = null;
       }
 
-      const allFailed = !copyPackage && !image && !video;
+      const allFailed = !copyPackage && images.length === 0 && !video;
       const status = allFailed ? 'failed' : 'completed';
 
       await this.creativePackageModel.updateOne(
@@ -150,20 +193,16 @@ export class CreativeProducerService {
             selectedCopyIndex: copyPackage.selectedIndex,
             copySelectionReason: copyPackage.selectionReason,
           }),
-          ...(image && {
-            imagePrompt: image.imagePrompt,
-            imageUrl: image.imageUrl,
-          }),
-          ...(video && {
-            videoPrompt: video.videoPrompt,
-            videoUrl: video.videoUrl,
-            videoThumbnailUrl: video.videoThumbnailUrl ?? '',
-          }),
+          images,
+          video,
           completedAt: new Date(),
         },
       );
 
-      this.logger.log(`Creative production ${status}: tenantId=${tenantId} briefId=${briefId} copy=${!!copyPackage} image=${!!image} video=${!!video}`);
+      const imageCount = images.filter(i => i.imageUrl).length;
+      this.logger.log(
+        `Creative production ${status}: tenantId=${tenantId} briefId=${briefId} copy=${!!copyPackage} images=${imageCount}/${images.length} video=${!!video?.videoUrl}`,
+      );
 
       if (!allFailed) {
         const slackWebhook = company.delivery?.slackWebhook;
@@ -173,7 +212,9 @@ export class CreativeProducerService {
             const copyLine = selectedCopy
               ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
               : '';
-            const imageLine = image?.imageUrl ? '\n✅ Image generated' : '\n⚠️ Image generation failed — retry needed';
+            const imagesLine = imageCount > 0
+              ? `\n✅ ${imageCount}/${images.length} images generated`
+              : '\n⚠️ Image generation failed — retry needed';
             const videoLine = video?.videoUrl
               ? '\n✅ Video generated'
               : video?.videoPrompt
@@ -182,7 +223,7 @@ export class CreativeProducerService {
             await this.slackService.sendMessage(
               slackWebhook,
               tenantId,
-              `🎨 *Creative ready — ${brief.topic}*${copyLine}${imageLine}${videoLine}`,
+              `🎨 *Creative ready — ${brief.topic}*${copyLine}${imagesLine}${videoLine}`,
             );
           } catch (slackErr: any) {
             this.logger.error(`Slack notification failed for creative ${briefId} — package saved: ${slackErr.message}`);
@@ -201,27 +242,19 @@ export class CreativeProducerService {
     }
   }
 
-  /**
-   * Convert scene list JSON to a Heygen-compatible text prompt.
-   * If the input is already a string (old format), return as-is.
-   */
   private convertVideoPromptForHeygen(videoPrompt: any): string {
-    // Already a plain string — return as-is
     if (typeof videoPrompt === 'string') {
-      // Try parsing as JSON array in case it's a stringified scene list
       try {
         const parsed = JSON.parse(videoPrompt);
         if (Array.isArray(parsed)) {
           return this.scenesToHeygenPrompt(parsed);
         }
       } catch {
-        // Not JSON — plain text prompt, use as-is
         return videoPrompt;
       }
       return videoPrompt;
     }
 
-    // Already an array — convert
     if (Array.isArray(videoPrompt)) {
       return this.scenesToHeygenPrompt(videoPrompt);
     }

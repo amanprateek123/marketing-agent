@@ -108,6 +108,28 @@ export class PipelineController {
         .exec();
     }
 
+    // Normalize creative package to new schema shape for backward compatibility.
+    // Old packages have flat imageUrl/videoUrl fields — convert to images[]/video{} so
+    // the frontend always receives the same shape regardless of when the run was created.
+    if (creativePackage) {
+      const pkg = creativePackage as any;
+      if (!pkg.images || pkg.images.length === 0) {
+        pkg.images = pkg.imageUrl
+          ? [{ variantIndex: 0, imagePrompt: pkg.imagePrompt ?? '', imageUrl: pkg.imageUrl }]
+          : [];
+      }
+      if (!pkg.video) {
+        pkg.video = (pkg.videoUrl || pkg.videoPrompt)
+          ? {
+              variantIndex: pkg.selectedCopyIndex ?? 0,
+              videoPrompt: pkg.videoPrompt ?? '',
+              videoUrl: pkg.videoUrl ?? '',
+              videoThumbnailUrl: pkg.videoThumbnailUrl ?? '',
+            }
+          : null;
+      }
+    }
+
     return {
       run,
       scouts,

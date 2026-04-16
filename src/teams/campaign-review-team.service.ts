@@ -241,8 +241,8 @@ Geography: ${company.geography}
 
 Selected Copy:
 ${selectedCopy ? `  Headline: ${selectedCopy.headline}\n  Copy: ${selectedCopy.primaryText}\n  CTA: ${selectedCopy.cta}` : '  No copy available yet'}
-Image: ${creativePackage?.imageUrl ? 'Generated' : 'Pending'}
-Video: ${creativePackage?.videoUrl ? 'Generated' : 'Pending'}
+Image: ${(creativePackage as any)?.images?.some((img: any) => img.imageUrl) ? 'Generated' : 'Pending'}
+Video: ${(creativePackage as any)?.video?.videoUrl ? 'Generated' : 'Pending'}
 
 ${productBlock}
 

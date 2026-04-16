@@ -10,6 +10,19 @@ export interface CopyVariant {
   hookStyle: string;
 }
 
+export interface ImageCreative {
+  variantIndex: number;
+  imagePrompt: string;
+  imageUrl: string;
+}
+
+export interface VideoCreative {
+  variantIndex: number;   // which copy variant this video was made for (selectedCopyIndex)
+  videoPrompt: string;
+  videoUrl: string;
+  videoThumbnailUrl: string;
+}
+
 @Schema({ collection: 'creative_packages', timestamps: true })
 export class CreativePackage {
   @Prop({ required: true, index: true })
@@ -34,22 +47,13 @@ export class CreativePackage {
   @Prop({ default: '' })
   copySelectionReason: string;
 
-  // Image
-  @Prop({ default: '' })
-  imagePrompt: string;
+  // Images — one per copy variant (variantIndex matches copyVariants index)
+  @Prop({ type: Array, default: [] })
+  images: ImageCreative[];
 
-  @Prop({ default: '' })
-  imageUrl: string;
-
-  // Video (deferred — prompt stored now, URL added when fal.ai key available)
-  @Prop({ default: '' })
-  videoPrompt: string;
-
-  @Prop({ default: '' })
-  videoUrl: string;
-
-  @Prop({ default: '' })
-  videoThumbnailUrl: string;
+  // Video — one, generated for the selected copy variant
+  @Prop({ type: Object, default: null })
+  video: VideoCreative | null;
 
   @Prop()
   error?: string;

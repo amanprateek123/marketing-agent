@@ -51,9 +51,9 @@ export interface MetaCampaignConfig {
   customConversionId?: string;   // Meta Custom Conversion ID — takes priority over conversionEvent
   adSets: MetaAdSetConfig[];
   copyVariants: { primaryText: string; headline: string; cta: string }[];
-  imageHash?: string;               // real generated creative image
-  videoThumbnailHash?: string;      // thumbnail extracted from video (used only in video ads)
-  videoId?: string;                 // Meta video ID (uploaded before launch)
+  imageHashes?: Record<number, string>; // per-variant image hashes (variantIndex → hash)
+  videoThumbnailHash?: string;          // thumbnail extracted from video (used only in video ads)
+  videoId?: string;                     // Meta video ID (uploaded before launch)
   landingUrl: string;
 }
 
@@ -268,6 +268,9 @@ export class MetaAdsService {
 
           const adName = `${adSetConfig.name} — Variant ${variantIndex + 1}`;
 
+          // Resolve per-variant image hash
+          const variantImageHash = config.imageHashes?.[variantIndex];
+
           // video-only or both → create video ad if videoId available
           if ((creativeFormat === 'video' || creativeFormat === 'both') && config.videoId) {
             const { adId, creativeId } = await this.createVideoAd(
@@ -279,15 +282,15 @@ export class MetaAdsService {
               config.videoId,
               config.pageId!,
               config.landingUrl,
-              config.videoThumbnailHash ?? config.imageHash, // thumbnail for video ads only
+              config.videoThumbnailHash ?? variantImageHash, // thumbnail for video ads only
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
             adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
           }
 
-          // image-only or both → create image ad if imageHash available
-          if ((creativeFormat === 'image' || creativeFormat === 'both') && config.imageHash) {
+          // image-only or both → create image ad using variant-specific hash
+          if ((creativeFormat === 'image' || creativeFormat === 'both') && variantImageHash) {
             const adName2 = creativeFormat === 'both' ? `${adName} (image)` : adName;
             const { adId, creativeId } = await this.createAd(
               config.accountId,
@@ -295,7 +298,7 @@ export class MetaAdsService {
               adSetId,
               adName2,
               variant,
-              config.imageHash,
+              variantImageHash,
               config.pageId ?? '',
               config.landingUrl,
             );

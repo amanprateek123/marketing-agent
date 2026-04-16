@@ -23,6 +23,82 @@ export class ImageGeneratorService {
     private readonly s3Service: S3Service,
   ) {}
 
+  /**
+   * Generate an image for a specific copy variant.
+   * Uses the variant's hook/headline to create a visually matched image prompt.
+   */
+  async generateForVariant(
+    brief: {
+      topic: string;
+      angle: string;
+      platform: string;
+      format: string;
+      audience: string;
+    },
+    copyVariant: { primaryText: string; headline: string; cta: string; hookStyle: string },
+    variantIndex: number,
+    company: CompanyDocument,
+    runId: string,
+  ): Promise<ImageResult> {
+    const hookText = copyVariant.primaryText?.split('\n')[0] ?? '';
+    const headline = copyVariant.headline ?? '';
+
+    const promptResult = await this.claudeService.runAgent({
+      tenantId: company.tenantId,
+      runId,
+      agentType: AgentType.CREATIVE_PRODUCER,
+      systemPrompt: '',
+      liveContext: this.liveContextBuilder.build(company),
+      userMessage: `
+Write an image generation prompt for a Meta direct response ad. This image must make someone STOP scrolling and TAP the ad.
+
+BRIEF:
+Brand: ${company.name}
+Topic: ${brief.topic}
+Angle: ${brief.angle}
+Platform: ${brief.platform} | Format: ${brief.format}
+Audience: ${brief.audience}
+Hook style: ${copyVariant.hookStyle}
+Hook text: "${hookText}"
+Headline: "${headline}"
+CTA: "${copyVariant.cta}"
+Brand guidelines: ${company.brandGuidelines ?? 'Not specified'}
+
+STEP 1 — VISUAL CENTERPIECE: Read the hook "${hookText}" and topic "${brief.topic}". What is the ONE visual concept that makes THIS variant unique?
+- If the hook mentions a date/event → centerpiece is that date (calendar, countdown)
+- If the hook mentions a fear → centerpiece is that fear visualized dramatically
+- If the hook mentions social proof → centerpiece is the number, large and bold
+The centerpiece must DOMINATE the image (60% of the frame).
+
+STEP 2 — BUILD AROUND IT:
+- VISUAL CENTERPIECE (largest element): The concept from Step 1, unmissable
+- TEXT OVERLAY — TOP: "${hookText}" in bold Hinglish, high contrast, readable at phone size
+- TEXT OVERLAY — BOTTOM: "${headline}" + CTA, high contrast
+- PRODUCT VISIBLE — show what they're buying
+- INDIAN CONTEXT — real Indian faces, settings, skin tones
+
+Format: Vertical 9:16, photorealistic, 5-6 sentences.
+
+AVOID: generic images, muted colors, stock aesthetic, cluttered composition.
+
+Return ONLY the image prompt, nothing else.
+      `.trim(),
+      maxTurns: 2,
+    });
+
+    const imagePrompt = promptResult.content.trim();
+    this.logger.log(`Image prompt generated for variant ${variantIndex}: tenantId=${company.tenantId}`);
+
+    let imageUrl = '';
+    try {
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId);
+    } catch (err: any) {
+      this.logger.error(`Image generation failed for variant ${variantIndex} (prompt saved): ${err.message}`);
+    }
+
+    return { imagePrompt, imageUrl };
+  }
+
   async generate(
     brief: {
       topic: string;
