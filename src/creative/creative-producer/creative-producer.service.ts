@@ -79,7 +79,7 @@ export class CreativeProducerService {
       // Falls back to single-agent approach if team fails
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
       let image: { imagePrompt: string; imageUrl: string } | null = null;
-      let video: { videoPrompt: string; videoUrl: string } | null = null;
+      let video: { videoPrompt: string; videoUrl: string; videoThumbnailUrl: string } | null = null;
 
       try {
         this.logger.log(`Creative Team starting for briefId=${briefId}`);
@@ -107,7 +107,13 @@ export class CreativeProducerService {
           );
         } catch (videoErr: any) {
           this.logger.error(`Video generation failed (prompt saved): ${videoErr.message}`);
-          video = { videoPrompt: teamResult.videoPrompt, videoUrl: '' };
+          video = {
+            videoPrompt: typeof teamResult.videoPrompt === 'string'
+              ? teamResult.videoPrompt
+              : JSON.stringify(teamResult.videoPrompt),
+            videoUrl: '',
+            videoThumbnailUrl: '',
+          };
         }
 
         this.logger.log(
@@ -120,7 +126,7 @@ export class CreativeProducerService {
         const [copyResult, imageResult, videoResult] = await Promise.allSettled([
           this.copyWriter.generate(brief, company, runId),
           this.imageGenerator.generate(brief, company, runId),
-          Promise.resolve({ videoPrompt: '', videoUrl: '' }), // video deferred to team path
+          Promise.resolve({ videoPrompt: '', videoUrl: '', videoThumbnailUrl: '' }), // video deferred to team path
         ]);
 
         copyPackage = copyResult.status === 'fulfilled' ? copyResult.value : null;
@@ -151,6 +157,7 @@ export class CreativeProducerService {
           ...(video && {
             videoPrompt: video.videoPrompt,
             videoUrl: video.videoUrl,
+            videoThumbnailUrl: video.videoThumbnailUrl ?? '',
           }),
           completedAt: new Date(),
         },
@@ -227,7 +234,7 @@ export class CreativeProducerService {
       .map((s: any) => `[${s.duration}] Text on screen: "${s.text}" — Visual: ${s.visual}${s.music ? ` — Music: ${s.music}` : ''}`)
       .join('\n\n');
 
-    return `15-20 second vertical 9:16 Meta ad video. Sharp jump cuts every 2-3 seconds. Bold Hinglish/Hindi text overlays on every scene. Indian aesthetic throughout.
+    return `15-20 second vertical 9:16 Meta ad video. Sharp jump cuts every 2-3 seconds. Bold Hinglish/Hindi text overlays on every scene. Indian aesthetic throughout. IMPORTANT: Do NOT add auto-generated subtitles or captions — only the text overlays specified per scene.
 
 ${sceneDescriptions}
 

@@ -5,7 +5,7 @@ import { CompaniesService } from '../companies/companies.service';
 import { CampaignSyncService } from '../campaigns/meta-ads/campaign-sync.service';
 import { QUEUES } from './queue.constants';
 
-@Processor(QUEUES.CAMPAIGN_SYNC)
+@Processor(QUEUES.CAMPAIGN_SYNC, { lockDuration: 120000 })
 export class CampaignSyncProcessor extends WorkerHost {
   private readonly logger = new Logger(CampaignSyncProcessor.name);
 

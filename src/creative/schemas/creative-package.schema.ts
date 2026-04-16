@@ -48,6 +48,9 @@ export class CreativePackage {
   @Prop({ default: '' })
   videoUrl: string;
 
+  @Prop({ default: '' })
+  videoThumbnailUrl: string;
+
   @Prop()
   error?: string;
 

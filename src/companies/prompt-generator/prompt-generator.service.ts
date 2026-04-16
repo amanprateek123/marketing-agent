@@ -10,9 +10,7 @@ import { CompanyPrompts } from '../schemas/company.types';
 
 const SKILLS_DIR = path.join(process.cwd(), '.claude', 'skills');
 
-const buildPromptGeneratorSystemPrompt = (youtubeApiKey: string) => `
-You are a prompt engineering expert specializing in marketing AI agents.
-
+const COMMON_RULES = `
 CRITICAL RULES:
 1. NEVER hardcode any product names, prices, offers, or calendar dates into the system prompts.
    These will be injected at runtime as live operational data.
@@ -22,12 +20,17 @@ CRITICAL RULES:
    strategic patterns, and proven methodologies from the skills provided.
 5. Each prompt must be deeply specific to THIS company's industry, tone, and audience —
    but generic enough that price/product changes don't require regeneration.
+`.trim();
+
+// Batch 1: Observation layer — scouts + metaAdsLibrary
+const buildBatch1SystemPrompt = (youtubeApiKey: string) => `
+You are a prompt engineering expert specializing in marketing AI agents.
+
+${COMMON_RULES}
 6. Scout prompts (instagramScout, redditScout, twitterScout, youtubeScout): 600-900 words —
    they must include all 3 required sections plus brand-specific focus areas.
    metaAdsLibrary prompt: 400-600 words — include brand-specific focus on which competitor ads to watch for,
    what messaging angles to flag as threats, and what gaps would be most valuable for this brand to own.
-   Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter, campaignCreator): 300-500 words —
-   focus on synthesis logic, scoring criteria, and brand voice.
 
 ───────────────────────────────────────────
 SCOUT PROMPT REQUIREMENTS (instagramScout, redditScout, twitterScout, youtubeScout)
@@ -98,6 +101,42 @@ Do NOT put viral trends inside trending_topics. Do NOT leave viral_trends empty 
 No markdown, no explanation outside the JSON. Return only the JSON object.
 
 ───────────────────────────────────────────
+META ADS LIBRARY PROMPT (metaAdsLibrary)
+───────────────────────────────────────────
+This agent scrapes the Meta Ads Library to surface competitor ad intelligence for paid campaigns.
+Write a 400-600 word system prompt that instructs the agent to:
+1. Monitor the specific competitors most relevant to this company's market position
+2. Flag messaging angles and creative themes that competitors are running at scale (indicating what's converting)
+3. Identify positioning gaps — angles competitors are NOT covering that this brand could own
+4. Score each competitor ad by threat level (how much it directly competes with this brand's value proposition)
+5. Return structured output: competitor name, ad theme, threat level, identified gap, and recommended counter-angle
+
+Focus on what makes a competitor ad a threat vs background noise for THIS specific brand.
+
+───────────────────────────────────────────
+FINAL OUTPUT FORMAT
+───────────────────────────────────────────
+Return ONLY a valid JSON object with exactly these keys:
+{
+  "instagramScout": "...",
+  "redditScout": "...",
+  "twitterScout": "...",
+  "youtubeScout": "...",
+  "metaAdsLibrary": "..."
+}
+
+No markdown, no explanation, no code blocks — just the raw JSON object.
+`.trim();
+
+// Batch 2: Decision layer — coordinator, research, ideation, delivery, campaign
+const buildBatch2SystemPrompt = () => `
+You are a prompt engineering expert specializing in marketing AI agents.
+
+${COMMON_RULES}
+6. Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter, campaignCreator): 300-500 words —
+   focus on synthesis logic, scoring criteria, and brand voice.
+
+───────────────────────────────────────────
 NON-SCOUT PROMPTS (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter)
 ───────────────────────────────────────────
 These agents receive already-collected data. They do NOT need tool usage instructions.
@@ -157,14 +196,9 @@ FINAL OUTPUT FORMAT
 ───────────────────────────────────────────
 Return ONLY a valid JSON object with exactly these keys:
 {
-  "instagramScout": "...",
-  "redditScout": "...",
-  "twitterScout": "...",
-  "youtubeScout": "...",
   "coordinator": "...",
   "competitorResearch": "...",
   "marketResearch": "...",
-  "metaAdsLibrary": "...",
   "ideaPool": "...",
   "digestWriter": "...",
   "campaignCreator": "..."
@@ -173,23 +207,46 @@ Return ONLY a valid JSON object with exactly these keys:
 No markdown, no explanation, no code blocks — just the raw JSON object.
 `.trim();
 
-const REQUIRED_PROMPT_KEYS: (keyof CompanyPrompts)[] = [
+const BATCH1_PROMPT_KEYS: (keyof CompanyPrompts)[] = [
   'instagramScout',
   'redditScout',
   'twitterScout',
   'youtubeScout',
+  'metaAdsLibrary',
+];
+
+const BATCH2_PROMPT_KEYS: (keyof CompanyPrompts)[] = [
   'coordinator',
   'competitorResearch',
   'marketResearch',
-  'metaAdsLibrary',
   'ideaPool',
   'digestWriter',
   'campaignCreator',
 ];
 
+
 @Injectable()
 export class PromptGeneratorService {
   private readonly logger = new Logger(PromptGeneratorService.name);
+
+  // Skills needed per batch — selected based on actual skill content vs agent needs.
+  // copywriting is excluded entirely (landing page copy, irrelevant to all 11 agents).
+  private readonly BATCH1_SKILLS = [
+    'social-content',    // platform dynamics + hook patterns — essential for 4 scouts
+    'customer-research', // digital watering hole research, signal extraction — essential for redditScout
+    'market-research',   // research standards, source attribution — all 5 agents need this
+    'paid-ads',          // Meta ad formats + campaign structure — needed by metaAdsLibrary
+  ];
+
+  private readonly BATCH2_SKILLS = [
+    'paid-ads',                   // campaign structure, budget, optimization — coordinator, ideaPool, campaignCreator
+    'ad-creative',                // creative angles, what makes ads convert — ideaPool, campaignCreator
+    'marketing-psychology',       // buyer psychology, persuasion, urgency — ideaPool, campaignCreator, competitorResearch
+    'competitor-alternatives',    // competitor research process, review mining — competitorResearch
+    'customer-research',          // customer language, pain points, personas — competitorResearch, marketResearch, ideaPool
+    'market-research',            // research quality standards — marketResearch, coordinator
+    'product-marketing-context',  // positioning/ICP framework — ideaPool, campaignCreator
+  ];
 
   constructor(
     private readonly claudeService: ClaudeService,
@@ -201,41 +258,77 @@ export class PromptGeneratorService {
     this.logger.log(`Generating prompts for: ${tenantId}`);
 
     const company = await this.companiesService.findByTenantId(tenantId);
-    const skillContents = await this.readAllSkills();
+    const companyProfile = this.buildCompanyProfile(company);
+
+    // Load all needed skills once, then distribute to batches
+    const allNeededSkills = [...new Set([...this.BATCH1_SKILLS, ...this.BATCH2_SKILLS])];
+    const allSkills = await this.readSkills(allNeededSkills);
+    const batch1Skills = this.selectSkills(allSkills, this.BATCH1_SKILLS);
+    const batch2Skills = this.selectSkills(allSkills, this.BATCH2_SKILLS);
+
+    const youtubeApiKey = this.configService.get<string>('youtube.apiKey') ?? '';
+
+    // Run batches sequentially — Batch 2 is independent but sequential keeps logs readable
+    const batch1 = await this.runBatch(
+      tenantId,
+      'batch1_observation',
+      buildBatch1SystemPrompt(youtubeApiKey),
+      companyProfile,
+      batch1Skills,
+      BATCH1_PROMPT_KEYS,
+    );
+
+    const batch2 = await this.runBatch(
+      tenantId,
+      'batch2_decision',
+      buildBatch2SystemPrompt(),
+      companyProfile,
+      batch2Skills,
+      BATCH2_PROMPT_KEYS,
+    );
+
+    const prompts = { ...batch1, ...batch2 } as CompanyPrompts;
+    await this.companiesService.updatePrompts(tenantId, prompts);
+
+    this.logger.log(`All 11 prompts generated and saved for: ${tenantId}`);
+    return prompts;
+  }
+
+  private async runBatch(
+    tenantId: string,
+    batchName: string,
+    systemPrompt: string,
+    companyProfile: object,
+    skills: Record<string, string>,
+    requiredKeys: (keyof CompanyPrompts)[],
+  ): Promise<Partial<CompanyPrompts>> {
+    this.logger.log(`[${batchName}] Starting — ${requiredKeys.length} prompts for ${tenantId}`);
 
     let result;
     try {
       result = await this.claudeService.runAgent({
         tenantId,
         agentType: AgentType.PROMPT_GENERATOR,
-        systemPrompt: buildPromptGeneratorSystemPrompt(
-          this.configService.get<string>('youtube.apiKey') ?? '',
-        ),
+        systemPrompt,
         liveContext: '',
-        userMessage: JSON.stringify({
-          companyProfile: this.buildCompanyProfile(company),
-          skills: skillContents,
-        }),
+        userMessage: JSON.stringify({ companyProfile, skills }),
         model: 'claude-sonnet-4-6',
         maxTurns: 3,
       });
     } catch (err: any) {
-      this.logger.error(`Claude agent failed for ${tenantId}: ${err.message}`);
+      this.logger.error(`[${batchName}] Claude agent failed for ${tenantId}: ${err.message}`);
       throw err;
     }
 
     if (!result.content || result.content.trim() === '') {
-      this.logger.error(`Prompt generator returned empty content for ${tenantId}`);
-      throw new Error('Prompt generator returned empty content');
+      throw new Error(`[${batchName}] returned empty content`);
     }
 
-    this.logger.log(`Raw response received: ${result.content.length} chars | tokens in:${result.inputTokens} out:${result.outputTokens} cost:$${result.costUSD.toFixed(4)}`);
+    this.logger.log(
+      `[${batchName}] Done: ${result.content.length} chars | tokens in:${result.inputTokens} out:${result.outputTokens} cost:$${result.costUSD.toFixed(4)}`,
+    );
 
-    const prompts = this.parsePrompts(result.content);
-    await this.companiesService.updatePrompts(tenantId, prompts);
-
-    this.logger.log(`Prompts generated and saved for: ${tenantId}`);
-    return prompts;
+    return this.parsePrompts(result.content, requiredKeys, batchName);
   }
 
   private buildCompanyProfile(company: CompanyDocument): object {
@@ -255,7 +348,6 @@ export class PromptGeneratorService {
       geography: company.geography,
       language: company.language,
       primaryObjective: company.primaryObjective,
-      // Product catalog — so prompts understand what the company sells
       products: (company.products ?? []).filter(p => p.active).map(p => ({
         name: p.name,
         price: p.price,
@@ -265,57 +357,39 @@ export class PromptGeneratorService {
         trendKeywords: p.trendKeywords,
         languages: p.languages,
       })),
-      // Past learnings — so prompts incorporate what worked before
       learnings: company.learnings ? {
         winningHooks: company.learnings.creative?.winningHooks,
         losingHooks: company.learnings.creative?.losingHooks,
         winningFormats: company.learnings.creative?.winningFormats,
         topAudiences: company.learnings.campaign?.audienceScores
           ? Object.entries(company.learnings.campaign.audienceScores)
-              .sort(([,a],[,b]) => b - a)
+              .sort(([, a], [, b]) => b - a)
               .slice(0, 5)
-              .map(([k,v]) => `${k}: ${v}`)
+              .map(([k, v]) => `${k}: ${v}`)
           : [],
       } : null,
     };
   }
 
-  // Only marketing skills are useful for prompt generation.
-  // Technical/execution skills (autonomous-loops, continuous-learning-v2, etc.)
-  // are implemented in TypeScript code — not needed in agent prompts.
-  private readonly MARKETING_SKILLS = [
-    'ad-creative',
-    'paid-ads',
-    'copywriting',
-    'marketing-psychology',
-    'social-content',
-    'customer-research',
-    'competitor-alternatives',
-    'market-research',
-    'product-marketing-context',
-  ];
-
-  private async readAllSkills(): Promise<Record<string, string>> {
+  private async readSkills(skillNames: string[]): Promise<Record<string, string>> {
     const skills: Record<string, string> = {};
 
-    let skillDirs: string[] = [];
+    let availableDirs: string[] = [];
     try {
-      skillDirs = await fs.readdir(SKILLS_DIR);
+      availableDirs = await fs.readdir(SKILLS_DIR);
     } catch {
       this.logger.warn(`Skills directory not found at ${SKILLS_DIR} — continuing without skills`);
       return skills;
     }
 
-    // Only load marketing skills — skip technical/execution skills
-    const relevantDirs = skillDirs.filter((dir) => this.MARKETING_SKILLS.includes(dir));
+    const toLoad = skillNames.filter(name => availableDirs.includes(name));
 
     await Promise.all(
-      relevantDirs.map(async (dir) => {
+      toLoad.map(async (dir) => {
         const skillMdPath = path.join(SKILLS_DIR, dir, 'SKILL.md');
         const readmePath = path.join(SKILLS_DIR, dir, 'README.md');
         try {
-          const content = await fs.readFile(skillMdPath, 'utf-8');
-          skills[dir] = content;
+          skills[dir] = await fs.readFile(skillMdPath, 'utf-8');
         } catch {
           try {
             const content = await fs.readFile(readmePath, 'utf-8');
@@ -323,52 +397,60 @@ export class PromptGeneratorService {
               skills[dir] = content;
             }
           } catch {
-            // Skill dir exists but no readable file — skip silently
+            // skill dir exists but no readable file — skip silently
           }
         }
       }),
     );
 
-    this.logger.log(`Loaded ${Object.keys(skills).length} marketing skills`);
+    this.logger.log(`Loaded skills: ${Object.keys(skills).join(', ')}`);
     return skills;
   }
 
-  private parsePrompts(content: string): CompanyPrompts {
+  private selectSkills(
+    allSkills: Record<string, string>,
+    names: string[],
+  ): Record<string, string> {
+    return Object.fromEntries(
+      names.filter(n => allSkills[n]).map(n => [n, allSkills[n]]),
+    );
+  }
+
+  private parsePrompts(
+    content: string,
+    requiredKeys: (keyof CompanyPrompts)[],
+    batchName: string,
+  ): Partial<CompanyPrompts> {
     let parsed: Partial<CompanyPrompts>;
 
     try {
-      // Try to extract a ```json block first (Claude often adds explanation before it)
       const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
       if (fenceMatch) {
         parsed = JSON.parse(fenceMatch[1].trim());
       } else {
-        // Fallback: find the outermost { ... } in the response
         const start = content.indexOf('{');
         const end = content.lastIndexOf('}');
-        if (start === -1 || end === -1) {
-          throw new Error('No JSON object found in response');
-        }
+        if (start === -1 || end === -1) throw new Error('No JSON object found in response');
         parsed = JSON.parse(content.slice(start, end + 1));
       }
     } catch (err: any) {
-      this.logger.error(`JSON parse failed: ${err.message}`);
-      this.logger.error(`Raw response (first 500 chars): ${content.slice(0, 500)}`);
-      throw new Error(`Prompt Generator returned invalid JSON: ${err.message}`);
+      this.logger.error(`[${batchName}] JSON parse failed: ${err.message}`);
+      this.logger.error(`[${batchName}] Raw response (first 500 chars): ${content.slice(0, 500)}`);
+      throw new Error(`[${batchName}] returned invalid JSON: ${err.message}`);
     }
 
-    // Validate all 9 keys are present and non-empty
-    const missingKeys = REQUIRED_PROMPT_KEYS.filter(
-      (key) => !parsed[key] || typeof parsed[key] !== 'string' || parsed[key]!.trim() === '',
+    const missingKeys = requiredKeys.filter(
+      key => !parsed[key] || typeof parsed[key] !== 'string' || parsed[key]!.trim() === '',
     );
 
     if (missingKeys.length > 0) {
-      throw new Error(`Prompt Generator response missing keys: ${missingKeys.join(', ')}`);
+      throw new Error(`[${batchName}] response missing keys: ${missingKeys.join(', ')}`);
     }
 
-    REQUIRED_PROMPT_KEYS.forEach((key) => {
-      this.logger.log(`Prompt ready: ${key} (${parsed[key]!.trim().split(/\s+/).length} words)`);
+    requiredKeys.forEach(key => {
+      this.logger.log(`[${batchName}] Prompt ready: ${key} (${parsed[key]!.trim().split(/\s+/).length} words)`);
     });
 
-    return parsed as CompanyPrompts;
+    return parsed;
   }
 }

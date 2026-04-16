@@ -30,7 +30,7 @@ export class ClaudeService {
   ];
 
   private static readonly MAX_RETRIES = 3;
-  private static readonly QUERY_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly QUERY_TIMEOUT_MS = 8 * 60 * 1000; // 8 minutes
 
   async runAgent(params: RunAgentParams): Promise<AgentResult> {
     let lastError: Error | null = null;

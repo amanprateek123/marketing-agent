@@ -5,6 +5,7 @@ import { S3Service } from '../../common/storage/s3.service';
 export interface VideoResult {
   videoPrompt: string;
   videoUrl: string;
+  videoThumbnailUrl: string;
 }
 
 @Injectable()
@@ -32,7 +33,7 @@ export class VideoGeneratorService {
       throw new Error('Video prompt is empty');
     }
 
-    const heygenUrl = await this.heygenService.generateVideo(videoPrompt.trim());
+    const { videoUrl: heygenUrl, thumbnailUrl } = await this.heygenService.generateVideo(videoPrompt.trim());
     this.logger.log(`Heygen video ready — uploading to S3: tenantId=${tenantId}`);
 
     // Upload to S3 for a permanent URL — Heygen URLs expire
@@ -40,6 +41,6 @@ export class VideoGeneratorService {
     const videoUrl = await this.s3Service.uploadFromUrl(heygenUrl, key, 'video/mp4');
 
     this.logger.log(`Video uploaded to S3: tenantId=${tenantId} url=${videoUrl}`);
-    return { videoPrompt, videoUrl };
+    return { videoPrompt, videoUrl, videoThumbnailUrl: thumbnailUrl };
   }
 }

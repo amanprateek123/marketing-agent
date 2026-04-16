@@ -146,7 +146,7 @@ export class CampaignSyncService {
             limit: '200',
             access_token: accessToken,
           },
-          timeout: 30000,
+          timeout: 60000,
         });
 
         const campaigns: any[] = res.data?.data ?? [];
@@ -166,7 +166,7 @@ export class CampaignSyncService {
             limit: '200',
             access_token: accessToken,
           },
-          timeout: 30000,
+          timeout: 60000,
         }).catch(() => ({ data: { data: [] } }));
 
         const insightsMap = new Map<string, any>();
