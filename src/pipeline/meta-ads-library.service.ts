@@ -55,35 +55,35 @@ Always cite sources. Score every finding by how actionable it is (1-10).
 
     const userMessage = `
 Research the Meta Ads Library for ${company.name}'s competitors and category.
+Use all available search turns across 4 steps. Do NOT output JSON until Step 4 is complete.
 
 COMPETITORS: ${competitors}
 INDUSTRY: ${company.industry}
 TARGET AUDIENCE: ${company.targetAudience}
 
-STEP 1 — COMPETITOR ADS
+STEP 1 — COMPETITOR AD DISCOVERY (searches 1–5)
 For each competitor, search:
 - "site:facebook.com/ads/library [competitor]"
 - "[competitor] facebook ads running ${company.geography} ${new Date().getFullYear()}"
 - "[competitor] meta ads active creatives"
 
-For each significant ad found, capture:
-- The hook/opening line
-- The angle (discount, testimonial, transformation, lifestyle, fear, urgency)
-- Format (video/image/carousel)
-- CTA
-- How long it appears to have been running (longevity = proven winner)
+For each ad found, capture: hook/opening line, angle, format (video/image/carousel), CTA, estimated days running.
+Do not output JSON yet.
 
-STEP 2 — GAP ANALYSIS
-After researching all competitors, identify:
-- Topics/angles NOBODY is advertising on — biggest opportunities
-- Audience segments nobody targets well in their ad copy
-- Formats underused in this category
-- Emotional triggers absent from all competitor ads
+STEP 2 — EVALUATE AD QUALITY
+After completing all competitor searches, evaluate each ad found:
+- High confidence (longevity > 14 days, multiple sources confirming): these are proven winners
+- Low confidence (only one result, no engagement data): mark as uncertain
+- Based on what patterns you see across all competitors: what angles dominate? What's absent?
 
-STEP 3 — CATEGORY FORMAT TRENDS
-- Search: "${company.industry} best performing facebook ads ${company.geography} ${new Date().getFullYear()}"
-- What format dominates this category right now?
+STEP 3 — GAP ANALYSIS + FORMAT TRENDS (searches 6–8)
+Based on the high-confidence ads from Step 2:
+- Identify topics/angles nobody is advertising on
+- Identify audience segments nobody targets well
+- Search: "${company.industry} best performing facebook ads ${company.geography} ${new Date().getFullYear()}" to confirm the dominant format
+- What emotional triggers are absent from all competitor ads?
 
+STEP 4 — OUTPUT JSON
 Return ONLY a valid JSON object — no markdown, no explanation:
 {
   "competitorAds": [

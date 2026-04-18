@@ -2,10 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { AgentType } from '../claude/claude.types';
+import { ClaudeService } from '../claude/claude.service';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
-import { runTeamViaCli, CliResult } from './team-cli.util';
+import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
 export interface AdSetConfig {
@@ -62,6 +63,7 @@ export class CampaignReviewTeamService {
   private readonly logger = new Logger(CampaignReviewTeamService.name);
 
   constructor(
+    private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
     private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(UsageLog.name)
@@ -85,14 +87,32 @@ export class CampaignReviewTeamService {
     runId: string,
   ): Promise<CampaignReviewOutput> {
     const tenantId = company.tenantId;
-    this.logger.log(`Campaign Review Team starting | tenant: ${tenantId} | run: ${runId}`);
+    const teamMode = company.pipelineConfig?.teamMode ?? 'sequential';
+    this.logger.log(`Campaign Review Team starting | tenant: ${tenantId} | run: ${runId} | mode: ${teamMode}`);
 
+    if (teamMode === 'cli') {
+      return this.reviewViaCli(brief, creativePackage, company, runId);
+    }
+    return this.reviewSequential(brief, creativePackage, company, runId);
+  }
+
+  // ── CLI path ────────────────────────────────────────────────────────────────
+  private async reviewViaCli(
+    brief: {
+      topic: string; angle: string; platform: string; format: string;
+      audience: string; hook: string; keyMessage: string; conversionBridge: string;
+      suggestedBudget: number;
+    },
+    creativePackage: any,
+    company: CompanyDocument,
+    runId: string,
+  ): Promise<CampaignReviewOutput> {
+    const tenantId = company.tenantId;
     const prompt = await this.buildPrompt(brief, creativePackage, company, runId);
     const cliResult = await runTeamViaCli(prompt, `review-${runId}`, 'Campaign Review');
 
     await this.usageLogModel.create({
-      tenantId,
-      runId,
+      tenantId, runId,
       agent: AgentType.CAMPAIGN_REVIEW_LEAD,
       claudeModel: 'claude-sonnet-4-6',
       inputTokens: cliResult.usage?.input_tokens ?? 0,
@@ -101,11 +121,170 @@ export class CampaignReviewTeamService {
       timestamp: new Date(),
     });
 
-    this.logger.log(
-      `Campaign Review Team completed | tenant: ${tenantId} | run: ${runId} | turns: ${cliResult.num_turns} | cost: $${cliResult.total_cost_usd?.toFixed(4)}`,
-    );
-
+    this.logger.log(`Campaign Review Team (CLI) completed | tenant: ${tenantId} | run: ${runId} | turns: ${cliResult.num_turns}`);
     return this.parseOutput(cliResult.result);
+  }
+
+  // ── Sequential path (2 runAgent() calls) ───────────────────────────────────
+  private async reviewSequential(
+    brief: {
+      topic: string; angle: string; platform: string; format: string;
+      audience: string; hook: string; keyMessage: string; conversionBridge: string;
+      suggestedBudget: number;
+    },
+    creativePackage: any,
+    company: CompanyDocument,
+    runId: string,
+  ): Promise<CampaignReviewOutput> {
+    const tenantId = company.tenantId;
+
+    // ── Call 1: Strategist proposes campaign config ─────────────────────────
+    const call1Prompt = await this.buildCall1Prompt(brief, creativePackage, company, runId);
+
+    const call1 = await this.claudeService.runAgent({
+      tenantId, runId,
+      agentType: AgentType.CAMPAIGN_REVIEW_LEAD,
+      systemPrompt: company.prompts?.campaignCreator ?? '',
+      // liveContext is already embedded in call1Prompt via buildCall1Prompt → buildPrompt
+      // passing it here would inject it twice (system prompt + user message)
+      liveContext: '',
+      userMessage: call1Prompt,
+      maxTurns: 5,
+    });
+
+    this.logger.log(`Campaign Review Team sequential — Call 1 done (${call1.content.length} chars)`);
+
+    // ── Validate Call 1 before passing to the Analyst ───────────────────────
+    let call1Parsed: CampaignReviewOutput;
+    try {
+      call1Parsed = this.parseOutput(call1.content);
+    } catch (parseErr: any) {
+      throw new Error(`Campaign Review Team Call 1 returned unparseable output — cannot proceed to analyst review: ${parseErr.message}`);
+    }
+
+    // ── Call 2: Performance Analyst challenges and finalises ────────────────
+    const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+
+    const call2UserMessage = `You are the Performance Analyst reviewing a Meta Ads campaign config for ${company.name}.
+
+Your job: challenge budget, targeting, and timing decisions with data. Be conservative on unproven, aggressive on proven.
+
+CONSTRAINTS:
+- Hard budget cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
+- Pause if ROAS < ${company.pauseIfROASBelow ?? 'not set'} | CTR < ${company.pauseIfCTRBelow ?? 'not set'}
+- Max scale: ${company.maxBudgetScalePercent}%
+- No past data → conservative start at 50-60% of proposed budget
+
+PROPOSED CAMPAIGN CONFIG TO REVIEW:
+${JSON.stringify(call1Parsed.campaign, null, 2)}
+
+YOUR JOB:
+1. BUDGET: Is the proposed daily budget right for the data available? Adjust if needed.
+2. TARGETING: Are the ad sets targeting the right audiences? Are real Meta audience IDs being used (not invented)?
+3. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
+4. RISK: What's the downside scenario? Does the config protect against it?
+5. If anything is wrong: fix it directly in the output config.
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "approved": true,
+  "campaign": {
+    "budget": ${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)},
+    "objective": "OUTCOME_SALES",
+    "conversionEvent": "${product?.conversionEvent ?? 'Purchase'}",
+    "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
+    "adSets": [],
+    "scaleRules": "specific ROAS/CTR threshold + scale %",
+    "pauseRules": "specific CTR/ROAS threshold + spend amount"
+  },
+  "adjustments": {
+    "budgetAdjusted": false,
+    "originalBudget": ${brief.suggestedBudget},
+    "recommendedBudget": 0
+  },
+  "debateRounds": 2,
+  "debateLog": [
+    {"round": 1, "from": "strategist", "summary": "proposed campaign config"},
+    {"round": 2, "from": "analyst", "summary": "reviewed and finalised"}
+  ],
+  "debateRationale": "2-3 sentence summary of changes made and why"
+}`;
+
+    const call2 = await this.claudeService.runAgent({
+      tenantId, runId,
+      agentType: AgentType.CAMPAIGN_REVIEW_LEAD,
+      systemPrompt: `You are a Performance Marketing Analyst specializing in Meta Ads for Indian brands. You review campaign configs before they go live. Be data-driven and conservative on unproven campaigns. Always ensure guardrails are specific and actionable.`,
+      liveContext: '',
+      userMessage: call2UserMessage,
+      maxTurns: 3,
+    });
+
+    this.logger.log(`Campaign Review Team sequential — Call 2 done | tenant: ${tenantId} | run: ${runId}`);
+    return this.parseOutput(call2.content);
+  }
+
+  private async buildCall1Prompt(
+    brief: {
+      topic: string; angle: string; platform: string; format: string;
+      audience: string; hook: string; keyMessage: string; conversionBridge: string;
+      suggestedBudget: number;
+    },
+    creativePackage: any,
+    company: CompanyDocument,
+    runId: string,
+  ): Promise<string> {
+    const fullPrompt = await this.buildPrompt(brief, creativePackage, company, runId);
+
+    // Strip STEPS section and replace with a direct "propose config" instruction
+    const stepsIdx = fullPrompt.indexOf('═══════════════════════════════════════════════════════\nSTEPS');
+    const withoutSteps = stepsIdx !== -1 ? fullPrompt.slice(0, stepsIdx).trimEnd() : fullPrompt;
+
+    const product = (company.products ?? []).find(p => p.name === (brief as any).product);
+
+    return `${withoutSteps}
+
+═══════════════════════════════════════════════════════
+OUTPUT
+═══════════════════════════════════════════════════════
+
+This is Phase 1 of a 2-phase review. A Performance Analyst will review your config separately.
+Do NOT approve your own work. Just propose the best campaign config you can based on all the data above.
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "approved": true,
+  "campaign": {
+    "budget": ${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)},
+    "objective": "OUTCOME_SALES",
+    "conversionEvent": "${product?.conversionEvent ?? 'Purchase'}",
+    "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
+    "adSets": [
+      {
+        "name": "descriptive name",
+        "budgetPercent": 50,
+        "audienceType": "lookalike|advantage_plus|retarget|interest|custom",
+        "metaAudienceId": "actual Meta audience ID or omit for advantage_plus",
+        "excludeAudienceIds": [],
+        "ageMin": 25,
+        "ageMax": 42,
+        "geoLocations": ["IN"],
+        "optimizationGoal": "OFFSITE_CONVERSIONS",
+        "ads": [0, 1, 2],
+        "creativeFormat": "video"
+      }
+    ],
+    "scaleRules": "specific ROAS/CTR threshold + scale %",
+    "pauseRules": "specific CTR/ROAS threshold + spend amount"
+  },
+  "adjustments": {
+    "budgetAdjusted": false,
+    "originalBudget": ${brief.suggestedBudget},
+    "recommendedBudget": 0
+  },
+  "debateRounds": 1,
+  "debateLog": [{"round": 1, "from": "strategist", "summary": "proposed campaign config"}],
+  "debateRationale": "initial proposal — awaiting analyst review"
+}`.trim();
   }
 
   private async buildPrompt(
@@ -203,20 +382,28 @@ ${audiencePerfContext ? 'Audience data available — see context brief.' : 'No a
     const losingFormats = learnings?.creative?.losingFormats ?? [];
     const hasFormatData = winningFormats.length > 0 || losingFormats.length > 0;
 
+    const selectedCopyIndex = creativePackage?.selectedCopyIndex ?? 0;
+
     const formatSection = hasFormatData
       ? `CREATIVE FORMAT — video vs image per ad set:
 Each ad set must have "creativeFormat": "video" | "image" | "both".
 Format performance: Winning: ${winningFormats.join(', ')}. Losing: ${losingFormats.join(', ') || 'none'}.
 - Assign winning format to largest budget ad sets. Test the other on smallest budget ad set.
 - If both winning → split test across ad sets.
-- Budget < ₹1,500/day → don't split, use winning format only.`
+- Budget < ₹1,500/day → don't split, use winning format only.
+IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for all variants.
+- Video ad sets → must use ads: [${selectedCopyIndex}] only (video matches this variant's hook)
+- Image ad sets → can use ads: [0, 1, 2] (each variant has its own image)`
       : `CREATIVE FORMAT — video vs image per ad set:
 Each ad set must have "creativeFormat": "video" | "image" | "both".
 No format data yet. Decide from first principles:
 - Young/impulse/lifestyle audiences → video. Professionals/B2B → image. Broad/advantage_plus → video default. Retarget → image.
 - Demo/transformation/testimonial → video. Discount/urgency/simple product → image.
 - Conflicting signals or unsure → "both" (let Meta optimize).
-- Budget < ₹1,500/day → don't split formats, pick one.`;
+- Budget < ₹1,500/day → don't split formats, pick one.
+IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for all variants.
+- Video ad sets → must use ads: [${selectedCopyIndex}] only (video matches this variant's hook)
+- Image ad sets → can use ads: [0, 1, 2] (each variant has its own image)`;
 
     // ═════════════════════════════════════════════════════════════════════════
     // PROMPT: Data first → Rules → Steps
@@ -239,9 +426,17 @@ Proposed Daily Budget: ₹${brief.suggestedBudget}/day (total across all ad sets
 Objective: ${company.primaryObjective}
 Geography: ${company.geography}
 
-Selected Copy:
-${selectedCopy ? `  Headline: ${selectedCopy.headline}\n  Copy: ${selectedCopy.primaryText}\n  CTA: ${selectedCopy.cta}` : '  No copy available yet'}
-Image: ${(creativePackage as any)?.images?.some((img: any) => img.imageUrl) ? 'Generated' : 'Pending'}
+Copy Variants (use index when assigning ads[] in ad sets):
+${((creativePackage as any)?.copyVariants ?? []).length > 0
+  ? (creativePackage as any).copyVariants.map((v: any, i: number) =>
+    `  Variant ${i} [hookStyle: ${v.hookStyle ?? 'unknown'}]${i === ((creativePackage as any).selectedCopyIndex ?? 0) ? ' ← SELECTED' : ''}
+    Headline: ${v.headline}
+    Hook: ${v.primaryText?.split('\n')[0] ?? ''}
+    CTA: ${v.cta}`
+  ).join('\n')
+  : `  Variant 0 [hookStyle: unknown] ← SELECTED\n  Headline: ${selectedCopy?.headline ?? 'N/A'}\n  Hook: ${selectedCopy?.primaryText?.split('\n')[0] ?? 'N/A'}\n  CTA: ${selectedCopy?.cta ?? 'N/A'}`
+}
+Images: ${(creativePackage as any)?.images?.filter((img: any) => img.imageUrl).length ?? 0}/3 generated
 Video: ${(creativePackage as any)?.video?.videoUrl ? 'Generated' : 'Pending'}
 
 ${productBlock}
@@ -277,7 +472,12 @@ AD SETS:
 - Use real Meta audience IDs from the product data — don't invent IDs.
 - No Meta audiences → use audienceType "advantage_plus" (NOT "interest" without real IDs).
 - Exclude past buyer audiences from prospecting ad sets.
-- "ads": [0, 1, 2] = all 3 copy variants per ad set — Meta optimizes.
+- "ads" array: assign copy variants by index using hookStyle from the variants listed above:
+  * Prospecting / lookalike / broad / advantage_plus → all 3 variants [0, 1, 2] — let Meta optimize
+  * Interest-based cold → all 3 variants [0, 1, 2]
+  * Retargeting / past visitors → only the variant whose hookStyle is "social_proof", "urgency", or "price_anchor" — check hookStyle above and pick that index
+  * If no retargeting-appropriate hookStyle exists → use selected variant only e.g. [selectedCopyIndex]
+  * Never assign "curiosity", "problem_awareness", or "question" hookStyle to retargeting — they already know the problem
 - budgetPercent across all ad sets must sum to 100.
 
 ${formatSection}
@@ -299,14 +499,18 @@ STEP 2: Spawn the Performance Analyst via Agent tool:
   - mode: "bypassPermissions"
   - prompt: "You are the Performance Analyst on the Campaign Review Team for ${company.name}. Your job is to challenge campaign configs that might waste budget.
 
+    FIRST ACTION (do this immediately before anything else):
+    Call TaskCreate(name: 'waiting-for-brief', body: 'waiting for Campaign Director to send the campaign brief'). Stay alive and keep waiting until their message arrives. Do NOT produce any output until you receive their message.
+
     REVIEW PROTOCOL:
     - You will receive a campaign brief with a CONTEXT BRIEF containing key performance data.
     - Use the data to challenge budget, targeting, and timing decisions.
     - Evaluate: (1) BUDGET — too high for a first run? (2) TARGETING — too broad/narrow? (3) TIMING — right moment? (4) RISK — what if it flops? (5) GUARDRAILS — what triggers scale/pause?
     - Be data-driven. Push for conservative budgets on unproven concepts, aggressive on proven ones.
+    - After each response, call TaskCreate to wait for the next message.
     - When the Strategist pushes back, either concede with data or hold firm with data.
-    - Max 5 rounds. When you agree, send: {type: 'consensus', approved: true/false}.
-    - Send all messages to 'team-lead'. Respond IMMEDIATELY."
+    - Max 5 rounds. When you agree, send: {type: 'consensus', approved: true/false} via SendMessage(to: 'team-lead').
+    - When you receive a shutdown_request: reply with {type: 'shutdown_confirmed'} via SendMessage(to: 'team-lead') then stop."
 
 STEP 3: Send the campaign package to the Analyst via SendMessage(to: "analyst").
 
@@ -375,15 +579,16 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   }
 
   private parseOutput(content: string): CampaignReviewOutput {
+    let jsonStr = '';
     try {
       const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      const jsonStr = fenceMatch
+      jsonStr = fenceMatch
         ? fenceMatch[1].trim()
         : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
       return JSON.parse(jsonStr);
-    } catch {
-      this.logger.error('Campaign Review Team output parse failed');
-      throw new Error('Campaign Review Team returned invalid JSON');
+    } catch (err: any) {
+      this.logger.error(`Campaign Review Team output parse failed: ${err.message} | content snippet: ${content.slice(0, 300)}`);
+      throw new Error(`Campaign Review Team returned invalid JSON: ${err.message}`);
     }
   }
 }

@@ -133,7 +133,7 @@ const buildBatch2SystemPrompt = () => `
 You are a prompt engineering expert specializing in marketing AI agents.
 
 ${COMMON_RULES}
-6. Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter, campaignCreator): 300-500 words —
+6. Non-scout prompts (coordinator, competitorResearch, marketResearch, ideaPool, digestWriter, campaignCreator, strategyTeamLead, creativeTeamLead): 300-500 words —
    focus on synthesis logic, scoring criteria, and brand voice.
 
 ───────────────────────────────────────────
@@ -158,6 +158,70 @@ Specific guidance per agent:
 - digestWriter: Tone and format for the weekly PAID AD INTELLIGENCE digest. The audience is a
   performance marketer reviewing Meta ad campaign ideas — they want to know: what should I run
   this week, on which Meta placement, at what budget, and why will it convert?
+
+───────────────────────────────────────────
+STRATEGY TEAM LEAD PROMPT (strategyTeamLead)
+───────────────────────────────────────────
+This agent generates a pool of Meta ad campaign ideas from intelligence signals and debates them with a contrarian.
+Write a 300-500 word system prompt that covers:
+
+1. BRAND VOICE FOR IDEA GENERATION — what makes an idea feel on-brand for THIS company
+   - What tones, angles, and messaging styles resonate with the target audience
+   - What angles are off-brand or tone-deaf for this brand
+   - The connection between trends and purchase intent for THIS audience specifically
+
+2. IDEA QUALITY FILTER — what makes a campaign idea worth pursuing as a paid Meta ad:
+   - Must have a clear, specific product tie-in (not vague awareness)
+   - Must have a believable conversion bridge (trend → desire → buy)
+   - Must map to a real audience segment with purchase intent
+   - Must be differentiated from what competitors are already running
+
+3. DEBATE MINDSET — when to defend an idea vs concede:
+   - Defend: when you have a specific insight from the intelligence that the contrarian is missing
+   - Concede fast: when the contrarian is right that the conversion bridge is weak or the audience is wrong
+   - Never defend ideas out of attachment — only out of evidence
+
+4. WINNER CRITERIA — what makes one idea the week's best bet:
+   - Strongest combination of urgency, audience fit, and conversion bridge
+   - Matches the brand's campaign strategy (conservative/balanced/experimental)
+   - Backed by at least one strong intelligence signal (scout, competitor gap, or market insight)
+
+Do NOT include any product names, prices, or specific dates — these are injected at runtime.
+Focus on brand voice, strategic debate criteria, and idea quality standards for THIS company.
+
+───────────────────────────────────────────
+CREATIVE TEAM LEAD PROMPT (creativeTeamLead)
+───────────────────────────────────────────
+This agent is the Creative Director for THIS company's Meta ad campaigns. It produces the full creative package: 3 copy variants, an image prompt, and a video script. A Brand Compliance Reviewer will check its output separately.
+Write a 300-500 word system prompt that covers:
+
+1. BRAND VOICE FOR AD COPY — specific to this company's tone, audience, and language:
+   - What emotional register works for THIS audience (aspirational, urgent, humorous, empathetic)
+   - Whether Hinglish, Hindi, or English is the primary copy language for this brand
+   - What phrases, idioms, or cultural references resonate vs fall flat for this target audience
+   - What to NEVER say — off-brand phrases, tones, or claims that damage trust
+
+2. HOOK QUALITY — what makes a scroll-stopping first line for THIS audience:
+   - The specific fears, desires, or curiosities that make this audience stop scrolling
+   - Whether this audience responds better to pain-point hooks or aspiration hooks
+   - Which hook style (bold claim, social proof, curiosity gap, urgency) has worked before for this brand
+
+3. COPY STRUCTURE for direct response Meta ads:
+   - How to frame the value proposition for THIS product category
+   - How to reference price in a way that feels like a deal, not a barrier, for this audience
+   - How to create urgency that feels genuine, not spammy, for this brand's tone
+
+4. IMAGE & VIDEO DIRECTION — what visual style converts for this brand:
+   - What visual aesthetic (raw/authentic vs polished/premium) fits this brand and audience
+   - Whether Indian faces, settings, and cultural contexts are important for this brand
+   - What visual elements (text overlays, product close-ups, lifestyle) have worked for this product category
+
+5. COMPLIANCE AWARENESS — what to pre-emptively avoid:
+   - Any claims this brand's product category cannot make on Meta (medical, financial, guaranteed results)
+   - What superlatives or guarantees are off-limits for this industry
+
+Do NOT include any product names, prices, or specific dates — these are injected at runtime.
+Focus on creative standards, brand voice, and visual direction specific to THIS company's audience.
 
 ───────────────────────────────────────────
 CAMPAIGN CREATOR PROMPT (campaignCreator)
@@ -201,7 +265,9 @@ Return ONLY a valid JSON object with exactly these keys:
   "marketResearch": "...",
   "ideaPool": "...",
   "digestWriter": "...",
-  "campaignCreator": "..."
+  "campaignCreator": "...",
+  "strategyTeamLead": "...",
+  "creativeTeamLead": "..."
 }
 
 No markdown, no explanation, no code blocks — just the raw JSON object.
@@ -222,6 +288,8 @@ const BATCH2_PROMPT_KEYS: (keyof CompanyPrompts)[] = [
   'ideaPool',
   'digestWriter',
   'campaignCreator',
+  'strategyTeamLead',
+  'creativeTeamLead',
 ];
 
 
@@ -230,7 +298,6 @@ export class PromptGeneratorService {
   private readonly logger = new Logger(PromptGeneratorService.name);
 
   // Skills needed per batch — selected based on actual skill content vs agent needs.
-  // copywriting is excluded entirely (landing page copy, irrelevant to all 11 agents).
   private readonly BATCH1_SKILLS = [
     'social-content',    // platform dynamics + hook patterns — essential for 4 scouts
     'customer-research', // digital watering hole research, signal extraction — essential for redditScout
@@ -246,6 +313,7 @@ export class PromptGeneratorService {
     'customer-research',          // customer language, pain points, personas — competitorResearch, marketResearch, ideaPool
     'market-research',            // research quality standards — marketResearch, coordinator
     'product-marketing-context',  // positioning/ICP framework — ideaPool, campaignCreator
+    'copywriting',                // hook formulas, CTA frameworks, copy structure — creative producer, campaignCreator
   ];
 
   constructor(
@@ -416,41 +484,117 @@ export class PromptGeneratorService {
     );
   }
 
+  /**
+   * Fix literal (unescaped) newlines and carriage returns inside JSON string values.
+   * The model sometimes writes multi-line prompt text directly inside JSON strings,
+   * producing newlines that are valid text but invalid JSON encoding.
+   */
+  private fixJsonStringNewlines(jsonStr: string): string {
+    let result = '';
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < jsonStr.length; i++) {
+      const ch = jsonStr[i];
+      if (escaped) {
+        result += ch;
+        escaped = false;
+      } else if (ch === '\\' && inString) {
+        result += ch;
+        escaped = true;
+      } else if (ch === '"') {
+        inString = !inString;
+        result += ch;
+      } else if (inString && ch === '\n') {
+        result += '\\n';
+      } else if (inString && ch === '\r') {
+        result += '\\r';
+      } else {
+        result += ch;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Last-resort per-key extraction when the full JSON is unparseable (e.g. truncated).
+   * Extracts each required key individually via regex — resilient to truncation.
+   */
+  private extractKeysViaRegex(
+    content: string,
+    keys: (keyof CompanyPrompts)[],
+  ): Partial<CompanyPrompts> {
+    const result: Partial<CompanyPrompts> = {};
+    for (const key of keys) {
+      // Match "key": "value" where value may span multiple lines (unescaped newlines)
+      const pattern = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\[\\s\\S])*)"`, 's');
+      const match = content.match(pattern);
+      if (match) {
+        try {
+          result[key] = JSON.parse(`"${match[1]}"`) as any;
+        } catch {
+          // Unescape manually if JSON.parse still fails on the individual value
+          result[key] = match[1]
+            .replace(/\\n/g, '\n')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\') as any;
+        }
+      }
+    }
+    return result;
+  }
+
   private parsePrompts(
     content: string,
     requiredKeys: (keyof CompanyPrompts)[],
     batchName: string,
   ): Partial<CompanyPrompts> {
-    let parsed: Partial<CompanyPrompts>;
+    let parsed: Partial<CompanyPrompts> | null = null;
 
-    try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      if (fenceMatch) {
-        parsed = JSON.parse(fenceMatch[1].trim());
-      } else {
-        const start = content.indexOf('{');
-        const end = content.lastIndexOf('}');
-        if (start === -1 || end === -1) throw new Error('No JSON object found in response');
-        parsed = JSON.parse(content.slice(start, end + 1));
+    // Extract raw JSON string from fence or bare object
+    const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
+    let rawJson: string;
+    if (fenceMatch) {
+      rawJson = fenceMatch[1].trim();
+    } else {
+      const start = content.indexOf('{');
+      const end = content.lastIndexOf('}');
+      if (start === -1 || end === -1) {
+        this.logger.error(`[${batchName}] No JSON object found`);
+        this.logger.error(`[${batchName}] Raw response (first 500 chars): ${content.slice(0, 500)}`);
+        throw new Error(`[${batchName}] returned invalid JSON: No JSON object found`);
       }
-    } catch (err: any) {
-      this.logger.error(`[${batchName}] JSON parse failed: ${err.message}`);
-      this.logger.error(`[${batchName}] Raw response (first 500 chars): ${content.slice(0, 500)}`);
-      throw new Error(`[${batchName}] returned invalid JSON: ${err.message}`);
+      rawJson = content.slice(start, end + 1);
+    }
+
+    // Pass 1: try direct parse
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      // Pass 2: fix unescaped newlines inside string values, then retry
+      try {
+        parsed = JSON.parse(this.fixJsonStringNewlines(rawJson));
+        this.logger.log(`[${batchName}] Parsed after newline-fix`);
+      } catch {
+        // Pass 3: regex per-key extraction (resilient to truncation)
+        this.logger.warn(`[${batchName}] Full JSON parse failed — falling back to per-key regex extraction`);
+        parsed = this.extractKeysViaRegex(content, requiredKeys);
+      }
     }
 
     const missingKeys = requiredKeys.filter(
-      key => !parsed[key] || typeof parsed[key] !== 'string' || parsed[key]!.trim() === '',
+      key => !parsed![key] || typeof parsed![key] !== 'string' || (parsed![key] as string).trim() === '',
     );
 
     if (missingKeys.length > 0) {
+      this.logger.error(`[${batchName}] Raw response (first 500 chars): ${content.slice(0, 500)}`);
       throw new Error(`[${batchName}] response missing keys: ${missingKeys.join(', ')}`);
     }
 
     requiredKeys.forEach(key => {
-      this.logger.log(`[${batchName}] Prompt ready: ${key} (${parsed[key]!.trim().split(/\s+/).length} words)`);
+      this.logger.log(`[${batchName}] Prompt ready: ${key} (${(parsed![key] as string).trim().split(/\s+/).length} words)`);
     });
 
-    return parsed;
+    return parsed!;
   }
 }

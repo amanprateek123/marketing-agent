@@ -6,6 +6,12 @@ const HEYGEN_API_BASE = 'https://api.heygen.com';
 const POLL_INTERVAL_MS = 10000;
 const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+export interface HeygenAvatarConfig {
+  avatarId: string;
+  voiceId: string;
+  backgroundUrl?: string;
+}
+
 @Injectable()
 export class HeygenService {
   private readonly logger = new Logger(HeygenService.name);
@@ -13,47 +19,97 @@ export class HeygenService {
   constructor(private readonly configService: ConfigService) {}
 
   /**
-   * Generate a video from a text prompt via Heygen V3 Video Agent API.
-   * Flow: POST /v3/video-agents → session_id → poll session for video_id → poll video for url
+   * Generate a video via Heygen V3 Video Agent API.
+   * Takes a natural language prompt — ideal for text-overlay + music conversion ads.
+   *
+   * Flow: POST /v3/video-agents → video_id → poll /v1/video_status.get → video_url_caption
+   *
+   * onVideoIdReady: called immediately after video_id is assigned (before rendering).
+   * Persist it so polling can resume if this call times out.
    */
-  async generateVideo(prompt: string): Promise<{ videoUrl: string; thumbnailUrl: string }> {
+  async generateVideoFromPrompt(
+    prompt: string,
+    onVideoIdReady?: (videoId: string) => Promise<void>,
+  ): Promise<{ videoUrl: string; thumbnailUrl: string }> {
     const apiKey = this.configService.get<string>('heygen.apiKey');
     if (!apiKey) throw new Error('HEYGEN_API_KEY not configured');
 
-    const sessionId = await this.submitJob(apiKey, prompt);
-    this.logger.log(`Heygen session created: sessionId=${sessionId}`);
+    const videoId = await this.submitVideoAgentJob(apiKey, prompt);
+    this.logger.log(`Heygen video agent submitted: videoId=${videoId}`);
 
-    const videoId = await this.pollSessionForVideoId(apiKey, sessionId);
-    this.logger.log(`Heygen rendering started: sessionId=${sessionId} videoId=${videoId}`);
+    if (onVideoIdReady) await onVideoIdReady(videoId);
 
-    const result = await this.pollVideoForUrl(apiKey, videoId);
-    this.logger.log(`Heygen video ready: videoId=${videoId} url=${result.videoUrl}`);
-
-    return result;
+    return this.pollForCompletion(apiKey, videoId);
   }
 
-  private async submitJob(apiKey: string, prompt: string): Promise<string> {
-    this.logger.log(`Heygen submitting prompt (${prompt.length} chars)`);
+  /**
+   * Resume polling a video already rendering (videoId known).
+   * Use when a previous call timed out but the videoId was persisted.
+   */
+  async resumePolling(videoId: string): Promise<{ videoUrl: string; thumbnailUrl: string }> {
+    const apiKey = this.configService.get<string>('heygen.apiKey');
+    if (!apiKey) throw new Error('HEYGEN_API_KEY not configured');
+
+    this.logger.log(`Resuming Heygen poll: videoId=${videoId}`);
+    return this.pollForCompletion(apiKey, videoId);
+  }
+
+  /**
+   * List available avatars — discover Indian-looking avatar IDs.
+   * Inspect avatar_name and preview_image_url to pick the right one.
+   */
+  async listAvatars(): Promise<Array<{ avatar_id: string; avatar_name: string; gender: string; preview_image_url: string; tags: string[] }>> {
+    const apiKey = this.configService.get<string>('heygen.apiKey');
+    if (!apiKey) throw new Error('HEYGEN_API_KEY not configured');
+
+    const response = await axios.get(`${HEYGEN_API_BASE}/v2/avatars`, {
+      headers: { 'x-api-key': apiKey },
+      timeout: 15000,
+    });
+    return response.data?.data?.avatars ?? [];
+  }
+
+  /**
+   * List available voices — filter by language="Hindi" to find Hindi TTS voice IDs.
+   */
+  async listVoices(language?: string): Promise<Array<{ voice_id: string; language: string; gender: string; name: string; preview_audio: string }>> {
+    const apiKey = this.configService.get<string>('heygen.apiKey');
+    if (!apiKey) throw new Error('HEYGEN_API_KEY not configured');
+
+    const response = await axios.get(`${HEYGEN_API_BASE}/v2/voices`, {
+      headers: { 'x-api-key': apiKey },
+      timeout: 15000,
+    });
+    const voices = response.data?.data?.voices ?? [];
+    return language ? voices.filter((v: any) => v.language === language) : voices;
+  }
+
+  // POST /v3/video-agents — natural language prompt → video_id
+  private async submitVideoAgentJob(apiKey: string, prompt: string): Promise<string> {
+    this.logger.log(`Heygen submitting video agent job (prompt: ${prompt.length} chars)`);
 
     try {
       const response = await axios.post(
         `${HEYGEN_API_BASE}/v3/video-agents`,
-        { prompt, orientation: 'portrait' },
+        {
+          prompt: prompt.trim(),
+          title: 'Meta Ad Video',
+          aspect_ratio: '9:16',
+        },
         {
           headers: {
-            'X-Api-Key': apiKey,
+            'x-api-key': apiKey,
             'Content-Type': 'application/json',
           },
           timeout: 30000,
         },
       );
 
-      const sessionId = response.data?.data?.session_id;
-      if (!sessionId) {
-        throw new Error(`Heygen submit failed — no session_id: ${JSON.stringify(response.data).slice(0, 300)}`);
+      const videoId = response.data?.data?.video_id ?? response.data?.video_id;
+      if (!videoId) {
+        throw new Error(`Heygen submit failed — no video_id in response: ${JSON.stringify(response.data).slice(0, 300)}`);
       }
-
-      return sessionId;
+      return videoId;
     } catch (err: any) {
       if (err instanceof AxiosError && err.response) {
         const detail = JSON.stringify(err.response.data).slice(0, 500);
@@ -63,51 +119,22 @@ export class HeygenService {
     }
   }
 
-  // Step 2: poll session until video_id is assigned (agent thinking → generating)
-  private async pollSessionForVideoId(apiKey: string, sessionId: string): Promise<string> {
+  // GET /v1/video_status.get?video_id=<id> — poll until completed
+  private async pollForCompletion(
+    apiKey: string,
+    videoId: string,
+  ): Promise<{ videoUrl: string; thumbnailUrl: string }> {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
 
     while (Date.now() < deadline) {
       await this.sleep(POLL_INTERVAL_MS);
 
       const response = await axios.get(
-        `${HEYGEN_API_BASE}/v3/video-agents/${sessionId}`,
+        `${HEYGEN_API_BASE}/v1/video_status.get`,
         {
-          headers: { 'X-Api-Key': apiKey },
-          timeout: 15000,
-        },
-      );
-
-      const data = response.data?.data;
-      const status = data?.status;
-
-      if (status === 'failed') {
-        const raw = JSON.stringify(response.data).slice(0, 500);
-        throw new Error(`Heygen session failed: ${data?.failure_message ?? 'unknown'} | raw=${raw}`);
-      }
-
-      if (data?.video_id) {
-        return data.video_id;
-      }
-
-      this.logger.log(`Heygen session polling: sessionId=${sessionId} status=${status}`);
-    }
-
-    throw new Error(`Heygen session timed out waiting for video_id: sessionId=${sessionId}`);
-  }
-
-  // Step 3: poll video until completed
-  private async pollVideoForUrl(apiKey: string, videoId: string): Promise<{ videoUrl: string; thumbnailUrl: string }> {
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-    while (Date.now() < deadline) {
-      await this.sleep(POLL_INTERVAL_MS);
-
-      const response = await axios.get(
-        `${HEYGEN_API_BASE}/v3/videos/${videoId}`,
-        {
-          headers: { 'X-Api-Key': apiKey },
-          timeout: 15000,
+          params: { video_id: videoId },
+          headers: { 'x-api-key': apiKey },
+          timeout: 60000,
         },
       );
 
@@ -115,17 +142,19 @@ export class HeygenService {
       const status = data?.status;
 
       if (status === 'completed') {
-        const videoUrl = data?.video_url;
+        // Prefer video_url_caption (captions burned in) over plain video_url
+        const videoUrl = data?.video_url_caption ?? data?.video_url;
         if (!videoUrl) throw new Error(`Heygen completed but no video_url for videoId=${videoId}`);
+        this.logger.log(`Heygen video ready: videoId=${videoId} captioned=${!!data?.video_url_caption}`);
         return { videoUrl, thumbnailUrl: data?.thumbnail_url ?? '' };
       }
 
       if (status === 'failed') {
-        const raw = JSON.stringify(response.data).slice(0, 500);
-        throw new Error(`Heygen video failed: ${data?.failure_message ?? data?.failure_code ?? 'unknown'} | raw=${raw}`);
+        const errMsg = data?.error?.message ?? data?.error ?? 'unknown';
+        throw new Error(`Heygen video failed: ${errMsg} | videoId=${videoId}`);
       }
 
-      this.logger.log(`Heygen video polling: videoId=${videoId} status=${status}`);
+      this.logger.log(`Heygen polling: videoId=${videoId} status=${status}`);
     }
 
     throw new Error(`Heygen timed out after 30 minutes: videoId=${videoId}`);

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { extractConversions } from './conversion-extractor.util';
 
 /**
  * PatternCalculator — pure TypeScript math, no Claude.
@@ -582,40 +583,6 @@ export class PatternCalculatorService {
   }
 
   private extractConversions(actions: any[] | undefined, conversionTypes?: Set<string>): number {
-    if (!actions || actions.length === 0) return 0;
-
-    if (conversionTypes && conversionTypes.size > 0) {
-      // Custom conversions first (offsite_conversion.custom.*)
-      const customActions = actions.filter(
-        a => a.action_type.startsWith('offsite_conversion.custom.') && conversionTypes.has(a.action_type),
-      );
-      if (customActions.length > 0) {
-        return customActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
-      }
-
-      // Step 2: Custom pixel event names (e.g. NADI_REPORT_PURCHASE_COMPLETED)
-      const STANDARD_EVENTS = new Set(['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
-        'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial']);
-
-      const customEventActions = actions.filter(
-        a => !a.action_type.startsWith('offsite_conversion.custom.')
-          && !STANDARD_EVENTS.has(a.action_type)
-          && conversionTypes.has(a.action_type),
-      );
-      if (customEventActions.length > 0) {
-        return customEventActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
-      }
-
-      // Step 3: Standard events fallback — priority order
-      const PRIORITY = ['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
-        'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial'];
-      for (const type of PRIORITY) {
-        if (!conversionTypes.has(type)) continue;
-        const action = actions.find(a => a.action_type === type);
-        if (action && parseInt(action.value ?? '0', 10) > 0) return parseInt(action.value, 10);
-      }
-    }
-
-    return 0;
+    return extractConversions(actions, conversionTypes);
   }
 }

@@ -19,6 +19,13 @@ export interface CoordinatorResult {
     compositeScore: number;
     rationale: string;
   }[];
+  viralTrends: {
+    trend: string;
+    platforms: string[];
+    brandTieIn: string;
+    compositeScore: number;
+    urgent: boolean;
+  }[];
 }
 
 @Injectable()
@@ -81,23 +88,25 @@ export class CoordinatorService {
       maxTurns: 5,
     });
 
-    const topSignals = this.extractTopSignals(result.content);
+    const { topSignals, viralTrends } = this.extractTopSignalsAndViralTrends(result.content);
 
     const saved = await this.coordinatorOutputModel.create({
       tenantId,
       runId,
       content: result.content,
       topSignals,
+      viralTrends,
     });
 
     this.logger.log(
-      `Coordinator done: tenantId=${tenantId} runId=${runId} signals=${topSignals.length}`,
+      `Coordinator done: tenantId=${tenantId} runId=${runId} signals=${topSignals.length} viralTrends=${viralTrends.length}`,
     );
 
     return {
       coordinatorOutputId: (saved as any)._id.toString(),
       content: result.content,
       topSignals,
+      viralTrends,
     };
   }
 
@@ -112,6 +121,7 @@ export class CoordinatorService {
 
     const userMessage = `
 Based on this coordinator synthesis, perform deep competitor research focused on PAID AD OPPORTUNITIES.
+Use all available search turns across 3 phases. Do NOT output JSON until Phase 3 is complete.
 
 COORDINATOR SYNTHESIS:
 ${coordinatorContent}
@@ -119,16 +129,29 @@ ${coordinatorContent}
 Company competitors to analyse: ${company.competitors.join(', ')}
 
 NOTE: We have a separate Meta Ads Library agent that already scrapes competitor active Meta ad creatives.
-DO NOT focus on ad creatives here. Instead, find what the Ads Library cannot surface:
-- Pricing changes, new product launches, or promotions competitors just announced
-- Customer complaints, bad reviews, or refund demands — these are attack angles for our ads
-- Positioning shifts — if a competitor is moving upmarket or downmarket, there's a gap to exploit
-- Seasonal campaigns or discount events competitors are running (to counter or out-price them)
-- Press coverage or controversies that make their audience receptive to switching
+DO NOT focus on ad creatives here. Instead, find what the Ads Library cannot surface.
 
-Use web_search to find recent competitor news, reviews (G2, Trustpilot, Google Reviews), pricing pages, and social mentions.
+━━━ PHASE 1 — DISCOVERY (searches 1–4) ━━━
+For each competitor run these searches:
+- "[competitor] pricing ${new Date().getFullYear()}" — find pricing changes or promotions
+- "[competitor] reviews complaints" on Trustpilot, G2, Google Reviews — find pain points their customers have
+- "[competitor] news" — find recent launches, controversies, or positioning shifts
+Collect candidates. Do not output JSON yet.
 
-Return ONLY a JSON object in this exact format — no markdown, no explanation:
+━━━ PHASE 2 — EVALUATE ━━━
+Review everything found. For each candidate finding ask:
+- Is this backed by a real URL with recent date (last 30 days preferred)?
+- How exploitable is this as a Meta ad angle? Score 1–10.
+- Identify your top 3 most exploitable findings that have actual evidence.
+
+━━━ PHASE 3 — DEEP-DIVE (searches 5–8) ━━━
+For each of your top 3 findings:
+- Find the specific review, news article, or pricing page URL
+- Pull 1-2 verbatim quotes from negative reviews if available — these become ad copy
+- Verify recency — if you cannot find a date, lower the score
+- Drop findings with no verifiable source URL
+
+After Phase 3, return ONLY a JSON object in this exact format — no markdown, no explanation:
 {
   "insights": [
     {
@@ -147,7 +170,7 @@ Rules:
 - score 8-10: competitor is vulnerable RIGHT NOW — act this week with a targeted Meta ad
 - score 5-7: important pattern worth building an ad angle around this month
 - score 1-4: background context, low urgency
-- implication must be a specific Meta ad tactic — audience, hook angle, or offer to run
+- implication must be a specific paid ad tactic — audience, hook angle, or offer to run
 - urgency "high" = act this week, "medium" = this month, "low" = general awareness
     `.trim();
 
@@ -186,6 +209,7 @@ Rules:
 
     const userMessage = `
 Based on this coordinator synthesis, find market signals with DIRECT PURCHASE INTENT that can fuel paid Meta ad campaigns.
+Use all available search turns across 3 phases. Do NOT output JSON until Phase 3 is complete.
 
 COORDINATOR SYNTHESIS:
 ${coordinatorContent}
@@ -193,17 +217,28 @@ ${coordinatorContent}
 Industry: ${company.industry}
 Target audience: ${company.targetAudience}
 
-Use web_search to find signals that translate into paid ad opportunities — NOT generic trend articles.
-Focus on:
-- Urgency triggers: festivals, salary cycles, exam seasons, weather shifts, tax deadlines — anything creating a "buy now" window
-- Consumer pain points with purchase intent: complaints, unmet needs, price sensitivity signals from forums, reviews, Reddit
-- Demand spikes: search trend data, news coverage showing a category moment (e.g. "anxiety at all-time high" → sell wellness product)
-- Seasonal conversion windows: when does this audience's wallet open? What are they willing to spend on right now?
+━━━ PHASE 1 — DISCOVERY (searches 1–4) ━━━
+Find candidate signals — NOT generic trend articles. Focus on:
+- Urgency triggers: festivals, salary cycles, exam seasons, weather shifts, tax deadlines in ${company.geography} — search "[industry] seasonal buying ${company.geography} ${new Date().getFullYear()}"
+- Consumer pain points: Reddit, Quora, Google Reviews complaints about this category — search "reddit ${company.industry} ${company.targetAudience} problem complaints"
+- Demand spikes: news or search trend data showing a category moment right now — search "${company.industry} demand spike ${new Date().getFullYear()}"
+Collect 8-10 candidate signals. Do not output JSON yet.
 
-Each insight must pass the "can I run a profitable Meta ad against this right now?" test.
-Skip macro trends with no clear commercial hook (e.g. "Gen Z values authenticity" — too vague to run an ad against).
+━━━ PHASE 2 — EVALUATE ━━━
+For each candidate signal ask:
+- Does it pass the "can I run a profitable Meta ad against this RIGHT NOW?" test?
+- Is there a specific time window (next 7 days, this month)?
+- Is there a source URL confirming the signal is real and recent?
+Score each 1–10. Identify top 3 with the clearest commercial hook.
 
-Return ONLY a JSON object in this exact format — no markdown, no explanation:
+━━━ PHASE 3 — DEEP-DIVE (searches 5–8) ━━━
+For each of your top 3 signals:
+- Find the specific article, Reddit thread, or data source confirming the urgency/pain
+- Pull exact quotes or data points that can become ad copy hooks
+- Verify timing — if you cannot confirm recency, lower the score
+- Drop signals with no verifiable source URL
+
+After Phase 3, return ONLY a JSON object in this exact format — no markdown, no explanation:
 {
   "insights": [
     {
@@ -317,7 +352,7 @@ Rules:
       .filter((o) => o.viral_trends?.length > 0)
       .map(({ platform, viral_trends }) => {
         const lines = viral_trends
-          .slice(0, 5)
+          .slice(0, 10)
           .map(
             (v) =>
               `  - [Score ${v.signalScore}] Trend: "${v.trend}" | Tie-in: "${v.brand_tie_in}" | Source: ${v.source}`,
@@ -337,11 +372,12 @@ ${industrySections || 'No industry signals collected.'}
 ${viralSections || 'No viral trends collected.'}
 
 Your job:
-1. From industry signals — identify topics appearing across multiple platforms (cross-platform momentum)
-2. From viral trends — identify trends strong enough to tie into the brand, with a clear brand_tie_in
-3. Combine both into a single ranked list (topSignals) scored 0–10
-4. A viral trend with a strong brand tie-in can outscore a weak industry signal
-5. Produce a synthesis brief that the intelligence and idea pool agents can use
+1. From industry signals — identify topics appearing across multiple platforms (cross-platform momentum) → goes into topSignals
+2. From viral trends — identify trends strong enough to tie into the brand, with a clear brand_tie_in → goes into viralTrends (SEPARATE array)
+3. Do NOT mix viral trends into topSignals. Keep them strictly separate.
+4. Score topSignals 0–10 based on cross-platform momentum and commercial relevance
+5. Score viralTrends 0–10 based on viral strength and brand tie-in quality
+6. Produce a synthesis brief that the intelligence and idea pool agents can use
 
 
 You MUST include a JSON block at the end using EXACTLY this format:
@@ -355,38 +391,71 @@ You MUST include a JSON block at the end using EXACTLY this format:
       "compositeScore": 9.2,
       "rationale": "one sentence on why this signal matters now"
     }
+  ],
+  "viralTrends": [
+    {
+      "trend": "the meme or cultural moment name",
+      "platforms": ["instagram", "reddit"],
+      "brandTieIn": "how the brand can ride this trend in a paid ad",
+      "compositeScore": 8.5,
+      "urgent": true
+    }
   ]
 }
 \`\`\`
 
-Include 5–10 top signals. Use exactly these field names: topic, platforms, compositeScore, rationale.
+Rules:
+- Include 5–10 topSignals (industry signals only — NOT viral trends)
+- Include up to 5 viralTrends — only genuine meme/cultural moments with clear brand tie-in potential
+- Keep topSignals and viralTrends strictly separate — do NOT put viral trends in topSignals
+- urgent: true if this meme will be dead within 7 days
+- Use exactly these field names
     `.trim();
   }
 
-  private extractTopSignals(content: string): CoordinatorResult['topSignals'] {
-    // Try JSON block first
+  private extractTopSignalsAndViralTrends(content: string): {
+    topSignals: CoordinatorResult['topSignals'];
+    viralTrends: CoordinatorResult['viralTrends'];
+  } {
     const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i);
     if (jsonMatch) {
       try {
         const parsed = JSON.parse(jsonMatch[1]);
         const signals = parsed.topSignals ?? parsed.top_signals ?? parsed.signals ?? parsed.topics ?? [];
-        if (Array.isArray(signals) && signals.length > 0) {
-          return signals.slice(0, 10).map((s: any) => ({
-            topic: String(s.topic ?? s.title ?? s.id ?? ''),
-            platforms: Array.isArray(s.platforms) ? s.platforms
-              : Array.isArray(s.platformPresence) ? s.platformPresence
-              : [],
-            compositeScore: Number(s.compositeScore ?? s.composite_score ?? 0),
-            rationale: String(s.rationale ?? s.urgency ?? (Array.isArray(s.primaryAngles) ? s.primaryAngles[0] : '') ?? ''),
-          }));
+        const viral = parsed.viralTrends ?? parsed.viral_trends ?? [];
+
+        const topSignals = Array.isArray(signals) && signals.length > 0
+          ? signals.slice(0, 10).map((s: any) => ({
+              topic: String(s.topic ?? s.title ?? s.id ?? ''),
+              platforms: Array.isArray(s.platforms) ? s.platforms
+                : Array.isArray(s.platformPresence) ? s.platformPresence
+                : [],
+              compositeScore: Number(s.compositeScore ?? s.composite_score ?? 0),
+              rationale: String(s.rationale ?? s.urgency ?? (Array.isArray(s.primaryAngles) ? s.primaryAngles[0] : '') ?? ''),
+            }))
+          : [];
+
+        const viralTrends = Array.isArray(viral)
+          ? viral.slice(0, 5).map((v: any) => ({
+              trend: String(v.trend ?? v.topic ?? ''),
+              platforms: Array.isArray(v.platforms) ? v.platforms : [],
+              brandTieIn: String(v.brandTieIn ?? v.brand_tie_in ?? v.tieIn ?? ''),
+              compositeScore: Number(v.compositeScore ?? v.composite_score ?? 0),
+              urgent: Boolean(v.urgent ?? false),
+            }))
+          : [];
+
+        if (topSignals.length > 0) {
+          this.logger.log(`Coordinator extracted: ${topSignals.length} signals, ${viralTrends.length} viral trends`);
+          return { topSignals, viralTrends };
         }
       } catch (err: any) {
-        this.logger.warn(`extractTopSignals JSON parse failed: ${err.message}`);
+        this.logger.warn(`extractTopSignalsAndViralTrends JSON parse failed: ${err.message}`);
       }
     }
 
-    // Fallback: extract signals from plain text by looking for numbered topics
-    this.logger.warn('extractTopSignals: no JSON block found — attempting text extraction');
+    // Fallback: extract signals from plain text
+    this.logger.warn('extractTopSignalsAndViralTrends: no JSON block found — attempting text extraction');
     const textSignals: CoordinatorResult['topSignals'] = [];
     const lines = content.split('\n');
     for (const line of lines) {
@@ -395,7 +464,7 @@ Include 5–10 top signals. Use exactly these field names: topic, platforms, com
         textSignals.push({
           topic: match[1].replace(/\*\*/g, '').trim(),
           platforms: [],
-          compositeScore: 8 - textSignals.length * 0.5, // descending: 8, 7.5, 7, 6.5, 6, 5.5, 5
+          compositeScore: 8 - textSignals.length * 0.5,
           rationale: '',
         });
         if (textSignals.length >= 7) break;
@@ -403,11 +472,10 @@ Include 5–10 top signals. Use exactly these field names: topic, platforms, com
     }
 
     if (textSignals.length > 0) {
-      this.logger.warn(`extractTopSignals: recovered ${textSignals.length} signals from plain text`);
-      return textSignals;
+      this.logger.warn(`extractTopSignalsAndViralTrends: recovered ${textSignals.length} signals from plain text`);
+      return { topSignals: textSignals, viralTrends: [] };
     }
 
-    // Hard fail — pipeline should not continue with 0 signals
     throw new Error('Coordinator returned no parseable signals — cannot proceed with pipeline');
   }
 }

@@ -149,6 +149,7 @@ export class Company {
       campaignStrategy: 'balanced',
       pauseGracePeriodHours: 12,
       scaleRequiresApproval: true,
+      teamMode: 'sequential',
     }),
   })
   pipelineConfig: PipelineConfig;

@@ -23,6 +23,16 @@ export class CoordinatorOutput {
     compositeScore: number;
     rationale: string;
   }[];
+
+  // Viral/meme trends kept separate from industry signals
+  @Prop({ type: [Object], default: [] })
+  viralTrends?: {
+    trend: string;
+    platforms: string[];
+    brandTieIn: string;
+    compositeScore: number;
+    urgent: boolean;
+  }[];
 }
 
 export const CoordinatorOutputSchema = SchemaFactory.createForClass(CoordinatorOutput);

@@ -104,7 +104,13 @@ export class CompaniesService {
   }
 
   async updatePrompts(tenantId: string, prompts: CompanyPrompts): Promise<void> {
-    await this.companyModel.updateOne({ tenantId }, { $set: { prompts } });
+    // Use dot-notation to merge individual keys — avoids wiping optional fields
+    // (e.g. intelligenceLead) that aren't part of the current generation batch
+    const dotSet: Record<string, string> = {};
+    for (const [key, value] of Object.entries(prompts)) {
+      dotSet[`prompts.${key}`] = value;
+    }
+    await this.companyModel.updateOne({ tenantId }, { $set: dotSet });
     this.logger.log(`Prompts updated for: ${tenantId}`);
   }
 

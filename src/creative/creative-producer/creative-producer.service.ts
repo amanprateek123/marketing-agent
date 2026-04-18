@@ -58,6 +58,36 @@ export class CreativeProducerService {
       this.logger.log(`Creative production skipped — already completed for briefId=${briefId}`);
       return existing as any;
     }
+    // Resume video polling if we have a videoId but no completed video
+    if (existing && existing.heygenVideoId && !(existing.video as any)?.videoUrl) {
+      this.logger.log(`Resuming Heygen poll for briefId=${briefId} videoId=${existing.heygenVideoId}`);
+      try {
+        const videoResult = await this.videoGenerator.resumeFromVideoId(
+          existing.heygenVideoId,
+          (existing.video as any)?.videoPrompt ?? '',
+          tenantId,
+          runId,
+        );
+        await this.creativePackageModel.updateOne(
+          { _id: existing._id },
+          {
+            status: 'completed',
+            completedAt: new Date(),
+            video: {
+              variantIndex: (existing.video as any)?.variantIndex ?? 0,
+              videoPrompt: (existing.video as any)?.videoPrompt ?? '',
+              videoUrl: videoResult.videoUrl,
+              videoThumbnailUrl: videoResult.videoThumbnailUrl,
+            },
+          },
+        );
+        this.logger.log(`Heygen resume succeeded for briefId=${briefId}`);
+        return (await this.creativePackageModel.findOne({ _id: existing._id }).lean().exec()) as any;
+      } catch (resumeErr: any) {
+        this.logger.error(`Heygen resume failed for briefId=${briefId}: ${resumeErr.message} — regenerating`);
+        await this.creativePackageModel.deleteOne({ _id: existing._id });
+      }
+    }
     if (existing) {
       await this.creativePackageModel.deleteOne({ _id: existing._id });
       this.logger.log(`Creative production: removing stale ${existing.status} package for briefId=${briefId}`);
@@ -89,18 +119,24 @@ export class CreativeProducerService {
           selectionReason: teamResult.selectionReason,
         };
 
-        // Generate one image per copy variant in parallel
+        // Generate one image per copy variant using the creative team's per-variant prompts
         this.logger.log(`Generating ${teamResult.variants.length} images (one per variant): tenantId=${tenantId}`);
         const imageResults = await Promise.allSettled(
-          teamResult.variants.map((variant: any, i: number) =>
-            this.imageGenerator.generateForVariant(
+          teamResult.variants.map((variant: any, i: number) => {
+            const teamImagePrompt = teamResult.imagePrompts?.[i];
+            if (teamImagePrompt) {
+              // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
+              return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId);
+            }
+            // Fallback: generate image prompt from scratch for this variant
+            return this.imageGenerator.generateForVariant(
               { topic: brief.topic, angle: brief.angle, platform: brief.platform, format: brief.format, audience: brief.audience },
               variant,
               i,
               company,
               runId,
-            ),
-          ),
+            );
+          }),
         );
 
         images = teamResult.variants.map((_: any, i: number) => {
@@ -109,18 +145,32 @@ export class CreativeProducerService {
             return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
           }
           this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
-          return { variantIndex: i, imagePrompt: '', imageUrl: '' };
+          return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '' };
         });
 
-        // Generate one video for the selected copy variant
+        // Generate one video for the selected copy variant — skip for meme format (static image ad)
         const selectedIndex = teamResult.selectedIndex ?? 0;
-        const heygenPrompt = this.convertVideoPromptForHeygen(teamResult.videoPrompt);
         const videoPromptStr = typeof teamResult.videoPrompt === 'string'
           ? teamResult.videoPrompt
           : JSON.stringify(teamResult.videoPrompt);
 
+        if (brief.format === 'meme') {
+          this.logger.log(`Video generation skipped — meme format uses static image only`);
+          video = null;
+        } else
         try {
-          const videoResult = await this.videoGenerator.generateFromScript(heygenPrompt, tenantId, runId);
+          const videoResult = await this.videoGenerator.generateFromScript(
+            videoPromptStr,
+            tenantId,
+            runId,
+            async (videoId: string) => {
+              await this.creativePackageModel.updateOne(
+                { _id: pkg._id },
+                { heygenVideoId: videoId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '' } },
+              );
+              this.logger.log(`Heygen videoId persisted: ${videoId} for briefId=${briefId}`);
+            },
+          );
           video = {
             variantIndex: selectedIndex,
             videoPrompt: videoPromptStr,
@@ -242,35 +292,4 @@ export class CreativeProducerService {
     }
   }
 
-  private convertVideoPromptForHeygen(videoPrompt: any): string {
-    if (typeof videoPrompt === 'string') {
-      try {
-        const parsed = JSON.parse(videoPrompt);
-        if (Array.isArray(parsed)) {
-          return this.scenesToHeygenPrompt(parsed);
-        }
-      } catch {
-        return videoPrompt;
-      }
-      return videoPrompt;
-    }
-
-    if (Array.isArray(videoPrompt)) {
-      return this.scenesToHeygenPrompt(videoPrompt);
-    }
-
-    return String(videoPrompt);
-  }
-
-  private scenesToHeygenPrompt(scenes: any[]): string {
-    const sceneDescriptions = scenes
-      .map((s: any) => `[${s.duration}] Text on screen: "${s.text}" — Visual: ${s.visual}${s.music ? ` — Music: ${s.music}` : ''}`)
-      .join('\n\n');
-
-    return `15-20 second vertical 9:16 Meta ad video. Sharp jump cuts every 2-3 seconds. Bold Hinglish/Hindi text overlays on every scene. Indian aesthetic throughout. IMPORTANT: Do NOT add auto-generated subtitles or captions — only the text overlays specified per scene.
-
-${sceneDescriptions}
-
-Style: fast-paced, high contrast, thumb-stopping. Each scene has bold centered text overlay in white/yellow on a semi-transparent dark band. Sharp cuts between scenes — no smooth transitions. Indian faces, settings, and music throughout.`;
-  }
 }

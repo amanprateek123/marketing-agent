@@ -54,6 +54,7 @@ class PipelineConfigDto {
   @IsOptional() @IsEnum(['conservative', 'balanced', 'experimental']) campaignStrategy?: string;
   @IsOptional() @IsNumber() @Min(1) pauseGracePeriodHours?: number;
   @IsOptional() @IsBoolean() scaleRequiresApproval?: boolean;
+  @IsOptional() @IsEnum(['cli', 'sequential']) teamMode?: string;
 }
 
 class DeliveryDto {

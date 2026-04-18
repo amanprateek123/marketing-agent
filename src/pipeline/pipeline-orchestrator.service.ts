@@ -177,6 +177,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
       coordinatorOutputId: coordinatorOutput._id.toString(),
       content: coordinatorOutput.content,
       topSignals: coordinatorOutput.topSignals,
+      viralTrends: coordinatorOutput.viralTrends ?? [],
     };
 
     const ideaPoolResult: IdeaPoolResult = {
@@ -272,6 +273,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
               coordinatorOutputId: existingCoordinator._id.toString(),
               content: existingCoordinator.content,
               topSignals: existingCoordinator.topSignals,
+              viralTrends: existingCoordinator.viralTrends ?? [],
             };
           }
           return this.coordinatorService.run(company, runId);

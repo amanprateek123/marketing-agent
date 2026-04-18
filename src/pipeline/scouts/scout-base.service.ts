@@ -41,7 +41,7 @@ export abstract class ScoutBaseService {
 
     // Load recently covered signals to inject as exclusion context
     const recentlyCovered = await this.loadRecentSignals(company.tenantId);
-    const userMessage = this.buildResearchPrompt(company, recentlyCovered);
+    const userMessage = this.wrapWithIterativePhases(this.buildResearchPrompt(company, recentlyCovered));
 
     // Verification loop — retry up to 3 times if JSON is invalid
     let output: ScoutOutputData | null = null;
@@ -100,6 +100,37 @@ export abstract class ScoutBaseService {
     await this.saveSignals(company.tenantId, runId, finalOutput.trending_topics, finalOutput.viral_trends);
 
     return finalOutput;
+  }
+
+  // Wraps each scout's research prompt with 3-phase iterative retrieval structure.
+  // Guides the agent to spend its 10 turns systematically instead of doing 1-2 searches and stopping.
+  private wrapWithIterativePhases(researchPrompt: string): string {
+    return `
+Use all available search turns across 3 phases. Do NOT output JSON until Phase 3 is complete.
+
+━━━ PHASE 1 — DISCOVERY (searches 1–4) ━━━
+${researchPrompt}
+
+Return nothing yet. Just run your searches and collect candidates.
+
+━━━ PHASE 2 — EVALUATE ━━━
+Review everything you found in Phase 1.
+For each candidate topic or trend ask:
+- Does it have real engagement evidence (view counts, like counts, share counts)?
+- Is it recent (last 7 days preferred, last 14 days acceptable)?
+- Does it have a verifiable source URL?
+Assign a preliminary signal score 1–10 based on evidence so far.
+Identify the top 5 candidates (score ≥ 6) that need deeper verification.
+
+━━━ PHASE 3 — DEEP-DIVE (searches 5–8) ━━━
+For each of your top 5 candidates:
+- Find the specific post / thread / video URL with actual numbers (views, likes, comments)
+- Verify it is genuinely trending right now, not an old story
+- If engagement data is unavailable, lower the signal score accordingly
+- Drop candidates where you cannot find any source URL (score them 0)
+
+After Phase 3, compile your final verified signals and return the JSON output as specified in your instructions.
+    `.trim();
   }
 
   // Each scout provides its own research prompt
@@ -192,6 +223,8 @@ ${lines}
     });
 
     // Validate viral trends — drop if signalScore missing or below quality floor
+    // Viral memes are ephemeral and rarely have clean canonical URLs — cap at 7 (not 5) to avoid
+    // systematically penalising genuine trends just because they lack a permalink
     const validViralTrends = ((parsed.viral_trends ?? []) as ViralTrend[]).filter((v) => {
       if (typeof v.signalScore !== 'number') {
         this.logger.warn(`Dropping viral trend "${v.trend}" — missing signalScore`);
@@ -199,7 +232,7 @@ ${lines}
       }
       const hasSource = v.source && v.source.startsWith('http');
       if (!hasSource) {
-        v.signalScore = Math.min(v.signalScore, 5);
+        v.signalScore = Math.min(v.signalScore, 7);
         this.logger.warn(`Viral trend "${v.trend}" kept with capped score (no source URL)`);
       }
       if (v.signalScore < 3) {

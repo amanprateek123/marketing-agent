@@ -4,6 +4,7 @@ import { Model } from 'mongoose';
 import axios from 'axios';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { extractConversions } from './conversion-extractor.util';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -58,13 +59,14 @@ export class CampaignSyncService {
       const ctr = parseFloat(insights.ctr ?? '0');
       const cpc = parseFloat(insights.cpc ?? '0');
       const conversions = this.extractConversions(insights.actions, conversionTypes);
-      const roas = spend > 0 && conversions > 0 ? (conversions * 1) / spend : 0; // approximate
 
       const metaStatus = campaign.status ?? 'PAUSED';
       const internalStatus = META_TO_INTERNAL_STATUS[metaStatus] ?? 'paused';
 
       // Build metaAdSets from enriched data
       const metaAdSets = this.buildMetaAdSets(campaign, conversionTypes);
+
+      const roas = spend > 0 && conversions > 0 ? (conversions * 1) / spend : 0; // approximate
 
       const existing = await this.campaignModel.findOne({
         tenantId,
@@ -327,34 +329,6 @@ export class CampaignSyncService {
   }
 
   private extractConversions(actions: any[] | undefined, conversionTypes: Set<string>): number {
-    if (!actions || actions.length === 0) return 0;
-
-    const customActions = actions.filter(
-      a => a.action_type.startsWith('offsite_conversion.custom.') && conversionTypes.has(a.action_type),
-    );
-    if (customActions.length > 0) {
-      return customActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
-    }
-
-    // Custom pixel events (e.g. NADI_REPORT_PURCHASE_COMPLETED)
-    const STANDARD_EVENTS = new Set(['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
-      'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial']);
-    const customEventActions = actions.filter(
-      a => !a.action_type.startsWith('offsite_conversion.custom.')
-        && !STANDARD_EVENTS.has(a.action_type)
-        && conversionTypes.has(a.action_type),
-    );
-    if (customEventActions.length > 0) {
-      return customEventActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
-    }
-
-    const PRIORITY = ['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
-      'offsite_conversion.fb_pixel_lead', 'complete_registration'];
-    for (const type of PRIORITY) {
-      if (!conversionTypes.has(type)) continue;
-      const action = actions.find(a => a.action_type === type);
-      if (action && parseInt(action.value ?? '0', 10) > 0) return parseInt(action.value, 10);
-    }
-    return 0;
+    return extractConversions(actions, conversionTypes);
   }
 }

@@ -33,6 +33,7 @@ export function runTeamViaCli(
         '--verbose',
         '--permission-mode', 'bypassPermissions',
         '--dangerously-skip-permissions',
+        '--max-turns', '40',
       ],
       {
         env: {
@@ -89,8 +90,8 @@ export function runTeamViaCli(
     const timeout = setTimeout(() => {
       child.kill('SIGTERM');
       forceCleanup(teamName, logPrefix);
-      settle(() => reject(new Error(`${logPrefix} timed out after 10 minutes`)));
-    }, 10 * 60 * 1000);
+      settle(() => reject(new Error(`${logPrefix} timed out after 20 minutes`)));
+    }, 20 * 60 * 1000);
 
     child.on('close', (code) => {
       clearTimeout(timeout);

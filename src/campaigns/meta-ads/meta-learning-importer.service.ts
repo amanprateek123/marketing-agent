@@ -13,6 +13,7 @@ import { MetaLearningImport, MetaLearningImportDocument } from '../schemas/meta-
 import { EnrichedCampaign, EnrichedCampaignDocument } from '../schemas/enriched-campaign.schema';
 import { PatternCalculatorService } from './pattern-calculator.service';
 import { CampaignSyncService } from './campaign-sync.service';
+import { extractConversions } from './conversion-extractor.util';
 import { CompaniesService } from '../../companies/companies.service';
 import { QUEUES } from '../../scheduler/queue.constants';
 
@@ -704,12 +705,26 @@ export class MetaLearningImporterService {
       const customConversions = rawCustomConversions.map(c => ({ id: String(c.id), name: String(c.name) }));
       const conversionTypes = new Set<string>();
 
-      for (const conversion of customConversions) {
+      // Only count custom conversions that represent actual purchases/completions.
+      // Add-to-cart, attempted, view-content etc. are funnel events — not conversions.
+      const PURCHASE_KEYWORDS = ['purchase', 'completed', 'payment', 'paid', 'buy', 'order', 'sold'];
+      const NON_PURCHASE_KEYWORDS = ['add_to_cart', 'addtocart', 'cart', 'attempted', 'view_content', 'viewcontent', 'initiated', 'started'];
+
+      const isPurchaseConversion = (name: string): boolean => {
+        const lower = name.toLowerCase();
+        if (NON_PURCHASE_KEYWORDS.some(kw => lower.includes(kw))) return false;
+        return PURCHASE_KEYWORDS.some(kw => lower.includes(kw));
+      };
+
+      const purchaseConversions = customConversions.filter(c => isPurchaseConversion(c.name));
+      const skippedConversions = customConversions.filter(c => !isPurchaseConversion(c.name));
+
+      for (const conversion of purchaseConversions) {
         conversionTypes.add(`offsite_conversion.custom.${conversion.id}`);
       }
 
       this.logger.log(
-        `Found ${customConversions.length} custom conversions: ${customConversions.map(c => c.name).join(', ')}`,
+        `Found ${customConversions.length} custom conversions — counting ${purchaseConversions.length} purchase-type: [${purchaseConversions.map(c => c.name).join(', ')}] | skipping ${skippedConversions.length} non-purchase: [${skippedConversions.map(c => c.name).join(', ')}]`,
       );
 
       for (const event of STANDARD_EVENTS) conversionTypes.add(event);
@@ -1185,39 +1200,6 @@ Rules: SPECIFIC patterns from the actual data above. No generic advice. If no cl
   }
 
   private extractConversions(actions: any[] | undefined, conversionTypes?: Set<string>): number {
-    if (!actions || actions.length === 0) return 0;
-
-    if (conversionTypes && conversionTypes.size > 0) {
-      const customActions = actions.filter(
-        a => a.action_type.startsWith('offsite_conversion.custom.') && conversionTypes.has(a.action_type),
-      );
-      if (customActions.length > 0) {
-        return customActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
-      }
-
-      const STANDARD_EVENTS = new Set(['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
-        'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial']);
-
-      const customEventActions = actions.filter(
-        a => !a.action_type.startsWith('offsite_conversion.custom.')
-          && !STANDARD_EVENTS.has(a.action_type)
-          && conversionTypes.has(a.action_type),
-      );
-      if (customEventActions.length > 0) {
-        return customEventActions.reduce((sum, a) => sum + parseInt(a.value ?? '0', 10), 0);
-      }
-
-      const PRIORITY = ['purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
-        'offsite_conversion.fb_pixel_lead', 'complete_registration', 'submit_application', 'subscribe', 'start_trial'];
-      for (const type of PRIORITY) {
-        if (!conversionTypes.has(type)) continue;
-        const action = actions.find(a => a.action_type === type);
-        if (action && parseInt(action.value ?? '0', 10) > 0) {
-          return parseInt(action.value, 10);
-        }
-      }
-    }
-
-    return 0;
+    return extractConversions(actions, conversionTypes);
   }
 }

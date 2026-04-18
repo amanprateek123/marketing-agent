@@ -218,6 +218,7 @@ export class PipelineController {
           coordinatorOutputId: (coordOutput as any)._id.toString(),
           content: coordOutput.content,
           topSignals: coordOutput.topSignals,
+          viralTrends: (coordOutput as any).viralTrends ?? [],
         },
         competitorResearch,
         marketResearch,
@@ -275,6 +276,7 @@ export class PipelineController {
           coordinatorOutputId: (coordOutput as any)._id.toString(),
           content: coordOutput.content,
           topSignals: coordOutput.topSignals,
+          viralTrends: (coordOutput as any).viralTrends ?? [],
         },
         {
           briefs: allBriefs.map((b) => ({

@@ -55,6 +55,10 @@ export class CreativePackage {
   @Prop({ type: Object, default: null })
   video: VideoCreative | null;
 
+  // Heygen video ID — persisted as soon as rendering starts so polling can resume if it times out
+  @Prop({ type: String, default: null })
+  heygenVideoId: string | null;
+
   @Prop()
   error?: string;
 

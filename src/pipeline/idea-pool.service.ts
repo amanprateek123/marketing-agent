@@ -11,6 +11,7 @@ import { CreativeBrief, CreativeBriefDocument } from './schemas/creative-brief.s
 import { CoordinatorResult } from './coordinator.service';
 import { StructuredResearch } from './schemas/research-output.schema';
 import { MetaAdsLibraryInsights } from './schemas/meta-ads-library-output.schema';
+import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 
 export interface IdeaPoolResult {
   briefs: Array<{
@@ -39,6 +40,7 @@ export class IdeaPoolService {
   constructor(
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
+    private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(IntelligenceBrief.name)
     private readonly intelligenceBriefModel: Model<IntelligenceBriefDocument>,
     @InjectModel(CreativeBrief.name)
@@ -57,6 +59,25 @@ export class IdeaPoolService {
     const liveContext = this.liveContextBuilder.build(company);
     const ideasPerRun = company.pipelineConfig?.ideasPerRun ?? 10;
 
+    // ── Case studies ──────────────────────────────────────────────────────────
+    let caseStudyContext = '';
+    try {
+      const caseStudies = await this.metaLearningImporter.getRelevantCaseStudies(
+        tenantId,
+        { limit: 10 },
+      );
+      if (caseStudies.length > 0) {
+        caseStudyContext = `\nPAST CAMPAIGN CASE STUDIES (${caseStudies.length} most recent — learn from what worked and what failed):
+${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRange})
+    Product: ${cs.product} | Spend: ₹${cs.totalSpend} | Conversions: ${cs.totalConversions}
+    What worked: ${cs.whatWorked?.hooks?.join(', ') || 'unknown'} hooks, ${cs.whatWorked?.audiences?.join(', ') || 'unknown'} audiences, best CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}
+    What failed: ${cs.whatFailed?.reason || 'nothing notable'}
+    Lesson: ${cs.lesson}`).join('\n')}`;
+      }
+    } catch (err: any) {
+      this.logger.warn(`Case studies unavailable for ${tenantId}: ${err.message}`);
+    }
+
     const generateMessage = this.buildGeneratePrompt(
       coordinatorResult,
       competitorResearch,
@@ -64,6 +85,8 @@ export class IdeaPoolService {
       adLibraryInsights,
       company,
       ideasPerRun,
+      caseStudyContext,
+      coordinatorResult.viralTrends ?? [],
     );
 
     const generated = await this.claudeService.runAgent({
@@ -193,6 +216,8 @@ export class IdeaPoolService {
     adLibraryInsights: MetaAdsLibraryInsights,
     company: CompanyDocument,
     ideasPerRun: number,
+    caseStudyContext: string = '',
+    viralTrends: CoordinatorResult['viralTrends'] = [],
   ): string {
     const generationTarget = Math.max(20, ideasPerRun * 2);
     const activeProducts = (company.products ?? []).filter(p => p.active);
@@ -242,7 +267,19 @@ ${adLibraryInsights.gaps.length > 0
   ).join('\n')}`
   : ''}
 
+VIRAL TRENDS & MEME OPPORTUNITIES (trend-jacking for paid ads):
+${viralTrends.length > 0
+  ? viralTrends.map((v, idx) =>
+    `  ${idx + 1}. [Score ${v.compositeScore}${v.urgent ? ' | URGENT — dies in <7 days' : ''}] "${v.trend}" on ${v.platforms.join(', ')}\n     Brand tie-in: ${v.brandTieIn}`
+  ).join('\n')
+  : '  No viral trends this run.'}
+
+${caseStudyContext ? `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PAST PERFORMANCE (avoid repeating failures, double down on what worked)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${caseStudyContext}
+
+` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Generate ~${generationTarget} ideas internally, rank by priorityScore, return only the top ${ideasPerRun}. For each idea provide:
@@ -255,7 +292,7 @@ Generate ~${generationTarget} ideas internally, rank by priorityScore, return on
       "angle": "...",
       "product": "exact product name from the list above",
       "platform": "instagram|facebook|youtube|reddit",
-      "format": "reel|carousel|video|single_image|collection",
+      "format": "reel|carousel|video|single_image|collection|meme",
       "audience": "...",
       "hook": "opening line or visual hook — for a PAID META AD, not organic content",
       "keyMessage": "what the audience should believe after seeing this ad",
@@ -266,16 +303,18 @@ Generate ~${generationTarget} ideas internally, rank by priorityScore, return on
       "signalRank": 1,
       "urgent": false,
       "priorityScore": 8.5,
-      "selectionReason": "one sentence on why this idea matters now"
+      "selectionReason": "one sentence on why this idea matters now",
+      "trendJackingNote": "only for viral_trend ideas — explain how the meme/trend is adapted for this ad"
     }
   ]
 }
 \`\`\`
 
 Rules:
-- Read ALL sources above — coordinator signals, competitor insights, market insights, Meta Ads Library
-- Generate ideas from ANY source. A competitor vulnerability is just as valid as a trending signal. A seasonal market window is just as valid as a viral trend. Best ideas win.
+- Read ALL sources above — coordinator signals, competitor insights, market insights, Meta Ads Library, AND viral trends
+- Generate ideas from ANY source. A competitor vulnerability is just as valid as a trending signal. A viral meme with strong brand tie-in is just as valid as a market insight. Best ideas win.
 - You CAN combine sources — e.g. a trending signal + a competitor gap = a stronger idea. But standalone ideas from any single source are equally valid.
+- For VIRAL TRENDS: generate trend-jacking ad ideas. Adapt the meme/cultural moment to naturally feature the product. Use format: "meme" and ideaSource: "viral_trend". These are time-sensitive — mark urgent: true if the trend dies in <7 days. Fill in trendJackingNote explaining the adaptation.
 - Generate ~${generationTarget} raw ideas total, rank by priorityScore, return the top ${ideasPerRun}
 - signalRank: 1/2/3/etc for coordinator signal ideas, null for competitor/market/meta_ads_gap ideas
 - urgent: true only if this idea must be executed THIS WEEK
@@ -287,10 +326,11 @@ Rules:
   // ── Rule-based winner selection ─────────────────────────────────────────────
   // Priority order:
   // 1. Urgent competitor gap or meta ads gap (someone is vulnerable RIGHT NOW)
-  // 2. Idea tied to Signal 1 (highest coordinator signal)
-  // 3. Urgent market insight
-  // 4. Idea tied to Signal 2
-  // 5. Fallback: highest priorityScore
+  // 2. Urgent viral trend (meme window closes in <7 days)
+  // 3. Idea tied to Signal 1 (highest coordinator signal)
+  // 4. Urgent market insight
+  // 5. Idea tied to Signal 2
+  // 6. Fallback: highest priorityScore
   private selectWinner(briefs: any[], coordinator: CoordinatorResult): any {
     // 1. Urgent competitor gap or meta ads gap
     const urgentGap = briefs.find((b) => (b.ideaSource === 'competitor_gap' || b.ideaSource === 'meta_ads_gap') && b.urgent === true);
@@ -299,7 +339,14 @@ Rules:
       return urgentGap;
     }
 
-    // 2. Signal 1 idea
+    // 2. Urgent viral trend — memes are time-sensitive, window closes in days
+    const urgentViral = briefs.find((b) => b.ideaSource === 'viral_trend' && b.urgent === true);
+    if (urgentViral) {
+      urgentViral.selectionReason = urgentViral.selectionReason ?? 'Urgent viral trend — meme window closes in <7 days, act now';
+      return urgentViral;
+    }
+
+    // 3. Signal 1 idea
     const signal1 = briefs.find((b) => b.signalRank === 1);
     if (signal1) {
       const topSignal = coordinator.topSignals[0];
@@ -308,21 +355,21 @@ Rules:
       return signal1;
     }
 
-    // 3. Urgent market insight
+    // 4. Urgent market insight
     const urgentMarket = briefs.find((b) => b.ideaSource === 'market_insight' && b.urgent === true);
     if (urgentMarket) {
       urgentMarket.selectionReason = urgentMarket.selectionReason ?? 'Urgent market insight — seasonal window closing';
       return urgentMarket;
     }
 
-    // 4. Signal 2 idea
+    // 5. Signal 2 idea
     const signal2 = briefs.find((b) => b.signalRank === 2);
     if (signal2) {
       signal2.selectionReason = signal2.selectionReason ?? 'Tied to Signal 2 — no Signal 1 idea generated';
       return signal2;
     }
 
-    // 5. Fallback: highest priorityScore
+    // 6. Fallback: highest priorityScore
     const fallback = briefs.sort((a, b) => (b.priorityScore ?? 0) - (a.priorityScore ?? 0))[0];
     fallback.selectionReason = fallback.selectionReason ?? 'Highest priority score among generated ideas';
     return fallback;

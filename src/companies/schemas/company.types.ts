@@ -97,6 +97,8 @@ export interface CompanyPrompts {
   campaignCreator: string;
   // Phase 9 — agent team lead prompts
   intelligenceLead?: string;
+  strategyTeamLead?: string;
+  creativeTeamLead?: string;
 }
 
 // Phase 9 — rolling 7-day observations written by Performance Marketing Expert
@@ -122,6 +124,13 @@ export interface PipelineConfig {
   // experimental: all new ideas, maximum testing, higher risk
   pauseGracePeriodHours: number;     // hours before auto-pausing a flagged ad/ad set (default: 12)
   scaleRequiresApproval: boolean;    // scaling budget always needs human approval (default: true)
+  teamMode: 'cli' | 'sequential';   // cli = 2-agent tmux debate (~100% quality, ~65% reliable); sequential = 2 runAgent() calls (~95% quality, ~99% reliable)
+
+  // Heygen avatar video config — set once per tenant via settings
+  // Discover IDs via GET /v2/avatars and GET /v2/voices on Heygen API
+  heygenAvatarId?: string;          // e.g. "Priya_public_..." — pick an Indian-looking avatar from /v2/avatars
+  heygenVoiceId?: string;           // e.g. Hindi voice from /v2/voices filtered by language="Hindi"
+  heygenBackgroundUrl?: string;     // optional image URL for background; defaults to dark navy #1a1a2e
 }
 
 export interface CreativeLearnings {
