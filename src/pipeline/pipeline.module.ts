@@ -19,6 +19,8 @@ import { InstagramScout } from './scouts/instagram.scout';
 import { RedditScout } from './scouts/reddit.scout';
 import { TwitterScout } from './scouts/twitter.scout';
 import { YoutubeScout } from './scouts/youtube.scout';
+import { YoutubeApiService } from './scouts/youtube-api.service';
+import { RedditApiService } from './scouts/reddit-api.service';
 import { CoordinatorService } from './coordinator.service';
 import { IdeaPoolService } from './idea-pool.service';
 import { DigestWriterService } from './digest-writer.service';
@@ -54,6 +56,8 @@ import { CreativePackage, CreativePackageSchema } from '../creative/schemas/crea
   controllers: [PipelineController],
   providers: [
     MetaAdsLibraryService,
+    YoutubeApiService,
+    RedditApiService,
     InstagramScout,
     RedditScout,
     TwitterScout,

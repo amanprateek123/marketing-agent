@@ -9,6 +9,7 @@ import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CopyVariant } from '../creative/schemas/creative-package.schema';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
+import { MetaAdsLibraryOutput, MetaAdsLibraryOutputDocument } from '../pipeline/schemas/meta-ads-library-output.schema';
 
 export interface CreativeTeamOutput {
   variants: CopyVariant[];
@@ -41,6 +42,8 @@ export class CreativeTeamService {
     private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(UsageLog.name)
     private readonly usageLogModel: Model<UsageLog>,
+    @InjectModel(MetaAdsLibraryOutput.name)
+    private readonly metaAdsLibraryModel: Model<MetaAdsLibraryOutputDocument>,
   ) {}
 
   async run(
@@ -157,7 +160,7 @@ YOUR JOB:
 - For each element (copy variants, imagePrompts, video prompt): APPROVE it, or give a specific fix.
 - If a variant violates Meta policies in a way that can't be fixed, replace it with a compliant alternative.
 - If an imagePrompts[i] won't stop the scroll for its matching variant hook, improve it.
-- Select the best variant (index 0, 1, or 2) for the "selectedIndex" field.
+- Select the best variant (index 0, 1, 2, or 3) for the "selectedIndex" field.
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -174,13 +177,14 @@ Return ONLY this JSON (no markdown, no explanation):
   "imagePrompts": [
     "Vertical 9:16 image for variant 0 — visual centerpiece matched to its hook...",
     "Vertical 9:16 image for variant 1 — visual centerpiece matched to its hook...",
-    "Vertical 9:16 image for variant 2 — visual centerpiece matched to its hook..."
+    "Vertical 9:16 image for variant 2 — visual centerpiece matched to its hook...",
+    "Vertical 9:16 image for variant 3 — visual centerpiece matched to its hook..."
   ],
   "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Text-overlay format, no talking head, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
   "complianceNotes": "what was reviewed and any changes made",
   "debateRounds": 2,
   "debateLog": [
-    {"round": 1, "from": "creative-director", "summary": "drafted 3 variants + 3 image prompts + video"},
+    {"round": 1, "from": "creative-director", "summary": "drafted 4 variants + 4 image prompts + video"},
     {"round": 2, "from": "compliance", "summary": "approved with minor fixes"}
   ]
 }`;
@@ -238,7 +242,8 @@ Return ONLY this JSON (no markdown, no explanation):
   "imagePrompts": [
     "Vertical 9:16 image for variant 0 — visual centerpiece matched to its specific hook...",
     "Vertical 9:16 image for variant 1 — visual centerpiece matched to its specific hook...",
-    "Vertical 9:16 image for variant 2 — visual centerpiece matched to its specific hook..."
+    "Vertical 9:16 image for variant 2 — visual centerpiece matched to its specific hook...",
+    "Vertical 9:16 image for variant 3 — visual centerpiece matched to its specific hook..."
   ],
   "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Text-overlay format, no talking head, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
   "complianceNotes": "",
@@ -264,12 +269,18 @@ Return ONLY this JSON (no markdown, no explanation):
     runId: string,
   ): Promise<string> {
     const liveContext = this.liveContextBuilder.build(company);
+    const competitorHooks = await this.fetchCompetitorHooks(company.tenantId);
 
     // Resolve product
     const resolvedProduct = (company.products ?? []).find(p => p.name === brief.product)
       ?? (company.products ?? []).find(p => p.active)
       ?? (company.products ?? [])[0]
       ?? null;
+
+    // Guard: price must be set before building video/copy prompts
+    if (brief.format !== 'meme' && resolvedProduct && !resolvedProduct.price) {
+      throw new Error(`Product "${resolvedProduct.name}" has no price set for tenant ${company.tenantId} — cannot build creative prompt`);
+    }
 
     // Case studies (recent only)
     let caseStudyContext = '';
@@ -319,8 +330,8 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
     const strategyMode = strategy === 'conservative'
       ? `CONSERVATIVE MODE: Use proven hook styles from past learnings only. Stick to visual formats that have worked before. Minimize creative risk.`
       : strategy === 'experimental'
-        ? `EXPERIMENTAL MODE: Try bold, untested hook styles. Push creative boundaries. At least 1 variant should be genuinely risky/different from anything tried before.`
-        : `BALANCED MODE: 2 variants should use proven hook styles from learnings. 1 variant should test a new hook style or creative angle.`;
+        ? `EXPERIMENTAL MODE: Try bold, untested hook styles. Push creative boundaries. At least 2 variants should be genuinely risky/different from anything tried before.`
+        : `BALANCED MODE: 3 variants should use proven hook styles from learnings. 1 variant should test a new hook style or creative angle.`;
 
     // ═════════════════════════════════════════════════════════════════════════
     // PROMPT: Data first → Creative specs → Rules → Steps
@@ -350,6 +361,10 @@ ${liveContext}
 
 ${caseStudyContext}
 
+COMPETITOR WINNING HOOKS (from Meta Ads Library — use as inspiration to differentiate, not to copy):
+${competitorHooks}
+Study what angles competitors are already running. If they own "pain_point", try "bold_claim" or "before_after" instead.
+
 CAMPAIGN STRATEGY: ${strategyMode}
 
 ═══════════════════════════════════════════════════════
@@ -362,7 +377,7 @@ Your creative must: (1) nail the meme format exactly so it feels native, (2) tie
   : `This is a PAID Meta direct response ad. The user is scrolling and has NOT asked to see this.
 Your creative must: (1) stop the scroll in the FIRST LINE / FIRST 3 SECONDS, (2) make the value proposition crystal clear (product + benefit + price), (3) push to ONE action — tap the CTA button.`}
 
-━━━ a) 3 AD COPY VARIANTS ━━━
+━━━ a) AD COPY VARIANTS ━━━
 
 ${brief.format === 'meme' ? `Each variant needs:
 - primaryText: 1-2 lines MAX. Meme copy is short. Structure:
@@ -386,7 +401,7 @@ MEME COPY RULES:
 - cta: button text — "Shop Now", "Order Now", "Buy Today" (NOT "Learn More" unless considered purchase)
 - hookStyle: one of the options below (each variant must use a DIFFERENT one)
 
-HOOK STYLES (use one per variant, all 3 different):
+HOOK STYLES (use one per variant — pick 4 different styles, one per variant):
   "pain_point" — open with the audience's frustration
   "bold_claim" — specific, provable promise
   "price_shock" — lead with value proposition + price
@@ -399,13 +414,13 @@ COPY RULES:
 - Hinglish where natural for ${company.targetAudience}
 - Specific beats vague: "lost 4kg in 3 weeks" beats "see results fast"
 - Product name in EVERY variant's primaryText
-- Price in at least 2 of 3 variants
+- Price (₹${resolvedProduct?.price ?? '[price]'}) in EVERY variant — no exceptions
 - No generic phrases: "best quality", "amazing product", "don't miss out"
 ${resolvedProduct ? `- Every variant MUST mention "${resolvedProduct.name}" and ₹${resolvedProduct.price}` : ''}`}
 
 ━━━ b) IMAGE PROMPTS — one per copy variant, for Nano Banana (Gemini Image) ━━━
 
-Write 3 separate image prompts — one for EACH copy variant. Each image must be visually tailored to its variant's specific hook and headline, not a generic image that could work for any variant.
+Write one image prompt per copy variant (4 total). Each image must be visually tailored to its variant's specific hook and headline, not a generic image that could work for any variant.
 
 Each image must make someone STOP scrolling and TAP the ad. It's not a brand photo — it's a direct response sales image.
 
@@ -453,37 +468,36 @@ AVOID:
 
 ━━━ c) VIDEO CREATIVE — Heygen Video Agent prompt ━━━
 
-Write a detailed prompt for Heygen's AI Video Generator. This prompt is submitted DIRECTLY to Heygen's API — it is not a script you read, it is an instruction to an AI video engine.
+Write a storyboard-style prompt for Heygen's AI Video Generator. This is submitted DIRECTLY to Heygen's API — write it as scene-by-scene visual directions, not prose paragraphs.
 
-The video format: TEXT OVERLAYS + INDIAN BACKGROUND MUSIC. No talking head, no avatar face.
-This is a 15-second 9:16 vertical Meta conversion ad — every second must push the viewer toward buying.
+Use this exact 4-scene structure. Each scene is a hard cut — different visual from the previous:
 
-YOUR PROMPT MUST COVER ALL 6 OF THESE ELEMENTS:
+[Scene 1] 0–3s — HOOK
+Visual: [specific Indian setting — close-up of face/object/environment that instantly matches the hook's emotion. Real, raw, not stock. E.g.: "Close-up of a young Indian woman's face, worried expression, dim Mumbai apartment at night, phone light on her face"]
+Text overlay (bold, large, Hindi/Hinglish): [exact hook words from the brief — make viewer say "yeh toh mere baare mein hai"]
 
-1. VIDEO CONCEPT (2 sentences): State it's a 15-second 9:16 vertical Meta ad for ${company.name}. Describe the format — text-overlay conversion video with Indian instrumental background music, no talking head.
+[Scene 2] 3–7s — PAIN / DESIRE
+Visual: [different angle/location that shows the problem or desire — not a repeat of Scene 1]
+Text overlay: [exact words naming the specific fear or desire — 1 short resonant line]
 
-2. TEXT OVERLAYS — the exact Hindi/Hinglish words the viewer sees, with timing:
-   - 0–3s HOOK: [exact words — make the viewer say "yeh toh mere baare mein hai" — self-identification instantly]
-   - 3–7s PAIN/DESIRE: [name the specific fear or desire — 1 short resonant sentence]
-   - 7–12s PRODUCT REVEAL: [product name "${resolvedProduct?.name ?? 'Product'}" + one-line benefit]
-   - 12–15s CTA: [₹${resolvedProduct?.price ?? '???'} + CTA action — bold, urgent, unmissable]
-   Each overlay stays on screen minimum 3 seconds. Text: bold, large, readable on a 5-inch phone screen.
+[Scene 3] 7–12s — PRODUCT REVEAL
+Visual: [product or transformation visual — show what changes after using the product]
+Text overlay: [product name "${resolvedProduct?.name ?? 'Product'}" + one-line benefit in Hindi/Hinglish]
 
-3. BACKGROUND VISUAL: Describe a culturally specific Indian visual that MATCHES the hook's emotion — not generic stock. Examples: if hook is about astrology → sacred mandala with warm saffron glow; if hook is about career → a Mumbai skyline at golden hour with one figure looking up. The background must make the text pop (dark enough for white text, but emotionally resonant).
+[Scene 4] 12–15s — CTA
+Visual: [urgency visual — offer highlight, product close-up, or result moment]
+Text overlay: ₹${resolvedProduct?.price} | [CTA action] — bold, high-contrast, unmissable
 
-4. TEXT STYLE: Bold white text with a dark shadow/outline. Each overlay fades in over 0.3 seconds. Smooth cross-fade (0.5s) between overlay changes.
+MUSIC: Indian classical instrumental — [name the specific instrument: tanpura / sitar / bansuri / tabla]. Builds in energy across all 4 scenes. No vocals. No lyrics.
 
-5. MUSIC: Indian classical instrumental — specify the instrument (e.g., tanpura, sitar, bansuri). Start soft (15% volume), rise gently to 30% by product reveal, build to 45% at CTA. No vocals. The music should feel like it's building toward something — not just background filler.
+NEGATIVE PROMPTS: No English-only text overlays. No stock footage watermarks. No celebrity or politician faces. No generic AI face artifacts. No cursive or decorative fonts. No religious imagery outside astrology/spiritual context. No slow fades between scenes — hard cuts only. No talking head or avatar.
 
-6. CONVERSION GOAL: One sentence — what emotion the viewer feels and what single action they take at 15 seconds.
-
-HEYGEN PROMPT WRITING RULES:
-- Write 180-230 words, natural prose — this is a direct instruction to an AI, not a script
-- Be specific, not generic — "warm saffron mandala on dark background" beats "nice colorful background"
-- The 4 text overlays must contain the EXACT Hindi/Hinglish words (not placeholders) tailored to the brief's hook and key message
-- Product name "${resolvedProduct?.name ?? 'Product'}" and price "₹${resolvedProduct?.price ?? '???' }" must appear as text overlay at the CTA moment
-- No English-only overlay lines — every overlay must include Hindi or Hinglish
-- Music direction must match the product's emotional register (spiritual product → meditative; health product → energizing; finance → trustworthy)
+VIDEO RULES:
+- Each scene must show a DIFFERENT visual — no repeating the same background across scenes
+- All text overlays must be in Hindi or Hinglish — no pure English lines
+- Be specific about visuals — "worried young woman, dim Mumbai apartment, phone glow on face" beats "person looking worried"
+- Product name and price must appear as exact text in Scene 4, not as placeholders
+- The brief's hook and key message must drive Scene 1 and Scene 2 specifically
 
 ═══════════════════════════════════════════════════════
 RULES
@@ -529,7 +543,7 @@ STEP 2: Spawn the Brand Compliance Reviewer via Agent tool:
     - When everything passes, send a final message: {type: 'approved', notes: 'summary of what was fixed'} via SendMessage(to: 'team-lead').
     - When you receive a shutdown_request: reply with {type: 'shutdown_confirmed'} via SendMessage(to: 'team-lead') then stop."
 
-STEP 3: Create the full creative package (3 copy variants + image prompt + video prompt) using the brief and specs above.
+STEP 3: Create the full creative package (4 copy variants + 4 image prompts + video prompt) using the brief and specs above.
 
 Send the full package to the Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". Do not produce any output until you receive their message.
@@ -562,19 +576,46 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   "imagePrompts": [
     "Vertical 9:16 image for variant 0 — visual centerpiece matched to its pain_point hook...",
     "Vertical 9:16 image for variant 1 — visual centerpiece matched to its bold_claim hook...",
-    "Vertical 9:16 image for variant 2 — visual centerpiece matched to its social_proof hook..."
+    "Vertical 9:16 image for variant 2 — visual centerpiece matched to its social_proof hook...",
+    "Vertical 9:16 image for variant 3 — visual centerpiece matched to its urgency hook..."
   ],
-  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Text-overlay format, no talking head...\\n\\nTEXT OVERLAYS:\\n0-3s: [exact hook in Hindi/Hinglish]\\n...\\n12-15s: ₹[price] | [CTA]\\n\\nBACKGROUND: [specific Indian visual]\\nMUSIC: [Indian classical instrument, builds to CTA]\\nGOAL: [emotion + action]",
+  "videoPrompt": "[Scene 1] 0–3s — HOOK\\nVisual: [specific Indian setting matching hook emotion]\\nText overlay: [exact Hindi/Hinglish hook words]\\n\\n[Scene 2] 3–7s — PAIN/DESIRE\\nVisual: [different location showing problem or desire]\\nText overlay: [exact pain/desire line]\\n\\n[Scene 3] 7–12s — PRODUCT REVEAL\\nVisual: [product or transformation visual]\\nText overlay: [product name + benefit in Hindi/Hinglish]\\n\\n[Scene 4] 12–15s — CTA\\nVisual: [urgency visual]\\nText overlay: ₹[price] | [CTA action]\\n\\nMUSIC: [Indian classical instrument — tanpura/sitar/bansuri/tabla]. Builds across all 4 scenes. No vocals.\\n\\nNEGATIVE PROMPTS: No English-only overlays. No watermarks. No celebrity faces. No AI artifacts. No cursive fonts. No slow fades — hard cuts only.",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [
-    {"round": 1, "from": "creative-director", "summary": "drafted 3 variants + image + video prompts"},
+    {"round": 1, "from": "creative-director", "summary": "drafted 4 variants + 4 image prompts + video"},
     {"round": 1, "from": "compliance", "summary": "flagged variant 2, approved rest"},
     {"round": 2, "from": "creative-director", "summary": "revised variant 2"},
     {"round": 2, "from": "compliance", "summary": "all approved"}
   ]
 }
     `.trim();
+  }
+
+  private async fetchCompetitorHooks(tenantId: string): Promise<string> {
+    try {
+      const latest = await this.metaAdsLibraryModel
+        .findOne({ tenantId })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec();
+
+      if (!latest?.insights?.competitorAds?.length) {
+        return 'No competitor ad data available yet.';
+      }
+
+      const hooks = latest.insights.competitorAds
+        .filter((ad: any) => ad.score >= 6)
+        .slice(0, 5)
+        .map((ad: any, i: number) =>
+          `  ${i + 1}. ${ad.competitor}: "${ad.hook}" — angle: ${ad.angle} | ${ad.format} | ${ad.estimatedDaysRunning > 0 ? `${ad.estimatedDaysRunning} days running` : 'days unknown'} | score: ${ad.score}`
+        )
+        .join('\n');
+
+      return hooks || 'No high-confidence competitor ads found this run.';
+    } catch {
+      return 'Competitor hook data unavailable this run.';
+    }
   }
 
   private parseOutput(content: string): CreativeTeamOutput {

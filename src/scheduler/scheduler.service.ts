@@ -7,7 +7,8 @@ import { CompaniesService } from '../companies/companies.service';
 import { PipelineRun, PipelineRunDocument } from '../pipeline/schemas/pipeline-run.schema';
 import { QUEUES } from './queue.constants';
 
-const AUDIT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const AUDIT_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
+const SYNC_INTERVAL_MS  = 60 * 60 * 1000;  // 1 hour
 
 @Injectable()
 export class SchedulerService implements OnModuleInit {
@@ -72,11 +73,11 @@ export class SchedulerService implements OnModuleInit {
       `campaign-sync-${tenantId}`,
       { tenantId },
       {
-        repeat: { every: AUDIT_INTERVAL_MS }, // every 6 hours
+        repeat: { every: SYNC_INTERVAL_MS },
         jobId: `campaign-sync-${tenantId}`,
       },
     );
-    this.logger.log(`Scheduled campaign sync every 6h for tenantId=${tenantId}`);
+    this.logger.log(`Scheduled campaign sync every 1h for tenantId=${tenantId}`);
   }
 
   async scheduleAuditForTenant(tenantId: string): Promise<void> {
@@ -96,7 +97,7 @@ export class SchedulerService implements OnModuleInit {
         jobId: `audit-${tenantId}`,
       },
     );
-    this.logger.log(`Scheduled campaign audit every 6h for tenantId=${tenantId}`);
+    this.logger.log(`Scheduled campaign audit every 1h for tenantId=${tenantId}`);
   }
 
   async scheduleForTenant(

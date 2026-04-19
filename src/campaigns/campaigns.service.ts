@@ -86,7 +86,7 @@ export class CampaignsService {
   }
 
   async findActive(tenantId: string): Promise<CampaignDocument[]> {
-    return this.campaignModel.find({ tenantId, status: 'active', source: 'agent' }).lean().exec();
+    return this.campaignModel.find({ tenantId, status: 'active' }).lean().exec();
   }
 
   async getWeeklySpend(tenantId: string): Promise<number> {

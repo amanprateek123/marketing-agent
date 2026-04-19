@@ -122,17 +122,22 @@ export class CampaignAuditorService {
       cpc: full.campaign.cpc,
     });
 
-    // Execute any expired pending actions
-    await this.executePendingActions(campaign, company);
+    // Execute any expired pending actions (agent campaigns only)
+    if (campaign.source === 'agent') {
+      await this.executePendingActions(campaign, company);
+    }
 
     // Pre-compute weekly spend — used by both safety rails and signal detector
     const weeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
 
-    // ── Layer 1: Safety rails (TypeScript — cannot be overridden) ─────────────
-    const safetyPaused = await this.runSafetyRails(campaign, full, company, weeklySpend);
-    if (safetyPaused) {
-      result.paused++;
-      return;
+    // ── Layer 1: Safety rails (agent-created campaigns only) ──────────────────
+    // Non-agent campaigns (manual/imported) are tracked for metrics but never auto-paused
+    if (campaign.source === 'agent') {
+      const safetyPaused = await this.runSafetyRails(campaign, full, company, weeklySpend);
+      if (safetyPaused) {
+        result.paused++;
+        return;
+      }
     }
 
     // ── Layer 2: Signal detection ─────────────────────────────────────────────
@@ -197,8 +202,9 @@ export class CampaignAuditorService {
     snapshotData.verdict = verdict as any;
     await this.snapshotModel.create(snapshotData);
 
-    // ── Layer 4: Human-in-the-loop actions based on verdict ───────────────────
-    if (verdict.verdict === 'act') {
+    // ── Layer 4: Actions only for agent-created campaigns ────────────────────
+    // Manual/imported campaigns: audit runs but no actions are created or executed
+    if (campaign.source === 'agent' && verdict.verdict === 'act') {
       const gracePeriodHours = company.pipelineConfig?.pauseGracePeriodHours ?? 12;
 
       for (const action of verdict.recommendedActions) {

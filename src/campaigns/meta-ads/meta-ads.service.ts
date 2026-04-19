@@ -527,6 +527,11 @@ export class MetaAdsService {
           },
         },
       },
+      degrees_of_freedom_spec: {
+        creative_features_spec: {
+          standard_enhancements: { enroll_status: 'OPT_IN' },
+        },
+      },
       access_token: accessToken,
     };
 
@@ -597,6 +602,11 @@ export class MetaAdsService {
       object_story_spec: {
         page_id: pageId,
         video_data: videoData,
+      },
+      degrees_of_freedom_spec: {
+        creative_features_spec: {
+          standard_enhancements: { enroll_status: 'OPT_IN' },
+        },
       },
       access_token: accessToken,
     };

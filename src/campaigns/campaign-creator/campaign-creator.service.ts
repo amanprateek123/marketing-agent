@@ -123,7 +123,22 @@ export class CampaignCreatorService {
 
       this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds} | adSets: ${review.campaign?.adSets?.length ?? 0}`);
     } else {
-      this.logger.warn(`Campaign Review Team failed after 2 attempts — proceeding with original budget ₹${finalBudget}`);
+      this.logger.error(`Campaign Review Team failed after 2 attempts — saving campaign as failed`);
+      await this.campaignModel.create({
+        tenantId: company.tenantId,
+        runId,
+        briefId: brief.briefId,
+        name: `FAILED_${brief.topic.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30)}`,
+        topic: brief.topic ?? '',
+        angle: brief.angle ?? '',
+        creativePackageId: creativePackage?._id?.toString() ?? '',
+        metaCampaignId: '',
+        status: 'failed',
+        budget: 0,
+        objective: company.primaryObjective,
+        reviewNotes: 'Campaign Review Team failed after 2 attempts — no valid config produced',
+      });
+      throw new Error(`Campaign Review Team failed after 2 attempts for brief ${brief.briefId} — campaign saved as failed`);
     }
 
     // ── Idempotency: don't create duplicate campaigns for same brief ──────────

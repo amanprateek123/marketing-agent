@@ -585,7 +585,22 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
       jsonStr = fenceMatch
         ? fenceMatch[1].trim()
         : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
-      return JSON.parse(jsonStr);
+      const parsed: CampaignReviewOutput = JSON.parse(jsonStr);
+
+      // Validate budgetPercent sums to 100 — fix by normalising if off
+      const adSets = parsed.campaign?.adSets ?? [];
+      if (adSets.length > 0) {
+        const total = adSets.reduce((sum, s) => sum + (s.budgetPercent ?? 0), 0);
+        if (total !== 100) {
+          this.logger.warn(`budgetPercent sums to ${total}, not 100 — normalising`);
+          adSets.forEach(s => { s.budgetPercent = Math.round((s.budgetPercent / total) * 100); });
+          // Fix rounding drift on last ad set
+          const diff = 100 - adSets.reduce((sum, s) => sum + s.budgetPercent, 0);
+          adSets[adSets.length - 1].budgetPercent += diff;
+        }
+      }
+
+      return parsed;
     } catch (err: any) {
       this.logger.error(`Campaign Review Team output parse failed: ${err.message} | content snippet: ${content.slice(0, 300)}`);
       throw new Error(`Campaign Review Team returned invalid JSON: ${err.message}`);

@@ -13,6 +13,7 @@ import { CompaniesModule } from '../companies/companies.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
+import { MetaAdsLibraryOutput, MetaAdsLibraryOutputSchema } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
 import { HeygenService } from './video-generator/heygen.service';
 
@@ -22,6 +23,7 @@ import { HeygenService } from './video-generator/heygen.service';
       { name: CreativePackage.name, schema: CreativePackageSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
+      { name: MetaAdsLibraryOutput.name, schema: MetaAdsLibraryOutputSchema },
     ]),
     ClaudeModule,
     forwardRef(()=> CompaniesModule),

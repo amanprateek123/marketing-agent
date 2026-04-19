@@ -8,6 +8,7 @@ import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { ScoutOutput, ScoutOutputDocument } from '../schemas/scout-output.schema';
 import { ScoutSignal, ScoutSignalDocument } from '../schemas/scout-signal.schema';
 import { ScoutBaseService } from './scout-base.service';
+import { RedditApiService } from './reddit-api.service';
 
 @Injectable()
 export class RedditScout extends ScoutBaseService {
@@ -19,8 +20,18 @@ export class RedditScout extends ScoutBaseService {
     liveContextBuilder: LiveContextBuilder,
     @InjectModel(ScoutOutput.name) scoutOutputModel: Model<ScoutOutputDocument>,
     @InjectModel(ScoutSignal.name) scoutSignalModel: Model<ScoutSignalDocument>,
+    private readonly redditApi: RedditApiService,
   ) {
     super(claudeService, liveContextBuilder, scoutOutputModel, scoutSignalModel);
+  }
+
+  protected async prefetchApiData(company: CompanyDocument): Promise<string> {
+    const data = await this.redditApi.fetchScoutData(
+      `${company.industry} ${company.geography}`,
+      company.geography,
+      company.competitors,
+    );
+    return this.redditApi.formatForPrompt(data);
   }
 
   protected buildResearchPrompt(
@@ -28,18 +39,17 @@ export class RedditScout extends ScoutBaseService {
     recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
   ): string {
     return `
-Scout Reddit right now for two types of signals for ${company.name}.
+Analyse the pre-fetched Reddit data above for two types of signals for ${company.name}.
 
 PART 1 — INDUSTRY SIGNALS
-Find trending discussions in ${company.geography} ${company.industry} space.
-Real pain points, questions, competitor complaints from: ${company.competitors.join(', ')}.
-Use web_search with site:reddit.com queries.
+From the INDUSTRY POSTS section: identify high-score posts with real pain points, questions, and complaints relevant to ${company.geography} ${company.industry}.
+Real pain points and competitor complaints from: ${company.competitors.join(', ')}.
+If the pre-fetched data is missing something important, use web_search with site:reddit.com queries.
 
 PART 2 — VIRAL TRENDS (trend-jacking opportunities)
-Find what topics are massively viral on Reddit in ${company.geography} right now — regardless of industry.
-This includes: trending memes, viral posts, pop culture moments relevant to ${company.geography}.
+From the TRENDING IN GEOGRAPHY section: identify what topics are massively viral in ${company.geography} right now.
 For each trend, suggest how ${company.name} could create content using that trend.
-Search: "site:reddit.com trending ${company.geography} today", "site:reddit.com viral ${company.geography} this week".
+If you need more, search: "site:reddit.com trending ${company.geography} today".
 
 ${this.buildExclusionBlock(recentlyCovered)}
 

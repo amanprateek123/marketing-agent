@@ -176,6 +176,48 @@ export class CampaignSyncService {
           insightsMap.set(row.campaign_id, row);
         }
 
+        // Fetch all active/paused ad sets for this account in one call
+        const adSetsRes = await axios.get(`${META_API_BASE}/${accountId}/adsets`, {
+          params: {
+            fields: 'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal',
+            filtering: JSON.stringify([
+              { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
+              { field: 'campaign.id', operator: 'IN', value: campaignIds },
+            ]),
+            limit: '500',
+            access_token: accessToken,
+          },
+          timeout: 60000,
+        }).catch(() => ({ data: { data: [] } }));
+
+        // Fetch ad set insights in one bulk call
+        const adSetInsightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
+          params: {
+            fields: 'adset_id,spend,impressions,clicks,ctr,cpc,actions,frequency',
+            level: 'adset',
+            date_preset: 'maximum',
+            filtering: JSON.stringify([
+              { field: 'campaign.id', operator: 'IN', value: campaignIds },
+            ]),
+            limit: '500',
+            access_token: accessToken,
+          },
+          timeout: 60000,
+        }).catch(() => ({ data: { data: [] } }));
+
+        // Group ad sets and insights by campaign_id
+        const adSetsByCampaign = new Map<string, any[]>();
+        for (const adSet of adSetsRes.data?.data ?? []) {
+          const list = adSetsByCampaign.get(adSet.campaign_id) ?? [];
+          list.push(adSet);
+          adSetsByCampaign.set(adSet.campaign_id, list);
+        }
+
+        const adSetInsightsMap = new Map<string, any>();
+        for (const row of adSetInsightsRes.data?.data ?? []) {
+          adSetInsightsMap.set(row.adset_id, row);
+        }
+
         for (const campaign of campaigns) {
           const insights = insightsMap.get(campaign.id) ?? {};
           const spend = parseFloat(insights.spend ?? '0');
@@ -186,6 +228,31 @@ export class CampaignSyncService {
           const conversions = this.extractConversions(insights.actions, conversionTypes);
           const internalStatus = META_TO_INTERNAL_STATUS[campaign.status] ?? 'active';
 
+          // Build metaAdSets from fetched ad sets + insights
+          const metaAdSets = (adSetsByCampaign.get(campaign.id) ?? []).map((as: any) => {
+            const asi = adSetInsightsMap.get(as.id) ?? {};
+            const asSpend = parseFloat(asi.spend ?? '0');
+            const asConversions = this.extractConversions(asi.actions, conversionTypes);
+            const asCpa = asConversions > 0 ? asSpend / asConversions : 0;
+            return {
+              id: as.id,
+              name: as.name,
+              status: (META_TO_INTERNAL_STATUS[as.status] ?? as.status).toLowerCase(),
+              audienceType: '',
+              dailyBudget: parseFloat(as.daily_budget ?? '0') / 100,
+              lifetimeBudget: parseFloat(as.lifetime_budget ?? '0') / 100,
+              optimizationGoal: as.optimization_goal ?? '',
+              spend: asSpend,
+              impressions: parseInt(asi.impressions ?? '0', 10),
+              clicks: parseInt(asi.clicks ?? '0', 10),
+              conversions: asConversions,
+              ctr: parseFloat(asi.ctr ?? '0'),
+              cpa: asCpa,
+              frequency: parseFloat(asi.frequency ?? '0'),
+              ads: [],
+            };
+          });
+
           await this.campaignModel.updateOne(
             { tenantId, metaCampaignId: campaign.id },
             {
@@ -193,6 +260,7 @@ export class CampaignSyncService {
                 name: campaign.name ?? '',
                 status: internalStatus,
                 spend, impressions, clicks, conversions, ctr, cpc,
+                metaAdSets,
                 syncedAt: new Date(),
               },
               $setOnInsert: {
@@ -213,7 +281,7 @@ export class CampaignSyncService {
           totalSynced++;
         }
 
-        this.logger.log(`Active campaign sync: ${campaigns.length} campaigns from ${accountId}`);
+        this.logger.log(`Active campaign sync: ${campaigns.length} campaigns, ad sets fetched from ${accountId}`);
       } catch (err: any) {
         this.logger.warn(`Active sync failed for ${accountId}: ${err.message}`);
       }

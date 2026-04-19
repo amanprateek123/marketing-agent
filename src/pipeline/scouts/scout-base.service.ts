@@ -41,7 +41,14 @@ export abstract class ScoutBaseService {
 
     // Load recently covered signals to inject as exclusion context
     const recentlyCovered = await this.loadRecentSignals(company.tenantId);
-    const userMessage = this.wrapWithIterativePhases(this.buildResearchPrompt(company, recentlyCovered));
+
+    // Pre-fetch real API data if the scout supports it (YouTube, Reddit)
+    const prefetchedData = await this.prefetchApiData(company);
+
+    const userMessage = this.wrapWithIterativePhases(
+      this.buildResearchPrompt(company, recentlyCovered),
+      prefetchedData,
+    );
 
     // Verification loop — retry up to 3 times if JSON is invalid
     let output: ScoutOutputData | null = null;
@@ -102,14 +109,26 @@ export abstract class ScoutBaseService {
     return finalOutput;
   }
 
+  // Override in scouts that have a real API pre-fetch (YouTube, Reddit).
+  // Return a formatted string of pre-fetched data to inject into the prompt.
+  // Default: no pre-fetch — Claude does web_search as before.
+  protected async prefetchApiData(_company: CompanyDocument): Promise<string> {
+    return '';
+  }
+
   // Wraps each scout's research prompt with 3-phase iterative retrieval structure.
   // Guides the agent to spend its 10 turns systematically instead of doing 1-2 searches and stopping.
-  private wrapWithIterativePhases(researchPrompt: string): string {
+  // If prefetchedData is provided, Phase 1 is replaced with analysis of real data.
+  private wrapWithIterativePhases(researchPrompt: string, prefetchedData = ''): string {
+    const phase1 = prefetchedData
+      ? `${prefetchedData}\n\n${researchPrompt}\n\nThe pre-fetched data above is REAL API data with verified engagement numbers. Use it as your primary source. Only use your search turns to fill gaps not covered above.`
+      : researchPrompt;
+
     return `
 Use all available search turns across 3 phases. Do NOT output JSON until Phase 3 is complete.
 
 ━━━ PHASE 1 — DISCOVERY (searches 1–4) ━━━
-${researchPrompt}
+${phase1}
 
 Return nothing yet. Just run your searches and collect candidates.
 

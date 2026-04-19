@@ -8,6 +8,7 @@ import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { ScoutOutput, ScoutOutputDocument } from '../schemas/scout-output.schema';
 import { ScoutSignal, ScoutSignalDocument } from '../schemas/scout-signal.schema';
 import { ScoutBaseService } from './scout-base.service';
+import { YoutubeApiService } from './youtube-api.service';
 
 @Injectable()
 export class YoutubeScout extends ScoutBaseService {
@@ -19,8 +20,18 @@ export class YoutubeScout extends ScoutBaseService {
     liveContextBuilder: LiveContextBuilder,
     @InjectModel(ScoutOutput.name) scoutOutputModel: Model<ScoutOutputDocument>,
     @InjectModel(ScoutSignal.name) scoutSignalModel: Model<ScoutSignalDocument>,
+    private readonly youtubeApi: YoutubeApiService,
   ) {
     super(claudeService, liveContextBuilder, scoutOutputModel, scoutSignalModel);
+  }
+
+  protected async prefetchApiData(company: CompanyDocument): Promise<string> {
+    const industryQuery = `${company.industry} ${company.geography}`;
+    const viralQuery = `trending ${company.geography} shorts`;
+    const competitorQueries = company.competitors.slice(0, 2).map(c => `${c} ${company.geography}`);
+
+    const data = await this.youtubeApi.fetchScoutData(industryQuery, viralQuery, competitorQueries);
+    return this.youtubeApi.formatForPrompt(data);
   }
 
   protected buildResearchPrompt(
@@ -32,19 +43,17 @@ export class YoutubeScout extends ScoutBaseService {
       .split('T')[0];
 
     return `
-Scout YouTube right now for two types of signals for ${company.name}.
+Analyse the pre-fetched YouTube data above for two types of signals for ${company.name}.
 
 PART 1 — INDUSTRY SIGNALS
-Find high-performing ${company.geography} ${company.industry} videos published in the last 7 days.
-Use the YouTube Data API (key in your instructions) with publishedAfter=${sevenDaysAgo}.
-Competitors to analyse: ${company.competitors.join(', ')}.
-Run multiple API queries for different search terms. Fetch video statistics for promising videos.
+From the INDUSTRY VIDEOS section: identify videos with high engagement (views + likes + comments) relevant to ${company.geography} ${company.industry} targeting ${company.targetAudience}.
+Competitors to watch: ${company.competitors.join(', ')}.
+If the pre-fetched data is missing something important, use web_search with publishedAfter=${sevenDaysAgo}.
 
 PART 2 — VIRAL TRENDS (trend-jacking opportunities)
-Find what is massively trending on YouTube in ${company.geography} right now — regardless of industry.
-Search YouTube API for: trending ${company.geography} videos, viral shorts ${company.geography}, top ${company.geography} content this week.
-Use queries like: q=trending ${company.geography}, q=viral ${company.geography} shorts, q=${company.geography} meme ${sevenDaysAgo}.
-For each viral trend found, suggest how ${company.name} could create a video riding that trend.
+From the VIRAL / TRENDING VIDEOS section: identify what is massively trending on YouTube in ${company.geography} RIGHT NOW.
+For each trend, suggest how ${company.name} could create content using that trend.
+If you need more, search: "trending YouTube ${company.geography} this week", "viral shorts ${company.geography}".
 
 ${this.buildExclusionBlock(recentlyCovered)}
 
