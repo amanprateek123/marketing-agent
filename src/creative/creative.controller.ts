@@ -142,7 +142,7 @@ export class CreativeController {
         userMessage: `
 Write a detailed Heygen Video Agent prompt that will be submitted directly to Heygen's API to generate a 15-second 9:16 vertical Meta conversion ad video.
 
-The video format: text-overlay + Indian background music. No avatar/talking head.
+The video format: cinematic b-roll visuals with text overlays + off-screen Hindi voiceover narration + Indian instrumental background music. No avatar/talking head visible on screen — voice is heard but no person is shown speaking.
 
 BRIEF:
 Brand: ${company.name}
@@ -159,7 +159,7 @@ ${ctaInsights}
 
 Write the Heygen prompt (180-220 words) covering ALL of these elements:
 
-1. VIDEO CONCEPT: 15-second 9:16 vertical Meta ad for ${company.name}, text-overlay format, no talking head.
+1. VIDEO CONCEPT: 15-second 9:16 vertical Meta ad for ${company.name}, cinematic b-roll with text overlays and off-screen Hindi voiceover narration. No visible person speaking.
 
 2. TEXT OVERLAYS (exact Hindi/Hinglish words for each moment):
    - 0-3s HOOK: [exact words from the winning hook — make the viewer say "yeh toh mere baare mein hai"]
@@ -461,5 +461,43 @@ Return ONLY the image prompt, nothing else.
       .catch(() => {});
 
     return { status: 'started', briefId, topic: brief.topic };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/fix-caption-videos
+   * Re-fetch video URLs without burned-in captions for all packages that have a heygenVideoId.
+   * Use this once to fix existing videos that had overlapping captions + text overlays.
+   */
+  @Post(':tenantId/fix-caption-videos')
+  async fixCaptionVideos(@Param('tenantId') tenantId: string) {
+    const packages = await this.creativePackageModel.find({
+      tenantId,
+      heygenVideoId: { $ne: null },
+      'video.videoUrl': { $exists: true, $ne: '' },
+    }).exec();
+
+    const results: { briefId: string; status: string }[] = [];
+
+    for (const pkg of packages) {
+      try {
+        const result = await this.videoGenerator.resumeFromVideoId(
+          pkg.heygenVideoId!,
+          (pkg.video as any)?.videoPrompt ?? '',
+          tenantId,
+          pkg.runId,
+        );
+
+        await this.creativePackageModel.updateOne(
+          { _id: pkg._id },
+          { $set: { 'video.videoUrl': result.videoUrl, 'video.videoThumbnailUrl': result.videoThumbnailUrl } },
+        );
+        results.push({ briefId: pkg.briefId, status: 'fixed' });
+      } catch (err: any) {
+        this.logger.error(`Fix caption failed for ${pkg.briefId}: ${err.message}`);
+        results.push({ briefId: pkg.briefId, status: `failed: ${err.message}` });
+      }
+    }
+
+    return { fixed: results.filter(r => r.status === 'fixed').length, total: packages.length, results };
   }
 }

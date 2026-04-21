@@ -19,7 +19,7 @@ export interface AuditVerdict {
   }[];
 }
 
-const AUDIT_SYSTEM_PROMPT = `You are a performance marketing analyst auditing a live Meta Ads campaign.
+const DEFAULT_AUDIT_SYSTEM_PROMPT = `You are a performance marketing analyst auditing a live Meta Ads campaign.
 
 You receive:
 1. Campaign metadata (age, budget, objective, audience)
@@ -50,7 +50,7 @@ Output ONLY valid JSON in this exact format:
   "recommendedActions": [
     {
       "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative",
-      "targetId": "meta_id_here",
+      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name",
       "targetName": "human readable name",
       "reason": "specific reason for this action",
       "priority": "high" | "medium" | "low"
@@ -74,12 +74,13 @@ export class AuditAgentService {
     const caseStudies = (company as any).caseStudies ?? [];
 
     const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies);
+    const systemPrompt = (company.prompts as any)?.campaignAuditor || DEFAULT_AUDIT_SYSTEM_PROMPT;
 
     try {
       const result = await this.claudeService.runAgent({
         tenantId: company.tenantId,
         agentType: AgentType.CAMPAIGN_AUDITOR,
-        systemPrompt: AUDIT_SYSTEM_PROMPT,
+        systemPrompt,
         liveContext: '',
         userMessage: context,
         maxTurns: 1,
@@ -185,7 +186,15 @@ Based on all of the above, produce your verdict JSON.`;
         contextInsight: typeof parsed.contextInsight === 'string' ? parsed.contextInsight : '',
         watchSignals: Array.isArray(parsed.watchSignals) ? parsed.watchSignals : [],
         recommendedActions: Array.isArray(parsed.recommendedActions)
-          ? parsed.recommendedActions.filter((a: any) => a.type && a.targetId)
+          ? parsed.recommendedActions.filter((a: any) => {
+              if (!a.type || !a.targetId) return false;
+              // Reject non-numeric targetIds — Claude sometimes returns slugs instead of Meta IDs
+              if (!/^\d+$/.test(String(a.targetId))) {
+                this.logger.warn(`Dropping action with invalid targetId: "${a.targetId}" (expected numeric Meta ID)`);
+                return false;
+              }
+              return true;
+            })
           : [],
       };
     } catch (err: any) {

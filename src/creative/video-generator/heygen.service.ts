@@ -93,8 +93,6 @@ export class HeygenService {
         `${HEYGEN_API_BASE}/v3/video-agents`,
         {
           prompt: prompt.trim(),
-          title: 'Meta Ad Video',
-          aspect_ratio: '9:16',
         },
         {
           headers: {
@@ -142,10 +140,10 @@ export class HeygenService {
       const status = data?.status;
 
       if (status === 'completed') {
-        // Prefer video_url_caption (captions burned in) over plain video_url
-        const videoUrl = data?.video_url_caption ?? data?.video_url;
+        // Use plain video_url — captions overlap with text overlays already in the video
+        const videoUrl = data?.video_url;
         if (!videoUrl) throw new Error(`Heygen completed but no video_url for videoId=${videoId}`);
-        this.logger.log(`Heygen video ready: videoId=${videoId} captioned=${!!data?.video_url_caption}`);
+        this.logger.log(`Heygen video ready: videoId=${videoId}`);
         return { videoUrl, thumbnailUrl: data?.thumbnail_url ?? '' };
       }
 

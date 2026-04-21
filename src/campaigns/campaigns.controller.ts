@@ -4,6 +4,7 @@ import {
   Post,
   Param,
   Body,
+  Query,
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
@@ -13,6 +14,7 @@ import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
+import { CampaignSyncService } from './meta-ads/campaign-sync.service';
 import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
 
 @Controller('campaigns')
@@ -22,6 +24,7 @@ export class CampaignsController {
     private readonly campaignCreator: CampaignCreatorService,
     private readonly companiesService: CompaniesService,
     private readonly metaAdsService: MetaAdsService,
+    private readonly campaignSyncService: CampaignSyncService,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
   ) {}
@@ -97,17 +100,46 @@ export class CampaignsController {
   }
 
   /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/actions
+   * List audit actions for a campaign. Optional ?status=pending|executed|overridden filter.
+   */
+  @Get(':tenantId/:campaignId/actions')
+  async getActions(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Query('status') status?: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    const actions = (campaign as any).pendingActions ?? [];
+    const filtered = status
+      ? actions.filter((a: any) => a.status === status)
+      : actions;
+    return filtered.map((a: any) => ({
+      actionId: a.actionId,
+      type: a.type,
+      targetId: a.targetId,
+      targetName: a.targetName,
+      reason: a.reason,
+      status: a.status,
+      recommendedAt: a.recommendedAt,
+      executeAt: a.executeAt,
+      executedAt: a.executedAt,
+      metrics: a.metrics,
+      replacementStatus: a.replacementStatus ?? null,
+    }));
+  }
+
+  /**
    * GET /api/v1/campaigns/:tenantId/:campaignId/pending-actions
-   * List pending audit actions for a campaign.
+   * Backward-compatible alias — returns only pending actions.
    */
   @Get(':tenantId/:campaignId/pending-actions')
   async getPendingActions(
     @Param('tenantId') tenantId: string,
     @Param('campaignId') campaignId: string,
   ) {
-    const campaign = await this.campaignsService.findById(tenantId, campaignId);
-    if (!campaign) throw new NotFoundException('Campaign not found');
-    return (campaign as any).pendingActions?.filter((a: any) => a.status === 'pending') ?? [];
+    return this.getActions(tenantId, campaignId, 'pending');
   }
 
   /**
@@ -188,6 +220,21 @@ export class CampaignsController {
     try {
       await this.campaignsService.overrideAction(tenantId, campaignId, actionId);
       return { success: true, message: 'Action overridden — will not execute' };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/sync
+   * Manually trigger a Meta campaign sync for a tenant.
+   */
+  @Post(':tenantId/sync')
+  async syncCampaigns(@Param('tenantId') tenantId: string) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+      const result = await this.campaignSyncService.syncActiveCampaigns(company);
+      return { success: true, ...result };
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }

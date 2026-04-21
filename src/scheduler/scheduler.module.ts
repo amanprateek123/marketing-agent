@@ -13,6 +13,11 @@ import { AuditProcessor } from './audit.processor';
 import { LearningProcessor } from './learning.processor';
 import { MetaLearningProcessor } from './meta-learning.processor';
 import { CampaignSyncProcessor } from './campaign-sync.processor';
+import { CreativeReplacementProcessor } from './creative-replacement.processor';
+import { CreativeModule } from '../creative/creative.module';
+import { DeliveryModule } from '../delivery/delivery.module';
+import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
+import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
 
 @Module({
   imports: [
@@ -21,13 +26,20 @@ import { CampaignSyncProcessor } from './campaign-sync.processor';
     BullModule.registerQueue({ name: QUEUES.MONTHLY_LEARNING }),
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_SYNC }),
-    MongooseModule.forFeature([{ name: PipelineRun.name, schema: PipelineRunSchema }]),
+    BullModule.registerQueue({ name: QUEUES.CREATIVE_PRODUCTION }),
+    MongooseModule.forFeature([
+      { name: PipelineRun.name, schema: PipelineRunSchema },
+      { name: Campaign.name, schema: CampaignSchema },
+      { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
+    ]),
     forwardRef(() => CompaniesModule),
     PipelineModule,
     CampaignsModule,
+    CreativeModule,
     LearningModule,
+    DeliveryModule,
   ],
-  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor, CampaignSyncProcessor],
+  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor, CampaignSyncProcessor, CreativeReplacementProcessor],
   exports: [SchedulerService],
 })
 export class SchedulerModule {}

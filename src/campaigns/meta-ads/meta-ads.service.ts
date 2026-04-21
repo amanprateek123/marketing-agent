@@ -722,6 +722,33 @@ export class MetaAdsService {
     this.logger.log(`Ad set budget updated: ${adSetId} → ₹${newDailyBudgetINR}/day`);
   }
 
+  /**
+   * Update an existing ad's creative (swap creative on a live ad).
+   */
+  async updateAdCreative(
+    adId: string,
+    newCreativeId: string,
+    accessToken: string,
+  ): Promise<void> {
+    await this.metaApiCall('POST', `${META_API_BASE}/${adId}`, {
+      creative: { creative_id: newCreativeId },
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad creative updated: ${adId} → creative ${newCreativeId}`);
+  }
+
+  async updateAdStatus(
+    adId: string,
+    status: 'ACTIVE' | 'PAUSED',
+    accessToken: string,
+  ): Promise<void> {
+    await this.metaApiCall('POST', `${META_API_BASE}/${adId}`, {
+      status,
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad status updated: ${adId} → ${status}`);
+  }
+
   // ─── Retry wrapper for transient Meta API errors ────────────────────────────
 
   private async metaApiCall(

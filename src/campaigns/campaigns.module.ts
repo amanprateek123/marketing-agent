@@ -44,6 +44,7 @@ import { QUEUES } from '../scheduler/queue.constants';
       { name: EnrichedCampaign.name, schema: EnrichedCampaignSchema },
     ]),
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
+    BullModule.registerQueue({ name: QUEUES.CREATIVE_PRODUCTION }),
     ClaudeModule,
     forwardRef(() => CompaniesModule),
     CommonModule,
@@ -52,6 +53,6 @@ import { QUEUES } from '../scheduler/queue.constants';
   ],
   controllers: [CampaignsController],
   providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService],
-  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService],
+  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService, MetaAdsService],
 })
 export class CampaignsModule {}

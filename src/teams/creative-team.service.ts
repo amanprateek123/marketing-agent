@@ -180,7 +180,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its hook..."
   ],
-  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Text-overlay format, no talking head, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
+  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Cinematic b-roll visuals with text overlays and off-screen Hindi voiceover narration, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
   "complianceNotes": "what was reviewed and any changes made",
   "debateRounds": 2,
   "debateLog": [
@@ -245,7 +245,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its specific hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its specific hook..."
   ],
-  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Text-overlay format, no talking head, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
+  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Cinematic b-roll visuals with text overlays and off-screen Hindi voiceover narration, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
   "complianceNotes": "",
   "debateRounds": 1,
   "debateLog": [{"round": 1, "from": "creative-director", "summary": "drafted creative package"}]
@@ -468,36 +468,39 @@ AVOID:
 
 ━━━ c) VIDEO CREATIVE — Heygen Video Agent prompt ━━━
 
-Write a storyboard-style prompt for Heygen's AI Video Generator. This is submitted DIRECTLY to Heygen's API — write it as scene-by-scene visual directions, not prose paragraphs.
+Write a CINEMATIC SCRIPT prompt for Heygen's AI Video Generator (V3 Video Agent API). This prompt is sent DIRECTLY to Heygen — write it as a natural-language film script that Heygen's AI can interpret and render.
 
-Use this exact 4-scene structure. Each scene is a hard cut — different visual from the previous:
+FORMAT: Write the prompt as a single flowing script. Describe visuals, text on screen, voiceover narration, and music as a continuous cinematic direction. Do NOT use numbered scenes or brackets — write it like you're directing a short film.
 
-[Scene 1] 0–3s — HOOK
-Visual: [specific Indian setting — close-up of face/object/environment that instantly matches the hook's emotion. Real, raw, not stock. E.g.: "Close-up of a young Indian woman's face, worried expression, dim Mumbai apartment at night, phone light on her face"]
-Text overlay (bold, large, Hindi/Hinglish): [exact hook words from the brief — make viewer say "yeh toh mere baare mein hai"]
+THE AD MUST CREATE:
+1. CURIOSITY — an irresistible open loop in the first 2 seconds that makes the viewer NEED to keep watching
+2. BUY INTENT — build desire so strong that tapping the CTA feels inevitable, not optional
 
-[Scene 2] 3–7s — PAIN / DESIRE
-Visual: [different angle/location that shows the problem or desire — not a repeat of Scene 1]
-Text overlay: [exact words naming the specific fear or desire — 1 short resonant line]
+STRUCTURE (15 seconds total, 9:16 vertical format):
 
-[Scene 3] 7–12s — PRODUCT REVEAL
-Visual: [product or transformation visual — show what changes after using the product]
-Text overlay: [product name "${resolvedProduct?.name ?? 'Product'}" + one-line benefit in Hindi/Hinglish]
+OPENING (0–3s): Start with a DARK background. A single bold Hindi/Hinglish text line fades in — large, white or gold on black. This is the curiosity hook — a provocative question or shocking statement from the brief that makes the viewer freeze mid-scroll. The text should feel like a personal whisper, not an ad. Add a soft, mysterious sound — a single tanpura drone or a deep bell.
 
-[Scene 4] 12–15s — CTA
-Visual: [urgency visual — offer highlight, product close-up, or result moment]
-Text overlay: ₹${resolvedProduct?.price} | [CTA action] — bold, high-contrast, unmissable
+TENSION (3–7s): The dark background shifts to a moody, cinematic visual — specific to the Indian context. Describe the exact setting, lighting, and mood (e.g., "dimly lit puja room with a single diya flame flickering, casting shadows on an open kundli chart"). A Hindi voiceover narration begins — speaking directly to the viewer's deepest fear or desire related to the brief's topic. The voice is warm, confident, slightly urgent — like a trusted elder revealing a secret. A second text overlay appears reinforcing the pain point. Music builds slowly — add tabla or soft sitar underneath the tanpura.
 
-MUSIC: Indian classical instrumental — [name the specific instrument: tanpura / sitar / bansuri / tabla]. Builds in energy across all 4 scenes. No vocals. No lyrics.
+REVEAL (7–12s): Visual shifts to the product/transformation — brighter, warmer tones contrasting the dark opening. Show what changes with ${resolvedProduct?.name ?? 'the product'}. Voiceover delivers the key promise in one powerful Hindi/Hinglish line. Bold text overlay shows the product name. Music lifts — energy increases, instruments layer in.
 
-NEGATIVE PROMPTS: No English-only text overlays. No stock footage watermarks. No celebrity or politician faces. No generic AI face artifacts. No cursive or decorative fonts. No religious imagery outside astrology/spiritual context. No slow fades between scenes — hard cuts only. No talking head or avatar.
+CTA (12–15s): Dark background returns. Large, high-contrast text: "₹${resolvedProduct?.price} | [specific CTA action]". Voiceover delivers a final urgency line — "Aaj hi jaano" / "Sirf aaj" / "Pehla kadam lo". Music hits a final beat and stops clean. Silence after the beat creates tension.
 
-VIDEO RULES:
-- Each scene must show a DIFFERENT visual — no repeating the same background across scenes
-- All text overlays must be in Hindi or Hinglish — no pure English lines
-- Be specific about visuals — "worried young woman, dim Mumbai apartment, phone glow on face" beats "person looking worried"
-- Product name and price must appear as exact text in Scene 4, not as placeholders
-- The brief's hook and key message must drive Scene 1 and Scene 2 specifically
+AUDIO DIRECTION:
+- Background music: Indian classical instrumental that builds across the ad. Start minimal (single tanpura/drone), end full (tabla + sitar/bansuri + tanpura). The music must create a MOOD — mysterious, then hopeful, then urgent.
+- Voiceover: Hindi/Hinglish, male or female voice that sounds wise and trustworthy. NOT a sales pitch tone — more like a caring friend sharing important news. The voiceover must speak in conversational Hindi, not formal/textbook Hindi.
+- Sound design: Use a subtle whoosh or reveal sound when transitioning from dark to product reveal.
+
+VISUAL RULES:
+- 9:16 vertical format for Instagram/Facebook Reels
+- DARK backgrounds dominate — scenes 1 and 4 are pure dark/black, scenes 2 and 3 use moody low-light cinematography
+- All text overlays: bold sans-serif font, large enough to read on mobile, white or gold on dark backgrounds
+- All text in Hindi or Hinglish — zero English-only lines
+- Each visual must be DIFFERENT from the previous — hard cuts, no fade transitions
+- Be hyper-specific with visuals — "close-up of trembling hands holding a tattered kundli paper, warm diya light from below" not "person looking at horoscope"
+- Product name "${resolvedProduct?.name ?? 'Product'}" and price ₹${resolvedProduct?.price} must appear as exact text, never as placeholders
+- No talking head, no avatar, no face-to-camera — cinematic b-roll visuals with text overlays and OFF-SCREEN Hindi voiceover narration (voice is heard but no person is shown speaking)
+- No stock footage look, no watermarks, no celebrity faces, no religious imagery beyond astrology/spiritual context
 
 ═══════════════════════════════════════════════════════
 RULES

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import axios from 'axios';
 import { AgentType } from '../claude/claude.types';
 import { ClaudeService } from '../claude/claude.service';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
@@ -8,6 +9,8 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
+
+const META_API_BASE = 'https://graph.facebook.com/v21.0';
 
 export interface AdSetConfig {
   name: string;
@@ -180,10 +183,11 @@ ${JSON.stringify(call1Parsed.campaign, null, 2)}
 
 YOUR JOB:
 1. BUDGET: Is the proposed daily budget right for the data available? Adjust if needed.
-2. TARGETING: Are the ad sets targeting the right audiences? Are real Meta audience IDs being used (not invented)?
+2. TARGETING: Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.
 3. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
 4. RISK: What's the downside scenario? Does the config protect against it?
-5. If anything is wrong: fix it directly in the output config.
+5. Fix issues directly in the output config. Set approved: true unless there is a fundamental unfixable problem.
+6. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -223,6 +227,63 @@ Return ONLY this JSON (no markdown, no explanation):
     return this.parseOutput(call2.content);
   }
 
+  private async fetchMetaAudiences(company: CompanyDocument): Promise<string> {
+    try {
+      const accessToken = company.meta?.accessToken;
+      if (!accessToken) return '';
+
+      const normalizeId = (id: string) => id.startsWith('act_') ? id : `act_${id}`;
+      const accountIds = ((company.meta!.accountIds?.length ?? 0) > 0
+        ? company.meta!.accountIds!
+        : [company.meta!.accountId]
+      ).map(normalizeId);
+
+      const allAudiences: { id: string; name: string; subtype: string; count: number }[] = [];
+
+      for (const accountId of accountIds) {
+        const res = await axios.get(`${META_API_BASE}/${accountId}/customaudiences`, {
+          params: {
+            fields: 'id,name,subtype,approximate_count_lower_bound',
+            limit: '100',
+            access_token: accessToken,
+          },
+          timeout: 15000,
+        }).catch(() => ({ data: { data: [] } }));
+
+        for (const a of res.data?.data ?? []) {
+          if ((a.approximate_count_lower_bound ?? 0) >= 100) {
+            allAudiences.push({
+              id: a.id,
+              name: a.name,
+              subtype: a.subtype ?? 'CUSTOM',
+              count: a.approximate_count_lower_bound ?? 0,
+            });
+          }
+        }
+      }
+
+      if (allAudiences.length === 0) return '';
+
+      const lines = allAudiences
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 30)
+        .map(a => `  - id: "${a.id}" | name: "${a.name}" | type: ${a.subtype} | size: ~${a.count.toLocaleString()}`);
+
+      return `═══════════════════════════════════════════════════════
+AVAILABLE META AUDIENCES (use these real IDs in adSets)
+═══════════════════════════════════════════════════════
+${lines.join('\n')}
+
+Rules:
+- audienceType "lookalike" → pick a LOOKALIKE audience from above
+- audienceType "retarget" or "custom" → pick a CUSTOM audience from above
+- audienceType "advantage_plus" → no metaAudienceId needed
+- Only use IDs from this list — never invent audience IDs`;
+    } catch {
+      return '';
+    }
+  }
+
   private async buildCall1Prompt(
     brief: {
       topic: string; angle: string; platform: string; format: string;
@@ -241,7 +302,11 @@ Return ONLY this JSON (no markdown, no explanation):
 
     const product = (company.products ?? []).find(p => p.name === (brief as any).product);
 
+    const audienceContext = await this.fetchMetaAudiences(company);
+
     return `${withoutSteps}
+
+${audienceContext}
 
 ═══════════════════════════════════════════════════════
 OUTPUT
@@ -249,6 +314,7 @@ OUTPUT
 
 This is Phase 1 of a 2-phase review. A Performance Analyst will review your config separately.
 Do NOT approve your own work. Just propose the best campaign config you can based on all the data above.
+Use real metaAudienceId values from the AVAILABLE META AUDIENCES list above when proposing lookalike, retarget, or custom ad sets.
 
 Return ONLY this JSON (no markdown, no explanation):
 {

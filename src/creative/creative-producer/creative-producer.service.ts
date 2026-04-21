@@ -20,6 +20,7 @@ export interface BriefData {
   conversionBridge: string;
   product?: string;
   targetSegment?: string;
+  referenceVideoPrompt?: string;  // Original video prompt to replicate style for creative replacements
 }
 
 @Injectable()

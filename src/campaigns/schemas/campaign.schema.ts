@@ -205,6 +205,12 @@ export class Campaign {
       };
       ctrBaseline?: number;          // first 48h average CTR (for fatigue detection)
       baselineSetAt?: Date;
+      replacementHistory?: {
+        oldHook: string;
+        newHook: string;
+        replacedAt: Date;
+        reason: string;
+      }[];
     }[];
   }[];
 
@@ -216,11 +222,12 @@ export class Campaign {
     targetId: string;                 // Meta ad/adset ID
     targetName: string;
     reason: string;
-    metrics: Record<string, number>;  // relevant metrics at time of recommendation
+    metrics: Record<string, any>;     // relevant metrics at time of recommendation
     recommendedAt: Date;
     executeAt: Date;                  // recommendedAt + gracePeriod
     status: 'pending' | 'executed' | 'overridden' | 'expired';
     executedAt?: Date;
+    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed';  // replace_creative only
   }[];
 }
 

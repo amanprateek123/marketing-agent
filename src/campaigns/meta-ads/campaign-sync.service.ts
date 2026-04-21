@@ -175,20 +175,25 @@ export class CampaignSyncService {
         for (const row of insightsRes.data?.data ?? []) {
           insightsMap.set(row.campaign_id, row);
         }
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // Fetch all active/paused ad sets for this account in one call
-        const adSetsRes = await axios.get(`${META_API_BASE}/${accountId}/adsets`, {
-          params: {
-            fields: 'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal',
-            filtering: JSON.stringify([
-              { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
-              { field: 'campaign.id', operator: 'IN', value: campaignIds },
-            ]),
-            limit: '500',
-            access_token: accessToken,
-          },
-          timeout: 60000,
-        }).catch(() => ({ data: { data: [] } }));
+        // Fetch all active/paused ad sets for this account in one call (retry once on rate limit)
+        const adSetsRes = await this.fetchWithRetry(
+          () => axios.get(`${META_API_BASE}/${accountId}/adsets`, {
+            params: {
+              fields: 'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal',
+              filtering: JSON.stringify([
+                { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
+                { field: 'campaign.id', operator: 'IN', value: campaignIds },
+              ]),
+              limit: '500',
+              access_token: accessToken,
+            },
+            timeout: 60000,
+          }),
+          `AdSets ${accountId}`,
+        );
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
         // Fetch ad set insights in one bulk call
         const adSetInsightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
@@ -203,7 +208,31 @@ export class CampaignSyncService {
             access_token: accessToken,
           },
           timeout: 60000,
-        }).catch(() => ({ data: { data: [] } }));
+        }).catch((err: any) => {
+          this.logger.warn(`AdSet insights fetch failed for ${accountId}: ${err.response?.data?.error?.message ?? err.message}`);
+          return { data: { data: [] } };
+        });
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        // Fetch ads with embedded insights for ACTIVE campaigns only (single call, avoids rate limits)
+        const activeCampaignIds = campaigns.filter(c => c.status === 'ACTIVE').map(c => c.id);
+        const adsRes = activeCampaignIds.length > 0
+          ? await axios.get(`${META_API_BASE}/${accountId}/ads`, {
+              params: {
+                fields: 'id,name,status,adset_id,creative{id,name,object_story_spec},insights{spend,impressions,clicks,ctr,cpc,actions}',
+                filtering: JSON.stringify([
+                  { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
+                  { field: 'campaign.id', operator: 'IN', value: activeCampaignIds },
+                ]),
+                limit: '500',
+                access_token: accessToken,
+              },
+              timeout: 60000,
+            }).catch((err: any) => {
+              this.logger.warn(`Ads fetch failed for ${accountId}: ${err.response?.data?.error?.message ?? err.message}`);
+              return { data: { data: [] } };
+            })
+          : { data: { data: [] } };
 
         // Group ad sets and insights by campaign_id
         const adSetsByCampaign = new Map<string, any[]>();
@@ -218,6 +247,21 @@ export class CampaignSyncService {
           adSetInsightsMap.set(row.adset_id, row);
         }
 
+        // Build ads lookup by adset_id
+        const adsByAdSet = new Map<string, any[]>();
+        for (const ad of adsRes.data?.data ?? []) {
+          const list = adsByAdSet.get(ad.adset_id) ?? [];
+          list.push(ad);
+          adsByAdSet.set(ad.adset_id, list);
+        }
+
+        // Build ad insights map from embedded insights{} on each ad
+        const adInsightsMap = new Map<string, any>();
+        for (const ad of adsRes.data?.data ?? []) {
+          const insightRow = ad.insights?.data?.[0];
+          if (insightRow) adInsightsMap.set(ad.id, insightRow);
+        }
+
         for (const campaign of campaigns) {
           const insights = insightsMap.get(campaign.id) ?? {};
           const spend = parseFloat(insights.spend ?? '0');
@@ -228,28 +272,69 @@ export class CampaignSyncService {
           const conversions = this.extractConversions(insights.actions, conversionTypes);
           const internalStatus = META_TO_INTERNAL_STATUS[campaign.status] ?? 'active';
 
-          // Build metaAdSets from fetched ad sets + insights
+          // Build metaAdSets from fetched ad sets + insights + ads
           const metaAdSets = (adSetsByCampaign.get(campaign.id) ?? []).map((as: any) => {
+            // Build ads for this adset — full metrics for active campaigns, metadata only for paused
+            const ads = (adsByAdSet.get(as.id) ?? []).map((ad: any) => {
+              const adi = adInsightsMap.get(ad.id) ?? {};
+              const creative = ad.creative ?? {};
+              const format = this.inferFormatFromCreative(creative, ad.name ?? '');
+              const hookStyle = this.inferHookStyle(
+                ad.name ?? '',
+                creative.object_story_spec?.link_data?.message ?? creative.object_story_spec?.video_data?.message ?? '',
+                creative.name ?? '',
+              );
+              return {
+                id: ad.id,
+                name: ad.name ?? '',
+                status: (META_TO_INTERNAL_STATUS[ad.status] ?? ad.status ?? '').toLowerCase(),
+                hookStyle,
+                format,
+                spend: parseFloat(adi.spend ?? '0'),
+                impressions: parseInt(adi.impressions ?? '0', 10),
+                clicks: parseInt(adi.clicks ?? '0', 10),
+                ctr: parseFloat(adi.ctr ?? '0'),
+                cpc: parseFloat(adi.cpc ?? '0'),
+                conversions: this.extractConversions(adi.actions, conversionTypes),
+              };
+            });
+
+            // Aggregate adset metrics from ads if available, fall back to adSetInsightsMap
             const asi = adSetInsightsMap.get(as.id) ?? {};
-            const asSpend = parseFloat(asi.spend ?? '0');
-            const asConversions = this.extractConversions(asi.actions, conversionTypes);
+            let asSpend: number, asImpressions: number, asClicks: number, asConversions: number;
+            if (ads.length > 0) {
+              asSpend = ads.reduce((s, a) => s + a.spend, 0);
+              asImpressions = ads.reduce((s, a) => s + a.impressions, 0);
+              asClicks = ads.reduce((s, a) => s + a.clicks, 0);
+              asConversions = ads.reduce((s, a) => s + a.conversions, 0);
+            } else {
+              asSpend = parseFloat(asi.spend ?? '0');
+              asImpressions = parseInt(asi.impressions ?? '0', 10);
+              asClicks = parseInt(asi.clicks ?? '0', 10);
+              asConversions = this.extractConversions(asi.actions, conversionTypes);
+            }
+            const asCtr = asImpressions > 0 ? (asClicks / asImpressions) * 100 : 0;
+            const asCpc = asClicks > 0 ? asSpend / asClicks : 0;
             const asCpa = asConversions > 0 ? asSpend / asConversions : 0;
+            const asFrequency = parseFloat(asi.frequency ?? '0');
+
             return {
               id: as.id,
               name: as.name,
               status: (META_TO_INTERNAL_STATUS[as.status] ?? as.status).toLowerCase(),
-              audienceType: '',
+              audienceType: this.inferAudienceType(as.name ?? ''),
               dailyBudget: parseFloat(as.daily_budget ?? '0') / 100,
               lifetimeBudget: parseFloat(as.lifetime_budget ?? '0') / 100,
               optimizationGoal: as.optimization_goal ?? '',
               spend: asSpend,
-              impressions: parseInt(asi.impressions ?? '0', 10),
-              clicks: parseInt(asi.clicks ?? '0', 10),
+              impressions: asImpressions,
+              clicks: asClicks,
               conversions: asConversions,
-              ctr: parseFloat(asi.ctr ?? '0'),
+              ctr: asCtr,
+              cpc: asCpc,
               cpa: asCpa,
-              frequency: parseFloat(asi.frequency ?? '0'),
-              ads: [],
+              frequency: asFrequency,
+              ads,
             };
           });
 
@@ -279,15 +364,43 @@ export class CampaignSyncService {
             { upsert: true },
           );
           totalSynced++;
+          await new Promise(resolve => setTimeout(resolve, 200));
         }
 
         this.logger.log(`Active campaign sync: ${campaigns.length} campaigns, ad sets fetched from ${accountId}`);
       } catch (err: any) {
         this.logger.warn(`Active sync failed for ${accountId}: ${err.message}`);
       }
+
+      // Delay between accounts to avoid Meta user request rate limits
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
 
     return { synced: totalSynced };
+  }
+
+  private async fetchWithRetry(
+    fn: () => Promise<any>,
+    label: string,
+    retries = 2,
+    backoffMs = 15000,
+  ): Promise<any> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const msg = err.response?.data?.error?.message ?? err.message ?? '';
+        const isRateLimit = msg.toLowerCase().includes('limit reached') || msg.toLowerCase().includes('rate');
+        if (isRateLimit && attempt < retries) {
+          this.logger.warn(`${label} rate limited, retrying in ${backoffMs / 1000}s (attempt ${attempt}/${retries})`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+        } else {
+          this.logger.warn(`${label} failed: ${msg}`);
+          return { data: { data: [] } };
+        }
+      }
+    }
+    return { data: { data: [] } };
   }
 
   private buildMetaAdSets(campaign: any, conversionTypes: Set<string>): any[] {

@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { InjectQueue } from '@nestjs/bullmq';
 import { Model } from 'mongoose';
+import { Queue } from 'bullmq';
 import { v4 as uuidv4 } from 'uuid';
 import { AgentType } from '../../claude/claude.types';
 import { CompaniesService } from '../../companies/companies.service';
@@ -18,6 +20,7 @@ import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/sch
 import { CreativeLearningService } from '../../learning/creative-learning.service';
 import { CampaignLearningService } from '../../learning/campaign-learning.service';
 import { CampaignOptimizerService } from './campaign-optimizer.service';
+import { QUEUES } from '../../scheduler/queue.constants';
 
 export interface AuditResult {
   tenantId: string;
@@ -49,6 +52,8 @@ export class CampaignAuditorService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
+    @InjectQueue(QUEUES.CREATIVE_PRODUCTION)
+    private readonly creativeQueue: Queue,
   ) {}
 
   async audit(tenantId: string): Promise<AuditResult> {
@@ -179,22 +184,63 @@ export class CampaignAuditorService {
         frequency: as.frequency,
       })),
       ads: full.adSets.flatMap(as =>
-        as.ads.map(ad => ({
-          metaAdId: ad.adId,
-          name: ad.adId,
-          hookStyle: '',
-          copyVariantIndex: 0,
-          adSetId: as.adSetId,
-          spend: ad.spend,
-          conversions: ad.conversions,
-          ctr: ad.ctr,
-          cpc: ad.cpc,
-        })),
+        as.ads.map(ad => {
+          const localAd = (campaign as any).adSets
+            ?.find((a: any) => a.metaAdSetId === as.adSetId)
+            ?.ads?.find((a: any) => a.metaAdId === ad.adId);
+          const hook = localAd?.hookStyle ?? '';
+          const variantIdx = localAd?.copyVariantIndex ?? 0;
+          return {
+            metaAdId: ad.adId,
+            name: hook ? `Ad ${variantIdx + 1} (${hook})` : ad.adId,
+            hookStyle: hook,
+            copyVariantIndex: variantIdx,
+            adSetId: as.adSetId,
+            spend: ad.spend,
+            conversions: ad.conversions,
+            ctr: ad.ctr,
+            cpc: ad.cpc,
+          };
+        }),
       ),
       verdict: null,
     };
 
     // ── Layer 3: Intelligent audit agent ──────────────────────────────────────
+    // Short-circuit: skip Claude when all signals are green (saves LLM cost)
+    const isAllGreen =
+      signals.anomalies.highSpendZeroConversions.length === 0 &&
+      signals.anomalies.creativeFatigue.length === 0 &&
+      signals.anomalies.audienceFatigue.length === 0 &&
+      !signals.anomalies.stuckInLearning &&
+      !signals.anomalies.budgetExhaustionRisk &&
+      !signals.safetyBreaches.weeklyCapExceeded &&
+      !signals.safetyBreaches.campaignCapExceeded &&
+      signals.trends.ctrTrend !== 'declining' &&
+      signals.trends.roasTrend !== 'declining';
+
+    if (isAllGreen) {
+      const skipVerdict = {
+        verdict: 'no_action' as const,
+        urgency: null,
+        contextInsight: 'All signals green — agent skipped',
+        watchSignals: [] as string[],
+        recommendedActions: [] as any[],
+      };
+      snapshotData.verdict = skipVerdict as any;
+      await this.snapshotModel.create(snapshotData);
+      this.logger.debug(`All-green skip for campaign ${campaign.metaCampaignId}`);
+
+      // Still run performance writeback even when skipping Claude
+      if (campaign.launchedAt) {
+        const ageMs = Date.now() - new Date(campaign.launchedAt).getTime();
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        const written = await this.writePerformanceBack(campaign, full, ageDays);
+        if (written) result.performanceWritten++;
+      }
+      return;
+    }
+
     const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).lean().exec();
     const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company);
 
@@ -208,12 +254,21 @@ export class CampaignAuditorService {
       const gracePeriodHours = company.pipelineConfig?.pauseGracePeriodHours ?? 12;
 
       for (const action of verdict.recommendedActions) {
+        // For replace_creative: pre-compute the replacement hookStyle and store in metrics
+        const metrics: Record<string, any> = {};
+        if (action.type === 'replace_creative') {
+          metrics.replacementHook = this.pickReplacementHook(campaign, action.targetId, company);
+          metrics.fatiguedHook = (campaign as any).adSets
+            ?.flatMap((as: any) => as.ads ?? [])
+            ?.find((a: any) => a.metaAdId === action.targetId)?.hookStyle ?? '';
+        }
+
         const created = await this.createPendingAction(campaign, company, {
           type: action.type,
           targetId: action.targetId,
           targetName: action.targetName,
           reason: action.reason,
-          metrics: {},
+          metrics,
           gracePeriodHours: action.priority === 'high' ? gracePeriodHours : gracePeriodHours * 2,
         });
         if (created) result.actionsCreated++;
@@ -348,7 +403,7 @@ export class CampaignAuditorService {
       targetId: string;
       targetName: string;
       reason: string;
-      metrics: Record<string, number>;
+      metrics: Record<string, any>;
       gracePeriodHours: number;
     },
   ): Promise<boolean> {
@@ -417,6 +472,52 @@ export class CampaignAuditorService {
             cpc: campaign.cpc ?? 0,
             frequency: 0,
           });
+        } else if (action.type === 'replace_creative') {
+          // Replace creative requires explicit approval — auto-execute not supported yet
+          if (!manuallyApproved) continue;
+          // Pause the fatigued ad
+          await this.metaAds.pauseAd(action.targetId, company.meta!.accessToken);
+          for (const adSet of (campaign as any).adSets ?? []) {
+            const ad = adSet.ads.find((a: any) => a.metaAdId === action.targetId);
+            if (ad) ad.status = 'paused_for_replacement';
+          }
+          // Use pre-computed hook from action creation, or recompute if missing
+          const replacementHook = action.metrics?.replacementHook
+            ?? this.pickReplacementHook(campaign, action.targetId, company);
+
+          // Track replacement lifecycle
+          action.replacementStatus = 'queued';
+
+          // Queue creative production job for autonomous replacement
+          await this.creativeQueue.add(
+            `replace-creative-${action.targetId}`,
+            {
+              tenantId: company.tenantId,
+              campaignId: campaign._id.toString(),
+              briefId: campaign.briefId,
+              fatiguedAdId: action.targetId,
+              fatiguedHook: action.metrics?.fatiguedHook ?? '',
+              replacementHook,
+              adSetId: (campaign as any).adSets
+                ?.find((as: any) => as.ads?.some((a: any) => a.metaAdId === action.targetId))
+                ?.metaAdSetId ?? '',
+            },
+            { attempts: 2, backoff: { type: 'exponential', delay: 60000 } },
+          );
+
+          this.logger.log(
+            `Ad ${action.targetId} paused — creative replacement queued with hook "${replacementHook}"`,
+          );
+
+          // Notify Slack
+          const slackWebhook = company.delivery?.slackWebhook;
+          if (slackWebhook) {
+            await this.slackService.sendMessage(
+              slackWebhook,
+              company.tenantId,
+              `🔄 *Creative Replacement Queued*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Fatigued Ad:* ${action.targetName} (hook: ${action.metrics?.fatiguedHook || 'unknown'})\n*Replacement Hook:* ${replacementHook}\n\nFatigued ad paused. New creative is being produced automatically.`,
+            );
+          }
         }
 
         action.status = 'executed';
@@ -456,9 +557,12 @@ export class CampaignAuditorService {
     if (!slackWebhook) return;
 
     const actionsText = verdict.recommendedActions.length > 0
-      ? verdict.recommendedActions.map(a =>
-          `  • [${a.priority.toUpperCase()}] ${a.type.replace(/_/g, ' ')}: ${a.targetName}\n    _${a.reason}_`,
-        ).join('\n')
+      ? verdict.recommendedActions.map(a => {
+          const approvalHint = (a.type === 'scale_adset' || a.type === 'replace_creative')
+            ? `\n    _Requires approval:_ \`POST /api/v1/campaigns/${company.tenantId}/${campaign._id}/actions/{actionId}/approve\``
+            : '';
+          return `  • [${a.priority.toUpperCase()}] ${a.type.replace(/_/g, ' ')}: ${a.targetName}\n    _${a.reason}_${approvalHint}`;
+        }).join('\n')
       : '  No specific actions recommended';
 
     const watchText = verdict.watchSignals.length > 0
@@ -556,5 +660,43 @@ export class CampaignAuditorService {
     }
 
     return written;
+  }
+
+  /**
+   * Pick a replacement hookStyle for a fatigued ad.
+   * Strategy: exclude the fatigued hook + all hooks already used in this campaign,
+   * then pick the best from company learnings. Falls back to a default rotation.
+   */
+  private pickReplacementHook(
+    campaign: CampaignDocument,
+    fatiguedAdId: string,
+    company: CompanyDocument,
+  ): string {
+    const DEFAULT_HOOKS = ['pain_point', 'social_proof', 'price_shock', 'curiosity', 'urgency', 'benefit_led'];
+
+    // Collect all hookStyles already in use on this campaign
+    const usedHooks = new Set<string>();
+    let fatiguedHook = '';
+    for (const adSet of (campaign as any).adSets ?? []) {
+      for (const ad of adSet.ads ?? []) {
+        if (ad.hookStyle) usedHooks.add(ad.hookStyle);
+        if (ad.metaAdId === fatiguedAdId) fatiguedHook = ad.hookStyle ?? '';
+      }
+    }
+
+    // Winning hooks from learnings, ordered by past performance
+    const winningHooks: string[] = company.learnings?.creative?.winningHooks ?? [];
+
+    // First: try winning hooks that aren't already used in this campaign
+    const fromLearnings = winningHooks.find(h => h !== fatiguedHook && !usedHooks.has(h));
+    if (fromLearnings) return fromLearnings;
+
+    // Second: try any winning hook that isn't the fatigued one (allow reuse across ad sets)
+    const anyWinning = winningHooks.find(h => h !== fatiguedHook);
+    if (anyWinning) return anyWinning;
+
+    // Third: fallback to default rotation, excluding fatigued hook
+    const fallback = DEFAULT_HOOKS.find(h => h !== fatiguedHook && !usedHooks.has(h));
+    return fallback ?? DEFAULT_HOOKS.find(h => h !== fatiguedHook) ?? 'benefit_led';
   }
 }
