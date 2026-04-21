@@ -12,6 +12,7 @@ import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { SlackService } from '../../delivery/slack.service';
+import axios from 'axios';
 
 @Injectable()
 export class CampaignCreatorService {
@@ -250,6 +251,79 @@ export class CampaignCreatorService {
     const images = (creativePackage as any)?.images ?? [];
     const video = (creativePackage as any)?.video ?? null;
     const videoUrl = video?.videoUrl ?? '';
+
+    // Pre-launch: fetch live audiences from Meta and strip any expired IDs from ad sets
+    const validAudienceIds = new Set<string>();
+    try {
+      const normalizeId = (id: string) => id.startsWith('act_') ? id : `act_${id}`;
+      const accountIds = ((company.meta!.accountIds?.length ?? 0) > 0
+        ? company.meta!.accountIds!
+        : [company.meta!.accountId]
+      ).map(normalizeId);
+
+      for (const acctId of accountIds) {
+        const res = await axios.get(`https://graph.facebook.com/v21.0/${acctId}/customaudiences`, {
+          params: { fields: 'id', limit: '200', access_token: company.meta!.accessToken },
+          timeout: 15000,
+        }).catch(() => ({ data: { data: [] } }));
+        for (const a of res.data?.data ?? []) {
+          validAudienceIds.add(a.id);
+        }
+      }
+      this.logger.log(`Pre-launch audience check: ${validAudienceIds.size} valid audiences on Meta`);
+    } catch (err: any) {
+      this.logger.warn(`Audience validation failed (proceeding without check): ${err.message}`);
+    }
+
+    if (validAudienceIds.size > 0) {
+      for (const adSet of config.adSets as any[]) {
+        if (adSet.metaAudienceId && !validAudienceIds.has(adSet.metaAudienceId)) {
+          this.logger.warn(`Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — converting to advantage_plus`);
+          delete adSet.metaAudienceId;
+          adSet.audienceType = 'advantage_plus';
+        }
+        if (adSet.excludeAudienceIds?.length) {
+          const before = adSet.excludeAudienceIds.length;
+          adSet.excludeAudienceIds = adSet.excludeAudienceIds.filter((id: string) => validAudienceIds.has(id));
+          const removed = before - adSet.excludeAudienceIds.length;
+          if (removed > 0) {
+            this.logger.warn(`Ad set "${adSet.name}": removed ${removed} expired exclude audience(s)`);
+          }
+        }
+      }
+    }
+
+    // Consolidate: if multiple ad sets ended up as advantage_plus (same targeting),
+    // merge them into one ad set with all unique variant indices and full budget
+    const advantagePlusAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType === 'advantage_plus');
+    const otherAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType !== 'advantage_plus');
+
+    if (advantagePlusAdSets.length > 1) {
+      // Merge all advantage_plus ad sets into one
+      const allVariants = [...new Set(advantagePlusAdSets.flatMap((as: any) => as.ads))].sort();
+      const totalBudgetPercent = advantagePlusAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
+      const mergedCreativeFormat = advantagePlusAdSets.some((as: any) => as.creativeFormat === 'both') ? 'both'
+        : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'video') ? 'video' : 'image';
+
+      const merged = {
+        ...advantagePlusAdSets[0],
+        name: `ADVANTAGE_PLUS_${new Date().toISOString().split('T')[0]}`,
+        ads: allVariants,
+        budgetPercent: totalBudgetPercent,
+        creativeFormat: mergedCreativeFormat,
+        audienceType: 'advantage_plus',
+      };
+      delete merged.metaAudienceId;
+      delete merged.excludeAudienceIds;
+
+      config.adSets = [...otherAdSets, merged];
+      this.logger.log(`Consolidated ${advantagePlusAdSets.length} advantage_plus ad sets into 1 (budget: ${totalBudgetPercent}%, variants: ${allVariants.join(',')})`);
+    }
+
+    // If only one ad set remains, give it 100% budget
+    if (config.adSets.length === 1) {
+      (config.adSets as any[])[0].budgetPercent = 100;
+    }
 
     // Validate ad sets before touching Meta API
     for (const [i, adSet] of (config.adSets as any[]).entries()) {

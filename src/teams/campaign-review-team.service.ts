@@ -409,9 +409,6 @@ USE THIS TO: allocate higher budget % to audience types with lowest CPA.`;
       const segments = (product.audienceSegments ?? []).map(s =>
         `  - ${s.name} (${s.confidence}${s.avgCPA ? `, CPA ₹${s.avgCPA}` : ''}): ${s.description}, age ${s.ageMin}-${s.ageMax}`
       ).join('\n');
-      const metaAud = (product.metaAudiences ?? []).map(a =>
-        `  - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name} (id: ${a.id})`
-      ).join('\n');
       const perf = product.performance;
       return `PRODUCT BEING SOLD:
   ${product.name} — ₹${product.price}
@@ -420,11 +417,7 @@ USE THIS TO: allocate higher budget % to audience types with lowest CPA.`;
   Past performance: ${perf?.totalConversions ?? 0} conversions, CPA ₹${perf?.avgCPA ?? 'N/A'}, ROAS ${perf?.avgROAS ?? 'N/A'}x (${perf?.confidenceLevel ?? 'no data'})
 
 AVAILABLE AUDIENCE SEGMENTS:
-${segments || '  none defined'}
-
-AVAILABLE META AUDIENCES (use these EXACT IDs in adSets config):
-${metaAud || '  none linked — use Advantage+ broad'}
-  IMPORTANT: Use the actual Meta audience IDs above in your adSets[].metaAudienceId field.`;
+${segments || '  none defined'}`;
     })();
 
     // ── Compact context brief for the Analyst ────────────────────────────────

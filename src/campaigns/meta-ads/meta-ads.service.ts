@@ -233,7 +233,7 @@ export class MetaAdsService {
     const expectedAdCount = config.adSets.reduce((sum, as) => sum + as.ads.length, 0);
 
     try {
-      // Step 1: Create campaign (PAUSED)
+      // Step 1: Create campaign (PAUSED) — ABO (budget at ad set level for testing)
       created.campaignId = await this.createCampaign(
         config.accountId,
         config.accessToken,
@@ -392,7 +392,6 @@ export class MetaAdsService {
         objective,
         status: 'PAUSED',
         special_ad_categories: [],
-        is_adset_budget_sharing_enabled: false,
         access_token: accessToken,
       },
     );
@@ -415,7 +414,7 @@ export class MetaAdsService {
     customEventName?: string,
     customConversionId?: string,
   ): Promise<string> {
-    // Budget: INR rupees → paise (Meta expects smallest currency unit)
+    // ABO: budget at ad set level for testing new creatives/audiences
     const dailyBudgetPaise = Math.round((totalBudget * config.budgetPercent / 100) * 100);
 
     const targeting: any = {
@@ -489,17 +488,50 @@ export class MetaAdsService {
 
     this.logger.log(`Creating ad set: ${config.name} | payload: ${JSON.stringify({ ...adSetData, access_token: '[REDACTED]' })}`);
 
-    const response = await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${accountId}/adsets`,
-      adSetData,
-    );
+    try {
+      const response = await this.metaApiCall(
+        'POST',
+        `${META_API_BASE}/${accountId}/adsets`,
+        adSetData,
+      );
 
-    const adSetId = response.data?.id;
-    if (!adSetId) throw new Error(`No ad set ID in response for ${config.name}`);
+      const adSetId = response.data?.id;
+      if (!adSetId) throw new Error(`No ad set ID in response for ${config.name}`);
 
-    this.logger.log(`Ad set created: ${adSetId}`);
-    return adSetId;
+      this.logger.log(`Ad set created: ${adSetId}`);
+      return adSetId;
+    } catch (err: any) {
+      // Custom audience expired/deleted — retry as advantage_plus
+      // Catch audience errors — Meta returns "Invalid parameter" with error_subcode 1359207 for expired audiences
+      // We only retry if we actually set custom_audiences in targeting
+      const hasAnyAudiences = targeting.custom_audiences || targeting.excluded_custom_audiences;
+      const isAudienceError = hasAnyAudiences && (
+        err.message?.includes('Invalid parameter') ||
+        err.message?.includes('custom audience') ||
+        err.message?.includes('Custom audience not available')
+      );
+      if (isAudienceError) {
+        this.logger.warn(`Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}, excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without audiences.`);
+        delete targeting.custom_audiences;
+        delete targeting.excluded_custom_audiences;
+        targeting.targeting_automation = { advantage_audience: 1 };
+        delete targeting.age_min;
+        delete targeting.age_max;
+        delete targeting.genders;
+        adSetData.targeting = targeting;
+
+        const retryResponse = await this.metaApiCall(
+          'POST',
+          `${META_API_BASE}/${accountId}/adsets`,
+          adSetData,
+        );
+        const adSetId = retryResponse.data?.id;
+        if (!adSetId) throw new Error(`No ad set ID in retry response for ${config.name}`);
+        this.logger.log(`Ad set created (advantage_plus fallback): ${adSetId}`);
+        return adSetId;
+      }
+      throw err;
+    }
   }
 
   private async createAd(
@@ -525,11 +557,6 @@ export class MetaAdsService {
             type: this.mapCta(copy.cta),
             value: { link: landingUrl },
           },
-        },
-      },
-      degrees_of_freedom_spec: {
-        creative_features_spec: {
-          standard_enhancements: { enroll_status: 'OPT_IN' },
         },
       },
       access_token: accessToken,
@@ -602,11 +629,6 @@ export class MetaAdsService {
       object_story_spec: {
         page_id: pageId,
         video_data: videoData,
-      },
-      degrees_of_freedom_spec: {
-        creative_features_spec: {
-          standard_enhancements: { enroll_status: 'OPT_IN' },
-        },
       },
       access_token: accessToken,
     };
