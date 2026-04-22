@@ -172,6 +172,12 @@ export class CampaignReviewTeamService {
 
 Your job: challenge budget, targeting, and timing decisions with data. Be conservative on unproven, aggressive on proven.
 
+PRODUCT DATA:
+- Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? 'N/A'}
+- Historical CPA: ₹${product?.performance?.avgCPA ?? 'no data'} | Historical ROAS: ${product?.performance?.avgROAS ?? 'no data'}x
+- Total conversions on record: ${product?.performance?.totalConversions ?? 0} (confidence: ${product?.performance?.confidenceLevel ?? 'none'})
+- At ₹${product?.performance?.avgCPA ?? '???'} CPA, budget of ₹${brief.suggestedBudget}/day = ~${product?.performance?.avgCPA ? Math.floor(brief.suggestedBudget / product.performance.avgCPA * 7) : '?'} conversions/week expected
+
 CONSTRAINTS:
 - Hard budget cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
 - Pause if ROAS < ${company.pauseIfROASBelow ?? 'not set'} | CTR < ${company.pauseIfCTRBelow ?? 'not set'}
@@ -183,11 +189,12 @@ ${JSON.stringify(call1Parsed.campaign, null, 2)}
 
 YOUR JOB:
 1. BUDGET: Is the proposed daily budget right for the data available? Adjust if needed.
-2. TARGETING: Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.
-3. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
-4. RISK: What's the downside scenario? Does the config protect against it?
-5. Fix issues directly in the output config. Set approved: true unless there is a fundamental unfixable problem.
-6. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.
+2. AD SET COUNT: Budget ≤₹5,000/day → MUST be 1 ad set (advantage_plus). ₹5-15k → max 2. >₹15k → max 3. Each ad set needs ₹3,000+/day minimum. If the Strategist proposed too many ad sets for the budget, consolidate them.
+3. TARGETING: Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.
+4. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
+5. RISK: What's the downside scenario? Does the config protect against it?
+6. Fix issues directly in the output config. Set approved: true unless there is a fundamental unfixable problem.
+7. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -326,21 +333,17 @@ Return ONLY this JSON (no markdown, no explanation):
     "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
     "adSets": [
       {
-        "name": "descriptive name",
-        "budgetPercent": 50,
-        "audienceType": "lookalike|advantage_plus|retarget|interest|custom",
-        "metaAudienceId": "actual Meta audience ID or omit for advantage_plus",
-        "excludeAudienceIds": [],
-        "ageMin": 25,
-        "ageMax": 42,
+        "name": "ADVANTAGE_PLUS_BROAD",
+        "budgetPercent": 100,
+        "audienceType": "advantage_plus",
         "geoLocations": ["IN"],
         "optimizationGoal": "OFFSITE_CONVERSIONS",
         "ads": [0, 1, 2],
-        "creativeFormat": "video"
+        "creativeFormat": "both"
       }
     ],
-    "scaleRules": "specific ROAS/CTR threshold + scale %",
-    "pauseRules": "specific CTR/ROAS threshold + spend amount"
+    "scaleRules": "ROAS > 1.5x AND conversions >= 2 after 7d → scale 20%",
+    "pauseRules": "CTR < 0.5% after ₹${Math.round((product?.performance?.avgCPA ?? 2000) * 3)} spent → pause ad"
   },
   "adjustments": {
     "budgetAdjusted": false,
@@ -527,7 +530,7 @@ BUDGET:
 - No past data → be conservative, start at 50-60% of proposed budget
 
 AD SETS:
-- 2-3 ad sets minimum. Each MUST have a different audience.
+- Number of ad sets depends on budget (see AD SET COUNT below). Each ad set MUST have a different audience.
 - Use real Meta audience IDs from the product data — don't invent IDs.
 - No Meta audiences → use audienceType "advantage_plus" (NOT "interest" without real IDs).
 - Exclude past buyer audiences from prospecting ad sets.
@@ -540,6 +543,13 @@ AD SETS:
 - budgetPercent across all ad sets must sum to 100.
 
 ${formatSection}
+
+AD SET COUNT (scale to budget):
+- Budget ≤ ₹5,000/day → 1 ad set (advantage_plus). Concentrate all signal. Do NOT split.
+- Budget ₹5,000–15,000/day → max 2 ad sets (1 advantage_plus + 1 audience-based if valid audiences exist)
+- Budget > ₹15,000/day → up to 3 ad sets (advantage_plus + lookalike + retarget/custom)
+- Each ad set needs ₹3,000+/day minimum to have any chance of exiting Meta's learning phase.
+- The audit loop will add retarget/narrowed ad sets later based on performance data — don't over-segment at launch.
 
 GUARDRAILS:
 - Always set specific scaleRules and pauseRules — never launch without guardrails
@@ -604,21 +614,17 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
     "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
     "adSets": [
       {
-        "name": "descriptive name",
-        "budgetPercent": 50,
-        "audienceType": "lookalike|advantage_plus|retarget|interest|custom",
-        "metaAudienceId": "actual Meta audience ID or omit for advantage_plus",
-        "excludeAudienceIds": [],
-        "ageMin": 25,
-        "ageMax": 42,
+        "name": "ADVANTAGE_PLUS_BROAD",
+        "budgetPercent": 100,
+        "audienceType": "advantage_plus",
         "geoLocations": ["IN"],
         "optimizationGoal": "OFFSITE_CONVERSIONS",
         "ads": [0, 1, 2],
-        "creativeFormat": "video"
+        "creativeFormat": "both"
       }
     ],
-    "scaleRules": "specific rules — e.g. ROAS > 2x AND CTR > 0.8% after 48h → scale 20%",
-    "pauseRules": "specific rules — e.g. CTR < 0.5% after ₹1,500 spent → pause"
+    "scaleRules": "ROAS > 1.5x AND conversions >= 2 after 7d �� scale 20%",
+    "pauseRules": "CTR < 0.5% after ₹${Math.round((product?.performance?.avgCPA ?? 2000) * 3)} spent → pause ad"
   },
   "adjustments": {
     "budgetAdjusted": false,
@@ -627,10 +633,10 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   },
   "debateRounds": 2,
   "debateLog": [
-    {"round": 1, "from": "strategist", "summary": "proposed campaign config with 2 ad sets"},
-    {"round": 1, "from": "analyst", "summary": "challenged budget, suggested starting lower"},
-    {"round": 2, "from": "strategist", "summary": "adjusted budget down"},
-    {"round": 2, "from": "analyst", "summary": "approved revised config"}
+    {"round": 1, "from": "strategist", "summary": "proposed campaign config"},
+    {"round": 1, "from": "analyst", "summary": "reviewed and adjusted"},
+    {"round": 2, "from": "strategist", "summary": "accepted adjustments"},
+    {"round": 2, "from": "analyst", "summary": "approved final config"}
   ],
   "debateRationale": "2-3 sentence summary"
 }

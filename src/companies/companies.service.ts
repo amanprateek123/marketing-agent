@@ -119,6 +119,13 @@ export class CompaniesService {
     this.logger.log(`Learnings updated for: ${tenantId} (v${learnings.version})`);
   }
 
+  async updateProductAudiences(tenantId: string, productName: string, audiences: any[]): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId, 'products.name': productName },
+      { $set: { 'products.$.metaAudiences': audiences } },
+    );
+  }
+
   async updateCreativeLearnings(tenantId: string, creative: {
     ctaInsights: string[];
     copyToneInsights: string[];

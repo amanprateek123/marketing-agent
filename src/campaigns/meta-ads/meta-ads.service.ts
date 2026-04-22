@@ -466,6 +466,9 @@ export class MetaAdsService {
       access_token: accessToken,
     };
 
+    // Attribution: 7-day click — gives Meta enough signal for considered purchases
+    adSetData.attribution_spec = [{ event_type: 'CLICK_THROUGH', window_days: 7 }];
+
     // Pixel for conversion optimization
     if (customConversionId && pixelId) {
       // Custom Conversion — pixel_id + custom_conversion_id + custom_event_type: OTHER
@@ -696,6 +699,67 @@ export class MetaAdsService {
   // ─── Optimization actions (used by auditor) ─────────────────────────────────
 
   /**
+   * Create a pixel-based custom audience (e.g. website visitors, purchasers).
+   * Returns the audience ID.
+   */
+  async createPixelAudience(
+    accountId: string,
+    accessToken: string,
+    name: string,
+    pixelId: string,
+    rule: { event: string; retentionDays: number },
+  ): Promise<string> {
+    const response = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/customaudiences`, {
+      name,
+      subtype: 'WEBSITE',
+      retention_days: rule.retentionDays,
+      rule: JSON.stringify({
+        inclusions: {
+          operator: 'or',
+          rules: [{
+            event_sources: [{ id: pixelId, type: 'pixel' }],
+            retention_seconds: rule.retentionDays * 86400,
+            filter: { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: rule.event }] },
+          }],
+        },
+      }),
+      access_token: accessToken,
+    });
+    const id = response.data?.id;
+    if (!id) throw new Error(`Failed to create audience "${name}"`);
+    this.logger.log(`Pixel audience created: ${name} (${id})`);
+    return id;
+  }
+
+  /**
+   * Create a lookalike audience from a source custom audience.
+   */
+  async createLookalikeAudience(
+    accountId: string,
+    accessToken: string,
+    name: string,
+    sourceAudienceId: string,
+    country: string,
+    ratio: number,  // 0.01 = 1%, 0.02 = 2%
+  ): Promise<string> {
+    const response = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/customaudiences`, {
+      name,
+      subtype: 'LOOKALIKE',
+      origin_audience_id: sourceAudienceId,
+      lookalike_spec: JSON.stringify({
+        type: 'similarity',
+        country,
+        ratio,
+      }),
+      access_token: accessToken,
+    });
+    const id = response.data?.id;
+    if (!id) throw new Error(`Failed to create lookalike "${name}"`);
+    this.logger.log(`Lookalike audience created: ${name} (${id})`);
+    return id;
+  }
+
+  /**
    * Pause an entire campaign on Meta.
    */
   async pauseCampaign(campaignId: string, accessToken: string): Promise<void> {
@@ -704,6 +768,67 @@ export class MetaAdsService {
       access_token: accessToken,
     });
     this.logger.log(`Campaign paused on Meta: ${campaignId}`);
+  }
+
+  /**
+   * Create a new ad set in an existing campaign (used by auditor for retarget/narrowed ad sets).
+   */
+  async createAdSetInCampaign(
+    campaignId: string,
+    accessToken: string,
+    config: MetaAdSetConfig,
+    totalBudget: number,
+    conversionEvent: string,
+    pixelId?: string,
+  ): Promise<string> {
+    // Need accountId from campaign — fetch it
+    const campaignRes = await this.metaApiCall('GET', `${META_API_BASE}/${campaignId}`, {
+      fields: 'account_id',
+      access_token: accessToken,
+    });
+    const accountId = `act_${campaignRes.data?.account_id}`;
+
+    return this.createAdSet(
+      accountId,
+      accessToken,
+      campaignId,
+      config,
+      totalBudget,
+      conversionEvent,
+      pixelId,
+    );
+  }
+
+  /**
+   * Create a single ad in an existing ad set (used by auditor for add_creative).
+   * Uploads image, creates creative, creates ad — all in one call.
+   */
+  async createAdInAdSet(
+    adSetId: string,
+    accessToken: string,
+    adName: string,
+    copy: { primaryText: string; headline: string; cta: string },
+    imageUrl: string,
+    pageId: string,
+    landingUrl: string,
+  ): Promise<{ adId: string; creativeId: string }> {
+    // Get accountId from ad set
+    const adSetRes = await this.metaApiCall('GET', `${META_API_BASE}/${adSetId}`, {
+      fields: 'account_id',
+      access_token: accessToken,
+    });
+    const accountId = `act_${adSetRes.data?.account_id}`;
+
+    // Upload image
+    const imageHash = await this.uploadImage(imageUrl, accountId, accessToken);
+
+    // Create ad + creative
+    const result = await this.createAd(accountId, accessToken, adSetId, adName, copy, imageHash, pageId, landingUrl);
+
+    // Activate the ad
+    await this.updateAdStatus(result.adId, 'ACTIVE', accessToken);
+
+    return result;
   }
 
   /**

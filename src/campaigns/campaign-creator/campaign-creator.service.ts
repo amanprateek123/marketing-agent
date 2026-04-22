@@ -12,6 +12,7 @@ import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { SlackService } from '../../delivery/slack.service';
+import { CompaniesService } from '../../companies/companies.service';
 import axios from 'axios';
 
 @Injectable()
@@ -20,6 +21,7 @@ export class CampaignCreatorService {
 
   constructor(
     private readonly campaignsService: CampaignsService,
+    private readonly companiesService: CompaniesService,
     private readonly actionLogger: ActionLoggerService,
     private readonly campaignReviewTeam: CampaignReviewTeamService,
     private readonly metaAdsService: MetaAdsService,
@@ -47,6 +49,13 @@ export class CampaignCreatorService {
     this.logger.log(
       `Safety checks passed — running campaign review: tenantId=${company.tenantId} briefId=${brief.briefId}`,
     );
+
+    // ── Auto-create pixel-based audiences if missing ─────────────────────────
+    try {
+      await this.ensurePixelAudiences(company);
+    } catch (err: any) {
+      this.logger.warn(`Audience auto-creation failed (proceeding without): ${err.message}`);
+    }
 
     // ── Campaign Review Team — debate before launch (retry + fallback) ─────
     let finalBudget = brief.suggestedBudget;
@@ -477,6 +486,102 @@ export class CampaignCreatorService {
     );
 
     return (await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).lean().exec()) as any;
+  }
+
+  /**
+   * Auto-create pixel-based audiences if they don't exist on Meta.
+   * Creates: purchasers (180d), website visitors (30d), lookalike 1%.
+   * Stores IDs in product.metaAudiences.
+   */
+  private async ensurePixelAudiences(company: CompanyDocument): Promise<void> {
+    const accessToken = company.meta?.accessToken;
+    const pixelId = company.meta?.pixelId;
+    if (!accessToken || !pixelId) return;
+
+    const product = (company.products ?? []).find((p: any) => p.active);
+    if (!product) return;
+
+    const normalizeId = (id: string) => id.startsWith('act_') ? id : `act_${id}`;
+    const accountId = normalizeId(
+      (company.meta!.accountIds?.length ?? 0) > 0
+        ? company.meta!.accountIds![0]
+        : company.meta!.accountId!,
+    );
+
+    // Fetch existing audiences from Meta
+    let existingAudiences: { id: string; name: string; subtype: string }[] = [];
+    try {
+      const res = await axios.get(`https://graph.facebook.com/v21.0/${accountId}/customaudiences`, {
+        params: { fields: 'id,name,subtype', limit: '200', access_token: accessToken },
+        timeout: 15000,
+      });
+      existingAudiences = res.data?.data ?? [];
+    } catch {
+      return; // Can't check — skip
+    }
+
+    const existsByName = (name: string) => existingAudiences.some(a => a.name === name);
+    const conversionEvent = product.conversionEvent ?? 'Purchase';
+    const brandPrefix = company.name?.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20) ?? 'brand';
+    const newAudiences: { id: string; name: string; type: 'custom' | 'lookalike'; lookalikePercent?: number }[] = [];
+
+    // 1. Purchasers (180 days)
+    const purchasersName = `${brandPrefix}_Purchasers_180d`;
+    let purchasersId = existingAudiences.find(a => a.name === purchasersName)?.id;
+    if (!purchasersId && !existsByName(purchasersName)) {
+      try {
+        purchasersId = await this.metaAdsService.createPixelAudience(
+          accountId, accessToken, purchasersName, pixelId,
+          { event: conversionEvent, retentionDays: 180 },
+        );
+        newAudiences.push({ id: purchasersId, name: purchasersName, type: 'custom' });
+      } catch (err: any) {
+        this.logger.warn(`Failed to create purchasers audience: ${err.message}`);
+      }
+    }
+
+    // 2. Website visitors (30 days)
+    const visitorsName = `${brandPrefix}_Visitors_30d`;
+    if (!existsByName(visitorsName)) {
+      try {
+        const visitorsId = await this.metaAdsService.createPixelAudience(
+          accountId, accessToken, visitorsName, pixelId,
+          { event: 'PageView', retentionDays: 30 },
+        );
+        newAudiences.push({ id: visitorsId, name: visitorsName, type: 'custom' });
+      } catch (err: any) {
+        this.logger.warn(`Failed to create visitors audience: ${err.message}`);
+      }
+    }
+
+    // 3. Lookalike 1% from purchasers
+    const lookalikeSource = purchasersId ?? existingAudiences.find(a => a.name === purchasersName)?.id;
+    const lookalikeName = `${brandPrefix}_Lookalike_1pct`;
+    if (lookalikeSource && !existsByName(lookalikeName)) {
+      try {
+        const lookalikeId = await this.metaAdsService.createLookalikeAudience(
+          accountId, accessToken, lookalikeName, lookalikeSource, 'IN', 0.01,
+        );
+        newAudiences.push({ id: lookalikeId, name: lookalikeName, type: 'lookalike', lookalikePercent: 1 });
+      } catch (err: any) {
+        this.logger.warn(`Failed to create lookalike audience: ${err.message}`);
+      }
+    }
+
+    // Update product.metaAudiences with new audiences (merge, don't replace)
+    if (newAudiences.length > 0) {
+      const existing = product.metaAudiences ?? [];
+      const merged = [...existing];
+      for (const newAud of newAudiences) {
+        if (!merged.some(a => a.id === newAud.id)) {
+          merged.push(newAud);
+        }
+      }
+      await this.companiesService.updateProductAudiences(company.tenantId, product.name, merged);
+      this.logger.log(`Auto-created ${newAudiences.length} audience(s): ${newAudiences.map(a => a.name).join(', ')}`);
+    } else {
+      this.logger.log('All pixel audiences already exist on Meta');
+    }
   }
 
   private buildApprovalMessage(

@@ -25,11 +25,21 @@ export interface AuditSignalPacket {
 
   // Anomalies detected
   anomalies: {
-    highSpendZeroConversions: { adSetName: string; spend: number }[];
-    creativeFatigue: { adName: string; hookStyle: string; ctrDrop: number }[];
-    audienceFatigue: { adSetName: string; frequency: number }[];
+    highSpendZeroConversions: { adSetId: string; adSetName: string; spend: number }[];
+    campaignZeroConversions: boolean;  // total spend > 1x daily budget but 0 conversions
+    creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number }[];
+    audienceFatigue: { adSetId: string; adSetName: string; frequency: number }[];
     stuckInLearning: boolean;
     budgetExhaustionRisk: boolean;
+  };
+
+  // Opportunities — positive signals for scaling actions
+  opportunities: {
+    winningAdSets: { adSetName: string; adSetId: string; roas: number; ctr: number; conversions: number }[];
+    highClicksLowConversions: boolean;   // >100 clicks, <3 conversions → retarget candidate
+    totalClicks: number;
+    readyForRetarget: boolean;           // age >7d + highClicksLowConversions
+    earlyFatigue: { adSetName: string; adSetId: string; ctrDrop: number }[];  // winning ad set with declining CTR → add_creative
   };
 
   // Safety rail breaches — TypeScript only, never overridden
@@ -101,18 +111,19 @@ export class SignalDetectorService {
       : 'no_benchmark';
 
     // ── Anomalies ─────────────────────────────────────────────────────────────
-    // Flag ad sets with zero conversions after spending more than 50% of their daily budget
-    const dailyBudgetThreshold = Math.max(dailyBudget * 0.5, 500);
+    // Flag ad sets with zero conversions after spending more than 2x expected CPA (or 1 day's budget, whichever is higher)
+    const expectedCPA = (company.products ?? []).find(p => p.active)?.performance?.avgCPA ?? dailyBudget;
+    const highSpendThreshold = Math.max(expectedCPA * 2, dailyBudget);
     const highSpendZeroConversions = current.adSets
-      .filter(as => as.conversions === 0 && as.spend > dailyBudgetThreshold)
-      .map(as => ({ adSetName: as.adSetName, spend: as.spend }));
+      .filter(as => as.conversions === 0 && as.spend > highSpendThreshold)
+      .map(as => ({ adSetId: as.adSetId, adSetName: as.adSetName, spend: as.spend }));
 
     const audienceFatigue = current.adSets
       .filter(as => as.frequency > (company.pauseIfFrequencyAbove ?? 4))
-      .map(as => ({ adSetName: as.adSetName, frequency: as.frequency }));
+      .map(as => ({ adSetId: as.adSetId, adSetName: as.adSetName, frequency: as.frequency }));
 
     // Creative fatigue — compare current CTR to stored baseline
-    const creativeFatigue: { adName: string; hookStyle: string; ctrDrop: number }[] = [];
+    const creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number }[] = [];
     for (const adSet of campaign.adSets ?? []) {
       for (const ad of adSet.ads ?? []) {
         if (!ad.ctrBaseline || ad.ctrBaseline === 0) continue;
@@ -123,6 +134,7 @@ export class SignalDetectorService {
         const dropPercent = ((ad.ctrBaseline - currentAd.ctr) / ad.ctrBaseline) * 100;
         if (dropPercent > 35) {
           creativeFatigue.push({
+            adId: ad.metaAdId,
             adName: ad.metaAdId,
             hookStyle: ad.hookStyle ?? 'unknown',
             ctrDrop: Math.round(dropPercent),
@@ -131,10 +143,53 @@ export class SignalDetectorService {
       }
     }
 
+    // Campaign-level: spent more than 1 full day's budget with zero conversions
+    const campaignZeroConversions = current.campaign.conversions === 0 &&
+      dailyBudget > 0 && current.campaign.spend >= dailyBudget;
+
     const stuckInLearning = ageDays > coldStartDays && current.campaign.conversions === 0;
     // budgetExhaustionRisk: spending >15% more than expected for the days elapsed
     const budgetExhaustionRisk = dailyBudget > 0 && expectedSpendToDate > 0 &&
       current.campaign.spend / expectedSpendToDate > 1.15;
+
+    // ── Opportunities ─────────────────────────────────────────────────────────
+    const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
+    const conversionValue = (company.products ?? []).find(p => p.active)?.conversionValue
+      ?? (company.products ?? []).find(p => p.active)?.price ?? 0;
+    const winningAdSets = current.adSets
+      .filter(as => {
+        const adSetROAS = as.spend > 0 && as.conversions > 0 ? (as.conversions * conversionValue) / as.spend : 0;
+        return as.conversions >= 2 && adSetROAS > scaleThreshold;
+      })
+      .map(as => ({
+        adSetName: as.adSetName,
+        adSetId: as.adSetId,
+        roas: as.spend > 0 && as.conversions > 0 ? (as.conversions * conversionValue) / as.spend : 0,
+        ctr: as.ctr,
+        conversions: as.conversions,
+      }));
+
+    const totalClicks = current.campaign.clicks;
+    const highClicksLowConversions = totalClicks > 100 && current.campaign.conversions < 3;
+    const readyForRetarget = ageDays >= 7 && highClicksLowConversions;
+
+    // Early fatigue: winning ad set with CTR starting to decline (add fresh creative before it tanks)
+    const earlyFatigue: { adSetName: string; adSetId: string; ctrDrop: number }[] = [];
+    for (const winner of winningAdSets) {
+      const adSetSnapshots = sorted
+        .flatMap(s => (s.adSets ?? []))
+        .filter((as: any) => as.metaAdSetId === winner.adSetId);
+      if (adSetSnapshots.length >= 2) {
+        const recentCTR = adSetSnapshots[0]?.ctr ?? 0;
+        const olderCTR = adSetSnapshots[adSetSnapshots.length - 1]?.ctr ?? 0;
+        if (olderCTR > 0) {
+          const drop = ((olderCTR - recentCTR) / olderCTR) * 100;
+          if (drop > 15) {
+            earlyFatigue.push({ adSetName: winner.adSetName, adSetId: winner.adSetId, ctrDrop: Math.round(drop) });
+          }
+        }
+      }
+    }
 
     // ── Safety rails ─────────────────────────────────────────────────────────
     const safetyBreaches = {
@@ -156,10 +211,18 @@ export class SignalDetectorService {
       },
       anomalies: {
         highSpendZeroConversions,
+        campaignZeroConversions,
         creativeFatigue,
         audienceFatigue,
         stuckInLearning,
         budgetExhaustionRisk,
+      },
+      opportunities: {
+        winningAdSets,
+        highClicksLowConversions,
+        totalClicks,
+        readyForRetarget,
+        earlyFatigue,
       },
       safetyBreaches,
     };

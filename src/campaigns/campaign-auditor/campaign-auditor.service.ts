@@ -95,6 +95,24 @@ export class CampaignAuditorService {
       return;
     }
 
+    // Skip campaigns less than 1 hour old — no meaningful data yet
+    if (campaign.launchedAt) {
+      const ageHours = (Date.now() - new Date(campaign.launchedAt).getTime()) / (1000 * 60 * 60);
+      if (ageHours < 1) {
+        this.logger.debug(`Skipping campaign ${campaign.metaCampaignId}: launched ${ageHours.toFixed(1)}h ago — too early`);
+        return;
+      }
+    }
+
+    // Skip campaigns older than 45 days — they should be paused or graduated by now
+    if (campaign.launchedAt) {
+      const ageDays = (Date.now() - new Date(campaign.launchedAt).getTime()) / (1000 * 60 * 60 * 24);
+      if (ageDays > 45) {
+        this.logger.debug(`Skipping campaign ${campaign.metaCampaignId}: ${Math.round(ageDays)}d old — too old for active auditing`);
+        return;
+      }
+    }
+
     // ── Fetch live metrics from Meta ──────────────────────────────────────────
     // Match product to the one this campaign is actually selling
     const brief = campaign.briefId
@@ -208,8 +226,14 @@ export class CampaignAuditorService {
 
     // ── Layer 3: Intelligent audit agent ──────────────────────────────────────
     // Short-circuit: skip Claude when all signals are green (saves LLM cost)
+    const hasOpportunities =
+      signals.opportunities.winningAdSets.length > 0 ||
+      signals.opportunities.readyForRetarget ||
+      signals.opportunities.earlyFatigue.length > 0;
+
     const isAllGreen =
       signals.anomalies.highSpendZeroConversions.length === 0 &&
+      !signals.anomalies.campaignZeroConversions &&
       signals.anomalies.creativeFatigue.length === 0 &&
       signals.anomalies.audienceFatigue.length === 0 &&
       !signals.anomalies.stuckInLearning &&
@@ -217,13 +241,16 @@ export class CampaignAuditorService {
       !signals.safetyBreaches.weeklyCapExceeded &&
       !signals.safetyBreaches.campaignCapExceeded &&
       signals.trends.ctrTrend !== 'declining' &&
-      signals.trends.roasTrend !== 'declining';
+      signals.trends.roasTrend !== 'declining' &&
+      !hasOpportunities;
 
     if (isAllGreen) {
+      const age = signals.campaignAge;
+      const conv = full.campaign.conversions;
       const skipVerdict = {
         verdict: 'no_action' as const,
         urgency: null,
-        contextInsight: 'All signals green — agent skipped',
+        contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | CTR ${full.campaign.ctr.toFixed(2)}% | No anomalies — agent skipped`,
         watchSignals: [] as string[],
         recommendedActions: [] as any[],
       };
@@ -242,7 +269,7 @@ export class CampaignAuditorService {
     }
 
     const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).lean().exec();
-    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company);
+    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company, snapshotData);
 
     // Save verdict to snapshot
     snapshotData.verdict = verdict as any;
@@ -254,13 +281,20 @@ export class CampaignAuditorService {
       const gracePeriodHours = company.pipelineConfig?.pauseGracePeriodHours ?? 12;
 
       for (const action of verdict.recommendedActions) {
-        // For replace_creative: pre-compute the replacement hookStyle and store in metrics
-        const metrics: Record<string, any> = {};
+        const metrics: Record<string, any> = { ...(action.params ?? {}) };
+
         if (action.type === 'replace_creative') {
           metrics.replacementHook = this.pickReplacementHook(campaign, action.targetId, company);
           metrics.fatiguedHook = (campaign as any).adSets
             ?.flatMap((as: any) => as.ads ?? [])
             ?.find((a: any) => a.metaAdId === action.targetId)?.hookStyle ?? '';
+        } else if (action.type === 'add_creative') {
+          metrics.hookStyle = action.params?.hookStyle
+            ?? this.pickReplacementHook(campaign, action.targetId, company);
+        } else if (action.type === 'add_adset') {
+          metrics.audienceType = action.params?.audienceType ?? 'retarget';
+          metrics.targeting = action.params?.targeting ?? {};
+          metrics.campaignId = campaign.metaCampaignId;
         }
 
         const created = await this.createPendingAction(campaign, company, {
@@ -399,7 +433,7 @@ export class CampaignAuditorService {
     campaign: CampaignDocument,
     company: CompanyDocument,
     action: {
-      type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative';
+      type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
       targetId: string;
       targetName: string;
       reason: string;
@@ -518,6 +552,151 @@ export class CampaignAuditorService {
               `🔄 *Creative Replacement Queued*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Fatigued Ad:* ${action.targetName} (hook: ${action.metrics?.fatiguedHook || 'unknown'})\n*Replacement Hook:* ${replacementHook}\n\nFatigued ad paused. New creative is being produced automatically.`,
             );
           }
+        } else if (action.type === 'add_creative') {
+          // Add fresh creative to winning ad set — requires approval
+          if (!manuallyApproved) continue;
+          const hookStyle = action.metrics?.hookStyle
+            ?? this.pickReplacementHook(campaign, action.targetId, company);
+
+          action.replacementStatus = 'queued';
+
+          // Queue creative production — same as replace but doesn't pause existing ads
+          await this.creativeQueue.add(
+            `add-creative-${action.targetId}`,
+            {
+              tenantId: company.tenantId,
+              campaignId: campaign._id.toString(),
+              briefId: campaign.briefId,
+              fatiguedAdId: '',  // empty = add new, don't replace
+              fatiguedHook: '',
+              replacementHook: hookStyle,
+              adSetId: action.targetId,  // targetId is the ad set ID for add_creative
+            },
+            { attempts: 2, backoff: { type: 'exponential', delay: 60000 } },
+          );
+
+          this.logger.log(`Add creative queued for ad set ${action.targetId} with hook "${hookStyle}"`);
+        } else if (action.type === 'add_adset') {
+          // Add new ad set (retarget or narrowed) — requires approval
+          if (!manuallyApproved) continue;
+          let audienceType = action.metrics?.audienceType ?? 'retarget';
+          const targeting = action.metrics?.targeting ?? {};
+
+          // For retarget: find an existing retarget/custom audience from the product
+          let retargetAudienceId: string | undefined;
+          if (audienceType === 'retarget') {
+            const product = (company.products ?? []).find((p: any) => p.active);
+            const retargetAud = (product?.metaAudiences ?? []).find((a: any) =>
+              a.type === 'custom' || a.type === 'retarget',
+            );
+            if (retargetAud) {
+              retargetAudienceId = retargetAud.id;
+            } else {
+              // No retarget audience available — fall back to advantage_plus
+              this.logger.warn('No retarget audience found — falling back to advantage_plus for new ad set');
+              audienceType = 'advantage_plus';
+            }
+          }
+
+          // Find the best-performing ad's copy variant to reuse in the new ad set
+          const bestAdSet = (campaign as any).adSets?.find((as: any) =>
+            as.ads?.some((a: any) => a.metrics?.conversions > 0),
+          );
+          const bestVariantIndex = bestAdSet?.ads
+            ?.sort((a: any, b: any) => (b.metrics?.conversions ?? 0) - (a.metrics?.conversions ?? 0))[0]
+            ?.copyVariantIndex ?? 0;
+
+          // Load creative package for the winning variant's copy + image
+          const creativePackage = campaign.creativePackageId
+            ? await this.campaignsService.findCreativePackage(campaign.creativePackageId)
+            : null;
+          const bestVariant = (creativePackage as any)?.copyVariants?.[bestVariantIndex];
+          const bestImage = ((creativePackage as any)?.images ?? []).find((img: any) => img.variantIndex === bestVariantIndex);
+
+          if (!bestVariant) {
+            this.logger.warn(`No copy variant ${bestVariantIndex} found for add_adset — skipping`);
+            continue;
+          }
+
+          const adSetName = `${audienceType.toUpperCase()}_${new Date().toISOString().split('T')[0]}`;
+
+          // Steal 20% budget from existing ad sets proportionally (total spend stays the same)
+          const newAdSetPercent = 20;
+          const existingAdSets = (campaign as any).adSets ?? [];
+          const activeAdSets = existingAdSets.filter((as: any) => as.status === 'active');
+          const totalExistingPercent = activeAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
+
+          if (totalExistingPercent > 0) {
+            const scaleFactor = (totalExistingPercent - newAdSetPercent) / totalExistingPercent;
+            for (const as of activeAdSets) {
+              const oldPercent = as.budgetPercent ?? 0;
+              as.budgetPercent = Math.round(oldPercent * scaleFactor);
+              // Update budget on Meta
+              const newBudget = campaign.budget * (as.budgetPercent / 100);
+              await this.metaAds.updateAdSetBudget(as.metaAdSetId, newBudget, company.meta!.accessToken);
+            }
+            this.logger.log(`Redistributed budget: existing ad sets scaled to ${Math.round(scaleFactor * 100)}% to make room for ${newAdSetPercent}%`);
+          }
+
+          // Create new ad set via Meta API
+          const newAdSetId = await this.metaAds.createAdSetInCampaign(
+            campaign.metaCampaignId,
+            company.meta!.accessToken,
+            {
+              name: adSetName,
+              budgetPercent: newAdSetPercent,
+              audienceType,
+              optimizationGoal: 'OFFSITE_CONVERSIONS',
+              ads: [bestVariantIndex],
+              ...(retargetAudienceId ? { metaAudienceId: retargetAudienceId } : {}),
+              ...(audienceType !== 'retarget' ? targeting : {}),
+            },
+            campaign.budget,
+            (campaign as any).campaignConfig?.conversionEvent ?? 'Purchase',
+            company.meta!.pixelId,
+          );
+
+          // Create an ad inside the new ad set using winning variant
+          let newAdId = '';
+          if (bestImage?.imageUrl) {
+            const product = (company.products ?? []).find((p: any) => p.active);
+            try {
+              const { adId } = await this.metaAds.createAdInAdSet(
+                newAdSetId,
+                company.meta!.accessToken,
+                `${adSetName} — Variant ${bestVariantIndex + 1}`,
+                { primaryText: bestVariant.primaryText, headline: bestVariant.headline, cta: bestVariant.cta },
+                bestImage.imageUrl,
+                company.meta!.pageId ?? '',
+                product?.landingUrl ?? '',
+              );
+              newAdId = adId;
+            } catch (adErr: any) {
+              this.logger.error(`Failed to create ad in new ad set: ${adErr.message}`);
+            }
+          }
+
+          // Activate the ad set
+          await this.metaAds.updateAdStatus(newAdSetId, 'ACTIVE', company.meta!.accessToken);
+
+          // Track in campaign document
+          const adSets = existingAdSets;
+          adSets.push({
+            metaAdSetId: newAdSetId,
+            name: adSetName,
+            budgetPercent: newAdSetPercent,
+            audienceType,
+            status: 'active',
+            ads: newAdId ? [{
+              metaAdId: newAdId,
+              copyVariantIndex: bestVariantIndex,
+              hookStyle: bestVariant.hookStyle ?? '',
+              status: 'active',
+            }] : [],
+          });
+
+          await this.campaignModel.updateOne({ _id: campaign._id }, { adSets });
+          this.logger.log(`New ${audienceType} ad set created: ${newAdSetId}${newAdId ? ` with ad ${newAdId}` : ' (no ad — image missing)'}`);
         }
 
         action.status = 'executed';

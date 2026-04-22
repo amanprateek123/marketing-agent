@@ -15,10 +15,10 @@ interface ReplacementJobData {
   tenantId: string;
   campaignId: string;
   briefId: string;
-  fatiguedAdId: string;
+  fatiguedAdId: string;    // empty string = add_creative mode (create new ad, don't replace)
   fatiguedHook: string;
   replacementHook: string;
-  adSetId: string;
+  adSetId: string;         // target ad set for add_creative mode
 }
 
 @Processor(QUEUES.CREATIVE_PRODUCTION)
@@ -40,22 +40,22 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
   async process(job: Job<ReplacementJobData>): Promise<void> {
     const { tenantId, campaignId, briefId, fatiguedAdId, fatiguedHook, replacementHook, adSetId } = job.data;
-    this.logger.log(`Creative replacement starting: tenantId=${tenantId} ad=${fatiguedAdId} hook=${replacementHook}`);
+    const isAddMode = !fatiguedAdId; // add_creative vs replace_creative
+    this.logger.log(`Creative ${isAddMode ? 'addition' : 'replacement'} starting: tenantId=${tenantId} hook=${replacementHook}`);
 
     const company = await this.companiesService.findByTenantId(tenantId);
 
-    // Helper to update replacementStatus on the pending action
     const updateReplacementStatus = async (status: 'producing' | 'complete' | 'failed') => {
-      await this.campaignModel.updateOne(
-        { _id: campaignId, 'pendingActions.targetId': fatiguedAdId, 'pendingActions.type': 'replace_creative' },
-        { $set: { 'pendingActions.$.replacementStatus': status } },
-      );
+      const filter = isAddMode
+        ? { _id: campaignId, 'pendingActions.type': 'add_creative', 'pendingActions.targetId': adSetId }
+        : { _id: campaignId, 'pendingActions.targetId': fatiguedAdId, 'pendingActions.type': 'replace_creative' };
+      await this.campaignModel.updateOne(filter, { $set: { 'pendingActions.$.replacementStatus': status } });
     };
 
-    // Load original brief to rebuild BriefData with new hook
+    // Load original brief
     const brief = await this.briefModel.findOne({ tenantId, briefId }).lean().exec();
     if (!brief) {
-      this.logger.error(`Brief ${briefId} not found — cannot produce replacement`);
+      this.logger.error(`Brief ${briefId} not found — cannot produce creative`);
       await updateReplacementStatus('failed');
       return;
     }
@@ -63,13 +63,13 @@ export class CreativeReplacementProcessor extends WorkerHost {
     await updateReplacementStatus('producing');
 
     // Produce new creative with the replacement hook
-    const replacementBriefId = `${briefId}-replace-${Date.now()}`;
+    const replacementBriefId = `${briefId}-${isAddMode ? 'add' : 'replace'}-${Date.now()}`;
     let creativePackage: any;
     try {
       creativePackage = await this.creativeProducer.produce(
         tenantId,
         replacementBriefId,
-        `replace-${fatiguedAdId}`,
+        `${isAddMode ? 'add' : 'replace'}-${fatiguedAdId || adSetId}`,
         {
           topic: (brief as any).topic,
           angle: (brief as any).angle,
@@ -84,18 +84,17 @@ export class CreativeReplacementProcessor extends WorkerHost {
         },
       );
     } catch (err: any) {
-      this.logger.error(`Creative production failed for ad ${fatiguedAdId}: ${err.message}`);
+      this.logger.error(`Creative production failed: ${err.message}`);
       await updateReplacementStatus('failed');
       return;
     }
 
     if (!creativePackage || creativePackage.status === 'failed') {
-      this.logger.error(`Creative production failed for replacement of ad ${fatiguedAdId}`);
+      this.logger.error(`Creative production failed for ${isAddMode ? 'add' : 'replace'}`);
       await updateReplacementStatus('failed');
       return;
     }
 
-    // Upload new creative to Meta and swap on the fatigued ad
     const accessToken = company.meta?.accessToken;
     if (!accessToken) {
       this.logger.error(`No Meta access token for tenantId=${tenantId}`);
@@ -104,35 +103,81 @@ export class CreativeReplacementProcessor extends WorkerHost {
     }
 
     const selectedIndex = creativePackage.copyPackage?.selectedIndex ?? 0;
-    const newCreativeId = creativePackage.metaCreativeId;
-
-    if (newCreativeId) {
-      await this.metaAds.updateAdCreative(fatiguedAdId, newCreativeId, accessToken);
-      await this.metaAds.updateAdStatus(fatiguedAdId, 'ACTIVE', accessToken);
-      this.logger.log(`Ad ${fatiguedAdId} creative swapped to ${newCreativeId}`);
-    }
-
-    // Update campaign document — mark ad with new hookStyle + replacement history
     const campaign = await this.campaignModel.findOne({ _id: campaignId }).exec();
-    if (campaign) {
-      for (const as of (campaign as any).adSets ?? []) {
-        const ad = as.ads?.find((a: any) => a.metaAdId === fatiguedAdId);
-        if (ad) {
-          if (!ad.replacementHistory) ad.replacementHistory = [];
-          ad.replacementHistory.push({
-            oldHook: fatiguedHook || ad.hookStyle || '',
-            newHook: replacementHook,
-            replacedAt: new Date(),
-            reason: 'Creative fatigue — CTR drop triggered replacement',
-          });
 
-          ad.hookStyle = replacementHook;
-          ad.status = newCreativeId ? 'active' : 'pending_creative_swap';
-          ad.ctrBaseline = undefined;
-          ad.baselineSetAt = undefined;
-        }
+    if (isAddMode) {
+      // ── ADD MODE: Create a new ad in the target ad set ──────────────────────
+      const selectedVariant = creativePackage.copyVariants?.[selectedIndex];
+      const selectedImage = (creativePackage.images ?? []).find((img: any) => img.variantIndex === selectedIndex);
+
+      if (!selectedVariant || !selectedImage?.imageUrl) {
+        this.logger.error(`No variant or image for add_creative — variant: ${!!selectedVariant}, image: ${!!selectedImage?.imageUrl}`);
+        await updateReplacementStatus('failed');
+        return;
       }
-      await this.campaignModel.updateOne({ _id: campaignId }, { adSets: (campaign as any).adSets });
+
+      try {
+        const product = (company.products ?? []).find((p: any) => p.active);
+        const { adId } = await this.metaAds.createAdInAdSet(
+          adSetId,
+          accessToken,
+          `Ad (${replacementHook}) — added ${new Date().toISOString().split('T')[0]}`,
+          { primaryText: selectedVariant.primaryText, headline: selectedVariant.headline, cta: selectedVariant.cta },
+          selectedImage.imageUrl,
+          company.meta?.pageId ?? '',
+          product?.landingUrl ?? '',
+        );
+
+        // Add the new ad to the campaign document
+        if (campaign) {
+          const targetAdSet = (campaign as any).adSets?.find((as: any) => as.metaAdSetId === adSetId);
+          if (targetAdSet) {
+            if (!targetAdSet.ads) targetAdSet.ads = [];
+            targetAdSet.ads.push({
+              metaAdId: adId,
+              copyVariantIndex: selectedIndex,
+              hookStyle: replacementHook,
+              status: 'active',
+            });
+            await this.campaignModel.updateOne({ _id: campaignId }, { adSets: (campaign as any).adSets });
+          }
+        }
+
+        this.logger.log(`New ad created in ad set ${adSetId}: adId=${adId} hook=${replacementHook}`);
+      } catch (err: any) {
+        this.logger.error(`Failed to create ad in ad set: ${err.message}`);
+        await updateReplacementStatus('failed');
+        return;
+      }
+    } else {
+      // ── REPLACE MODE: Swap creative on fatigued ad ─────────────────────────
+      const newCreativeId = creativePackage.metaCreativeId;
+
+      if (newCreativeId) {
+        await this.metaAds.updateAdCreative(fatiguedAdId, newCreativeId, accessToken);
+        await this.metaAds.updateAdStatus(fatiguedAdId, 'ACTIVE', accessToken);
+        this.logger.log(`Ad ${fatiguedAdId} creative swapped to ${newCreativeId}`);
+      }
+
+      if (campaign) {
+        for (const as of (campaign as any).adSets ?? []) {
+          const ad = as.ads?.find((a: any) => a.metaAdId === fatiguedAdId);
+          if (ad) {
+            if (!ad.replacementHistory) ad.replacementHistory = [];
+            ad.replacementHistory.push({
+              oldHook: fatiguedHook || ad.hookStyle || '',
+              newHook: replacementHook,
+              replacedAt: new Date(),
+              reason: 'Creative fatigue — CTR drop triggered replacement',
+            });
+            ad.hookStyle = replacementHook;
+            ad.status = newCreativeId ? 'active' : 'pending_creative_swap';
+            ad.ctrBaseline = undefined;
+            ad.baselineSetAt = undefined;
+          }
+        }
+        await this.campaignModel.updateOne({ _id: campaignId }, { adSets: (campaign as any).adSets });
+      }
     }
 
     await updateReplacementStatus('complete');
@@ -140,14 +185,12 @@ export class CreativeReplacementProcessor extends WorkerHost {
     // Notify Slack
     const slackWebhook = company.delivery?.slackWebhook;
     if (slackWebhook) {
-      const swapStatus = newCreativeId ? 'swapped and reactivated' : 'produced (pending manual swap)';
-      await this.slackService.sendMessage(
-        slackWebhook,
-        tenantId,
-        `✅ *Creative Replacement Complete*\n\n*Campaign:* ${campaign?.name || campaignId}\n*Ad:* ${fatiguedAdId}\n*Old Hook:* ${fatiguedHook || 'unknown'} → *New Hook:* ${replacementHook}\n*Status:* ${swapStatus}\n*Selected Variant:* ${selectedIndex}`,
-      );
+      const msg = isAddMode
+        ? `✅ *New Creative Added*\n\n*Campaign:* ${campaign?.name || campaignId}\n*Ad Set:* ${adSetId}\n*Hook:* ${replacementHook}\n*Variant:* ${selectedIndex}\n\nNew ad is live alongside existing ads.`
+        : `✅ *Creative Replacement Complete*\n\n*Campaign:* ${campaign?.name || campaignId}\n*Ad:* ${fatiguedAdId}\n*Old Hook:* ${fatiguedHook || 'unknown'} → *New Hook:* ${replacementHook}\n*Variant:* ${selectedIndex}`;
+      await this.slackService.sendMessage(slackWebhook, tenantId, msg);
     }
 
-    this.logger.log(`Creative replacement done: ad=${fatiguedAdId} hook=${replacementHook}`);
+    this.logger.log(`Creative ${isAddMode ? 'addition' : 'replacement'} done: hook=${replacementHook}`);
   }
 }

@@ -218,16 +218,16 @@ export class Campaign {
   @Prop({ type: [Object], default: [] })
   pendingActions: {
     actionId: string;
-    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative';
-    targetId: string;                 // Meta ad/adset ID
+    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
+    targetId: string;                 // Meta ad/adset/campaign ID
     targetName: string;
     reason: string;
-    metrics: Record<string, any>;     // relevant metrics at time of recommendation
+    metrics: Record<string, any>;     // relevant metrics + action-specific params
     recommendedAt: Date;
     executeAt: Date;                  // recommendedAt + gracePeriod
     status: 'pending' | 'executed' | 'overridden' | 'expired';
     executedAt?: Date;
-    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed';  // replace_creative only
+    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed';  // replace/add creative only
   }[];
 }
 

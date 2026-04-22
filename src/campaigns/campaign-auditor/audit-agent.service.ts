@@ -11,35 +11,60 @@ export interface AuditVerdict {
   contextInsight: string;       // Why this verdict — the "so what" in plain English
   watchSignals: string[];        // Signals to monitor next audit
   recommendedActions: {
-    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative';
+    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
     targetId: string;
     targetName: string;
     reason: string;
     priority: 'high' | 'medium' | 'low';
+    params?: Record<string, any>;  // action-specific params (e.g. hookStyle, audienceType, budgetShift)
   }[];
 }
 
-const DEFAULT_AUDIT_SYSTEM_PROMPT = `You are a performance marketing analyst auditing a live Meta Ads campaign.
+const DEFAULT_AUDIT_SYSTEM_PROMPT = `You are a senior performance marketing analyst at AstroTalk auditing a live Meta Ads campaign. You have full visibility at CAMPAIGN, AD SET, and AD level — just like Ads Manager.
 
 You receive:
-1. Campaign metadata (age, budget, objective, audience)
-2. Current metrics from Meta (spend, CTR, ROAS, conversions, frequency)
-3. Trend signals from the last 3 audits (improving/stable/declining)
-4. Benchmarks from this company's historical learnings
-5. Detected anomalies (high spend zero conversions, creative fatigue, audience fatigue)
+1. Campaign-level metrics (total spend, CTR, ROAS, conversions)
+2. Per-ad-set breakdown (each ad set's spend, conversions, CTR, CPA, ROAS, frequency, audience type)
+3. Per-ad breakdown (each ad's spend, conversions, CTR, CPC, hookStyle)
+4. Hook style performance summary (which creative angle is working)
+5. Funnel diagnostic (high clicks + zero conversions = landing page problem, not creative)
+6. Trend signals, benchmarks, anomalies, and opportunities
 
 Your job is to produce a structured verdict:
 - "no_action": Campaign is performing within expectations, no changes needed
 - "watch": Concerning signals but not yet critical — flag for next audit
-- "act": Clear problem or opportunity requiring immediate human review
+- "act": Clear problem OR opportunity requiring action
+
+PROBLEM actions (cut waste):
+- "pause_ad": Pause a specific ad with zero conversions and high spend
+- "pause_adset": Pause an entire ad set burning budget with no return
+- "replace_creative": Swap out a fatigued creative (CTR dropped >35% from baseline)
+
+GROWTH actions (scale winners):
+- "scale_adset": Increase budget on a winning ad set (ROAS > 1.5x, 2+ conversions)
+- "add_creative": Add a FRESH ad to a winning ad set that shows early fatigue (CTR declining but still converting). Keep existing ads running — this adds alongside them, not replaces.
+- "add_adset": Add a new ad set to the campaign. Use when: (a) retargeting — campaign has >100 clicks but low conversions after 7+ days, add retarget ad set for website visitors; (b) narrowing — winning demographic identified, add targeted ad set
 
 Guidelines:
-- During learning phase (first 14 days): be tolerant of low CTR/ROAS unless spend is very high
-- Only recommend "act" if there is clear evidence of waste or a scaling opportunity
-- Creative fatigue with >35% CTR drop is always act-worthy
-- High spend + zero conversions = always act with immediate urgency
-- Improving ROAS with 3+ conversions = act with scale recommendation
-- Pure learning phase campaigns: watch unless major anomalies
+TIMING RULES — respect these strictly:
+- Day 0-3 (first 72h): WATCH ONLY. Do NOT recommend pause or act. Zero conversions is NORMAL — the campaign hasn't spent enough for a statistically meaningful result. Only exception: safety rail breaches (budget cap, weekly cap).
+- Day 3-7: Watch + pause losing ads/ad sets (zero conversions after 3x CPA spent on that ad set). No growth actions yet.
+- Day 7+: Growth actions unlock (add_creative, add_adset, scale_adset).
+
+ACTION TRIGGERS:
+- Creative fatigue with >35% CTR drop → replace_creative (day 3+)
+- Winning ad set with 15-35% CTR decline but still converting → add_creative (day 7+)
+- >100 clicks + <3 conversions after 7 days → add_adset retarget (day 7+)
+- Ad set at >1.5x ROAS with 2+ conversions → scale_adset (day 7+)
+- Ad set spent >3x expected CPA with zero conversions → pause_adset (day 3+, NOT before)
+- NEVER pause an entire campaign in the first 72 hours unless a safety rail is breached
+
+ANALYSIS FRAMEWORK (check in this order):
+1. FUNNEL CHECK: High CTR + zero conversions = landing page / pixel problem, NOT creative or audience. Flag this clearly — don't recommend pausing ads when the issue is post-click.
+2. AD SET LEVEL: Compare ad sets. Which is winning? Which is bleeding? At day 3+, pause bleeders. At day 7+, scale winners.
+3. AD LEVEL: Within each ad set, which hookStyle has the best CTR and conversions? Which ads are dead weight? Pause individual ads before pausing entire ad sets.
+4. CREATIVE DIAGNOSIS: If one hookStyle consistently outperforms across ad sets, recommend add_creative with that style in other ad sets. If a hook is dying everywhere, it's the creative, not the audience.
+5. BUDGET EFFICIENCY: Is spend concentrated on the right ads/ad sets, or is Meta spreading thin across losers?
 
 Output ONLY valid JSON in this exact format:
 {
@@ -49,11 +74,15 @@ Output ONLY valid JSON in this exact format:
   "watchSignals": ["signal 1", "signal 2"],
   "recommendedActions": [
     {
-      "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative",
-      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name",
+      "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative" | "add_creative" | "add_adset",
+      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name. For add_adset use the campaign ID.",
       "targetName": "human readable name",
       "reason": "specific reason for this action",
-      "priority": "high" | "medium" | "low"
+      "priority": "high" | "medium" | "low",
+      "params": {
+        "// For add_creative": "hookStyle: string (new hook to use)",
+        "// For add_adset": "audienceType: 'retarget' | 'narrowed', targeting: { ageMin, ageMax, geoLocations }"
+      }
     }
   ]
 }`;
@@ -69,11 +98,12 @@ export class AuditAgentService {
     signals: AuditSignalPacket,
     snapshots: AuditSnapshotDocument[],
     company: CompanyDocument,
+    liveSnapshot?: any,  // snapshotData with per-ad-set and per-ad metrics
   ): Promise<AuditVerdict> {
     const learnings = company.learnings;
     const caseStudies = (company as any).caseStudies ?? [];
 
-    const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies);
+    const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot);
     const systemPrompt = (company.prompts as any)?.campaignAuditor || DEFAULT_AUDIT_SYSTEM_PROMPT;
 
     try {
@@ -100,35 +130,80 @@ export class AuditAgentService {
     company: CompanyDocument,
     learnings: any,
     caseStudies: any[],
+    liveSnapshot?: any,
   ): string {
     const age = signals.campaignAge;
     const curr = campaign;
 
-    // Recent snapshot history for context
+    // ── Per-ad-set breakdown (like Ads Manager view) ──────────────────────────
+    const adSetLines = (liveSnapshot?.adSets ?? []).map((as: any) => {
+      const verdict = as.conversions > 0 && as.roas > 1.5 ? '🟢 WINNING'
+        : as.conversions === 0 && as.spend > 500 ? '🔴 ZERO CONV'
+        : as.roas > 0 && as.roas < 0.8 ? '🟡 LOW ROAS'
+        : '⚪ LEARNING';
+      return `  ${verdict} | ${as.name} [${as.metaAdSetId}]
+    Audience: ${as.audienceType || 'advantage_plus'} | Spend: ₹${as.spend?.toFixed(0)} | Conv: ${as.conversions} | CTR: ${as.ctr?.toFixed(2)}% | CPA: ₹${as.cpa?.toFixed(0) || '∞'} | ROAS: ${as.roas?.toFixed(2) || '0.00'}x | Freq: ${as.frequency?.toFixed(1)}`;
+    }).join('\n');
+
+    // ── Per-ad breakdown (creative performance) ──────────────────────────────
+    const adLines = (liveSnapshot?.ads ?? []).map((ad: any) => {
+      const hookLabel = ad.hookStyle ? `(${ad.hookStyle})` : '';
+      const convLabel = ad.conversions > 0 ? `🟢 ${ad.conversions} conv` : ad.spend > 300 ? '🔴 0 conv' : '⚪ testing';
+      return `  ${ad.name} ${hookLabel} [${ad.metaAdId}] → adSet ${ad.adSetId}
+    ${convLabel} | Spend: ₹${ad.spend?.toFixed(0)} | CTR: ${ad.ctr?.toFixed(2)}% | CPC: ₹${ad.cpc?.toFixed(0)}`;
+    }).join('\n');
+
+    // ── Hook style performance summary ───────────────────────────────────────
+    const hookMap = new Map<string, { spend: number; clicks: number; conversions: number; impressions: number }>();
+    for (const ad of liveSnapshot?.ads ?? []) {
+      const hook = ad.hookStyle || 'unknown';
+      const entry = hookMap.get(hook) ?? { spend: 0, clicks: 0, conversions: 0, impressions: 0 };
+      entry.spend += ad.spend ?? 0;
+      entry.conversions += ad.conversions ?? 0;
+      // Estimate clicks from CTR and impressions if not directly available
+      hookMap.set(hook, entry);
+    }
+    const hookSummary = [...hookMap.entries()]
+      .filter(([h]) => h !== 'unknown')
+      .map(([hook, d]) => `  ${hook}: ₹${d.spend.toFixed(0)} spent, ${d.conversions} conversions`)
+      .join('\n');
+
+    // ── Diagnostic: creative problem vs funnel problem ────────────────────────
+    const totalClicks = signals.opportunities.totalClicks;
+    const totalConv = curr.conversions ?? 0;
+    const clickToConvRate = totalClicks > 0 ? (totalConv / totalClicks * 100).toFixed(1) : '0.0';
+    const diagnosticLine = totalClicks > 50 && totalConv === 0
+      ? `⚠ FUNNEL ISSUE: ${totalClicks} clicks but 0 conversions — CTR is healthy (${curr.ctr?.toFixed(2)}%), problem is likely post-click (landing page, pixel firing, checkout flow)`
+      : totalClicks > 50 && totalConv > 0
+      ? `Click→Conv rate: ${clickToConvRate}% (${totalConv}/${totalClicks})`
+      : '';
+
+    // ── Anomalies ────────────────────────────────────────────────────────────
+    const anomalies = signals.anomalies;
+    const anomalyLines: string[] = [];
+    if (anomalies.highSpendZeroConversions.length > 0) {
+      anomalyLines.push(`HIGH SPEND ZERO CONVERSIONS: ${anomalies.highSpendZeroConversions.map(a => `${a.adSetName} [${a.adSetId}] (₹${a.spend})`).join(', ')}`);
+    }
+    if (anomalies.creativeFatigue.length > 0) {
+      anomalyLines.push(`CREATIVE FATIGUE: ${anomalies.creativeFatigue.map(a => `${a.adId} [${a.hookStyle}] CTR dropped ${a.ctrDrop}%`).join(', ')}`);
+    }
+    if (anomalies.audienceFatigue.length > 0) {
+      anomalyLines.push(`AUDIENCE FATIGUE: ${anomalies.audienceFatigue.map(a => `${a.adSetName} [${a.adSetId}] freq=${a.frequency.toFixed(1)}`).join(', ')}`);
+    }
+    if (anomalies.campaignZeroConversions) anomalyLines.push(`ZERO CONVERSIONS: ₹${campaign.spend?.toFixed(0) ?? 0} spent (>1 day budget) with 0 conversions`);
+    if (anomalies.stuckInLearning) anomalyLines.push('STUCK IN LEARNING: 0 conversions after learning phase');
+    if (anomalies.budgetExhaustionRisk) anomalyLines.push('BUDGET EXHAUSTION: spending >15% above expected daily pace');
+
+    // ── Snapshot history ─────────────────────────────────────────────────────
     const snapshotSummary = snapshots
       .slice(0, 3)
       .map((s, i) => {
         const d = new Date(s.auditedAt);
-        return `  Audit ${i + 1} (${d.toLocaleDateString()}): spend=₹${s.metrics.spend.toFixed(0)} ctr=${s.metrics.ctr.toFixed(2)}% roas=${s.metrics.roas.toFixed(2)}x conversions=${s.metrics.conversions}`;
+        return `  Audit ${i + 1} (${d.toLocaleDateString()}): spend=₹${s.metrics.spend.toFixed(0)} ctr=${s.metrics.ctr.toFixed(2)}% roas=${s.metrics.roas.toFixed(2)}x conv=${s.metrics.conversions}`;
       })
       .join('\n') || '  No prior snapshots';
 
-    // Build ad set anomaly detail
-    const anomalies = signals.anomalies;
-    const anomalyLines: string[] = [];
-    if (anomalies.highSpendZeroConversions.length > 0) {
-      anomalyLines.push(`HIGH SPEND ZERO CONVERSIONS: ${anomalies.highSpendZeroConversions.map(a => `${a.adSetName} (₹${a.spend})`).join(', ')}`);
-    }
-    if (anomalies.creativeFatigue.length > 0) {
-      anomalyLines.push(`CREATIVE FATIGUE: ${anomalies.creativeFatigue.map(a => `${a.adName} [${a.hookStyle}] CTR dropped ${a.ctrDrop}%`).join(', ')}`);
-    }
-    if (anomalies.audienceFatigue.length > 0) {
-      anomalyLines.push(`AUDIENCE FATIGUE: ${anomalies.audienceFatigue.map(a => `${a.adSetName} freq=${a.frequency.toFixed(1)}`).join(', ')}`);
-    }
-    if (anomalies.stuckInLearning) anomalyLines.push('STUCK IN LEARNING: 0 conversions after learning phase');
-    if (anomalies.budgetExhaustionRisk) anomalyLines.push('BUDGET EXHAUSTION: spending >15% above expected daily pace');
-
-    // Relevant case studies
+    // ── Case studies ─────────────────────────────────────────────────────────
     const relevantCases = caseStudies
       .filter((cs: any) => cs.verdict === 'act' || cs.outcome === 'paused' || cs.outcome === 'scaled')
       .slice(0, 3)
@@ -138,40 +213,49 @@ export class AuditAgentService {
     return `=== CAMPAIGN AUDIT ===
 
 CAMPAIGN: ${campaign.name ?? campaign.metaCampaignId}
+Meta Campaign ID: ${campaign.metaCampaignId}
 Objective: ${campaign.objective}
 Age: ${age.hours}h (${age.days} days) | ${age.inLearningPhase ? 'IN LEARNING PHASE' : 'POST LEARNING PHASE'}
 Daily Budget: ₹${campaign.budget}/day | Spend pace: ${signals.trends.spendPace}
+Historical CPA: ₹${(company.products ?? []).find((p: any) => p.active)?.performance?.avgCPA ?? 'unknown'}
 
-CURRENT METRICS (live from Meta):
-  Spend: ₹${curr.spend?.toFixed(0) ?? 0}
+━━━ CAMPAIGN METRICS (live) ━━━
+  Spend: ₹${curr.spend?.toFixed(0) ?? 0} | Impressions: ${curr.impressions ?? 0} | Clicks: ${totalClicks}
   CTR: ${curr.ctr?.toFixed(2) ?? 0}% | CPC: ₹${curr.cpc?.toFixed(0) ?? 0}
-  Conversions: ${curr.conversions ?? 0} | ROAS: ${curr.roas?.toFixed(2) ?? 0}x
+  Conversions: ${totalConv} | ROAS: ${curr.roas?.toFixed(2) ?? 0}x | Frequency: ${curr.frequency?.toFixed(1) ?? 0}
+${diagnosticLine ? `\n  ${diagnosticLine}` : ''}
 
-TREND SIGNALS (last 3 audits):
-  CTR trend: ${signals.trends.ctrTrend}
-  ROAS trend: ${signals.trends.roasTrend}
-  Frequency trend: ${signals.trends.frequencyTrend}
+━━━ AD SET BREAKDOWN (${(liveSnapshot?.adSets ?? []).length} ad sets) ━━━
+${adSetLines || '  No ad set data'}
 
-BENCHMARKS (from ${company.name} learnings):
+━━━ AD / CREATIVE BREAKDOWN (${(liveSnapshot?.ads ?? []).length} ads) ━━━
+${adLines || '  No ad data'}
+
+${hookSummary ? `━━━ HOOK STYLE PERFORMANCE ━━━\n${hookSummary}\n` : ''}
+━━━ TRENDS (last 3 audits) ━━━
+  CTR: ${signals.trends.ctrTrend} | ROAS: ${signals.trends.roasTrend} | Frequency: ${signals.trends.frequencyTrend}
+
+━━━ BENCHMARKS (${company.name}) ━━━
   Expected CTR: ${signals.benchmarks.expectedCTRRange ? `${signals.benchmarks.expectedCTRRange.min.toFixed(2)}–${signals.benchmarks.expectedCTRRange.max.toFixed(2)}%` : 'no benchmark'}
-  Current CTR vs benchmark: ${signals.benchmarks.currentCTRVsBenchmark}
+  CTR vs benchmark: ${signals.benchmarks.currentCTRVsBenchmark}
   Best audience type: ${signals.benchmarks.bestAudienceType ?? 'unknown'}
+  Winning hooks: ${learnings?.creative?.winningHooks?.slice(0, 3).join(', ') ?? 'none'}
 
-ANOMALIES DETECTED:
+━━━ ANOMALIES ━━━
 ${anomalyLines.length > 0 ? anomalyLines.map(l => `  ⚠ ${l}`).join('\n') : '  None'}
 
-AUDIT HISTORY (${snapshots.length} snapshots):
+━━━ OPPORTUNITIES ━━━
+${signals.opportunities.winningAdSets.length > 0 ? signals.opportunities.winningAdSets.map(w => `  ✅ WINNING: ${w.adSetName} (${w.adSetId}) — ROAS ${w.roas.toFixed(2)}x, CTR ${w.ctr.toFixed(2)}%, ${w.conversions} conv`).join('\n') : '  No winning ad sets yet'}
+${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
+${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
+
+━━━ AUDIT HISTORY (${snapshots.length} snapshots) ━━━
 ${snapshotSummary}
 
-COMPANY LEARNINGS SUMMARY:
-  Winning hooks: ${learnings?.creative?.winningHooks?.slice(0, 3).join(', ') ?? 'none'}
-  Budget insights: ${learnings?.campaign?.budgetInsights?.slice(0, 2).join('; ') ?? 'none'}
-  Timing insights: ${learnings?.campaign?.timingInsights?.slice(0, 2).join('; ') ?? 'none'}
-
-${relevantCases ? `RELEVANT CASE STUDIES:\n${relevantCases}\n` : ''}
+${relevantCases ? `━━━ CASE STUDIES ━━━\n${relevantCases}\n` : ''}
 === END AUDIT DATA ===
 
-Based on all of the above, produce your verdict JSON.`;
+Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
   }
 
   private parseVerdict(output: string): AuditVerdict {
@@ -186,15 +270,16 @@ Based on all of the above, produce your verdict JSON.`;
         contextInsight: typeof parsed.contextInsight === 'string' ? parsed.contextInsight : '',
         watchSignals: Array.isArray(parsed.watchSignals) ? parsed.watchSignals : [],
         recommendedActions: Array.isArray(parsed.recommendedActions)
-          ? parsed.recommendedActions.filter((a: any) => {
+          ? parsed.recommendedActions
+            .filter((a: any) => {
               if (!a.type || !a.targetId) return false;
-              // Reject non-numeric targetIds — Claude sometimes returns slugs instead of Meta IDs
               if (!/^\d+$/.test(String(a.targetId))) {
                 this.logger.warn(`Dropping action with invalid targetId: "${a.targetId}" (expected numeric Meta ID)`);
                 return false;
               }
               return true;
             })
+            .map((a: any) => ({ ...a, params: a.params ?? {} }))
           : [],
       };
     } catch (err: any) {
