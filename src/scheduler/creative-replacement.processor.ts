@@ -138,6 +138,12 @@ export class CreativeReplacementProcessor extends WorkerHost {
               copyVariantIndex: selectedIndex,
               hookStyle: replacementHook,
               status: 'active',
+              replacementHistory: [{
+                oldHook: '',
+                newHook: replacementHook,
+                replacedAt: new Date(),
+                reason: 'Added fresh creative — early fatigue detected on existing ads',
+              }],
             });
             await this.campaignModel.updateOne({ _id: campaignId }, { adSets: (campaign as any).adSets });
           }

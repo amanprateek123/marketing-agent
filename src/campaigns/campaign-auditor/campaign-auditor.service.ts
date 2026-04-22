@@ -56,6 +56,26 @@ export class CampaignAuditorService {
     private readonly creativeQueue: Queue,
   ) {}
 
+  /**
+   * Execute a single approved action immediately (called from approve endpoint).
+   * Runs the same logic as executePendingActions but for one specific action.
+   */
+  async executeApprovedAction(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    actionId: string,
+  ): Promise<void> {
+    const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).exec();
+    if (!freshCampaign) return;
+
+    const pendingActions = (freshCampaign as any).pendingActions ?? [];
+    const action = pendingActions.find((a: any) => a.actionId === actionId);
+    if (!action || action.status !== 'executed') return;
+
+    // Re-run executePendingActions — it will pick up this action since status is 'executed'
+    await this.executePendingActions(freshCampaign, company);
+  }
+
   async audit(tenantId: string): Promise<AuditResult> {
     const company = await this.companiesService.findByTenantId(tenantId);
     const activeCampaigns = await this.campaignsService.findActive(tenantId);
@@ -215,6 +235,7 @@ export class CampaignAuditorService {
             copyVariantIndex: variantIdx,
             adSetId: as.adSetId,
             spend: ad.spend,
+            impressions: ad.impressions ?? 0,
             conversions: ad.conversions,
             ctr: ad.ctr,
             cpc: ad.cpc,
@@ -243,6 +264,38 @@ export class CampaignAuditorService {
       signals.trends.ctrTrend !== 'declining' &&
       signals.trends.roasTrend !== 'declining' &&
       !hasOpportunities;
+
+    // Cooldown: if last Claude verdict was watch/no_action and < 6h ago, skip unless signals changed materially
+    const lastSnapshot = snapshots[0];
+    const lastVerdict = lastSnapshot?.verdict?.verdict;
+    const lastAuditAge = lastSnapshot ? (Date.now() - new Date(lastSnapshot.auditedAt).getTime()) / (1000 * 60 * 60) : Infinity;
+    const lastConversions = lastSnapshot?.metrics?.conversions ?? 0;
+    const conversionsChanged = full.campaign.conversions !== lastConversions;
+    const hadSafetyBreach = signals.safetyBreaches.weeklyCapExceeded || signals.safetyBreaches.campaignCapExceeded;
+
+    if (!isAllGreen && !conversionsChanged && !hadSafetyBreach &&
+        (lastVerdict === 'watch' || lastVerdict === 'no_action') && lastAuditAge < 6) {
+      const age = signals.campaignAge;
+      const conv = full.campaign.conversions;
+      const cooldownVerdict = {
+        verdict: 'no_action' as const,
+        urgency: null,
+        contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | Cooldown — last verdict "${lastVerdict}" ${lastAuditAge.toFixed(1)}h ago, no material change`,
+        watchSignals: lastSnapshot?.verdict?.watchSignals ?? [] as string[],
+        recommendedActions: [] as any[],
+      };
+      snapshotData.verdict = cooldownVerdict as any;
+      await this.snapshotModel.create(snapshotData);
+      this.logger.debug(`Cooldown skip for campaign ${campaign.metaCampaignId} — last verdict ${lastAuditAge.toFixed(1)}h ago`);
+
+      if (campaign.launchedAt) {
+        const ageMs = Date.now() - new Date(campaign.launchedAt).getTime();
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        const written = await this.writePerformanceBack(campaign, full, ageDays);
+        if (written) result.performanceWritten++;
+      }
+      return;
+    }
 
     if (isAllGreen) {
       const age = signals.campaignAge;
@@ -279,8 +332,32 @@ export class CampaignAuditorService {
     // Manual/imported campaigns: audit runs but no actions are created or executed
     if (campaign.source === 'agent' && verdict.verdict === 'act') {
       const gracePeriodHours = company.pipelineConfig?.pauseGracePeriodHours ?? 12;
+      const ageDays = signals.campaignAge.days;
 
-      for (const action of verdict.recommendedActions) {
+      // TypeScript-enforced timing rules — Claude cannot override
+      const allowedActions = verdict.recommendedActions.filter(action => {
+        const isPause = action.type === 'pause_ad' || action.type === 'pause_adset';
+        const isGrowth = action.type === 'scale_adset' || action.type === 'add_creative' || action.type === 'add_adset';
+        const isCreativeFix = action.type === 'replace_creative';
+
+        if (ageDays < 3) {
+          // Day 0-3: only allow pauses if safety-related (overspending, frequency breach)
+          if (isPause && action.priority === 'high') {
+            this.logger.log(`Timing guard: allowing high-priority ${action.type} on "${action.targetName}" in day 0-3 (safety exception)`);
+            return true;
+          }
+          this.logger.warn(`Timing guard: blocking ${action.type} on "${action.targetName}" — campaign is ${ageDays.toFixed(1)}d old (< 3d)`);
+          return false;
+        }
+        if (ageDays < 7 && isGrowth) {
+          // Day 3-7: pause + replace allowed, NO growth actions
+          this.logger.warn(`Timing guard: blocking growth action ${action.type} — campaign is ${ageDays.toFixed(1)}d old (< 7d)`);
+          return false;
+        }
+        return true;
+      });
+
+      for (const action of allowedActions) {
         const metrics: Record<string, any> = { ...(action.params ?? {}) };
 
         if (action.type === 'replace_creative') {
@@ -443,8 +520,10 @@ export class CampaignAuditorService {
   ): Promise<boolean> {
     const pendingActions = (campaign as any).pendingActions ?? [];
 
+    // Deduplicate: skip if same action already exists (pending OR executed)
     const existing = pendingActions.find(
-      (a: any) => a.targetId === action.targetId && a.type === action.type && a.status === 'pending',
+      (a: any) => a.targetId === action.targetId && a.type === action.type &&
+        (a.status === 'pending' || a.status === 'executed'),
     );
     if (existing) return false;
 
@@ -814,6 +893,7 @@ export class CampaignAuditorService {
     const brief = await this.briefModel.findOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }).lean().exec();
     if (!brief) return false;
 
+    // Campaign-level metrics
     const perf = {
       roas: full.campaign.roas,
       ctr: full.campaign.ctr,
@@ -821,19 +901,51 @@ export class CampaignAuditorService {
       conversions: full.campaign.conversions,
     };
 
+    // Per-hookStyle breakdown from ad-level metrics
+    const hookPerformance: Record<string, { spend: number; conversions: number; clicks: number; impressions: number; ctr: number; conversionRate: number }> = {};
+    for (const adSet of (campaign as any).adSets ?? []) {
+      for (const ad of adSet.ads ?? []) {
+        const hook = ad.hookStyle || 'unknown';
+        const metrics = ad.metrics;
+        if (!metrics) continue;
+        if (!hookPerformance[hook]) {
+          hookPerformance[hook] = { spend: 0, conversions: 0, clicks: 0, impressions: 0, ctr: 0, conversionRate: 0 };
+        }
+        hookPerformance[hook].spend += metrics.spend ?? 0;
+        hookPerformance[hook].conversions += metrics.conversions ?? 0;
+        hookPerformance[hook].clicks += metrics.clicks ?? 0;
+        hookPerformance[hook].impressions += metrics.impressions ?? 0;
+      }
+    }
+    // Calculate blended CTR and conversion rate per hook
+    for (const hook of Object.keys(hookPerformance)) {
+      const h = hookPerformance[hook];
+      h.ctr = h.impressions > 0 ? (h.clicks / h.impressions) * 100 : 0;
+      h.conversionRate = h.clicks > 0 ? (h.conversions / h.clicks) * 100 : 0;
+    }
+
     let written = false;
 
     if (ageDays >= 7 && !brief.performanceWritten?.day7) {
-      await this.briefModel.updateOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }, { day7Performance: perf, 'performanceWritten.day7': true });
+      await this.briefModel.updateOne(
+        { tenantId: campaign.tenantId, briefId: campaign.briefId },
+        { day7Performance: perf, hookPerformance, 'performanceWritten.day7': true },
+      );
       written = true;
       this.creativeLearning.runQuickScan(campaign.tenantId).catch(err => this.logger.error(`Quick scan failed: ${err.message}`));
     }
     if (ageDays >= 14 && !brief.performanceWritten?.day14) {
-      await this.briefModel.updateOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }, { day14Performance: perf, 'performanceWritten.day14': true });
+      await this.briefModel.updateOne(
+        { tenantId: campaign.tenantId, briefId: campaign.briefId },
+        { day14Performance: perf, hookPerformance, 'performanceWritten.day14': true },
+      );
       written = true;
     }
     if (ageDays >= 30 && !brief.performanceWritten?.day30) {
-      await this.briefModel.updateOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }, { day30Performance: perf, 'performanceWritten.day30': true });
+      await this.briefModel.updateOne(
+        { tenantId: campaign.tenantId, briefId: campaign.briefId },
+        { day30Performance: perf, hookPerformance, 'performanceWritten.day30': true },
+      );
       written = true;
       this.campaignLearning.runDeepRun(campaign.tenantId).catch(err => this.logger.error(`Deep run failed: ${err.message}`));
     }

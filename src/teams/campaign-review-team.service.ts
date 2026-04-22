@@ -168,6 +168,25 @@ export class CampaignReviewTeamService {
     // ── Call 2: Performance Analyst challenges and finalises ────────────────
     const product = (company.products ?? []).find(p => p.name === (brief as any).product);
 
+    // Fetch case studies + audience performance for the Analyst (same data the Strategist sees)
+    let analystCaseStudies = '';
+    let analystAudiencePerf = '';
+    try {
+      const [caseStudies, audiencePerf] = await Promise.all([
+        this.metaLearningImporter.getRelevantCaseStudies(company.tenantId, { product: product?.name, limit: 5 }),
+        this.metaLearningImporter.getAudiencePerformanceSummary(company.tenantId),
+      ]);
+      if (caseStudies.length > 0) {
+        analystCaseStudies = `\nPAST CAMPAIGN CASE STUDIES:\n${caseStudies.slice(0, 5).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ₹${cs.totalSpend} spent, ${cs.totalConversions} conv, CPA ₹${cs.whatWorked?.bestCPA || 'N/A'}, audiences: ${cs.whatWorked?.audiences?.join(', ') || 'unknown'}`).join('\n')}`;
+      }
+      const sorted = Object.entries(audiencePerf.byType).filter(([, d]) => d.conversions > 0).sort(([, a], [, b]) => a.avgCPA - b.avgCPA);
+      if (sorted.length > 0) {
+        analystAudiencePerf = `\nAUDIENCE TYPE PERFORMANCE:\n${sorted.map(([type, d]) => `  - ${type}: CPA ₹${d.avgCPA}, CTR ${d.avgCTR}%, ${d.conversions} conv (${d.adSetCount} ad sets)`).join('\n')}`;
+      }
+    } catch {
+      // Learnings unavailable — proceed without
+    }
+
     const call2UserMessage = `You are the Performance Analyst reviewing a Meta Ads campaign config for ${company.name}.
 
 Your job: challenge budget, targeting, and timing decisions with data. Be conservative on unproven, aggressive on proven.
@@ -186,6 +205,8 @@ CONSTRAINTS:
 
 PROPOSED CAMPAIGN CONFIG TO REVIEW:
 ${JSON.stringify(call1Parsed.campaign, null, 2)}
+${analystCaseStudies}
+${analystAudiencePerf}
 
 YOUR JOB:
 1. BUDGET: Is the proposed daily budget right for the data available? Adjust if needed.

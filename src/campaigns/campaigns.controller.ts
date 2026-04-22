@@ -12,6 +12,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
+import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
 import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
@@ -22,6 +23,7 @@ export class CampaignsController {
   constructor(
     private readonly campaignsService: CampaignsService,
     private readonly campaignCreator: CampaignCreatorService,
+    private readonly campaignAuditorService: CampaignAuditorService,
     private readonly companiesService: CompaniesService,
     private readonly metaAdsService: MetaAdsService,
     private readonly campaignSyncService: CampaignSyncService,
@@ -153,8 +155,17 @@ export class CampaignsController {
     @Param('actionId') actionId: string,
   ) {
     try {
+      // 1. Flip status in DB
       const result = await this.campaignsService.executeAction(tenantId, campaignId, actionId);
-      return { success: true, ...result };
+
+      // 2. Execute on Meta immediately (don't wait for next audit cycle)
+      const company = await this.companiesService.findByTenantId(tenantId);
+      const campaign = await this.campaignsService.findById(tenantId, campaignId);
+      if (campaign && company) {
+        await this.campaignAuditorService.executeApprovedAction(campaign, company, actionId);
+      }
+
+      return { success: true, ...result, executedImmediately: true };
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }

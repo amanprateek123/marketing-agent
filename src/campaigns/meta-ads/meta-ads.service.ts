@@ -459,7 +459,6 @@ export class MetaAdsService {
       daily_budget: dailyBudgetPaise,
       billing_event: 'IMPRESSIONS',
       optimization_goal: config.optimizationGoal || 'OFFSITE_CONVERSIONS',
-      bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
       destination_type: 'WEBSITE',
       targeting,
       status: 'PAUSED',
@@ -471,9 +470,10 @@ export class MetaAdsService {
 
     // Pixel for conversion optimization
     if (customConversionId && pixelId) {
-      // Custom Conversion — pixel_id + custom_conversion_id + custom_event_type: OTHER
+      // Custom Conversion — pixel_id required alongside custom_conversion_id
       adSetData.promoted_object = {
-        custom_conversion_id: customConversionId
+        pixel_id: pixelId,
+        custom_conversion_id: customConversionId,
       };
     } else if (pixelId && conversionEvent) {
       // Standard or custom event
@@ -508,10 +508,11 @@ export class MetaAdsService {
       // Catch audience errors — Meta returns "Invalid parameter" with error_subcode 1359207 for expired audiences
       // We only retry if we actually set custom_audiences in targeting
       const hasAnyAudiences = targeting.custom_audiences || targeting.excluded_custom_audiences;
+      // Match on Meta error subcode 1359207 (expired audience) or code 100 with audiences present
       const isAudienceError = hasAnyAudiences && (
-        err.message?.includes('Invalid parameter') ||
-        err.message?.includes('custom audience') ||
-        err.message?.includes('Custom audience not available')
+        err.message?.includes('subcode: 1359207') ||
+        err.message?.includes('subcode: 3858504') ||
+        (err.message?.includes('code: 100') && err.message?.includes('Invalid parameter'))
       );
       if (isAudienceError) {
         this.logger.warn(`Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}, excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without audiences.`);
@@ -717,8 +718,7 @@ export class MetaAdsService {
         inclusions: {
           operator: 'or',
           rules: [{
-            event_sources: [{ id: pixelId, type: 'pixel' }],
-            retention_seconds: rule.retentionDays * 86400,
+            event_sources: [pixelId],
             filter: { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: rule.event }] },
           }],
         },
@@ -746,11 +746,7 @@ export class MetaAdsService {
       name,
       subtype: 'LOOKALIKE',
       origin_audience_id: sourceAudienceId,
-      lookalike_spec: JSON.stringify({
-        type: 'similarity',
-        country,
-        ratio,
-      }),
+      lookalike_spec: { country, ratio },
       access_token: accessToken,
     });
     const id = response.data?.id;
@@ -931,9 +927,10 @@ export class MetaAdsService {
         // Non-retryable or last attempt — throw
         const fullError = (err as AxiosError<any>)?.response?.data?.error;
         const errorMsg = fullError?.message ?? err.message;
+        const errorSubcode = fullError?.error_subcode;
         const errorDetail = fullError ? JSON.stringify(fullError) : '';
         this.logger.error(`Meta API full error: ${errorDetail}`);
-        throw new Error(`Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'})`);
+        throw new Error(`Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`);
       }
     }
   }

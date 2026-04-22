@@ -143,9 +143,9 @@ export class SignalDetectorService {
       }
     }
 
-    // Campaign-level: spent more than 1 full day's budget with zero conversions
+    // Campaign-level: spent more than 2 full days' budget with zero conversions
     const campaignZeroConversions = current.campaign.conversions === 0 &&
-      dailyBudget > 0 && current.campaign.spend >= dailyBudget;
+      dailyBudget > 0 && current.campaign.spend >= dailyBudget * 2;
 
     const stuckInLearning = ageDays > coldStartDays && current.campaign.conversions === 0;
     // budgetExhaustionRisk: spending >15% more than expected for the days elapsed
@@ -159,7 +159,7 @@ export class SignalDetectorService {
     const winningAdSets = current.adSets
       .filter(as => {
         const adSetROAS = as.spend > 0 && as.conversions > 0 ? (as.conversions * conversionValue) / as.spend : 0;
-        return as.conversions >= 2 && adSetROAS > scaleThreshold;
+        return as.conversions >= 5 && adSetROAS > scaleThreshold;
       })
       .map(as => ({
         adSetName: as.adSetName,

@@ -334,6 +334,18 @@ export class CampaignCreatorService {
       (config.adSets as any[])[0].budgetPercent = 100;
     }
 
+    // Enforce video-variant restriction: video was only generated for the selected variant
+    const selectedCopyIndex = (creativePackage as any)?.selectedCopyIndex ?? 0;
+    for (const adSet of config.adSets as any[]) {
+      if (adSet.creativeFormat === 'video' && videoUrl) {
+        // Video-only ad sets MUST use only the selected variant
+        if (adSet.ads.length > 1 || !adSet.ads.includes(selectedCopyIndex)) {
+          this.logger.warn(`Ad set "${adSet.name}": video format restricted to variant ${selectedCopyIndex} (was: [${adSet.ads}])`);
+          adSet.ads = [selectedCopyIndex];
+        }
+      }
+    }
+
     // Validate ad sets before touching Meta API
     for (const [i, adSet] of (config.adSets as any[]).entries()) {
       if (!adSet.ads || adSet.ads.length === 0) {

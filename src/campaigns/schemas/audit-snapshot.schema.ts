@@ -54,6 +54,7 @@ export class AuditSnapshot {
     copyVariantIndex: number;
     adSetId: string;
     spend: number;
+    impressions: number;
     conversions: number;
     ctr: number;
     cpc: number;
