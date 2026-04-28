@@ -64,11 +64,32 @@ export interface RunAgentParams {
   tenantId: string;
   agentType: AgentType;
   systemPrompt: string;
+  /**
+   * Legacy: appended to systemPrompt. Used by all agents that haven't migrated yet.
+   * New code should prefer `userContext` so tenant data lives in the user message,
+   * separate from instructions.
+   */
   liveContext: string;
+  /**
+   * Tenant data (products, prices, learnings, calendar, etc.) prepended to userMessage
+   * under a `## TENANT CONTEXT` header. Keeps systemPrompt purely instructional.
+   */
+  userContext?: string;
   userMessage: string;
   model?: ClaudeModel;
   maxTurns?: number;
   runId?: string;
+  /**
+   * Extended thinking config. When set, the model can do hidden chain-of-thought
+   * before emitting final output — useful for agents that must produce JSON-only
+   * but need real reasoning (e.g. the audit agent at maxTurns=1).
+   *
+   * Accepted shapes (per Claude Agent SDK):
+   *   { type: 'enabled', budgetTokens: 4000 }
+   *   { type: 'adaptive' }                        // Opus 4.6+ only
+   *   { type: 'disabled' }
+   */
+  thinking?: { type: 'enabled'; budgetTokens?: number } | { type: 'adaptive' } | { type: 'disabled' };
 }
 
 export interface AgentResult {

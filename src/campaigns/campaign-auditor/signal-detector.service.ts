@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
-import { getBenchmark, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
+import { getBenchmark, getCPARange, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -48,6 +48,16 @@ export interface AuditSignalPacket {
     weeklyCapExceeded: boolean;
     campaignCapExceeded: boolean;
   };
+
+  // Account-level CPM environment — distinguishes "your campaign tanked" from
+  // "everyone's CPMs spiked". Null when the account-level fetch fails or is unavailable.
+  marketEnvironment: {
+    cpmChangePct: number;
+    cpcChangePct: number;
+    last7CPM: number;
+    prior7CPM: number;
+    trend: 'spiking' | 'rising' | 'stable' | 'falling';
+  } | null;
 }
 
 // Statistical floors — never fire signals on samples this small. These come from
@@ -68,6 +78,7 @@ export class SignalDetectorService {
     snapshots: AuditSnapshotDocument[],
     company: CompanyDocument,
     weeklySpend?: number,
+    marketEnvironment?: AuditSignalPacket['marketEnvironment'],
   ): AuditSignalPacket {
     const launchedAt = new Date(campaign.launchedAt ?? Date.now());
     const ageMs = Date.now() - launchedAt.getTime();
@@ -120,12 +131,16 @@ export class SignalDetectorService {
       };
     }
 
-    // Per-product CPA history → vertical CPA range. Used by the auditor to decide if
-    // a campaign's CPA is in a healthy range for the vertical.
+    // CPA range resolution chain:
+    //   1. Per-product CPA history (×0.7-1.5 around the historical mean)
+    //   2. Vertical × objective-aware CPA band (lead vs purchase vs install vs subscription)
+    //   3. Wide vertical fallback when objective doesn't map (awareness/traffic)
+    // Solves the "spirituality lead at ₹150 vs paid consultation at ₹800 share one band" problem.
     const productCPA = (company.products ?? []).find(p => p.active)?.performance?.avgCPA;
+    const cpaFromVertical = getCPARange(company.industry, company.primaryObjective);
     const expectedCPARange: { min: number; max: number } = productCPA && productCPA > 0
       ? { min: productCPA * 0.7, max: productCPA * 1.5 }
-      : { min: verticalBenchmark.cpaRangeRupees.min, max: verticalBenchmark.cpaRangeRupees.max };
+      : { min: cpaFromVertical.min, max: cpaFromVertical.max };
 
     const currentCTR = current.campaign.ctr;
     const currentCTRVsBenchmark = expectedCTRRange
@@ -277,6 +292,7 @@ export class SignalDetectorService {
         earlyFatigue,
       },
       safetyBreaches,
+      marketEnvironment: marketEnvironment ?? null,
     };
   }
 

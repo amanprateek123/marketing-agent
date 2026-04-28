@@ -188,4 +188,154 @@ export class CampaignOptimizerService {
       to:   { id: toAdSetId,   oldPercent: recipientOldPct, newPercent: recipient.budgetPercent },
     };
   }
+
+  /**
+   * Reduce the campaign's daily budget — mirror of scaleAdSet, downward. Use when
+   * a campaign is overspending or showing softness but isn't bad enough to pause.
+   * Throttle without killing. Capped at 50% reduction per call to prevent shock.
+   *
+   * Reverts already-applied ad-set budgets if a later one fails, to keep Meta and Mongo
+   * in sync. If revert itself fails, the per-ad-set state is logged so an operator can reconcile.
+   */
+  async reduceTotalBudget(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    requestedReductionPercent: number,
+  ): Promise<{ oldBudget: number; newBudget: number }> {
+    const MAX_REDUCTION_PCT = 50;
+    const reductionPct = Math.max(0, Math.min(MAX_REDUCTION_PCT, Number(requestedReductionPercent) || 0));
+    if (reductionPct <= 0) {
+      throw new Error('reduce_total_budget: reductionPercent must be > 0');
+    }
+
+    const oldBudget = campaign.budget;
+    const newBudget = Math.round(oldBudget * (1 - reductionPct / 100));
+    if (newBudget <= 0) {
+      throw new Error(`reduce_total_budget: newBudget would be ${newBudget} — pause campaign instead`);
+    }
+
+    // Capture per-ad-set old daily budgets so we can roll back on partial failure.
+    const adSets = ((campaign as any).adSets ?? []) as any[];
+    const activeAdSets = adSets.filter(a => a.status === 'active');
+    const updates: { adSetId: string; oldDaily: number; newDaily: number }[] = activeAdSets.map(as => {
+      const pct = (Number(as.budgetPercent) || 0) / 100;
+      return {
+        adSetId: as.metaAdSetId,
+        oldDaily: oldBudget * pct,
+        newDaily: newBudget * pct,
+      };
+    });
+
+    const applied: { adSetId: string; oldDaily: number }[] = [];
+    try {
+      for (const u of updates) {
+        if (u.newDaily > 0) {
+          await this.metaAdsService.updateAdSetBudget(u.adSetId, u.newDaily, company.meta!.accessToken);
+          applied.push({ adSetId: u.adSetId, oldDaily: u.oldDaily });
+        }
+      }
+    } catch (err: any) {
+      this.logger.error(
+        `reduce_total_budget: failed mid-loop on adSetId=${err?.metaAdSetId ?? '?'} after ${applied.length} successful updates — rolling back`,
+      );
+      for (const a of applied) {
+        try {
+          await this.metaAdsService.updateAdSetBudget(a.adSetId, a.oldDaily, company.meta!.accessToken);
+        } catch (revertErr: any) {
+          this.logger.error(
+            `reduce_total_budget revert failed for adSetId=${a.adSetId} (oldDaily=₹${a.oldDaily}): ${revertErr.message} — operator must reconcile manually`,
+          );
+        }
+      }
+      throw err;
+    }
+    await this.campaignsService.updateBudget(company.tenantId, campaign._id.toString(), newBudget);
+
+    await this.actionLogger.log({
+      tenantId: company.tenantId,
+      agent: AgentType.CAMPAIGN_AUDITOR,
+      action: 'budget_reduced',
+      reason: `Throttled by ${reductionPct}% — softening performance without pausing`,
+      outcome: `Daily budget ₹${oldBudget} → ₹${newBudget}`,
+      metadata: { metaCampaignId: campaign.metaCampaignId, oldBudget, newBudget },
+    });
+
+    this.logger.log(
+      `Budget reduced: tenantId=${company.tenantId} ${campaign.metaCampaignId} ₹${oldBudget} → ₹${newBudget}`,
+    );
+
+    return { oldBudget, newBudget };
+  }
+
+  /**
+   * Narrow an ad set's placements — pull off Audience Network / Stories etc. when
+   * those placements are bleeding without taking down the whole ad set.
+   */
+  async narrowAdSetPlacement(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    adSetId: string,
+    placements: {
+      publisherPlatforms: string[];
+      facebookPositions?: string[];
+      instagramPositions?: string[];
+      audienceNetworkPositions?: string[];
+      messengerPositions?: string[];
+    },
+  ): Promise<void> {
+    await this.metaAdsService.updateAdSetPlacements(adSetId, placements, company.meta!.accessToken);
+
+    await this.actionLogger.log({
+      tenantId: company.tenantId,
+      agent: AgentType.CAMPAIGN_AUDITOR,
+      action: 'placement_narrowed',
+      reason: `Narrowed to ${placements.publisherPlatforms.join(',')} — pulled off bleeding inventory`,
+      outcome: `Ad set ${adSetId} now restricted to ${placements.publisherPlatforms.join(',')}`,
+      metadata: { metaCampaignId: campaign.metaCampaignId, adSetId, placements },
+    });
+  }
+
+  /**
+   * Set dayparting on an ad set. India peak windows: 9pm-12am IST = minute 1260-1440;
+   * morning commute 8-10am = 480-600. Days: 0-6 (Sun-Sat).
+   *
+   * Meta interprets adset_schedule in the AD ACCOUNT's timezone. Our prompt advertises
+   * IST minutes — so we refuse the action if the ad account isn't Asia/Kolkata (caller
+   * sees an explicit error rather than silent wrong-hour delivery).
+   */
+  async daypartAdSet(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    adSetId: string,
+    schedule: { startMinute: number; endMinute: number; days: number[] }[],
+  ): Promise<void> {
+    if (!schedule.length) {
+      throw new Error('dayparting: schedule must have at least one slot');
+    }
+
+    // TZ guard — refuse non-IST accounts. The prompt teaches the LLM in IST minutes.
+    if (company.meta?.accountId) {
+      const accountTz = await this.metaAdsService.getAdAccountTimezone(
+        company.meta.accountId,
+        company.meta.accessToken,
+      );
+      if (accountTz && accountTz !== 'Asia/Kolkata') {
+        throw new Error(
+          `dayparting refused: ad account TZ is "${accountTz}", schedule was specified in IST. ` +
+          `Either change the ad account TZ to Asia/Kolkata, or implement TZ translation before calling this action.`,
+        );
+      }
+    }
+
+    await this.metaAdsService.updateAdSetSchedule(adSetId, schedule, company.meta!.accessToken);
+
+    await this.actionLogger.log({
+      tenantId: company.tenantId,
+      agent: AgentType.CAMPAIGN_AUDITOR,
+      action: 'dayparting_applied',
+      reason: `Restricted delivery to ${schedule.length} time slot(s) per week`,
+      outcome: `Ad set ${adSetId} dayparted`,
+      metadata: { metaCampaignId: campaign.metaCampaignId, adSetId, schedule },
+    });
+  }
 }

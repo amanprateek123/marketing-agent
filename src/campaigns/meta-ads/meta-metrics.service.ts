@@ -217,6 +217,75 @@ export class MetaMetricsService {
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
 
+  /**
+   * Fetch account-level CPM/CPC trend for the last 7 days vs the prior 7 days.
+   * Lets the auditor distinguish "your campaign's CTR dropped" (real fatigue)
+   * from "everyone's CPMs jumped 40%" (market-wide spike during IPL/Diwali/etc.).
+   */
+  async fetchAccountCpmEnvironment(
+    accountId: string,
+    accessToken: string,
+  ): Promise<{
+    last7CPM: number;
+    prior7CPM: number;
+    last7CPC: number;
+    prior7CPC: number;
+    cpmChangePct: number;     // +ve = CPM rising (more expensive)
+    cpcChangePct: number;
+    trend: 'spiking' | 'rising' | 'stable' | 'falling';
+  } | null> {
+    const acctRef = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
+    try {
+      // Fetch last 7d and prior 7d in parallel
+      const [last7, prior7] = await Promise.all([
+        this.metaApiGet(`${META_API_BASE}/${acctRef}/insights`, {
+          fields: 'cpm,cpc',
+          date_preset: 'last_7d',
+          access_token: accessToken,
+        }),
+        this.metaApiGet(`${META_API_BASE}/${acctRef}/insights`, {
+          fields: 'cpm,cpc',
+          // last_14d minus last_7d ≈ days 8-14 ago
+          time_range: this.priorWeekRange(),
+          access_token: accessToken,
+        }),
+      ]);
+
+      const last = last7.data?.data?.[0];
+      const prior = prior7.data?.data?.[0];
+      if (!last || !prior) return null;
+
+      const last7CPM = parseFloat(last.cpm ?? '0');
+      const prior7CPM = parseFloat(prior.cpm ?? '0');
+      const last7CPC = parseFloat(last.cpc ?? '0');
+      const prior7CPC = parseFloat(prior.cpc ?? '0');
+
+      const cpmChangePct = prior7CPM > 0 ? ((last7CPM - prior7CPM) / prior7CPM) * 100 : 0;
+      const cpcChangePct = prior7CPC > 0 ? ((last7CPC - prior7CPC) / prior7CPC) * 100 : 0;
+
+      const trend: 'spiking' | 'rising' | 'stable' | 'falling' =
+        cpmChangePct > 30 ? 'spiking'
+        : cpmChangePct > 10 ? 'rising'
+        : cpmChangePct < -10 ? 'falling'
+        : 'stable';
+
+      return { last7CPM, prior7CPM, last7CPC, prior7CPC, cpmChangePct, cpcChangePct, trend };
+    } catch (err: any) {
+      this.logger.warn(`Account CPM environment fetch failed: ${err.message} — proceeding without it`);
+      return null;
+    }
+  }
+
+  private priorWeekRange(): string {
+    // Returns Meta's expected JSON-encoded time_range string for days 8-14 ago.
+    const now = new Date();
+    const day = 24 * 60 * 60 * 1000;
+    const since = new Date(now.getTime() - 14 * day);
+    const until = new Date(now.getTime() - 8 * day);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    return JSON.stringify({ since: fmt(since), until: fmt(until) });
+  }
+
   private extractConversions(actions: any[] | undefined, conversionEvent?: string): number {
     if (!actions) return 0;
 

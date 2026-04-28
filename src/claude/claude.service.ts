@@ -56,9 +56,14 @@ export class ClaudeService {
 
   private async executeQuery(params: RunAgentParams): Promise<AgentResult> {
     const model = params.model ?? this.getModel(params.agentType);
+    // Legacy path: liveContext glued to systemPrompt (mixes instructions with data).
+    // New path: userContext prepended to userMessage under "## TENANT CONTEXT" — clean separation.
     const systemPrompt = params.liveContext
       ? `${params.systemPrompt}\n\n${params.liveContext}`
       : params.systemPrompt;
+    const userMessage = params.userContext
+      ? `## TENANT CONTEXT\n${params.userContext}\n\n## AUDIT TASK\n${params.userMessage}`
+      : params.userMessage;
 
     this.logger.log(
       `Running agent: ${params.agentType} | tenant: ${params.tenantId} | model: ${model}`,
@@ -76,21 +81,21 @@ export class ClaudeService {
 
     // Timeout guard — prevents a stuck agent from blocking a BullMQ worker indefinitely
     const queryPromise = (async () => {
-      for await (const message of query({
-        prompt: params.userMessage,
-        options: {
-          systemPrompt,
-          model,
-          maxTurns: params.maxTurns ?? 10,
-          cwd: process.cwd(),
-          persistSession: false,
-          allowedTools: NO_TOOL_AGENTS.includes(params.agentType)
-            ? []
-            : TEAM_LEAD_AGENTS.includes(params.agentType)
-              ? ['TeamCreate', 'TeamDelete', 'Agent', 'SendMessage', 'TaskCreate', 'WebSearch', 'WebFetch']
-              : ['WebSearch', 'WebFetch', 'Bash'],
-        },
-      })) {
+      const queryOptions: Record<string, any> = {
+        systemPrompt,
+        model,
+        maxTurns: params.maxTurns ?? 10,
+        cwd: process.cwd(),
+        persistSession: false,
+        allowedTools: NO_TOOL_AGENTS.includes(params.agentType)
+          ? []
+          : TEAM_LEAD_AGENTS.includes(params.agentType)
+            ? ['TeamCreate', 'TeamDelete', 'Agent', 'SendMessage', 'TaskCreate', 'WebSearch', 'WebFetch']
+            : ['WebSearch', 'WebFetch', 'Bash'],
+      };
+      if (params.thinking) queryOptions.thinking = params.thinking;
+
+      for await (const message of query({ prompt: userMessage, options: queryOptions as any })) {
         this.logger.log(`[${params.agentType}] Message: type=${message.type} subtype=${(message as any).subtype ?? '-'}`);
 
         if (message.type === 'assistant') {

@@ -892,6 +892,128 @@ export class MetaAdsService {
     this.logger.log(`Ad status updated: ${adId} → ${status}`);
   }
 
+  /**
+   * Narrow an ad set's placements — disable bleeding inventory (Audience Network,
+   * Stories, etc.) without pausing the whole ad set.
+   *
+   * IMPORTANT: Meta's POST to /{ad_set_id} REPLACES the whole `targeting` object,
+   * so we must GET the existing targeting first, deep-merge ONLY the placement
+   * subfields, and POST the merged object. Otherwise age/geo/audience/excluded
+   * audiences/etc. get wiped, leaving the ad set delivering to a global pool.
+   */
+  async updateAdSetPlacements(
+    adSetId: string,
+    placements: {
+      publisherPlatforms: string[];                    // e.g. ['facebook', 'instagram']
+      facebookPositions?: string[];                    // e.g. ['feed', 'video_feeds']
+      instagramPositions?: string[];                   // e.g. ['stream', 'reels']
+      audienceNetworkPositions?: string[];
+      messengerPositions?: string[];
+    },
+    accessToken: string,
+  ): Promise<void> {
+    if (!placements.publisherPlatforms?.length) {
+      throw new Error('updateAdSetPlacements: publisherPlatforms must be non-empty');
+    }
+
+    // Fetch current targeting so we don't blow away age/geo/audience.
+    const existing = await this.metaApiCall(
+      'GET',
+      `${META_API_BASE}/${adSetId}`,
+      { fields: 'targeting', access_token: accessToken },
+    );
+    const currentTargeting: Record<string, any> = (existing?.data?.targeting ?? existing?.targeting ?? {}) as any;
+
+    // Deep-clone existing, then overlay placement subfields. Remove position fields
+    // that are no longer relevant (e.g. dropping audience_network from publisher_platforms
+    // means audience_network_positions must also go, otherwise Meta rejects the call).
+    const merged: Record<string, any> = JSON.parse(JSON.stringify(currentTargeting));
+    merged.publisher_platforms = placements.publisherPlatforms;
+
+    const platformPositionMap: Record<string, string> = {
+      facebook: 'facebook_positions',
+      instagram: 'instagram_positions',
+      audience_network: 'audience_network_positions',
+      messenger: 'messenger_positions',
+    };
+    for (const [platform, posKey] of Object.entries(platformPositionMap)) {
+      if (!placements.publisherPlatforms.includes(platform)) {
+        delete merged[posKey];
+      }
+    }
+    if (placements.facebookPositions) merged.facebook_positions = placements.facebookPositions;
+    if (placements.instagramPositions) merged.instagram_positions = placements.instagramPositions;
+    if (placements.audienceNetworkPositions) merged.audience_network_positions = placements.audienceNetworkPositions;
+    if (placements.messengerPositions) merged.messenger_positions = placements.messengerPositions;
+
+    await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
+      targeting: merged,
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad set placements updated (merged into existing targeting): ${adSetId} → ${placements.publisherPlatforms.join(',')}`);
+  }
+
+  /**
+   * Set ad-set-level dayparting (adset_schedule). Each entry: {start_minute, end_minute, days}
+   * where minute is 0-1440 (minutes from midnight) and days is [0..6] (Sun-Sat).
+   *
+   * IMPORTANT — TWO Meta gotchas:
+   *   1. Without `pacing_type: ['day_parting']`, Meta accepts the call but ignores the schedule.
+   *   2. `start_minute`/`end_minute` are interpreted in the AD ACCOUNT'S timezone, not UTC.
+   *      Caller is responsible for ensuring the account timezone matches the schedule's intent.
+   */
+  async updateAdSetSchedule(
+    adSetId: string,
+    schedule: { startMinute: number; endMinute: number; days: number[] }[],
+    accessToken: string,
+  ): Promise<void> {
+    if (!schedule.length) {
+      throw new Error('updateAdSetSchedule: schedule must have at least one slot (use empty pacing_type to clear)');
+    }
+    for (const slot of schedule) {
+      if (slot.startMinute < 0 || slot.startMinute > 1440 || slot.endMinute < 0 || slot.endMinute > 1440) {
+        throw new Error(`updateAdSetSchedule: minutes must be 0-1440 (got ${slot.startMinute}-${slot.endMinute})`);
+      }
+      if (slot.endMinute <= slot.startMinute) {
+        throw new Error(`updateAdSetSchedule: endMinute must be > startMinute (slot ${slot.startMinute}-${slot.endMinute})`);
+      }
+      if (!slot.days.every(d => d >= 0 && d <= 6)) {
+        throw new Error(`updateAdSetSchedule: days must be 0-6 (got ${slot.days})`);
+      }
+    }
+
+    const adset_schedule = schedule.map(s => ({
+      start_minute: s.startMinute,
+      end_minute: s.endMinute,
+      days: s.days,
+    }));
+
+    await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
+      adset_schedule,
+      pacing_type: ['day_parting'],   // REQUIRED — Meta silently ignores adset_schedule without this
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad set schedule updated: ${adSetId} → ${schedule.length} slot(s)`);
+  }
+
+  /**
+   * Get the ad account's configured timezone (e.g. "Asia/Kolkata", "America/Los_Angeles").
+   * Used to gate dayparting — schedules are interpreted in this TZ, not UTC.
+   */
+  async getAdAccountTimezone(accountId: string, accessToken: string): Promise<string | null> {
+    const acctRef = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
+    try {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/${acctRef}`, {
+        fields: 'timezone_name',
+        access_token: accessToken,
+      });
+      return res?.data?.timezone_name ?? null;
+    } catch (err: any) {
+      this.logger.warn(`getAdAccountTimezone failed for ${accountId}: ${err.message}`);
+      return null;
+    }
+  }
+
   // ─── Retry wrapper for transient Meta API errors ────────────────────────────
 
   private async metaApiCall(

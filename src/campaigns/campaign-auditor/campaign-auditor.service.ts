@@ -11,7 +11,7 @@ import { CampaignsService } from '../campaigns.service';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { AuditSnapshot, AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
-import { SignalDetectorService } from './signal-detector.service';
+import { SignalDetectorService, AuditSignalPacket } from './signal-detector.service';
 import { AuditAgentService, AuditVerdict } from './audit-agent.service';
 import { MetaMetricsService, FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
@@ -90,9 +90,24 @@ export class CampaignAuditorService {
       performanceWritten: 0,
     };
 
+    // Fetch account-level CPM environment ONCE per audit batch (not per campaign).
+    // This is shared across all campaigns in the same account — distinguishes
+    // "your campaign tanked" from "everyone's CPMs spiked this week".
+    let marketEnvironment: AuditSignalPacket['marketEnvironment'] = null;
+    if (company.meta?.accessToken && company.meta?.accountId && activeCampaigns.length > 0) {
+      try {
+        marketEnvironment = await this.metaMetrics.fetchAccountCpmEnvironment(
+          company.meta.accountId,
+          company.meta.accessToken,
+        );
+      } catch (err: any) {
+        this.logger.warn(`Account CPM env fetch failed: ${err.message} — proceeding without it`);
+      }
+    }
+
     for (const campaign of activeCampaigns) {
       try {
-        await this.auditCampaign(campaign, company, result);
+        await this.auditCampaign(campaign, company, result, marketEnvironment);
       } catch (err: any) {
         this.logger.error(`Audit failed for campaign ${campaign.metaCampaignId}: ${err.message}`);
       }
@@ -109,6 +124,7 @@ export class CampaignAuditorService {
     campaign: CampaignDocument,
     company: CompanyDocument,
     result: AuditResult,
+    marketEnvironment: AuditSignalPacket['marketEnvironment'] = null,
   ): Promise<void> {
     if (!company.meta?.accessToken || !campaign.metaCampaignId) {
       this.logger.warn(`Skipping campaign ${campaign._id}: no Meta credentials or campaignId`);
@@ -191,7 +207,7 @@ export class CampaignAuditorService {
       .lean()
       .exec() as AuditSnapshotDocument[];
 
-    const signals = this.signalDetector.detect(campaign, full, snapshots, company, weeklySpend);
+    const signals = this.signalDetector.detect(campaign, full, snapshots, company, weeklySpend, marketEnvironment);
 
     // ── Save audit snapshot ───────────────────────────────────────────────────
     const snapshotData = {
@@ -517,7 +533,10 @@ export class CampaignAuditorService {
         | 'replace_creative'
         | 'add_creative'
         | 'add_adset'
-        | 'shift_budget_between_adsets';
+        | 'shift_budget_between_adsets'
+        | 'reduce_total_budget'
+        | 'narrow_placement'
+        | 'dayparting';
       targetId: string;
       targetName: string;
       reason: string;
@@ -596,6 +615,37 @@ export class CampaignAuditorService {
             toAdSetId,
             shiftPercent,
           );
+        } else if (action.type === 'reduce_total_budget') {
+          // Throttle without killing — auto-executes on grace expiry. Reduces total spend
+          // so it's lower-risk than scale_adset; explicit cap of 50% reduction in optimizer.
+          const reductionPct = Number(action.metrics?.reductionPercent);
+          if (!Number.isFinite(reductionPct) || reductionPct <= 0) {
+            this.logger.warn(`reduce_total_budget missing/invalid reductionPercent — skipping`);
+            continue;
+          }
+          await this.optimizer.reduceTotalBudget(campaign, company, reductionPct);
+        } else if (action.type === 'narrow_placement') {
+          // Disable bleeding placements — reversible (placements can be re-broadened).
+          const publisherPlatforms = action.metrics?.publisherPlatforms;
+          if (!Array.isArray(publisherPlatforms) || publisherPlatforms.length === 0) {
+            this.logger.warn(`narrow_placement missing publisherPlatforms — skipping`);
+            continue;
+          }
+          await this.optimizer.narrowAdSetPlacement(campaign, company, action.targetId, {
+            publisherPlatforms,
+            facebookPositions: action.metrics?.facebookPositions,
+            instagramPositions: action.metrics?.instagramPositions,
+            audienceNetworkPositions: action.metrics?.audienceNetworkPositions,
+            messengerPositions: action.metrics?.messengerPositions,
+          });
+        } else if (action.type === 'dayparting') {
+          // Restrict delivery hours — reversible (schedule can be cleared).
+          const schedule = action.metrics?.schedule;
+          if (!Array.isArray(schedule) || schedule.length === 0) {
+            this.logger.warn(`dayparting missing schedule — skipping`);
+            continue;
+          }
+          await this.optimizer.daypartAdSet(campaign, company, action.targetId, schedule);
         } else if (action.type === 'scale_adset') {
           // Scale requires explicit approval — only execute if manually approved (not grace-expired)
           if (!manuallyApproved) continue;

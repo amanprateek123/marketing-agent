@@ -75,7 +75,10 @@ export class AuditSnapshot {
         | 'replace_creative'
         | 'add_creative'
         | 'add_adset'
-        | 'shift_budget_between_adsets';
+        | 'shift_budget_between_adsets'
+        | 'reduce_total_budget'
+        | 'narrow_placement'
+        | 'dayparting';
       targetId: string;
       targetName: string;
       reason: string;
