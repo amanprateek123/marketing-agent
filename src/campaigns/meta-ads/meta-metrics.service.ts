@@ -232,18 +232,15 @@ export class MetaMetricsService {
     };
 
     const patterns = eventMap[conversionEvent ?? 'Purchase']
-      ?? [conversionEvent?.toLowerCase() ?? 'purchase', 'offsite_conversion'];
+      ?? [conversionEvent?.toLowerCase() ?? 'purchase'];
 
     const match = actions.find((a: any) =>
       patterns.some(p => a.action_type === p || a.action_type?.includes(p)),
     );
 
-    // Fallback: if no match for specific event, try generic offsite_conversion
-    if (!match) {
-      const generic = actions.find((a: any) => a.action_type === 'offsite_conversion');
-      return parseInt(generic?.value ?? '0', 10);
-    }
-
+    // No fallback to generic offsite_conversion — that counts ALL conversion types
+    // (ViewContent + AddToCart + Purchase etc.) and inflates numbers.
+    // If we can't find the specific event, report 0 rather than wrong data.
     return parseInt(match?.value ?? '0', 10);
   }
 

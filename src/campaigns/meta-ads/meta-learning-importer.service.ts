@@ -605,7 +605,7 @@ export class MetaLearningImporterService {
       const linkData = storySpec.link_data ?? storySpec.video_data ?? {};
       const actions = insight.actions ?? [];
       const conversionAction = actions.find((a: any) =>
-        ['offsite_conversion.fb_pixel_purchase', 'purchase', 'lead', 'offsite_conversion'].includes(a.action_type),
+        ['offsite_conversion.fb_pixel_purchase', 'purchase', 'lead', 'offsite_conversion.fb_pixel_lead'].includes(a.action_type),
       );
       const conversions = parseInt(conversionAction?.value ?? '0', 10);
       const spend = parseFloat(insight.spend ?? '0');

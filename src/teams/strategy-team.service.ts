@@ -227,6 +227,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       validBriefs.map((b: any) => ({
         tenantId, runId,
         briefId: b.briefId,
+        product: b.product ?? '',
         topic: b.topic, angle: b.angle, platform: b.platform,
         format: b.format, audience: b.audience,
         hook: b.hook ?? '', keyMessage: b.keyMessage ?? '', conversionBridge: b.conversionBridge ?? '',
@@ -242,6 +243,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
     await this.creativeBriefModel.create({
       tenantId, runId,
       briefId: winnerId,
+      product: winner.product ?? '',
       topic: winner.topic, angle: winner.angle, platform: winner.platform,
       format: winner.format, audience: winner.audience,
       hook: winner.hook, keyMessage: winner.keyMessage, conversionBridge: winner.conversionBridge,
