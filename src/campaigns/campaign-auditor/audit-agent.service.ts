@@ -514,6 +514,27 @@ ${signals.breakdowns.byHour
   .join('\n')}
   RULE: When proposing dayparting, identify the loss hours (high spend, 0 conv, low CTR) and exclude them. Don't dayparting based on prompt examples — use this data.
 ` : ''}
+${signals.breakdowns.byDayOfWeek.length > 0 ? (() => {
+  // Compute campaign-average CVR to flag strong/weak days as ratios.
+  const totalConv = signals.breakdowns.byDayOfWeek.reduce((s, d) => s + d.conversions, 0);
+  const totalClicks = signals.breakdowns.byDayOfWeek.reduce((s, d) => s + d.clicks, 0);
+  const avgCVR = totalClicks > 0 ? (totalConv / totalClicks) * 100 : 0;
+  // Use the vertical-aware click floor — same threshold the system uses for
+  // "zero conversions is meaningful" elsewhere. For fintech (~99 clicks) we need
+  // more evidence per DOW than spirituality (~49 clicks).
+  const dowEvidenceFloor = signals.evidenceFloors.clicksForZeroConvSignal;
+  return `━━━ DAY-OF-WEEK PATTERN (last 14d aggregate; ad-account TZ) ━━━
+${signals.breakdowns.byDayOfWeek.map(d => {
+  const cvrRatio = avgCVR > 0 ? d.cvr / avgCVR : 1;
+  const tag = cvrRatio >= 1.5 ? '🟢 STRONG'
+    : cvrRatio <= 0.5 && d.clicks >= dowEvidenceFloor ? '🔴 WEAK'
+    : '⚪';
+  return `  ${tag} ${d.dayLabel}: ₹${d.spend.toFixed(0)} | ${d.clicks} clicks | ${d.conversions} conv | CVR ${d.cvr.toFixed(2)}% (${cvrRatio.toFixed(2)}× avg) | CPA ${d.cpa > 0 ? `₹${d.cpa.toFixed(0)}` : '∞'}`;
+}).join('\n')}
+  Campaign avg CVR: ${avgCVR.toFixed(2)}% | DOW evidence floor: ${dowEvidenceFloor} clicks
+  RULE: When proposing dayparting, the schedule's days array MUST reflect this pattern. STRONG days (≥1.5× avg CVR) should always be included; WEAK days (≤0.5× avg with ≥${dowEvidenceFloor} clicks of evidence) should be excluded. Defer to observed data; ignore prior assumptions about the vertical's "auspicious" days.
+`;
+})() : ''}
 ━━━ PRIOR AUDIT DECISIONS (most recent first; cooldown/skip entries excluded) ━━━
 ${snapshotSummary}
   (In the contextInsight, briefly state whether your verdict aligns with or reverses the prior decisions, and why. Both directions need explanation — do not default to consistency.)

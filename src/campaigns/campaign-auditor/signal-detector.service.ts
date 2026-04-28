@@ -87,9 +87,9 @@ export interface AuditSignalPacket {
   // Null when there are 0 active ad sets.
   banditAllocation: ThompsonAllocationResult | null;
 
-  // Performance breakdowns (placements, hours). Provide the data the auditor
-  // needs to make narrow_placement and dayparting recommendations grounded in
-  // observed performance, not guessed. Empty array when Meta fetch fails.
+  // Performance breakdowns (placements, hours, days-of-week). Provide the data the
+  // auditor needs to make narrow_placement and dayparting recommendations grounded
+  // in observed performance, not guessed. Empty arrays when Meta fetch fails.
   breakdowns: {
     byPlacement: Array<{
       publisherPlatform: string;
@@ -108,6 +108,17 @@ export interface AuditSignalPacket {
       clicks: number;
       conversions: number;
       ctr: number;
+      cpa: number;
+    }>;
+    byDayOfWeek: Array<{
+      dayOfWeek: number;
+      dayLabel: string;
+      spend: number;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      ctr: number;
+      cvr: number;
       cpa: number;
     }>;
   };
@@ -407,7 +418,7 @@ export class SignalDetectorService {
         clicksForRetargetTrigger: MIN_CLICKS_FOR_RETARGET_TRIGGER,
       },
       banditAllocation: this.computeBanditAllocation(current.adSets, conversionValue, priorCVR),
-      breakdowns: breakdowns ?? { byPlacement: [], byHour: [] },
+      breakdowns: breakdowns ?? { byPlacement: [], byHour: [], byDayOfWeek: [] },
     };
   }
 

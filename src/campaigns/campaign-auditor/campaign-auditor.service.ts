@@ -162,7 +162,7 @@ export class CampaignAuditorService {
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
 
-    const [full, byPlacement, byHour] = await Promise.all([
+    const [full, byPlacement, byHour, byDayOfWeek] = await Promise.all([
       this.metaMetrics.fetchFullMetrics(
         campaign.metaCampaignId,
         company.meta.accessToken,
@@ -175,6 +175,11 @@ export class CampaignAuditorService {
         conversionEvent,
       ),
       this.metaMetrics.fetchHourlyBreakdown(
+        campaign.metaCampaignId,
+        company.meta.accessToken,
+        conversionEvent,
+      ),
+      this.metaMetrics.fetchDayOfWeekBreakdown(
         campaign.metaCampaignId,
         company.meta.accessToken,
         conversionEvent,
@@ -223,7 +228,7 @@ export class CampaignAuditorService {
 
     const signals = this.signalDetector.detect(
       campaign, full, snapshots, company, weeklySpend, marketEnvironment,
-      { byPlacement, byHour },
+      { byPlacement, byHour, byDayOfWeek },
     );
 
     // ── Save audit snapshot ───────────────────────────────────────────────────

@@ -344,6 +344,78 @@ export class MetaMetricsService {
   }
 
   /**
+   * Day-of-week performance breakdown (last 14 days, aggregated). For verticals
+   * with strong cultural day-of-week patterns (spirituality: Sunday peaks, Tuesday
+   * weakness; B2B: weekday-only) the agent needs this to make dayparting recommendations
+   * that match cultural reality, not just hour-of-day.
+   *
+   * Uses Meta's time_increment=1 (one row per day) for the last 14 days, then aggregates
+   * to 7 day-of-week buckets client-side.
+   */
+  async fetchDayOfWeekBreakdown(
+    campaignId: string,
+    accessToken: string,
+    conversionEvent?: string,
+  ): Promise<Array<{
+    dayOfWeek: number;             // 0=Sun, 6=Sat (matches Meta adset_schedule day numbering)
+    dayLabel: string;              // 'Sun' | 'Mon' | ...
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cvr: number;
+    cpa: number;
+  }>> {
+    try {
+      const response = await this.metaApiGet(
+        `${META_API_BASE}/${campaignId}/insights`,
+        {
+          fields: 'impressions,clicks,spend,actions',
+          time_increment: 1,
+          date_preset: 'last_14d',
+          access_token: accessToken,
+        },
+      );
+      const rows: any[] = response.data?.data ?? [];
+
+      // Aggregate per day-of-week (0=Sun..6=Sat).
+      const buckets: { spend: number; impressions: number; clicks: number; conversions: number }[] =
+        Array.from({ length: 7 }, () => ({ spend: 0, impressions: 0, clicks: 0, conversions: 0 }));
+
+      for (const r of rows) {
+        const dateStart: string = r.date_start ?? '';
+        if (!dateStart) continue;
+        // Parse YYYY-MM-DD as local date so getDay() returns the right DOW.
+        const [y, m, d] = dateStart.split('-').map((n: string) => parseInt(n, 10));
+        if (!y || !m || !d) continue;
+        const dow = new Date(y, m - 1, d).getDay();
+        const conversions = this.extractConversions(r.actions, conversionEvent);
+        buckets[dow].spend += parseFloat(r.spend ?? '0');
+        buckets[dow].impressions += parseInt(r.impressions ?? '0', 10);
+        buckets[dow].clicks += parseInt(r.clicks ?? '0', 10);
+        buckets[dow].conversions += conversions;
+      }
+
+      const labels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      return buckets.map((b, i) => ({
+        dayOfWeek: i,
+        dayLabel: labels[i],
+        spend: b.spend,
+        impressions: b.impressions,
+        clicks: b.clicks,
+        conversions: b.conversions,
+        ctr: b.impressions > 0 ? (b.clicks / b.impressions) * 100 : 0,
+        cvr: b.clicks > 0 ? (b.conversions / b.clicks) * 100 : 0,
+        cpa: b.conversions > 0 ? b.spend / b.conversions : 0,
+      }));
+    } catch (err: any) {
+      this.logger.warn(`Day-of-week breakdown fetch failed for ${campaignId}: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
    * Hourly performance breakdown (in the ad account's timezone). Used for
    * `dayparting` recommendations. Returns one row per (hour-of-day, day-of-week)
    * combination if Meta supports the aggregation, or per hour-of-day otherwise.
