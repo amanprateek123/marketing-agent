@@ -5,6 +5,7 @@ import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
 import { getBenchmark, getCPARange, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 import { adSetWinnerPosterior } from '../../common/statistics/bayesian-estimator.util';
 import { deriveFloorsFromVertical } from '../../common/statistics/power-calc.util';
+import { thompsonAllocate, ThompsonAllocationResult } from '../../common/statistics/bandit-allocator.util';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -80,6 +81,11 @@ export interface AuditSignalPacket {
     clicksForZeroConvSignal: number;
     clicksForRetargetTrigger: number;
   };
+
+  // Thompson Sampling allocation across active ad sets — recommended budget %.
+  // The auditor uses this to pick the recipient when proposing shift_budget.
+  // Null when there are 0 active ad sets.
+  banditAllocation: ThompsonAllocationResult | null;
 }
 
 // Statistical floors — derived per-vertical at runtime from cvrTypical and ctrMidpoint
@@ -374,7 +380,32 @@ export class SignalDetectorService {
         clicksForZeroConvSignal: MIN_CLICKS_FOR_ZERO_CONV_PAUSE,
         clicksForRetargetTrigger: MIN_CLICKS_FOR_RETARGET_TRIGGER,
       },
+      banditAllocation: this.computeBanditAllocation(current.adSets, conversionValue, priorCVR),
     };
+  }
+
+  private computeBanditAllocation(
+    adSets: FullCampaignMetrics['adSets'],
+    conversionValue: number,
+    priorCVR: number,
+  ): ThompsonAllocationResult | null {
+    // Only allocate across ad sets that are spending — paused / not-yet-launched arms
+    // have no business in the bandit (no data, no spend to redistribute).
+    const eligible = adSets.filter(as => as.spend > 0 && as.clicks > 0);
+    if (eligible.length === 0) return null;
+    return thompsonAllocate({
+      adSets: eligible.map(as => ({
+        adSetId: as.adSetId,
+        adSetName: as.adSetName,
+        conversions: as.conversions,
+        clicks: as.clicks,
+        spend: as.spend,
+      })),
+      priorCVR,
+      conversionValue,
+      numTrials: 200,
+      kappa: 10,
+    });
   }
 
   private calcTrend(values: number[]): 'improving' | 'stable' | 'declining' | 'insufficient_data' {

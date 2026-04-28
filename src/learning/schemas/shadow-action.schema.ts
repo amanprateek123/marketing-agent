@@ -46,6 +46,7 @@ export class ShadowAction {
     'donor_floor_shift_budget',         // donor at MIN_DONOR_FLOOR_PCT
     'recipient_cap_shift_budget',       // recipient at MAX_RECIPIENT_PCT
     'parser_validation',                // parser dropped malformed action params
+    'bandit_disagreement',              // LLM picked a recipient different from Thompson leader (action still ran)
     'other',
   ] })
   blockedReason: string;

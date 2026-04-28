@@ -228,7 +228,7 @@ export class AuditAgentService {
       });
 
       const verdict = this.parseVerdict(result.content);
-      return this.applyBusinessGuards(verdict, liveSnapshot, campaign, company);
+      return this.applyBusinessGuards(verdict, liveSnapshot, campaign, company, signals);
     } catch (err: any) {
       this.logger.error(`Audit agent failed: ${err.message} — defaulting to watch`);
       return this.safeDefault(signals);
@@ -248,10 +248,14 @@ export class AuditAgentService {
     liveSnapshot: any,
     campaign: any,
     company: CompanyDocument,
+    signals: AuditSignalPacket,
   ): AuditVerdict {
     const MIN_RECIPIENT_CONVERSIONS = 10;
     const liveAdSets = (liveSnapshot?.adSets ?? []) as any[];
     const liveCampaign = liveSnapshot ?? {};
+    const banditLeaderId = signals.banditAllocation?.leader?.adSetId;
+    const banditLeaderConfidence = signals.banditAllocation?.leaderConfidence ?? 0;
+
     const filtered = verdict.recommendedActions.filter(a => {
       if (a.type !== 'shift_budget_between_adsets') return true;
       const toAdSetId = a.params?.toAdSetId;
@@ -261,7 +265,6 @@ export class AuditAgentService {
         this.logger.warn(
           `Dropping shift_budget action — recipient ${toAdSetId} has ${recipientConv} conversions (< ${MIN_RECIPIENT_CONVERSIONS}). Won't move budget into noise.`,
         );
-        // Fire-and-forget: shadow logging must never break the audit.
         void this.shadowActions.recordBlocked({
           tenantId: company.tenantId,
           campaignId: campaign?._id?.toString() ?? campaign?.campaignId ?? '',
@@ -275,6 +278,31 @@ export class AuditAgentService {
         });
         return false;
       }
+
+      // LLM-vs-bandit disagreement: action still runs (LLM may have context the bandit lacks),
+      // but log the disagreement so we can later evaluate whose pick was correct.
+      // Threshold: only log when the bandit had a confident leader (>=55%) AND the LLM picked
+      // a different recipient. Below 55% confidence the bandit isn't confident either, so it's
+      // not a real disagreement.
+      if (banditLeaderId && banditLeaderConfidence >= 0.55 && String(toAdSetId) !== String(banditLeaderId)) {
+        this.logger.log(
+          `Bandit disagreement: LLM picked recipient ${toAdSetId}, bandit leader was ${banditLeaderId} (confidence ${(banditLeaderConfidence * 100).toFixed(0)}%) — action runs, disagreement logged`,
+        );
+        void this.shadowActions.recordBlocked({
+          tenantId: company.tenantId,
+          campaignId: campaign?._id?.toString() ?? campaign?.campaignId ?? '',
+          metaCampaignId: campaign?.metaCampaignId ?? liveCampaign.metaCampaignId ?? '',
+          proposedAction: {
+            type: a.type, targetId: a.targetId, targetName: a.targetName,
+            reason: a.reason, priority: a.priority,
+            params: { ...a.params, banditLeaderId, banditLeaderConfidence },
+          },
+          blockedReason: 'bandit_disagreement',
+          metricsAtT: this.snapshotToMetrics(liveCampaign),
+        });
+        // Don't filter — let the action through. Disagreement is data, not a veto.
+      }
+
       return true;
     });
     return { ...verdict, recommendedActions: filtered };
@@ -453,6 +481,13 @@ ${anomalyLines.length > 0 ? anomalyLines.map(l => `  ⚠ ${l}`).join('\n') : '  
 
 ━━━ OPPORTUNITIES ━━━
 ${signals.opportunities.winningAdSets.length > 0 ? signals.opportunities.winningAdSets.map(w => `  ✅ WINNING: ${w.adSetName} (${w.adSetId}) — observed ROAS ${w.roas.toFixed(2)}x, shrunken ${w.shrunkenROAS.toFixed(2)}x (lower 95: ${w.lowerROAS.toFixed(2)}x), CTR ${w.ctr.toFixed(2)}%, ${w.conversions} conv`).join('\n') : '  No winning ad sets yet (posterior-based: requires shrunken ROAS > scale threshold AND lower 95% > 1.0x)'}
+
+${signals.banditAllocation ? `━━━ THOMPSON ALLOCATION (bandit recommendation across ${signals.banditAllocation.allocations.length} active ad sets, ${signals.banditAllocation.trials} Monte Carlo trials) ━━━
+${signals.banditAllocation.allocations.map(a => `  ${a.adSetName} (${a.adSetId}): pBest ${(a.pBest * 100).toFixed(0)}% → recommended ${a.recommendedPct}% of campaign budget | E[ROAS] ${a.expectedROAS.toFixed(2)}x | posterior CVR ${(a.posteriorMeanCVR * 100).toFixed(2)}%`).join('\n')}
+  Leader: ${signals.banditAllocation.leader?.adSetName ?? 'none'} (confidence ${(signals.banditAllocation.leaderConfidence * 100).toFixed(0)}%)
+  RULE: When proposing shift_budget_between_adsets, the recipient (params.toAdSetId) SHOULD match the bandit's leader unless you have a specific reason to override (e.g. seasonal context, recent major change). If you override, state the reason explicitly in the action's reason field — disagreements are logged for review.
+  RULE: If leaderConfidence < 55%, the bandit is uncertain — exploration matters more than exploitation. PREFER continuing to observe over a shift_budget action this cycle.
+` : ''}
 ${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
 ${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
 
