@@ -3,6 +3,7 @@ import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
 import { getBenchmark, getCPARange, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
+import { adSetWinnerPosterior } from '../../common/statistics/bayesian-estimator.util';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -36,7 +37,15 @@ export interface AuditSignalPacket {
 
   // Opportunities — positive signals for scaling actions
   opportunities: {
-    winningAdSets: { adSetName: string; adSetId: string; roas: number; ctr: number; conversions: number }[];
+    winningAdSets: {
+      adSetName: string;
+      adSetId: string;
+      roas: number;                  // raw observed ROAS (kept for context)
+      shrunkenROAS: number;          // ROAS after shrinkage toward vertical prior
+      lowerROAS: number;             // 95% lower bound on ROAS (Wilson on CVR × value/spend)
+      ctr: number;
+      conversions: number;
+    }[];
     highClicksLowConversions: boolean;   // >100 clicks, <3 conversions → retarget candidate
     totalClicks: number;
     readyForRetarget: boolean;           // age >7d + highClicksLowConversions
@@ -66,7 +75,6 @@ export interface AuditSignalPacket {
 const MIN_IMPRESSIONS_FOR_CTR_SIGNAL = 1000;
 const MIN_CLICKS_FOR_ZERO_CONV_PAUSE = 30;
 const MIN_CLICKS_FOR_RETARGET_TRIGGER = 200;
-const MIN_CONVERSIONS_FOR_WINNER = 10;
 const MIN_IMPRESSIONS_FOR_FATIGUE = 500;
 const MIN_CLICKS_FOR_CAMPAIGN_ZERO_CONV = 50;
 
@@ -228,20 +236,44 @@ export class SignalDetectorService {
     const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
     const conversionValue = (company.products ?? []).find(p => p.active)?.conversionValue
       ?? (company.products ?? []).find(p => p.active)?.price ?? 0;
-    // Winning = ≥10 conversions (statistically meaningful — 5 has ±90% CI, basically a coin flip)
-    // and ROAS exceeds the configured scale threshold.
+    // Winner detection via Bayesian posterior, not point-threshold cliff.
+    // Two conditions must both hold:
+    //   1. Shrunken ROAS > scaleThreshold — the point estimate (after pulling toward
+    //      the vertical CVR prior) suggests a real winner, not lucky early data.
+    //   2. Lower 95% bound on ROAS > 1.0 — we're confident the ad set is at least
+    //      breakeven, not just performing well by chance.
+    // Hard floor of MIN_FLOOR_CONVERSIONS=5 prevents posterior-only "winners" with
+    // 1-2 conversions where even shrinkage can't fully tame the noise.
+    const MIN_FLOOR_CONVERSIONS = 5;
+    const priorCVR = (verticalBenchmark.cvrPct.typical || 3.5) / 100;
     const winningAdSets = current.adSets
-      .filter(as => {
-        const adSetROAS = as.spend > 0 && as.conversions > 0 ? (as.conversions * conversionValue) / as.spend : 0;
-        return as.conversions >= MIN_CONVERSIONS_FOR_WINNER && adSetROAS > scaleThreshold;
+      .map(as => {
+        const observedROAS = as.spend > 0 && as.conversions > 0
+          ? (as.conversions * conversionValue) / as.spend
+          : 0;
+        const post = adSetWinnerPosterior({
+          conversions: as.conversions,
+          clicks: as.clicks,
+          spend: as.spend,
+          conversionValue,
+          priorCVR,
+          // kappa = 10 pseudo-clicks of vertical-prior strength (moderate trust).
+        });
+        return {
+          adSetName: as.adSetName,
+          adSetId: as.adSetId,
+          conversions: as.conversions,
+          roas: observedROAS,
+          shrunkenROAS: post.shrunkenROAS,
+          lowerROAS: post.lowerROAS,
+          ctr: as.ctr,
+        };
       })
-      .map(as => ({
-        adSetName: as.adSetName,
-        adSetId: as.adSetId,
-        roas: as.spend > 0 && as.conversions > 0 ? (as.conversions * conversionValue) / as.spend : 0,
-        ctr: as.ctr,
-        conversions: as.conversions,
-      }));
+      .filter(w =>
+        w.conversions >= MIN_FLOOR_CONVERSIONS
+        && w.shrunkenROAS > scaleThreshold
+        && w.lowerROAS > 1.0,
+      );
 
     const totalClicks = current.campaign.clicks;
     // Retarget readiness needs enough clicks to claim "low conversions" is real, not noise.

@@ -412,7 +412,7 @@ ${signals.marketEnvironment ? `━━━ MARKET ENVIRONMENT (account-level, last
 ${anomalyLines.length > 0 ? anomalyLines.map(l => `  ⚠ ${l}`).join('\n') : '  None'}
 
 ━━━ OPPORTUNITIES ━━━
-${signals.opportunities.winningAdSets.length > 0 ? signals.opportunities.winningAdSets.map(w => `  ✅ WINNING: ${w.adSetName} (${w.adSetId}) — ROAS ${w.roas.toFixed(2)}x, CTR ${w.ctr.toFixed(2)}%, ${w.conversions} conv`).join('\n') : '  No winning ad sets yet'}
+${signals.opportunities.winningAdSets.length > 0 ? signals.opportunities.winningAdSets.map(w => `  ✅ WINNING: ${w.adSetName} (${w.adSetId}) — observed ROAS ${w.roas.toFixed(2)}x, shrunken ${w.shrunkenROAS.toFixed(2)}x (lower 95: ${w.lowerROAS.toFixed(2)}x), CTR ${w.ctr.toFixed(2)}%, ${w.conversions} conv`).join('\n') : '  No winning ad sets yet (posterior-based: requires shrunken ROAS > scale threshold AND lower 95% > 1.0x)'}
 ${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
 ${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
 
