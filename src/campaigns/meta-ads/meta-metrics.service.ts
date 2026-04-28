@@ -218,11 +218,13 @@ export class MetaMetricsService {
   // ─── Helpers ────────────────────────────────────────────────────────────────
 
   /**
-   * Fetch account-level CPM/CPC trend for the last 7 days vs the prior 7 days.
-   * Lets the auditor distinguish "your campaign's CTR dropped" (real fatigue)
-   * from "everyone's CPMs jumped 40%" (market-wide spike during IPL/Diwali/etc.).
+   * Fetch account-level CPM / CPC / CTR trend for last 7 days vs prior 7 days.
+   * Used by the auditor for two distinct purposes:
+   *   1. "Notice" — render market environment in the prompt so the LLM knows about exogenous shifts.
+   *   2. "Control" (DiD) — subtract the account-level CTR change from the campaign's CTR drop
+   *      so creativeFatigue only fires on genuinely-campaign-specific decline, not market-wide spikes.
    */
-  async fetchAccountCpmEnvironment(
+  async fetchAccountEnvironment(
     accountId: string,
     accessToken: string,
   ): Promise<{
@@ -230,8 +232,11 @@ export class MetaMetricsService {
     prior7CPM: number;
     last7CPC: number;
     prior7CPC: number;
+    last7CTR: number;
+    prior7CTR: number;
     cpmChangePct: number;     // +ve = CPM rising (more expensive)
     cpcChangePct: number;
+    ctrChangePct: number;     // -ve = account-wide CTR declining (used for DiD adjustment)
     trend: 'spiking' | 'rising' | 'stable' | 'falling';
   } | null> {
     const acctRef = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
@@ -239,12 +244,12 @@ export class MetaMetricsService {
       // Fetch last 7d and prior 7d in parallel
       const [last7, prior7] = await Promise.all([
         this.metaApiGet(`${META_API_BASE}/${acctRef}/insights`, {
-          fields: 'cpm,cpc',
+          fields: 'cpm,cpc,ctr',
           date_preset: 'last_7d',
           access_token: accessToken,
         }),
         this.metaApiGet(`${META_API_BASE}/${acctRef}/insights`, {
-          fields: 'cpm,cpc',
+          fields: 'cpm,cpc,ctr',
           // last_14d minus last_7d ≈ days 8-14 ago
           time_range: this.priorWeekRange(),
           access_token: accessToken,
@@ -259,9 +264,12 @@ export class MetaMetricsService {
       const prior7CPM = parseFloat(prior.cpm ?? '0');
       const last7CPC = parseFloat(last.cpc ?? '0');
       const prior7CPC = parseFloat(prior.cpc ?? '0');
+      const last7CTR = parseFloat(last.ctr ?? '0');
+      const prior7CTR = parseFloat(prior.ctr ?? '0');
 
       const cpmChangePct = prior7CPM > 0 ? ((last7CPM - prior7CPM) / prior7CPM) * 100 : 0;
       const cpcChangePct = prior7CPC > 0 ? ((last7CPC - prior7CPC) / prior7CPC) * 100 : 0;
+      const ctrChangePct = prior7CTR > 0 ? ((last7CTR - prior7CTR) / prior7CTR) * 100 : 0;
 
       const trend: 'spiking' | 'rising' | 'stable' | 'falling' =
         cpmChangePct > 30 ? 'spiking'
@@ -269,11 +277,19 @@ export class MetaMetricsService {
         : cpmChangePct < -10 ? 'falling'
         : 'stable';
 
-      return { last7CPM, prior7CPM, last7CPC, prior7CPC, cpmChangePct, cpcChangePct, trend };
+      return {
+        last7CPM, prior7CPM, last7CPC, prior7CPC, last7CTR, prior7CTR,
+        cpmChangePct, cpcChangePct, ctrChangePct, trend,
+      };
     } catch (err: any) {
-      this.logger.warn(`Account CPM environment fetch failed: ${err.message} — proceeding without it`);
+      this.logger.warn(`Account environment fetch failed: ${err.message} — proceeding without it`);
       return null;
     }
+  }
+
+  /** @deprecated Use fetchAccountEnvironment — kept for backward compat with any out-of-tree callers. */
+  async fetchAccountCpmEnvironment(accountId: string, accessToken: string) {
+    return this.fetchAccountEnvironment(accountId, accessToken);
   }
 
   private priorWeekRange(): string {

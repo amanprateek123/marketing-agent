@@ -319,7 +319,7 @@ export class AuditAgentService {
       anomalyLines.push(`HIGH SPEND ZERO CONVERSIONS: ${anomalies.highSpendZeroConversions.map(a => `${a.adSetName} [${a.adSetId}] (₹${a.spend})`).join(', ')}`);
     }
     if (anomalies.creativeFatigue.length > 0) {
-      anomalyLines.push(`CREATIVE FATIGUE: ${anomalies.creativeFatigue.map(a => `${a.adId} [${a.hookStyle}] CTR dropped ${a.ctrDrop}%`).join(', ')}`);
+      anomalyLines.push(`CREATIVE FATIGUE: ${anomalies.creativeFatigue.map(a => `${a.adId} [${a.hookStyle}] CTR dropped ${a.ctrDrop}% (residual after market adjustment: ${a.residualDrop}%)`).join(', ')}`);
     }
     if (anomalies.audienceFatigue.length > 0) {
       anomalyLines.push(`AUDIENCE FATIGUE: ${anomalies.audienceFatigue.map(a => `${a.adSetName} [${a.adSetId}] freq=${a.frequency.toFixed(1)}`).join(', ')}`);
@@ -397,11 +397,13 @@ ${hookSummary ? `━━━ HOOK STYLE PERFORMANCE ━━━\n${hookSummary}\n` :
 ${signals.marketEnvironment ? `━━━ MARKET ENVIRONMENT (account-level, last 7d vs prior 7d) ━━━
   CPM: ₹${signals.marketEnvironment.last7CPM.toFixed(0)} vs ₹${signals.marketEnvironment.prior7CPM.toFixed(0)} (${signals.marketEnvironment.cpmChangePct >= 0 ? '+' : ''}${signals.marketEnvironment.cpmChangePct.toFixed(0)}%) | trend: ${signals.marketEnvironment.trend}
   CPC change: ${signals.marketEnvironment.cpcChangePct >= 0 ? '+' : ''}${signals.marketEnvironment.cpcChangePct.toFixed(0)}%
-  RULE: If trend == 'spiking' OR 'rising', the CTR/CPA degradation you see is at least partly EXOGENOUS (everyone's CPMs are up). In that case:
+  CTR change: ${signals.marketEnvironment.ctrChangePct >= 0 ? '+' : ''}${signals.marketEnvironment.ctrChangePct.toFixed(0)}% (account-level, last 7d vs prior 7d)
+  RULE: If trend == 'spiking' OR 'rising', CPM/CTR degradation is at least partly EXOGENOUS (auction got harder for everyone). In that case:
     - DO NOT pause_ad / pause_adset on degradation alone — the creative isn't broken, the auction is.
     - Prefer reduce_total_budget (20-30%) to ride out the spike, or narrow_placement to drop expensive inventory.
     - Only override this rule if CPA > 2.5× benchmark (truly broken regardless of market).
   RULE: If trend == 'falling', CPMs are crashing — this is a green light to scale winners aggressively.
+  RULE (DiD on creative fatigue): If account CTR change is meaningfully negative (≤ -15%), the account-wide audience is just less responsive this week. Do NOT recommend replace_creative on CTR drop alone — the residual after market adjustment is what matters. The CREATIVE FATIGUE anomaly already shows the residual; trust it, not the raw drop %.
 ` : ''}━━━ BENCHMARKS (${company.name} | vertical: ${company.industry || 'unknown'}) ━━━
   Expected CTR: ${signals.benchmarks.expectedCTRRange ? `${signals.benchmarks.expectedCTRRange.min.toFixed(2)}–${signals.benchmarks.expectedCTRRange.max.toFixed(2)}%` : 'no benchmark'} | current: ${signals.benchmarks.currentCTRVsBenchmark}
   Expected CPA: ${signals.benchmarks.expectedCPARange ? `₹${signals.benchmarks.expectedCPARange.min.toFixed(0)}–₹${signals.benchmarks.expectedCPARange.max.toFixed(0)}` : 'no benchmark'} | current: ${signals.benchmarks.currentCPAVsBenchmark}

@@ -29,7 +29,7 @@ export interface AuditSignalPacket {
   anomalies: {
     highSpendZeroConversions: { adSetId: string; adSetName: string; spend: number }[];
     campaignZeroConversions: boolean;  // total spend > 1x daily budget but 0 conversions
-    creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number }[];
+    creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number; residualDrop: number }[];
     audienceFatigue: { adSetId: string; adSetName: string; frequency: number }[];
     stuckInLearning: boolean;
     budgetExhaustionRisk: boolean;
@@ -58,13 +58,17 @@ export interface AuditSignalPacket {
     campaignCapExceeded: boolean;
   };
 
-  // Account-level CPM environment — distinguishes "your campaign tanked" from
-  // "everyone's CPMs spiked". Null when the account-level fetch fails or is unavailable.
+  // Account-level environment — distinguishes "your campaign tanked" from "everyone's
+  // CPMs/CTR moved". Used both as a prompt hint AND as a DiD residual on creativeFatigue.
+  // Null when the account-level fetch fails or is unavailable.
   marketEnvironment: {
     cpmChangePct: number;
     cpcChangePct: number;
+    ctrChangePct: number;        // -ve = account CTR declining (for DiD adjustment)
     last7CPM: number;
     prior7CPM: number;
+    last7CTR: number;
+    prior7CTR: number;
     trend: 'spiking' | 'rising' | 'stable' | 'falling';
   } | null;
 }
@@ -197,9 +201,20 @@ export class SignalDetectorService {
       })
       .map(as => ({ adSetId: as.adSetId, adSetName: as.adSetName, frequency: as.frequency }));
 
-    // Creative fatigue — compare current CTR to stored baseline. Require ≥1k impressions on the
-    // current sample so a 35% CTR drop is signal, not Tuesday-morning noise.
-    const creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number }[] = [];
+    // Creative fatigue — DiD-adjusted comparison of current CTR vs stored baseline.
+    // Raw approach (pre-Phase-6) flagged any 35% drop as fatigue, even when account-wide CTR
+    // dropped 30% during festive / IPL / market spikes. DiD subtracts the account-level CTR
+    // change so we only flag fatigue when the campaign drop is materially larger than the market.
+    //
+    // Decision rule: campaign drop must exceed account drop by ≥25 percentage points (residual).
+    // If account CTR is FLAT or RISING, account adjustment ≈ 0 — same as the old 35% threshold.
+    // If account CTR is dropping with the campaign, we require evidence the campaign is doing
+    // worse than peers before swapping creative.
+    const FATIGUE_RESIDUAL_THRESHOLD = 25;       // percentage-points campaign drop must exceed market drop
+    const accountCTRChangePct = marketEnvironment?.ctrChangePct ?? 0;
+    // Convert to "account drop magnitude" — positive number when CTR declined; 0 when rising/flat.
+    const accountDropMagnitude = accountCTRChangePct < 0 ? -accountCTRChangePct : 0;
+    const creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number; residualDrop: number }[] = [];
     for (const adSet of campaign.adSets ?? []) {
       for (const ad of adSet.ads ?? []) {
         if (!ad.ctrBaseline || ad.ctrBaseline === 0) continue;
@@ -209,12 +224,14 @@ export class SignalDetectorService {
         if (!currentAd) continue;
         if (currentAd.impressions < MIN_IMPRESSIONS_FOR_CTR_SIGNAL) continue;
         const dropPercent = ((ad.ctrBaseline - currentAd.ctr) / ad.ctrBaseline) * 100;
-        if (dropPercent > 35) {
+        const residualDrop = dropPercent - accountDropMagnitude;
+        if (dropPercent > 35 && residualDrop > FATIGUE_RESIDUAL_THRESHOLD) {
           creativeFatigue.push({
             adId: ad.metaAdId,
             adName: ad.metaAdId,
             hookStyle: ad.hookStyle ?? 'unknown',
             ctrDrop: Math.round(dropPercent),
+            residualDrop: Math.round(residualDrop),
           });
         }
       }

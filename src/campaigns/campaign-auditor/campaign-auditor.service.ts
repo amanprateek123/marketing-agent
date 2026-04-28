@@ -96,7 +96,7 @@ export class CampaignAuditorService {
     let marketEnvironment: AuditSignalPacket['marketEnvironment'] = null;
     if (company.meta?.accessToken && company.meta?.accountId && activeCampaigns.length > 0) {
       try {
-        marketEnvironment = await this.metaMetrics.fetchAccountCpmEnvironment(
+        marketEnvironment = await this.metaMetrics.fetchAccountEnvironment(
           company.meta.accountId,
           company.meta.accessToken,
         );
