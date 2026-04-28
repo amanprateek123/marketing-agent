@@ -19,6 +19,7 @@ import { SlackService } from '../../delivery/slack.service';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
 import { CreativeLearningService } from '../../learning/creative-learning.service';
 import { CampaignLearningService } from '../../learning/campaign-learning.service';
+import { ShadowActionService } from '../../learning/shadow-action.service';
 import { CampaignOptimizerService } from './campaign-optimizer.service';
 import { QUEUES } from '../../scheduler/queue.constants';
 
@@ -43,6 +44,7 @@ export class CampaignAuditorService {
     private readonly actionLogger: ActionLoggerService,
     private readonly creativeLearning: CreativeLearningService,
     private readonly campaignLearning: CampaignLearningService,
+    private readonly shadowActions: ShadowActionService,
     private readonly metaMetrics: MetaMetricsService,
     private readonly metaAds: MetaAdsService,
     private readonly slackService: SlackService,
@@ -351,6 +353,30 @@ export class CampaignAuditorService {
       const ageDays = signals.campaignAge.days;
 
       // TypeScript-enforced timing rules — Claude cannot override
+      const recordTimingShadow = (action: any, reason: 'timing_guard_day_0_3' | 'timing_guard_day_3_7_growth') => {
+        void this.shadowActions.recordBlocked({
+          tenantId: company.tenantId,
+          campaignId: campaign._id.toString(),
+          metaCampaignId: campaign.metaCampaignId,
+          proposedAction: {
+            type: action.type, targetId: action.targetId, targetName: action.targetName,
+            reason: action.reason, priority: action.priority, params: action.params,
+          },
+          blockedReason: reason,
+          metricsAtT: {
+            spend: campaign.spend ?? 0,
+            impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0,
+            conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0,
+            cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0,
+            roas: campaign.roas ?? 0,
+            frequency: (campaign as any).frequency ?? 0,
+          },
+        });
+      };
+
       const allowedActions = verdict.recommendedActions.filter(action => {
         const isPause = action.type === 'pause_ad' || action.type === 'pause_adset';
         const isGrowth = action.type === 'scale_adset' || action.type === 'add_creative' || action.type === 'add_adset';
@@ -363,11 +389,13 @@ export class CampaignAuditorService {
             return true;
           }
           this.logger.warn(`Timing guard: blocking ${action.type} on "${action.targetName}" — campaign is ${ageDays.toFixed(1)}d old (< 3d)`);
+          recordTimingShadow(action, 'timing_guard_day_0_3');
           return false;
         }
         if (ageDays < 7 && isGrowth) {
           // Day 3-7: pause + replace allowed, NO growth actions
           this.logger.warn(`Timing guard: blocking growth action ${action.type} — campaign is ${ageDays.toFixed(1)}d old (< 7d)`);
+          recordTimingShadow(action, 'timing_guard_day_3_7_growth');
           return false;
         }
         return true;

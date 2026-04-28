@@ -14,6 +14,7 @@ import { LearningProcessor } from './learning.processor';
 import { MetaLearningProcessor } from './meta-learning.processor';
 import { CampaignSyncProcessor } from './campaign-sync.processor';
 import { CreativeReplacementProcessor } from './creative-replacement.processor';
+import { ShadowEvalProcessor } from './shadow-eval.processor';
 import { CreativeModule } from '../creative/creative.module';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
@@ -27,6 +28,7 @@ import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_SYNC }),
     BullModule.registerQueue({ name: QUEUES.CREATIVE_PRODUCTION }),
+    BullModule.registerQueue({ name: QUEUES.SHADOW_EVAL }),
     MongooseModule.forFeature([
       { name: PipelineRun.name, schema: PipelineRunSchema },
       { name: Campaign.name, schema: CampaignSchema },
@@ -39,7 +41,7 @@ import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/
     LearningModule,
     DeliveryModule,
   ],
-  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor, CampaignSyncProcessor, CreativeReplacementProcessor],
+  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor, CampaignSyncProcessor, CreativeReplacementProcessor, ShadowEvalProcessor],
   exports: [SchedulerService],
 })
 export class SchedulerModule {}

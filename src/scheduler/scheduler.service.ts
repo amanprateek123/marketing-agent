@@ -19,6 +19,7 @@ export class SchedulerService implements OnModuleInit {
     @InjectQueue(QUEUES.CAMPAIGN_AUDIT) private readonly auditQueue: Queue,
     @InjectQueue(QUEUES.MONTHLY_LEARNING) private readonly learningQueue: Queue,
     @InjectQueue(QUEUES.CAMPAIGN_SYNC) private readonly campaignSyncQueue: Queue,
+    @InjectQueue(QUEUES.SHADOW_EVAL) private readonly shadowEvalQueue: Queue,
     private readonly companiesService: CompaniesService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
@@ -38,6 +39,27 @@ export class SchedulerService implements OnModuleInit {
       await this.scheduleLearningForTenant(company.tenantId);
       await this.scheduleCampaignSyncForTenant(company.tenantId);
     }
+    // Shadow evaluator runs once globally (not per-tenant) — evaluates all pending shadows daily.
+    await this.scheduleShadowEval();
+  }
+
+  async scheduleShadowEval(): Promise<void> {
+    const existingJobs = await this.shadowEvalQueue.getRepeatableJobs();
+    for (const job of existingJobs) {
+      if (job.name === 'shadow-eval-global') {
+        await this.shadowEvalQueue.removeRepeatableByKey(job.key);
+      }
+    }
+    // Daily at 4 AM IST — quiet hour, picks up everything that crossed the 24h / 72h thresholds.
+    await this.shadowEvalQueue.add(
+      'shadow-eval-global',
+      {},
+      {
+        repeat: { pattern: '0 4 * * *', tz: 'Asia/Kolkata' },
+        jobId: 'shadow-eval-global',
+      },
+    );
+    this.logger.log('Scheduled shadow-action evaluator (daily, 4 AM IST)');
   }
 
   async scheduleLearningForTenant(tenantId: string): Promise<void> {

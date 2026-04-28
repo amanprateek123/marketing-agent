@@ -5,6 +5,7 @@ import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { AuditSignalPacket } from './signal-detector.service';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
+import { ShadowActionService } from '../../learning/shadow-action.service';
 
 export interface AuditVerdict {
   verdict: 'watch' | 'act' | 'no_action';
@@ -191,6 +192,7 @@ export class AuditAgentService {
   constructor(
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
+    private readonly shadowActions: ShadowActionService,
   ) {}
 
   async analyze(
@@ -226,7 +228,7 @@ export class AuditAgentService {
       });
 
       const verdict = this.parseVerdict(result.content);
-      return this.applyBusinessGuards(verdict, liveSnapshot);
+      return this.applyBusinessGuards(verdict, liveSnapshot, campaign, company);
     } catch (err: any) {
       this.logger.error(`Audit agent failed: ${err.message} — defaulting to watch`);
       return this.safeDefault(signals);
@@ -237,10 +239,19 @@ export class AuditAgentService {
    * Post-parse business guards: drop actions whose semantics are valid JSON but
    * marketing-domain wrong. Today: shift_budget recipients must have ≥10 conversions
    * in the live snapshot, otherwise we'd be moving budget into noise.
+   *
+   * Every dropped action is logged as a shadow action so we can later evaluate
+   * whether the block was correct (regret tracking — Phase 6 step 4).
    */
-  private applyBusinessGuards(verdict: AuditVerdict, liveSnapshot?: any): AuditVerdict {
+  private applyBusinessGuards(
+    verdict: AuditVerdict,
+    liveSnapshot: any,
+    campaign: any,
+    company: CompanyDocument,
+  ): AuditVerdict {
     const MIN_RECIPIENT_CONVERSIONS = 10;
     const liveAdSets = (liveSnapshot?.adSets ?? []) as any[];
+    const liveCampaign = liveSnapshot ?? {};
     const filtered = verdict.recommendedActions.filter(a => {
       if (a.type !== 'shift_budget_between_adsets') return true;
       const toAdSetId = a.params?.toAdSetId;
@@ -250,11 +261,37 @@ export class AuditAgentService {
         this.logger.warn(
           `Dropping shift_budget action — recipient ${toAdSetId} has ${recipientConv} conversions (< ${MIN_RECIPIENT_CONVERSIONS}). Won't move budget into noise.`,
         );
+        // Fire-and-forget: shadow logging must never break the audit.
+        void this.shadowActions.recordBlocked({
+          tenantId: company.tenantId,
+          campaignId: campaign?._id?.toString() ?? campaign?.campaignId ?? '',
+          metaCampaignId: campaign?.metaCampaignId ?? liveCampaign.metaCampaignId ?? '',
+          proposedAction: {
+            type: a.type, targetId: a.targetId, targetName: a.targetName,
+            reason: a.reason, priority: a.priority, params: a.params,
+          },
+          blockedReason: 'recipient_thin_evidence',
+          metricsAtT: this.snapshotToMetrics(liveCampaign),
+        });
         return false;
       }
       return true;
     });
     return { ...verdict, recommendedActions: filtered };
+  }
+
+  private snapshotToMetrics(snapshot: any): any {
+    return {
+      spend: snapshot?.metrics?.spend ?? snapshot?.spend ?? 0,
+      impressions: snapshot?.metrics?.impressions ?? snapshot?.impressions ?? 0,
+      clicks: snapshot?.metrics?.clicks ?? snapshot?.clicks ?? 0,
+      conversions: snapshot?.metrics?.conversions ?? snapshot?.conversions ?? 0,
+      ctr: snapshot?.metrics?.ctr ?? snapshot?.ctr ?? 0,
+      cpc: snapshot?.metrics?.cpc ?? snapshot?.cpc ?? 0,
+      cpa: snapshot?.metrics?.cpa ?? snapshot?.cpa ?? 0,
+      roas: snapshot?.metrics?.roas ?? snapshot?.roas ?? 0,
+      frequency: snapshot?.metrics?.frequency ?? snapshot?.frequency ?? 0,
+    };
   }
 
   private buildContext(
