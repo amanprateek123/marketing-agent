@@ -1014,6 +1014,79 @@ export class MetaAdsService {
   }
 
   /**
+   * Duplicate an ad set (deep copy — includes all child ads) and optionally swap the
+   * audience on the copy. Used by `refresh_audience` to give a fatigued ad set a fresh
+   * audience without losing the winning creative. The new ad set comes back PAUSED;
+   * caller activates after any post-creation mutations.
+   */
+  async duplicateAdSetWithNewAudience(
+    sourceAdSetId: string,
+    accessToken: string,
+    newAudience: {
+      newAudienceId?: string;        // existing Meta custom/lookalike audience to use
+      useAdvantagePlus?: boolean;    // alternative: switch to Advantage+ Audience
+    },
+  ): Promise<{ newAdSetId: string }> {
+    if (!newAudience.newAudienceId && !newAudience.useAdvantagePlus) {
+      throw new Error('refresh_audience: must provide newAudienceId OR useAdvantagePlus=true');
+    }
+
+    // 1) Deep-copy the source ad set (Meta /copies endpoint clones ads inside)
+    const copyRes = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${sourceAdSetId}/copies`,
+      {
+        deep_copy: true,
+        status_option: 'PAUSED',
+        access_token: accessToken,
+      },
+    );
+    const newAdSetId = copyRes?.data?.copied_adset_id ?? copyRes?.data?.ad_object_ids?.[0];
+    if (!newAdSetId) {
+      throw new Error('refresh_audience: Meta /copies did not return a new adset id');
+    }
+
+    // 2) Read existing targeting on the new copy and merge audience changes (read-modify-write
+    //    so we don't blow away age/geo/excluded audiences — same pattern as updateAdSetPlacements).
+    const existing = await this.metaApiCall(
+      'GET',
+      `${META_API_BASE}/${newAdSetId}`,
+      { fields: 'targeting', access_token: accessToken },
+    );
+    const targeting: Record<string, any> = JSON.parse(JSON.stringify(existing?.data?.targeting ?? {}));
+
+    if (newAudience.useAdvantagePlus) {
+      // Switch to Advantage+ Audience: clear custom audiences, enable advantage_audience flag
+      delete targeting.custom_audiences;
+      targeting.targeting_automation = { ...(targeting.targeting_automation ?? {}), advantage_audience: 1 };
+    } else if (newAudience.newAudienceId) {
+      targeting.custom_audiences = [{ id: newAudience.newAudienceId }];
+      // Clear conflicting Advantage+ flag if it was set
+      if (targeting.targeting_automation) {
+        targeting.targeting_automation = { ...targeting.targeting_automation, advantage_audience: 0 };
+      }
+    }
+
+    await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${newAdSetId}`,
+      { targeting, access_token: accessToken },
+    );
+
+    // 3) Activate the new ad set
+    await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${newAdSetId}`,
+      { status: 'ACTIVE', access_token: accessToken },
+    );
+
+    this.logger.log(
+      `refresh_audience: duplicated ${sourceAdSetId} → ${newAdSetId} with ${newAudience.useAdvantagePlus ? 'advantage_plus' : `audience ${newAudience.newAudienceId}`}`,
+    );
+    return { newAdSetId };
+  }
+
+  /**
    * Get the ad account's configured timezone (e.g. "Asia/Kolkata", "America/Los_Angeles").
    * Used to gate dayparting — schedules are interpreted in this TZ, not UTC.
    */

@@ -436,6 +436,12 @@ export class CampaignAuditorService {
           metrics.audienceType = action.params?.audienceType ?? 'retarget';
           metrics.targeting = action.params?.targeting ?? {};
           metrics.campaignId = campaign.metaCampaignId;
+        } else if (action.type === 'refresh_audience') {
+          // Capture source ad set's current frequency + campaign-level CTR trend
+          // so the optimizer can re-validate at execution time (gates: freq>4.5, CTR not declining).
+          const liveSourceAdSet = snapshotData.adSets?.find((as: any) => as.metaAdSetId === action.targetId);
+          metrics.sourceFrequency = Number(liveSourceAdSet?.frequency ?? 0);
+          metrics.sourceCtrTrend = signals.trends.ctrTrend;
         }
 
         const created = await this.createPendingAction(campaign, company, {
@@ -584,7 +590,8 @@ export class CampaignAuditorService {
         | 'shift_budget_between_adsets'
         | 'reduce_total_budget'
         | 'narrow_placement'
-        | 'dayparting';
+        | 'dayparting'
+        | 'refresh_audience';
       targetId: string;
       targetName: string;
       reason: string;
@@ -694,6 +701,23 @@ export class CampaignAuditorService {
             continue;
           }
           await this.optimizer.daypartAdSet(campaign, company, action.targetId, schedule);
+        } else if (action.type === 'refresh_audience') {
+          // Audience swap — requires explicit approval since it pauses the source ad set
+          // and creates a new one (Meta API write that can't be cleanly undone).
+          if (!manuallyApproved) continue;
+          const newAudienceId = action.metrics?.newAudienceId;
+          const useAdvantagePlus = action.metrics?.useAdvantagePlus === true;
+          const sourceFreq = Number(action.metrics?.sourceFrequency);
+          const sourceCtrTrend = action.metrics?.sourceCtrTrend ?? 'insufficient_data';
+          if (!newAudienceId && !useAdvantagePlus) {
+            this.logger.warn(`refresh_audience missing newAudienceId / useAdvantagePlus — skipping`);
+            continue;
+          }
+          await this.optimizer.refreshAudience(
+            campaign, company, action.targetId,
+            { newAudienceId, useAdvantagePlus },
+            { frequency: sourceFreq, ctrTrend: sourceCtrTrend },
+          );
         } else if (action.type === 'scale_adset') {
           // Scale requires explicit approval — only execute if manually approved (not grace-expired)
           if (!manuallyApproved) continue;

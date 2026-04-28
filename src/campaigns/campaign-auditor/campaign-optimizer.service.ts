@@ -338,4 +338,77 @@ export class CampaignOptimizerService {
       metadata: { metaCampaignId: campaign.metaCampaignId, adSetId, schedule },
     });
   }
+
+  /**
+   * Duplicate a fatigued ad set with a fresh audience, keeping the same creative.
+   * The senior-buyer move when frequency is high but the creative is still good:
+   * resets Meta's learning phase on the new audience, lets the proven creative
+   * keep running. Source ad set is paused after duplication.
+   *
+   * Validation gates (TS-enforced):
+   *   - source ad set must have frequency > 4.5 (otherwise no fatigue justification)
+   *   - source ad set's CTR trend must NOT be declining (if it is, the creative is
+   *     the problem, not the audience — agent should use replace_creative)
+   *   - newAudienceId or useAdvantagePlus must be provided
+   */
+  async refreshAudience(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    sourceAdSetId: string,
+    newAudience: { newAudienceId?: string; useAdvantagePlus?: boolean },
+    sourceMetrics: { frequency: number; ctrTrend: 'improving' | 'stable' | 'declining' | 'insufficient_data' },
+  ): Promise<{ newAdSetId: string; sourcePaused: boolean }> {
+    const MIN_FREQUENCY_FOR_REFRESH = 4.5;
+
+    if (sourceMetrics.frequency < MIN_FREQUENCY_FOR_REFRESH) {
+      throw new Error(
+        `refresh_audience refused: source ad set frequency ${sourceMetrics.frequency.toFixed(1)} is below ${MIN_FREQUENCY_FOR_REFRESH} — not yet fatigued. Wait or use a different action.`,
+      );
+    }
+    if (sourceMetrics.ctrTrend === 'declining') {
+      throw new Error(
+        `refresh_audience refused: source ad set CTR is declining — the creative is the problem, not the audience. Use replace_creative instead.`,
+      );
+    }
+    if (!newAudience.newAudienceId && !newAudience.useAdvantagePlus) {
+      throw new Error('refresh_audience: provide either newAudienceId or useAdvantagePlus=true');
+    }
+
+    const { newAdSetId } = await this.metaAdsService.duplicateAdSetWithNewAudience(
+      sourceAdSetId, company.meta!.accessToken, newAudience,
+    );
+
+    // Pause the source ad set
+    let sourcePaused = false;
+    try {
+      await this.metaAdsService.pauseAdSet(sourceAdSetId, company.meta!.accessToken);
+      sourcePaused = true;
+    } catch (err: any) {
+      this.logger.error(`refresh_audience: created ${newAdSetId} but failed to pause source ${sourceAdSetId}: ${err.message}`);
+    }
+
+    // Track in campaign document
+    const adSets = ((campaign as any).adSets ?? []) as any[];
+    const sourceAdSet = adSets.find(a => a.metaAdSetId === sourceAdSetId);
+    if (sourceAdSet) sourceAdSet.status = 'paused';
+    adSets.push({
+      metaAdSetId: newAdSetId,
+      name: `Refresh of ${sourceAdSet?.name ?? sourceAdSetId}`,
+      audienceType: newAudience.useAdvantagePlus ? 'advantage_plus' : 'custom',
+      status: 'active',
+      ads: [],   // /copies brought ads over server-side; we'll discover them on next audit
+      budgetPercent: sourceAdSet?.budgetPercent ?? 0,
+    });
+
+    await this.actionLogger.log({
+      tenantId: company.tenantId,
+      agent: AgentType.CAMPAIGN_AUDITOR,
+      action: 'audience_refreshed',
+      reason: `Source freq ${sourceMetrics.frequency.toFixed(1)} ≥ ${MIN_FREQUENCY_FOR_REFRESH} with healthy CTR trend (${sourceMetrics.ctrTrend}) — duplicating with fresh audience`,
+      outcome: `New ad set ${newAdSetId} active with ${newAudience.useAdvantagePlus ? 'Advantage+' : `audience ${newAudience.newAudienceId}`}; source ${sourceAdSetId} ${sourcePaused ? 'paused' : 'pause failed (see logs)'}`,
+      metadata: { metaCampaignId: campaign.metaCampaignId, sourceAdSetId, newAdSetId, newAudience, sourcePaused },
+    });
+
+    return { newAdSetId, sourcePaused };
+  }
 }

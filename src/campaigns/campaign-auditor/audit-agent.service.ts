@@ -23,7 +23,8 @@ export interface AuditVerdict {
       | 'shift_budget_between_adsets'
       | 'reduce_total_budget'
       | 'narrow_placement'
-      | 'dayparting';
+      | 'dayparting'
+      | 'refresh_audience';
     targetId: string;
     targetName: string;
     reason: string;
@@ -74,6 +75,9 @@ THROTTLE actions (less drastic than pause — prefer these BEFORE pausing):
     - B2B work hours (10am-7pm, Mon-Fri): {startMinute: 600, endMinute: 1140, days: [1,2,3,4,5]}
     - To span midnight, USE TWO SLOTS — Meta does not accept startMinute > endMinute. e.g. 10pm-2am = [{1320, 1440, days}, {0, 120, days}].
 
+REFRESH actions (when audience is fatigued but creative is good):
+- "refresh_audience": Duplicate a fatigued ad set with a fresh audience, keeping the same creative. Use when frequency is high (>4.5) but CTR is NOT declining (meaning the creative is still performing — it's the audience that's saturated). Resets Meta's learning phase on the new audience while preserving the proven creative. Set targetId = source (fatigued) ad set ID, EITHER params.newAudienceId = numeric Meta custom/lookalike audience ID OR params.useAdvantagePlus = true (switch to Advantage+ targeting). TS will REFUSE the action if frequency < 4.5 OR CTR is declining (in those cases use replace_creative or pause_adset).
+
 ═══ ACTION PRIORITY ORDER ═══
 When multiple actions could fit the same problem, prefer LESS DESTRUCTIVE first:
 1. THROTTLE (narrow_placement / dayparting / reduce_total_budget) before PAUSE (pause_ad / pause_adset).
@@ -117,8 +121,8 @@ Output ONLY valid JSON in this exact format:
   "watchSignals": ["signal 1", "signal 2"],
   "recommendedActions": [
     {
-      "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative" | "add_creative" | "add_adset" | "shift_budget_between_adsets" | "reduce_total_budget" | "narrow_placement" | "dayparting",
-      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name. For add_adset and reduce_total_budget use the campaign ID. For shift_budget_between_adsets use the DONOR (losing) ad set ID.",
+      "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative" | "add_creative" | "add_adset" | "shift_budget_between_adsets" | "reduce_total_budget" | "narrow_placement" | "dayparting" | "refresh_audience",
+      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name. For add_adset and reduce_total_budget use the campaign ID. For shift_budget_between_adsets use the DONOR (losing) ad set ID. For refresh_audience use the SOURCE (fatigued) ad set ID.",
       "targetName": "human readable name",
       "reason": "specific reason for this action",
       "priority": "high" | "medium" | "low",
@@ -128,7 +132,8 @@ Output ONLY valid JSON in this exact format:
         "// For shift_budget_between_adsets": "toAdSetId: string (recipient ad set), shiftPercent: number (1-50, % of donor's current budget % to move)",
         "// For reduce_total_budget": "reductionPercent: number (1-50, % of total daily budget to cut)",
         "// For narrow_placement": "publisherPlatforms: string[] (e.g. ['facebook','instagram']), optional: facebookPositions, instagramPositions, audienceNetworkPositions arrays",
-        "// For dayparting": "schedule: array of { startMinute: 0-1440, endMinute: 0-1440, days: number[] (0-6, Sun-Sat) }"
+        "// For dayparting": "schedule: array of { startMinute: 0-1440, endMinute: 0-1440, days: number[] (0-6, Sun-Sat) }",
+        "// For refresh_audience": "EITHER newAudienceId: string (numeric Meta audience ID — use a DIFFERENT lookalike % or custom audience than the source), OR useAdvantagePlus: true (switch source to Advantage+ targeting)"
       }
     }
   ]
@@ -642,6 +647,18 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
                   s.days.every((d: any) => Number.isInteger(d) && d >= 0 && d <= 6);
                 if (!schedule.every(validSlot)) {
                   this.logger.warn(`Dropping dayparting — invalid schedule slots`);
+                  return false;
+                }
+              }
+              if (a.type === 'refresh_audience') {
+                const newAudienceId = a.params?.newAudienceId;
+                const useAdvantagePlus = a.params?.useAdvantagePlus === true;
+                if (!useAdvantagePlus && (!newAudienceId || !/^\d+$/.test(String(newAudienceId)))) {
+                  this.logger.warn(`Dropping refresh_audience — provide either numeric newAudienceId OR useAdvantagePlus=true`);
+                  return false;
+                }
+                if (useAdvantagePlus && newAudienceId) {
+                  this.logger.warn(`Dropping refresh_audience — provide ONE of newAudienceId or useAdvantagePlus, not both`);
                   return false;
                 }
               }
