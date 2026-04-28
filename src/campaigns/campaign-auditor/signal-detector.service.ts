@@ -4,6 +4,7 @@ import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
 import { getBenchmark, getCPARange, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 import { adSetWinnerPosterior } from '../../common/statistics/bayesian-estimator.util';
+import { deriveFloorsFromVertical } from '../../common/statistics/power-calc.util';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -71,16 +72,20 @@ export interface AuditSignalPacket {
     prior7CTR: number;
     trend: 'spiking' | 'rising' | 'stable' | 'falling';
   } | null;
+
+  // Vertical-aware sample-size floors — derived from cvrTypical / ctrMidpoint.
+  // Surfaced so the auditor knows how much evidence is "enough" for this vertical.
+  evidenceFloors: {
+    impressionsForCtrSignal: number;
+    clicksForZeroConvSignal: number;
+    clicksForRetargetTrigger: number;
+  };
 }
 
-// Statistical floors — never fire signals on samples this small. These come from
-// media-buyer practice: <1k impressions can't distinguish CTR drop from noise;
-// <30 clicks at 5% CVR has a 95% CI that overlaps with healthy; etc.
-const MIN_IMPRESSIONS_FOR_CTR_SIGNAL = 1000;
-const MIN_CLICKS_FOR_ZERO_CONV_PAUSE = 30;
-const MIN_CLICKS_FOR_RETARGET_TRIGGER = 200;
+// Statistical floors — derived per-vertical at runtime from cvrTypical and ctrMidpoint
+// via power-calc.util.ts. Frequency-fatigue floor is a separate magnitude (we're not
+// detecting a proportion change, just requiring enough impressions for frequency to be stable).
 const MIN_IMPRESSIONS_FOR_FATIGUE = 500;
-const MIN_CLICKS_FOR_CAMPAIGN_ZERO_CONV = 50;
 
 @Injectable()
 export class SignalDetectorService {
@@ -129,6 +134,16 @@ export class SignalDetectorService {
     // Vertical priors prevent "no_benchmark" on cold-start campaigns where the auditor
     // has no basis to judge whether 0.4% CTR is normal or terrible for this industry.
     const verticalBenchmark = getBenchmark(company.industry);
+
+    // Vertical-aware sample-size floors — fintech needs ~5× the impressions of food-delivery
+    // to detect the same effect with the same confidence. Power-calc derives floors that scale.
+    const ctrMidpoint = (verticalBenchmark.ctrRangePct.min + verticalBenchmark.ctrRangePct.max) / 200; // /200 because input is %, output is decimal
+    const cvrTypical = verticalBenchmark.cvrPct.typical / 100;
+    const sampleFloors = deriveFloorsFromVertical({ ctrMidpoint, cvrTypical });
+    const MIN_IMPRESSIONS_FOR_CTR_SIGNAL = sampleFloors.impressionsForCtrSignal;
+    const MIN_CLICKS_FOR_ZERO_CONV_PAUSE = sampleFloors.clicksForZeroConvSignal;
+    const MIN_CLICKS_FOR_RETARGET_TRIGGER = sampleFloors.clicksForRetargetTrigger;
+    const MIN_CLICKS_FOR_CAMPAIGN_ZERO_CONV = Math.max(50, Math.round(sampleFloors.clicksForZeroConvSignal * 1.5));
     let expectedCTRRange: { min: number; max: number } | null = null;
     const historicalCTRs = sorted.map(s => s.metrics.ctr).filter(v => v > 0);
     if (historicalCTRs.length >= 2) {
@@ -354,6 +369,11 @@ export class SignalDetectorService {
       },
       safetyBreaches,
       marketEnvironment: marketEnvironment ?? null,
+      evidenceFloors: {
+        impressionsForCtrSignal: MIN_IMPRESSIONS_FOR_CTR_SIGNAL,
+        clicksForZeroConvSignal: MIN_CLICKS_FOR_ZERO_CONV_PAUSE,
+        clicksForRetargetTrigger: MIN_CLICKS_FOR_RETARGET_TRIGGER,
+      },
     };
   }
 

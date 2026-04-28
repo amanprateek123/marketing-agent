@@ -408,6 +408,7 @@ ${signals.marketEnvironment ? `━━━ MARKET ENVIRONMENT (account-level, last
   Expected CTR: ${signals.benchmarks.expectedCTRRange ? `${signals.benchmarks.expectedCTRRange.min.toFixed(2)}–${signals.benchmarks.expectedCTRRange.max.toFixed(2)}%` : 'no benchmark'} | current: ${signals.benchmarks.currentCTRVsBenchmark}
   Expected CPA: ${signals.benchmarks.expectedCPARange ? `₹${signals.benchmarks.expectedCPARange.min.toFixed(0)}–₹${signals.benchmarks.expectedCPARange.max.toFixed(0)}` : 'no benchmark'} | current: ${signals.benchmarks.currentCPAVsBenchmark}
   Best audience type: ${signals.benchmarks.bestAudienceType ?? 'unknown'}
+  Evidence floors (vertical-derived): ≥${signals.evidenceFloors.impressionsForCtrSignal} impressions for CTR signal, ≥${signals.evidenceFloors.clicksForZeroConvSignal} clicks before "zero-conv" is meaningful, ≥${signals.evidenceFloors.clicksForRetargetTrigger} clicks before retarget. Below these the data is too noisy to act on.
   (Winning hooks and other learnings are in the TENANT CONTEXT block above.)
 
 ━━━ ANOMALIES ━━━
