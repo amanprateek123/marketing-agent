@@ -82,6 +82,18 @@ export interface AuditSignalPacket {
     clicksForRetargetTrigger: number;
   };
 
+  // Hook saturation per (audienceType, hookStyle). Tells the agent which hooks
+  // have been hammering each audience pool — so add_creative / replace_creative
+  // recommendations can rotate to fresh hooks BEFORE per-ad CTR collapses.
+  // saturationPct = % of total impressions to this audience that came from this hook.
+  hookSaturation: Array<{
+    audienceType: string;
+    hookStyle: string;
+    impressions: number;
+    audienceTotalImpressions: number;
+    saturationPct: number;       // 0-100
+  }>;
+
   // Thompson Sampling allocation across active ad sets — recommended budget %.
   // The auditor uses this to pick the recipient when proposing shift_budget.
   // Null when there are 0 active ad sets.
@@ -385,6 +397,35 @@ export class SignalDetectorService {
       campaignCapExceeded: current.campaign.spend > (company.maxBudgetPerCampaign ?? Infinity),
     };
 
+    // ── Hook saturation per (audienceType, hookStyle) ────────────────────────
+    // Joins live ad-level impressions with the persisted hookStyle on each ad.
+    // Saturation = share of impressions on the audience that came from this hook.
+    // High saturation = the audience has been hammered with this angle; rotate.
+    const audienceTotal = new Map<string, number>();
+    const bucketImpressions = new Map<string, number>();   // key: `${audienceType}|${hookStyle}`
+    for (const adSet of (campaign.adSets ?? [])) {
+      const audienceType = adSet.audienceType ?? 'unknown';
+      for (const ad of (adSet.ads ?? [])) {
+        const live = current.adSets.flatMap(a => a.ads).find(a => a.adId === ad.metaAdId);
+        if (!live || !live.impressions) continue;
+        const hookStyle = ad.hookStyle ?? 'unknown';
+        audienceTotal.set(audienceType, (audienceTotal.get(audienceType) ?? 0) + live.impressions);
+        const key = `${audienceType}|${hookStyle}`;
+        bucketImpressions.set(key, (bucketImpressions.get(key) ?? 0) + live.impressions);
+      }
+    }
+    const hookSaturation: AuditSignalPacket['hookSaturation'] = [];
+    for (const [key, impressions] of bucketImpressions.entries()) {
+      const [audienceType, hookStyle] = key.split('|');
+      const total = audienceTotal.get(audienceType) ?? 0;
+      hookSaturation.push({
+        audienceType, hookStyle, impressions,
+        audienceTotalImpressions: total,
+        saturationPct: total > 0 ? Math.round((impressions / total) * 100) : 0,
+      });
+    }
+    hookSaturation.sort((a, b) => b.saturationPct - a.saturationPct);
+
     return {
       campaignAge: { hours: Math.round(ageHours), days: Math.round(ageDays * 10) / 10, inLearningPhase: ageDays < coldStartDays },
       trends: { ctrTrend, roasTrend, frequencyTrend: freqTrend, spendPace },
@@ -419,6 +460,7 @@ export class SignalDetectorService {
       },
       banditAllocation: this.computeBanditAllocation(current.adSets, conversionValue, priorCVR),
       breakdowns: breakdowns ?? { byPlacement: [], byHour: [], byDayOfWeek: [] },
+      hookSaturation,
     };
   }
 

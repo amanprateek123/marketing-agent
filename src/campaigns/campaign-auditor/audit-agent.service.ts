@@ -514,6 +514,35 @@ ${signals.breakdowns.byHour
   .join('\n')}
   RULE: When proposing dayparting, identify the loss hours (high spend, 0 conv, low CTR) and exclude them. Don't dayparting based on prompt examples — use this data.
 ` : ''}
+${signals.hookSaturation.length > 0 ? (() => {
+  // Group by audienceType for compact rendering. Show audiences with ≥1k impressions
+  // (smaller pools have unreliable saturation %).
+  const byAudience = new Map<string, typeof signals.hookSaturation>();
+  for (const h of signals.hookSaturation) {
+    if (h.audienceTotalImpressions < 1000) continue;
+    const list = byAudience.get(h.audienceType) ?? [];
+    list.push(h);
+    byAudience.set(h.audienceType, list);
+  }
+  if (byAudience.size === 0) return '';
+  const lines: string[] = ['━━━ HOOK SATURATION (% of audience impressions per hookStyle) ━━━'];
+  for (const [audience, hooks] of byAudience.entries()) {
+    const total = hooks[0].audienceTotalImpressions;
+    const formatted = hooks
+      .sort((a, b) => b.saturationPct - a.saturationPct)
+      .map(h => {
+        const tag = h.saturationPct >= 70 ? ' ⚠ SATURATED'
+          : h.saturationPct >= 40 ? ' (heavy)'
+          : h.saturationPct <= 15 ? ' (fresh)'
+          : '';
+        return `${h.hookStyle} ${h.saturationPct}%${tag}`;
+      })
+      .join(', ');
+    lines.push(`  ${audience} (${total.toLocaleString()} imp): ${formatted}`);
+  }
+  lines.push(`  RULE: When proposing replace_creative or add_creative, prefer a hookStyle marked (fresh) on the target audience. Avoid SATURATED hooks (≥70%) — the audience has been hammered with that angle and conversion will degrade even if individual ad CTR still looks fine. Hook diversity beats hook depth.`);
+  return lines.join('\n') + '\n';
+})() : ''}
 ${signals.breakdowns.byDayOfWeek.length > 0 ? (() => {
   // Compute campaign-average CVR to flag strong/weak days as ratios.
   const totalConv = signals.breakdowns.byDayOfWeek.reduce((s, d) => s + d.conversions, 0);
