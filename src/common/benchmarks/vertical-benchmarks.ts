@@ -24,12 +24,12 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
   spirituality: {
     ctrRangePct:    { min: 1.2, max: 5.0 },                                    // ceiling 5% — Hindi/regional reels with face-cam routinely hit 4-6%
     cpcRangeRupees: { min: 5,   max: 30 },                                     // floor 5 for tier-3 Hindi-belt
-    cpaRangeRupees: { min: 80,  max: 1200 },                                   // wide: lead ₹80-350, paid consultation ₹400-1200
+    cpaRangeRupees: { min: 80,  max: 1500 },                                   // wide: lead ₹80-350, paid consultation ₹400-1200, recurring ₹200-1500
     cpaByEventType: {
       lead:         { min: 80,  max: 350 },
       install:      { min: 60,  max: 250 },
       purchase:     { min: 400, max: 1200 },                                   // paid consultations
-      subscription: { min: 250, max: 800 },
+      subscription: { min: 200, max: 1500 },                                   // tier-1 recurring kundli/horoscope memberships push higher
     },
     frequencyCap:   4.0,
     cvrPct:         { typical: 6.0 },
@@ -37,11 +37,11 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
   fintech: {
     ctrRangePct:    { min: 0.5, max: 1.8 },                                    // floor 0.5% — insurance/loan cold can do 0.4-0.7%
     cpcRangeRupees: { min: 25,  max: 150 },                                    // ceiling 150 — credit cards/personal loans hit ₹100-180 in metros
-    cpaRangeRupees: { min: 250, max: 6000 },                                   // wide: top-of-funnel lead ₹250-1500, approved KYC/loan ₹2000-6000
+    cpaRangeRupees: { min: 250, max: 12000 },                                  // wide: insurance lead ₹250 → loan disbursement ₹12000
     cpaByEventType: {
       lead:         { min: 250, max: 1500 },                                   // form-fill / app-install
       install:      { min: 150, max: 600 },
-      purchase:     { min: 2000, max: 6000 },                                  // KYC-completed / approved card / loan disbursement
+      purchase:     { min: 2000, max: 12000 },                                 // approved-conversion: cards ₹3-6k, personal loans ₹6-12k disbursed
       subscription: { min: 800, max: 3500 },
     },
     frequencyCap:   3.5,
@@ -50,11 +50,11 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
   edtech: {
     ctrRangePct:    { min: 1.0, max: 3.5 },                                    // ceiling 3.5% — JEE/NEET rank-result hooks punch high
     cpcRangeRupees: { min: 15,  max: 50 },
-    cpaRangeRupees: { min: 150, max: 2500 },                                   // K-12 demo ₹250-600, UPSC test-series ₹800-2500
+    cpaRangeRupees: { min: 150, max: 5000 },                                   // K-12 demo ₹150 → UPSC/CAT/CFA paid course ₹3000-5000
     cpaByEventType: {
       lead:         { min: 150, max: 600 },                                    // demo bookings / free-trial
       install:      { min: 100, max: 400 },                                    // app downloads
-      purchase:     { min: 800, max: 2500 },                                   // paid course
+      purchase:     { min: 800, max: 5000 },                                   // K-12 ₹800-2500, UPSC/CAT/CFA paid courses ₹3000-5000 sustainable
       subscription: { min: 500, max: 1800 },
     },
     frequencyCap:   4.0,
@@ -112,6 +112,71 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     frequencyCap:   4.0,
     cvrPct:         { typical: 4.0 },
   },
+  real_estate: {
+    ctrRangePct:    { min: 0.5, max: 1.2 },                                    // low CTR — high-consideration / high-intent only
+    cpcRangeRupees: { min: 15,  max: 60 },
+    cpaRangeRupees: { min: 400, max: 30000 },                                  // form lead ₹400-2500, booking deposit ₹5000-30000
+    cpaByEventType: {
+      lead:         { min: 400, max: 2500 },                                   // site-visit booking / form fill
+      install:      { min: 300, max: 1200 },
+      purchase:     { min: 5000, max: 30000 },                                 // booking-deposit / token amount paid
+      subscription: { min: 800, max: 3000 },                                   // listing subscription on portals
+    },
+    frequencyCap:   3.5,
+    cvrPct:         { typical: 1.5 },
+  },
+  automotive: {
+    ctrRangePct:    { min: 0.8, max: 2.0 },                                    // test-drive / brochure download CTR band
+    cpcRangeRupees: { min: 15,  max: 80 },
+    cpaRangeRupees: { min: 400, max: 15000 },                                  // test-drive lead ₹400-1500, booking-confirmed ₹3000-15000
+    cpaByEventType: {
+      lead:         { min: 400, max: 1500 },                                   // test-drive / brochure
+      install:      { min: 200, max: 600 },                                    // dealer-finder app installs
+      purchase:     { min: 3000, max: 15000 },                                 // booking with deposit
+      subscription: { min: 600, max: 2500 },
+    },
+    frequencyCap:   4.0,
+    cvrPct:         { typical: 2.5 },
+  },
+  gaming: {
+    ctrRangePct:    { min: 2.0, max: 5.0 },                                    // RMG / fantasy / casual all index high — videos + offer-led creatives
+    cpcRangeRupees: { min: 6,   max: 25 },                                     // cheap inventory; high engagement format
+    cpaRangeRupees: { min: 40,  max: 800 },                                    // install-and-FTU ₹40-200; FTD (first-time deposit) ₹100-600
+    cpaByEventType: {
+      lead:         { min: 30,  max: 200 },                                    // signup / OTP-verify
+      install:      { min: 40,  max: 200 },
+      purchase:     { min: 100, max: 600 },                                    // FTD — first-time deposit
+      subscription: { min: 200, max: 800 },                                    // pro / VIP tiers
+    },
+    frequencyCap:   6.0,                                                       // high-engagement category — gamers re-engage hard
+    cvrPct:         { typical: 5.0 },
+  },
+  travel: {
+    ctrRangePct:    { min: 1.0, max: 2.5 },
+    cpcRangeRupees: { min: 15,  max: 60 },
+    cpaRangeRupees: { min: 150, max: 2500 },                                   // OTA lead ₹150-600, completed booking ₹400-2500 (commission-margin business)
+    cpaByEventType: {
+      lead:         { min: 150, max: 600 },                                    // form-fill / quote-request
+      install:      { min: 100, max: 400 },
+      purchase:     { min: 400, max: 2500 },                                   // booked trip — sensitive to AOV / commission
+      subscription: { min: 500, max: 2000 },                                   // travel club / loyalty
+    },
+    frequencyCap:   4.0,
+    cvrPct:         { typical: 3.0 },
+  },
+  jobs_recruitment: {
+    ctrRangePct:    { min: 1.0, max: 2.5 },
+    cpcRangeRupees: { min: 10,  max: 40 },
+    cpaRangeRupees: { min: 80,  max: 1500 },                                   // candidate signup ₹80-400; premium subscription ₹200-800; B2B JD-post ₹500-1500
+    cpaByEventType: {
+      lead:         { min: 80,  max: 400 },                                    // candidate signup / profile-complete
+      install:      { min: 60,  max: 250 },
+      purchase:     { min: 500, max: 1500 },                                   // employer JD-post / featured listing
+      subscription: { min: 200, max: 800 },                                    // candidate premium tier
+    },
+    frequencyCap:   4.5,
+    cvrPct:         { typical: 4.0 },
+  },
   default: {
     ctrRangePct:    { min: 1.0, max: 2.5 },
     cpcRangeRupees: { min: 15,  max: 50 },
@@ -127,7 +192,14 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
   },
 };
 
+// Order matters — first match wins. More specific keywords go before generic ones
+// (e.g. "real estate" before any keyword that might overlap).
 const INDUSTRY_KEYWORDS: { match: RegExp; key: keyof typeof VERTICAL_BENCHMARKS_INDIA }[] = [
+  { match: /real\s*estate|propert(y|ies)|realty|housing|builder|apartment|flat|condo/i, key: 'real_estate' },
+  { match: /automotive|automobile|\bauto\b|\bcars?\b|bikes?|two\s*wheel|four\s*wheel|vehicle|dealership|ev\s+(car|bike)/i, key: 'automotive' },
+  { match: /gaming|\bgame(s|ing)?\b|rmg|fantasy\s*(sport|cricket|league)|esports?|casino|betting|rummy|poker|teen\s*patti/i, key: 'gaming' },
+  { match: /travel|tour|holiday|flight|hotel|resort|\bota\b|booking\.com|makemytrip/i, key: 'travel' },
+  { match: /\bjobs?\b|recruit|hiring|career|naukri|monster|placement|employer|\bhr\s*tech/i, key: 'jobs_recruitment' },
   { match: /astro|spirit|religi|tarot|horoscope|vedic|puja|mystic/i,         key: 'spirituality' },
   { match: /fin\s*tech|loan|insur|invest|wealth|banking|credit|nbfc/i,        key: 'fintech' },
   { match: /ed\s*tech|education|exam|coaching|tutor|course|upsc|jee|neet/i,   key: 'edtech' },

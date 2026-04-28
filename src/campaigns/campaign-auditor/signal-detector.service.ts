@@ -171,10 +171,22 @@ export class SignalDetectorService {
 
     // Audience fatigue requires enough impression volume — frequency on a tiny sample is meaningless.
     // Fall back to vertical-specific frequency cap when the tenant hasn't configured one.
-    const frequencyCap = company.pauseIfFrequencyAbove ?? verticalBenchmark.frequencyCap;
+    // Retarget pods naturally run frequency 6-8 (warm audience, repeated exposure works) — apply
+    // a 1.75× multiplier so we don't pause healthy retarget ad sets that look "fatigued" by the
+    // prospecting cap. Cross-reference live metrics against campaign.adSets[i].audienceType.
+    const RETARGET_FREQ_MULTIPLIER = 1.75;
+    const baseFrequencyCap = company.pauseIfFrequencyAbove ?? verticalBenchmark.frequencyCap;
+    const adSetAudienceType: Record<string, string | undefined> = {};
+    for (const persisted of (campaign.adSets ?? [])) {
+      if (persisted?.metaAdSetId) adSetAudienceType[persisted.metaAdSetId] = persisted.audienceType;
+    }
     const audienceFatigue = current.adSets
-      .filter(as => as.frequency > frequencyCap
-        && as.impressions >= MIN_IMPRESSIONS_FOR_FATIGUE)
+      .filter(as => {
+        const audType = adSetAudienceType[as.adSetId];
+        const isRetarget = audType === 'retarget' || audType === 'custom';
+        const cap = isRetarget ? baseFrequencyCap * RETARGET_FREQ_MULTIPLIER : baseFrequencyCap;
+        return as.frequency > cap && as.impressions >= MIN_IMPRESSIONS_FOR_FATIGUE;
+      })
       .map(as => ({ adSetId: as.adSetId, adSetName: as.adSetName, frequency: as.frequency }));
 
     // Creative fatigue — compare current CTR to stored baseline. Require ≥1k impressions on the
