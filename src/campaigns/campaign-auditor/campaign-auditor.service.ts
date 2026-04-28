@@ -162,12 +162,24 @@ export class CampaignAuditorService {
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
 
-    const full = await this.metaMetrics.fetchFullMetrics(
-      campaign.metaCampaignId,
-      company.meta.accessToken,
-      conversionValue,
-      conversionEvent,
-    );
+    const [full, byPlacement, byHour] = await Promise.all([
+      this.metaMetrics.fetchFullMetrics(
+        campaign.metaCampaignId,
+        company.meta.accessToken,
+        conversionValue,
+        conversionEvent,
+      ),
+      this.metaMetrics.fetchPlacementBreakdown(
+        campaign.metaCampaignId,
+        company.meta.accessToken,
+        conversionEvent,
+      ),
+      this.metaMetrics.fetchHourlyBreakdown(
+        campaign.metaCampaignId,
+        company.meta.accessToken,
+        conversionEvent,
+      ),
+    ]);
 
     // Save ad-level metrics to campaign document
     await this.saveAdLevelMetrics(campaign, full);
@@ -209,7 +221,10 @@ export class CampaignAuditorService {
       .lean()
       .exec() as AuditSnapshotDocument[];
 
-    const signals = this.signalDetector.detect(campaign, full, snapshots, company, weeklySpend, marketEnvironment);
+    const signals = this.signalDetector.detect(
+      campaign, full, snapshots, company, weeklySpend, marketEnvironment,
+      { byPlacement, byHour },
+    );
 
     // ── Save audit snapshot ───────────────────────────────────────────────────
     const snapshotData = {
@@ -850,6 +865,7 @@ export class CampaignAuditorService {
                 bestImage.imageUrl,
                 company.meta!.pageId ?? '',
                 product?.landingUrl ?? '',
+                (company.meta as any)?.specialAdCategories ?? [],
               );
               newAdId = adId;
             } catch (adErr: any) {

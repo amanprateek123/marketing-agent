@@ -86,6 +86,31 @@ export interface AuditSignalPacket {
   // The auditor uses this to pick the recipient when proposing shift_budget.
   // Null when there are 0 active ad sets.
   banditAllocation: ThompsonAllocationResult | null;
+
+  // Performance breakdowns (placements, hours). Provide the data the auditor
+  // needs to make narrow_placement and dayparting recommendations grounded in
+  // observed performance, not guessed. Empty array when Meta fetch fails.
+  breakdowns: {
+    byPlacement: Array<{
+      publisherPlatform: string;
+      platformPosition: string;
+      spend: number;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      ctr: number;
+      cpa: number;
+    }>;
+    byHour: Array<{
+      hourOfDay: string;
+      spend: number;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      ctr: number;
+      cpa: number;
+    }>;
+  };
 }
 
 // Statistical floors — derived per-vertical at runtime from cvrTypical and ctrMidpoint
@@ -102,6 +127,7 @@ export class SignalDetectorService {
     company: CompanyDocument,
     weeklySpend?: number,
     marketEnvironment?: AuditSignalPacket['marketEnvironment'],
+    breakdowns?: AuditSignalPacket['breakdowns'],
   ): AuditSignalPacket {
     const launchedAt = new Date(campaign.launchedAt ?? Date.now());
     const ageMs = Date.now() - launchedAt.getTime();
@@ -381,6 +407,7 @@ export class SignalDetectorService {
         clicksForRetargetTrigger: MIN_CLICKS_FOR_RETARGET_TRIGGER,
       },
       banditAllocation: this.computeBanditAllocation(current.adSets, conversionValue, priorCVR),
+      breakdowns: breakdowns ?? { byPlacement: [], byHour: [] },
     };
   }
 

@@ -292,6 +292,105 @@ export class MetaMetricsService {
     return this.fetchAccountEnvironment(accountId, accessToken);
   }
 
+  /**
+   * Per-placement breakdown of campaign performance. Used by the auditor to
+   * recommend `narrow_placement` actions with real evidence (e.g. "Audience Network
+   * is bleeding ₹2k with 0 conv, drop it"). Without this, the agent has to guess
+   * which placement is the bleeder.
+   */
+  async fetchPlacementBreakdown(
+    campaignId: string,
+    accessToken: string,
+    conversionEvent?: string,
+  ): Promise<Array<{
+    publisherPlatform: string;
+    platformPosition: string;
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cpa: number;
+  }>> {
+    try {
+      const response = await this.metaApiGet(
+        `${META_API_BASE}/${campaignId}/insights`,
+        {
+          fields: 'impressions,clicks,spend,ctr,actions',
+          breakdowns: 'publisher_platform,platform_position',
+          date_preset: 'maximum',
+          access_token: accessToken,
+        },
+      );
+      const rows: any[] = response.data?.data ?? [];
+      return rows.map((r: any) => {
+        const spend = parseFloat(r.spend ?? '0');
+        const conversions = this.extractConversions(r.actions, conversionEvent);
+        return {
+          publisherPlatform: r.publisher_platform ?? 'unknown',
+          platformPosition: r.platform_position ?? 'unknown',
+          spend,
+          impressions: parseInt(r.impressions ?? '0', 10),
+          clicks: parseInt(r.clicks ?? '0', 10),
+          conversions,
+          ctr: parseFloat(r.ctr ?? '0'),
+          cpa: conversions > 0 ? spend / conversions : 0,
+        };
+      });
+    } catch (err: any) {
+      this.logger.warn(`Placement breakdown fetch failed for ${campaignId}: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Hourly performance breakdown (in the ad account's timezone). Used for
+   * `dayparting` recommendations. Returns one row per (hour-of-day, day-of-week)
+   * combination if Meta supports the aggregation, or per hour-of-day otherwise.
+   */
+  async fetchHourlyBreakdown(
+    campaignId: string,
+    accessToken: string,
+    conversionEvent?: string,
+  ): Promise<Array<{
+    hourOfDay: string;            // Meta returns "00:00:00 - 00:59:59" format
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cpa: number;
+  }>> {
+    try {
+      const response = await this.metaApiGet(
+        `${META_API_BASE}/${campaignId}/insights`,
+        {
+          fields: 'impressions,clicks,spend,ctr,actions',
+          breakdowns: 'hourly_stats_aggregated_by_advertiser_time_zone',
+          date_preset: 'last_14d',
+          access_token: accessToken,
+        },
+      );
+      const rows: any[] = response.data?.data ?? [];
+      return rows.map((r: any) => {
+        const spend = parseFloat(r.spend ?? '0');
+        const conversions = this.extractConversions(r.actions, conversionEvent);
+        return {
+          hourOfDay: r.hourly_stats_aggregated_by_advertiser_time_zone ?? 'unknown',
+          spend,
+          impressions: parseInt(r.impressions ?? '0', 10),
+          clicks: parseInt(r.clicks ?? '0', 10),
+          conversions,
+          ctr: parseFloat(r.ctr ?? '0'),
+          cpa: conversions > 0 ? spend / conversions : 0,
+        };
+      });
+    } catch (err: any) {
+      this.logger.warn(`Hourly breakdown fetch failed for ${campaignId}: ${err.message}`);
+      return [];
+    }
+  }
+
   private priorWeekRange(): string {
     // Returns Meta's expected JSON-encoded time_range string for days 8-14 ago.
     const now = new Date();

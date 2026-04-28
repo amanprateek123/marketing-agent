@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
+import { checkCopySafety, formatSafetyError } from '../../common/safety/copy-safety-checker.util';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -807,7 +808,23 @@ export class MetaAdsService {
     imageUrl: string,
     pageId: string,
     landingUrl: string,
+    declaredSpecialAdCategories?: string[],
   ): Promise<{ adId: string; creativeId: string }> {
+    // ── Safety pre-check — refuse launch on Meta-policy-violating copy ──────
+    // One Meta policy strike can restrict a Business Manager for days. This is
+    // the asymmetric-bet item: cheap regex check, prevents catastrophic outcomes.
+    const safety = checkCopySafety({
+      primaryText: copy.primaryText,
+      headline: copy.headline,
+      cta: copy.cta,
+      declaredSpecialAdCategories,
+    });
+    if (!safety.safe) {
+      const errorMsg = formatSafetyError(safety);
+      this.logger.error(`Refusing to launch ad "${adName}" — ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+
     // Get accountId from ad set
     const adSetRes = await this.metaApiCall('GET', `${META_API_BASE}/${adSetId}`, {
       fields: 'account_id',

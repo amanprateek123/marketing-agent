@@ -491,6 +491,29 @@ ${signals.banditAllocation.allocations.map(a => `  ${a.adSetName} (${a.adSetId})
 ${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
 ${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
 
+${signals.breakdowns.byPlacement.length > 0 ? `━━━ PLACEMENT BREAKDOWN (top 5 by spend) ━━━
+${signals.breakdowns.byPlacement
+  .slice()
+  .sort((a, b) => b.spend - a.spend)
+  .slice(0, 5)
+  .map(p => {
+    const verdict = p.conversions > 0 && p.cpa > 0 && p.cpa < (signals.benchmarks.expectedCPARange?.max ?? Infinity) ? '🟢'
+      : p.conversions === 0 && p.spend > 300 ? '🔴'
+      : '⚪';
+    return `  ${verdict} ${p.publisherPlatform}/${p.platformPosition}: ₹${p.spend.toFixed(0)} | ${p.clicks} clicks | ${p.conversions} conv | CTR ${p.ctr.toFixed(2)}% | CPA ${p.cpa > 0 ? `₹${p.cpa.toFixed(0)}` : '∞'}`;
+  })
+  .join('\n')}
+  RULE: When proposing narrow_placement, base it on this data. If a 🔴 placement has spent >₹500 with 0 conv, exclude it. If one 🟢 placement is dominating conversions, narrow to it.
+` : ''}
+${signals.breakdowns.byHour.length > 0 ? `━━━ HOURLY BREAKDOWN (last 14d, top 6 by spend; ad-account TZ) ━━━
+${signals.breakdowns.byHour
+  .slice()
+  .sort((a, b) => b.spend - a.spend)
+  .slice(0, 6)
+  .map(h => `  ${h.hourOfDay}: ₹${h.spend.toFixed(0)} | ${h.clicks} clicks | ${h.conversions} conv | CTR ${h.ctr.toFixed(2)}% | CPA ${h.cpa > 0 ? `₹${h.cpa.toFixed(0)}` : '∞'}`)
+  .join('\n')}
+  RULE: When proposing dayparting, identify the loss hours (high spend, 0 conv, low CTR) and exclude them. Don't dayparting based on prompt examples — use this data.
+` : ''}
 ━━━ PRIOR AUDIT DECISIONS (most recent first; cooldown/skip entries excluded) ━━━
 ${snapshotSummary}
   (In the contextInsight, briefly state whether your verdict aligns with or reverses the prior decisions, and why. Both directions need explanation — do not default to consistency.)

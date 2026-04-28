@@ -126,6 +126,7 @@ export class CreativeReplacementProcessor extends WorkerHost {
           selectedImage.imageUrl,
           company.meta?.pageId ?? '',
           product?.landingUrl ?? '',
+          (company.meta as any)?.specialAdCategories ?? [],
         );
 
         // Add the new ad to the campaign document
