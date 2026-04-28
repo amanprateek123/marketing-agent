@@ -510,7 +510,14 @@ export class CampaignAuditorService {
     campaign: CampaignDocument,
     company: CompanyDocument,
     action: {
-      type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
+      type:
+        | 'pause_ad'
+        | 'pause_adset'
+        | 'scale_adset'
+        | 'replace_creative'
+        | 'add_creative'
+        | 'add_adset'
+        | 'shift_budget_between_adsets';
       targetId: string;
       targetName: string;
       reason: string;
@@ -572,6 +579,23 @@ export class CampaignAuditorService {
           await this.metaAds.pauseAdSet(action.targetId, company.meta!.accessToken);
           const adSet = ((campaign as any).adSets ?? []).find((a: any) => a.metaAdSetId === action.targetId);
           if (adSet) adSet.status = 'paused';
+        } else if (action.type === 'shift_budget_between_adsets') {
+          // Revenue-neutral redistribution within the campaign — auto-executes on grace expiry.
+          // Total spend unchanged, so risk is capped vs scale_adset which raises total burn.
+          // Params were persisted into action.metrics by createPendingAction.
+          const toAdSetId = action.metrics?.toAdSetId;
+          const shiftPercent = Number(action.metrics?.shiftPercent);
+          if (!toAdSetId) {
+            this.logger.warn(`shift_budget action missing metrics.toAdSetId — skipping`);
+            continue;
+          }
+          await this.optimizer.shiftBudgetBetweenAdSets(
+            campaign,
+            company,
+            action.targetId,
+            toAdSetId,
+            shiftPercent,
+          );
         } else if (action.type === 'scale_adset') {
           // Scale requires explicit approval — only execute if manually approved (not grace-expired)
           if (!manuallyApproved) continue;

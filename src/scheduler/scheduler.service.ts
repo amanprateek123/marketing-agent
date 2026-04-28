@@ -7,7 +7,7 @@ import { CompaniesService } from '../companies/companies.service';
 import { PipelineRun, PipelineRunDocument } from '../pipeline/schemas/pipeline-run.schema';
 import { QUEUES } from './queue.constants';
 
-const AUDIT_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
+const AUDIT_INTERVAL_MS = 6 * 60 * 60 * 1000;  // 6 hours — matches cooldown in campaign-auditor
 const SYNC_INTERVAL_MS  = 60 * 60 * 1000;  // 1 hour
 
 @Injectable()
@@ -97,7 +97,7 @@ export class SchedulerService implements OnModuleInit {
         jobId: `audit-${tenantId}`,
       },
     );
-    this.logger.log(`Scheduled campaign audit every 1h for tenantId=${tenantId}`);
+    this.logger.log(`Scheduled campaign audit every 6h for tenantId=${tenantId}`);
   }
 
   async scheduleForTenant(

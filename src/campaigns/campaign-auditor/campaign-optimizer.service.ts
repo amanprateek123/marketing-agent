@@ -92,4 +92,100 @@ export class CampaignOptimizerService {
 
     return { oldBudget: campaign.budget, newBudget };
   }
+
+  /**
+   * Shift budget % between two ad sets in the same campaign. Total campaign budget
+   * is unchanged — this is pure redistribution. The donor's allocation goes down,
+   * the recipient's goes up.
+   *
+   * Safety rails (TS-enforced, agent cannot override):
+   *   - shiftPercent clamped to (0, 50] — max half the donor's CURRENT allocation per call.
+   *   - donor cannot drop below MIN_DONOR_FLOOR_PCT — keeps Meta delivery alive on the donor.
+   *   - recipient cannot exceed MAX_RECIPIENT_PCT — prevents allocation overflow.
+   *   - movePoints rounded DOWN (Math.floor) so we never overshoot.
+   */
+  async shiftBudgetBetweenAdSets(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    fromAdSetId: string,
+    toAdSetId: string,
+    requestedShiftPercent: number,
+  ): Promise<{ from: { id: string; oldPercent: number; newPercent: number }; to: { id: string; oldPercent: number; newPercent: number } }> {
+    const MIN_DONOR_FLOOR_PCT = 10;     // donor stays ≥10% — pause if you want it lower
+    const MAX_RECIPIENT_PCT = 90;        // recipient stays ≤90% — leaves headroom for other ad sets
+
+    if (fromAdSetId === toAdSetId) {
+      throw new Error('shift_budget: donor and recipient ad sets must differ');
+    }
+    const shiftPercent = Math.max(0, Math.min(50, Number(requestedShiftPercent) || 0));
+    if (shiftPercent <= 0) {
+      throw new Error('shift_budget: shiftPercent must be > 0 (clamped to ≤50)');
+    }
+
+    const adSets = ((campaign as any).adSets ?? []) as any[];
+    const donor = adSets.find(a => a.metaAdSetId === fromAdSetId);
+    const recipient = adSets.find(a => a.metaAdSetId === toAdSetId);
+    if (!donor) throw new Error(`shift_budget: donor ad set ${fromAdSetId} not found in campaign`);
+    if (!recipient) throw new Error(`shift_budget: recipient ad set ${toAdSetId} not found in campaign`);
+
+    const donorOldPct = Number(donor.budgetPercent) || 0;
+    const recipientOldPct = Number(recipient.budgetPercent) || 0;
+    if (donorOldPct <= MIN_DONOR_FLOOR_PCT) {
+      throw new Error(`shift_budget: donor at ${donorOldPct}% is already at/below floor (${MIN_DONOR_FLOOR_PCT}%) — pause it instead`);
+    }
+
+    // Move shiftPercent OF the donor's CURRENT allocation, then clamp by donor floor + recipient cap.
+    // e.g. donor 40% with shiftPercent 50 → naive 20pp move → check both ends.
+    const naiveMovePoints = Math.floor(donorOldPct * (shiftPercent / 100));
+    const maxByDonorFloor = donorOldPct - MIN_DONOR_FLOOR_PCT;
+    const maxByRecipientCap = MAX_RECIPIENT_PCT - recipientOldPct;
+    const movePoints = Math.min(naiveMovePoints, maxByDonorFloor, maxByRecipientCap);
+
+    if (movePoints <= 0) {
+      throw new Error(
+        `shift_budget: no headroom (donor ${donorOldPct}% floor ${MIN_DONOR_FLOOR_PCT}%, recipient ${recipientOldPct}% cap ${MAX_RECIPIENT_PCT}%, requested ${shiftPercent}%)`,
+      );
+    }
+
+    donor.budgetPercent = donorOldPct - movePoints;
+    recipient.budgetPercent = recipientOldPct + movePoints;
+
+    const totalDailyBudget = campaign.budget;
+    const donorNewDaily = totalDailyBudget * (donor.budgetPercent / 100);
+    const recipientNewDaily = totalDailyBudget * (recipient.budgetPercent / 100);
+
+    // Apply on Meta. If the second call fails, revert the first to avoid drift between Meta and Mongo.
+    await this.metaAdsService.updateAdSetBudget(fromAdSetId, donorNewDaily, company.meta!.accessToken);
+    try {
+      await this.metaAdsService.updateAdSetBudget(toAdSetId, recipientNewDaily, company.meta!.accessToken);
+    } catch (err) {
+      const donorRevertDaily = totalDailyBudget * (donorOldPct / 100);
+      try {
+        await this.metaAdsService.updateAdSetBudget(fromAdSetId, donorRevertDaily, company.meta!.accessToken);
+      } catch (revertErr: any) {
+        this.logger.error(`shift_budget revert failed on donor ${fromAdSetId}: ${revertErr.message}`);
+      }
+      donor.budgetPercent = donorOldPct;
+      recipient.budgetPercent = recipientOldPct;
+      throw err;
+    }
+
+    await this.actionLogger.log({
+      tenantId: company.tenantId,
+      agent: AgentType.CAMPAIGN_AUDITOR,
+      action: 'budget_shifted',
+      reason: `Redistributed ${movePoints}pp from ${fromAdSetId} to ${toAdSetId} (requested ${shiftPercent}% of donor)`,
+      outcome: `Donor ${donorOldPct}% → ${donor.budgetPercent}% (₹${donorNewDaily.toFixed(0)}/day) | Recipient ${recipientOldPct}% → ${recipient.budgetPercent}% (₹${recipientNewDaily.toFixed(0)}/day)`,
+      metadata: { metaCampaignId: campaign.metaCampaignId, fromAdSetId, toAdSetId, movePoints },
+    });
+
+    this.logger.log(
+      `Budget shifted: tenantId=${company.tenantId} ${fromAdSetId} ${donorOldPct}%→${donor.budgetPercent}% | ${toAdSetId} ${recipientOldPct}%→${recipient.budgetPercent}%`,
+    );
+
+    return {
+      from: { id: fromAdSetId, oldPercent: donorOldPct, newPercent: donor.budgetPercent },
+      to:   { id: toAdSetId,   oldPercent: recipientOldPct, newPercent: recipient.budgetPercent },
+    };
+  }
 }

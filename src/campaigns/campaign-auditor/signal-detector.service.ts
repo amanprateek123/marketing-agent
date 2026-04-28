@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
+import { getBenchmark, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -49,6 +50,16 @@ export interface AuditSignalPacket {
   };
 }
 
+// Statistical floors — never fire signals on samples this small. These come from
+// media-buyer practice: <1k impressions can't distinguish CTR drop from noise;
+// <30 clicks at 5% CVR has a 95% CI that overlaps with healthy; etc.
+const MIN_IMPRESSIONS_FOR_CTR_SIGNAL = 1000;
+const MIN_CLICKS_FOR_ZERO_CONV_PAUSE = 30;
+const MIN_CLICKS_FOR_RETARGET_TRIGGER = 200;
+const MIN_CONVERSIONS_FOR_WINNER = 10;
+const MIN_IMPRESSIONS_FOR_FATIGUE = 500;
+const MIN_CLICKS_FOR_CAMPAIGN_ZERO_CONV = 50;
+
 @Injectable()
 export class SignalDetectorService {
   detect(
@@ -91,17 +102,30 @@ export class SignalDetectorService {
       ? Object.entries(audienceScores).sort(([, a], [, b]) => (b as number) - (a as number))[0][0]
       : null;
 
-    // Estimate CTR range from historical audit snapshots (actual data, not parsed from text)
+    // Benchmark resolution order: this campaign's history → vertical prior → null.
+    // Vertical priors prevent "no_benchmark" on cold-start campaigns where the auditor
+    // has no basis to judge whether 0.4% CTR is normal or terrible for this industry.
+    const verticalBenchmark = getBenchmark(company.industry);
     let expectedCTRRange: { min: number; max: number } | null = null;
-    const historicalCTRs = sorted
-      .map(s => s.metrics.ctr)
-      .filter(v => v > 0);
+    const historicalCTRs = sorted.map(s => s.metrics.ctr).filter(v => v > 0);
     if (historicalCTRs.length >= 2) {
       expectedCTRRange = {
         min: Math.min(...historicalCTRs) * 0.7,
         max: Math.max(...historicalCTRs) * 1.3,
       };
+    } else {
+      expectedCTRRange = {
+        min: verticalBenchmark.ctrRangePct.min,
+        max: verticalBenchmark.ctrRangePct.max,
+      };
     }
+
+    // Per-product CPA history → vertical CPA range. Used by the auditor to decide if
+    // a campaign's CPA is in a healthy range for the vertical.
+    const productCPA = (company.products ?? []).find(p => p.active)?.performance?.avgCPA;
+    const expectedCPARange: { min: number; max: number } = productCPA && productCPA > 0
+      ? { min: productCPA * 0.7, max: productCPA * 1.5 }
+      : { min: verticalBenchmark.cpaRangeRupees.min, max: verticalBenchmark.cpaRangeRupees.max };
 
     const currentCTR = current.campaign.ctr;
     const currentCTRVsBenchmark = expectedCTRRange
@@ -110,19 +134,36 @@ export class SignalDetectorService {
         : 'below'
       : 'no_benchmark';
 
+    const currentCPA = current.campaign.cpa;
+    const currentCPAVsBenchmark: 'above' | 'within' | 'below' | 'no_benchmark' =
+      currentCPA > 0
+        ? currentCPA <= expectedCPARange.min ? 'below'   // below = better (cheaper)
+          : currentCPA <= expectedCPARange.max ? 'within'
+          : 'above'
+        : 'no_benchmark';
+
     // ── Anomalies ─────────────────────────────────────────────────────────────
-    // Flag ad sets with zero conversions after spending more than 2x expected CPA (or 1 day's budget, whichever is higher)
+    // Flag ad sets with zero conversions after enough click volume to make "zero" meaningful.
+    // Spend alone is insufficient — a high-CPM low-volume audience can spend ₹2k on 10 clicks
+    // and "zero conversions out of 10 clicks" is just noise.
     const expectedCPA = (company.products ?? []).find(p => p.active)?.performance?.avgCPA ?? dailyBudget;
     const highSpendThreshold = Math.max(expectedCPA * 2, dailyBudget);
     const highSpendZeroConversions = current.adSets
-      .filter(as => as.conversions === 0 && as.spend > highSpendThreshold)
+      .filter(as => as.conversions === 0
+        && as.spend > highSpendThreshold
+        && as.clicks >= MIN_CLICKS_FOR_ZERO_CONV_PAUSE)
       .map(as => ({ adSetId: as.adSetId, adSetName: as.adSetName, spend: as.spend }));
 
+    // Audience fatigue requires enough impression volume — frequency on a tiny sample is meaningless.
+    // Fall back to vertical-specific frequency cap when the tenant hasn't configured one.
+    const frequencyCap = company.pauseIfFrequencyAbove ?? verticalBenchmark.frequencyCap;
     const audienceFatigue = current.adSets
-      .filter(as => as.frequency > (company.pauseIfFrequencyAbove ?? 4))
+      .filter(as => as.frequency > frequencyCap
+        && as.impressions >= MIN_IMPRESSIONS_FOR_FATIGUE)
       .map(as => ({ adSetId: as.adSetId, adSetName: as.adSetName, frequency: as.frequency }));
 
-    // Creative fatigue — compare current CTR to stored baseline
+    // Creative fatigue — compare current CTR to stored baseline. Require ≥1k impressions on the
+    // current sample so a 35% CTR drop is signal, not Tuesday-morning noise.
     const creativeFatigue: { adId: string; adName: string; hookStyle: string; ctrDrop: number }[] = [];
     for (const adSet of campaign.adSets ?? []) {
       for (const ad of adSet.ads ?? []) {
@@ -131,6 +172,7 @@ export class SignalDetectorService {
           .flatMap(as => as.ads)
           .find(a => a.adId === ad.metaAdId);
         if (!currentAd) continue;
+        if (currentAd.impressions < MIN_IMPRESSIONS_FOR_CTR_SIGNAL) continue;
         const dropPercent = ((ad.ctrBaseline - currentAd.ctr) / ad.ctrBaseline) * 100;
         if (dropPercent > 35) {
           creativeFatigue.push({
@@ -143,9 +185,12 @@ export class SignalDetectorService {
       }
     }
 
-    // Campaign-level: spent more than 2 full days' budget with zero conversions
-    const campaignZeroConversions = current.campaign.conversions === 0 &&
-      dailyBudget > 0 && current.campaign.spend >= dailyBudget * 2;
+    // Campaign-level: zero conversions only meaningful once enough clicks have landed.
+    // Spend without click volume = high-CPM noise, not a real "nothing converts" signal.
+    const campaignZeroConversions = current.campaign.conversions === 0
+      && dailyBudget > 0
+      && current.campaign.spend >= dailyBudget * 2
+      && current.campaign.clicks >= MIN_CLICKS_FOR_CAMPAIGN_ZERO_CONV;
 
     const stuckInLearning = ageDays > coldStartDays && current.campaign.conversions === 0;
     // budgetExhaustionRisk: spending >15% more than expected for the days elapsed
@@ -156,10 +201,12 @@ export class SignalDetectorService {
     const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
     const conversionValue = (company.products ?? []).find(p => p.active)?.conversionValue
       ?? (company.products ?? []).find(p => p.active)?.price ?? 0;
+    // Winning = ≥10 conversions (statistically meaningful — 5 has ±90% CI, basically a coin flip)
+    // and ROAS exceeds the configured scale threshold.
     const winningAdSets = current.adSets
       .filter(as => {
         const adSetROAS = as.spend > 0 && as.conversions > 0 ? (as.conversions * conversionValue) / as.spend : 0;
-        return as.conversions >= 5 && adSetROAS > scaleThreshold;
+        return as.conversions >= MIN_CONVERSIONS_FOR_WINNER && adSetROAS > scaleThreshold;
       })
       .map(as => ({
         adSetName: as.adSetName,
@@ -170,12 +217,17 @@ export class SignalDetectorService {
       }));
 
     const totalClicks = current.campaign.clicks;
-    const highClicksLowConversions = totalClicks > 100 && current.campaign.conversions < 3;
+    // Retarget readiness needs enough clicks to claim "low conversions" is real, not noise.
+    const highClicksLowConversions = totalClicks >= MIN_CLICKS_FOR_RETARGET_TRIGGER
+      && current.campaign.conversions < 3;
     const readyForRetarget = ageDays >= 7 && highClicksLowConversions;
 
-    // Early fatigue: winning ad set with CTR starting to decline (add fresh creative before it tanks)
+    // Early fatigue: winning ad set with CTR starting to decline (add fresh creative before it tanks).
+    // Require winner to have current impressions ≥ MIN_IMPRESSIONS_FOR_CTR_SIGNAL so the trend is real.
     const earlyFatigue: { adSetName: string; adSetId: string; ctrDrop: number }[] = [];
     for (const winner of winningAdSets) {
+      const winnerCurrent = current.adSets.find(as => as.adSetId === winner.adSetId);
+      if (!winnerCurrent || winnerCurrent.impressions < MIN_IMPRESSIONS_FOR_CTR_SIGNAL) continue;
       const adSetSnapshots = sorted
         .flatMap(s => (s.adSets ?? []))
         .filter((as: any) => as.metaAdSetId === winner.adSetId);
@@ -204,9 +256,9 @@ export class SignalDetectorService {
       trends: { ctrTrend, roasTrend, frequencyTrend: freqTrend, spendPace },
       benchmarks: {
         expectedCTRRange,
-        expectedCPARange: null,
+        expectedCPARange,
         currentCTRVsBenchmark,
-        currentCPAVsBenchmark: 'no_benchmark',
+        currentCPAVsBenchmark,
         bestAudienceType,
       },
       anomalies: {

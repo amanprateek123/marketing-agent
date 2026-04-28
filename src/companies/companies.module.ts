@@ -6,6 +6,7 @@ import { Company, CompanySchema } from './schemas/company.schema';
 import { ClaudeModule } from '../claude/claude.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { SchedulerModule } from '../scheduler/scheduler.module';
+import { CommonModule } from '../common/common.module';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { LiveContextBuilder } from './prompt-generator/live-context.builder';
 
@@ -15,6 +16,7 @@ import { LiveContextBuilder } from './prompt-generator/live-context.builder';
       { name: Company.name, schema: CompanySchema },
     ]),
     ClaudeModule,
+    CommonModule,
     forwardRef(() => CampaignsModule),
     forwardRef(() => SchedulerModule),
   ],

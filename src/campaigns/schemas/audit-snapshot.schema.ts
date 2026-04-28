@@ -68,11 +68,19 @@ export class AuditSnapshot {
     contextInsight: string;
     watchSignals: string[];
     recommendedActions: {
-      type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative';
+      type:
+        | 'pause_ad'
+        | 'pause_adset'
+        | 'scale_adset'
+        | 'replace_creative'
+        | 'add_creative'
+        | 'add_adset'
+        | 'shift_budget_between_adsets';
       targetId: string;
       targetName: string;
       reason: string;
       priority: 'high' | 'medium' | 'low';
+      params?: Record<string, any>;
     }[];
   } | null;
 }

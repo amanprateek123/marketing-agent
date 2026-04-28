@@ -1,14 +1,23 @@
 import { Injectable } from '@nestjs/common';
 import { CompanyDocument } from '../schemas/company.schema';
+import { EventCalendarService } from '../../common/calendar/event-calendar.service';
 
 @Injectable()
 export class LiveContextBuilder {
+  constructor(private readonly eventCalendar: EventCalendarService) {}
+
   build(company: CompanyDocument): string {
     const products = company.products.filter((p) => p.active);
     const now = new Date();
     const promotions = (company.activePromotions ?? []).filter(
       (p) => new Date(p.expiresAt) > now,
     );
+    const upcomingEvents = this.eventCalendar.buildEventSummary(
+      company.geography || 'India',
+      21,
+      now,
+    );
+    const tenantCalendar = (company.calendarContext || '').trim();
 
     return `
 ## CURRENT PRODUCTS & PRICING (LIVE DATA — always use these, never cached values)
@@ -21,8 +30,9 @@ ${promotions.length
   ? promotions.map((p) => `- ${p.name}: ${p.details} (expires: ${p.expiresAt})`).join('\n')
   : 'None currently active.'}
 
-## UPCOMING CALENDAR EVENTS
-${company.calendarContext || 'No calendar context provided.'}
+## UPCOMING EVENTS (next 21 days, ${company.geography || 'India'})
+${upcomingEvents}
+${tenantCalendar ? `\n## TENANT-SPECIFIC CALENDAR\n${tenantCalendar}` : ''}
 
 ## CURRENT LEARNINGS (v${company.learnings?.version ?? 0})
 ${company.learnings

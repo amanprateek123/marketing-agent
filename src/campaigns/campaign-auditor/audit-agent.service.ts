@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { AuditSignalPacket } from './signal-detector.service';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 
@@ -11,16 +12,16 @@ export interface AuditVerdict {
   contextInsight: string;       // Why this verdict — the "so what" in plain English
   watchSignals: string[];        // Signals to monitor next audit
   recommendedActions: {
-    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
+    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset' | 'shift_budget_between_adsets';
     targetId: string;
     targetName: string;
     reason: string;
     priority: 'high' | 'medium' | 'low';
-    params?: Record<string, any>;  // action-specific params (e.g. hookStyle, audienceType, budgetShift)
+    params?: Record<string, any>;  // action-specific params (e.g. hookStyle, audienceType, toAdSetId, shiftPercent)
   }[];
 }
 
-const DEFAULT_AUDIT_SYSTEM_PROMPT = `You are a senior performance marketing analyst at AstroTalk auditing a live Meta Ads campaign. You have full visibility at CAMPAIGN, AD SET, and AD level — just like Ads Manager.
+const buildDefaultAuditSystemPrompt = (companyName: string) => `You are a senior performance marketing analyst at ${companyName} auditing a live Meta Ads campaign. You have full visibility at CAMPAIGN, AD SET, and AD level — just like Ads Manager.
 
 You receive:
 1. Campaign-level metrics (total spend, CTR, ROAS, conversions)
@@ -44,6 +45,9 @@ GROWTH actions (scale winners):
 - "scale_adset": Increase budget on a winning ad set (ROAS > 1.5x, 2+ conversions)
 - "add_creative": Add a FRESH ad to a winning ad set that shows early fatigue (CTR declining but still converting). Keep existing ads running — this adds alongside them, not replaces.
 - "add_adset": Add a new ad set to the campaign. Use when: (a) retargeting — campaign has >100 clicks but low conversions after 7+ days, add retarget ad set for website visitors; (b) narrowing — winning demographic identified, add targeted ad set
+
+REBALANCE actions (no extra spend, redistribute within the same campaign):
+- "shift_budget_between_adsets": Move budget % from a losing ad set to a winning one INSIDE the same campaign. Total campaign budget unchanged. Use this BEFORE pausing a losing ad set if a clear winner exists in the same campaign — you keep both alive, just feed the winner more. Set targetId = fromAdSetId (the losing/donor ad set), params.toAdSetId = the winning/recipient ad set, params.shiftPercent = how much of the donor's CURRENT budget % to move (e.g. 50 means move half of the donor's allocation to the recipient). Cap: TS will clamp to ≤50% per shift.
 
 Guidelines:
 TIMING RULES — respect these strictly:
@@ -74,14 +78,15 @@ Output ONLY valid JSON in this exact format:
   "watchSignals": ["signal 1", "signal 2"],
   "recommendedActions": [
     {
-      "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative" | "add_creative" | "add_adset",
-      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name. For add_adset use the campaign ID.",
+      "type": "pause_ad" | "pause_adset" | "scale_adset" | "replace_creative" | "add_creative" | "add_adset" | "shift_budget_between_adsets",
+      "targetId": "EXACT numeric Meta ID from the data above (e.g. 120241731996240278) — NOT a slug or name. For add_adset use the campaign ID. For shift_budget_between_adsets use the DONOR (losing) ad set ID.",
       "targetName": "human readable name",
       "reason": "specific reason for this action",
       "priority": "high" | "medium" | "low",
       "params": {
         "// For add_creative": "hookStyle: string (new hook to use)",
-        "// For add_adset": "audienceType: 'retarget' | 'narrowed', targeting: { ageMin, ageMax, geoLocations }"
+        "// For add_adset": "audienceType: 'retarget' | 'narrowed', targeting: { ageMin, ageMax, geoLocations }",
+        "// For shift_budget_between_adsets": "toAdSetId: string (recipient ad set), shiftPercent: number (1-50, % of donor's current budget % to move)"
       }
     }
   ]
@@ -91,7 +96,10 @@ Output ONLY valid JSON in this exact format:
 export class AuditAgentService {
   private readonly logger = new Logger(AuditAgentService.name);
 
-  constructor(private readonly claudeService: ClaudeService) {}
+  constructor(
+    private readonly claudeService: ClaudeService,
+    private readonly liveContextBuilder: LiveContextBuilder,
+  ) {}
 
   async analyze(
     campaign: any,
@@ -104,14 +112,16 @@ export class AuditAgentService {
     const caseStudies = (company as any).caseStudies ?? [];
 
     const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot);
-    const systemPrompt = (company.prompts as any)?.campaignAuditor || DEFAULT_AUDIT_SYSTEM_PROMPT;
+    const systemPrompt =
+      (company.prompts as any)?.campaignAuditor || buildDefaultAuditSystemPrompt(company.name);
+    const liveContext = this.liveContextBuilder.build(company);
 
     try {
       const result = await this.claudeService.runAgent({
         tenantId: company.tenantId,
         agentType: AgentType.CAMPAIGN_AUDITOR,
         systemPrompt,
-        liveContext: '',
+        liveContext,
         userMessage: context,
         maxTurns: 1,
       });
@@ -194,12 +204,37 @@ export class AuditAgentService {
     if (anomalies.stuckInLearning) anomalyLines.push('STUCK IN LEARNING: 0 conversions after learning phase');
     if (anomalies.budgetExhaustionRisk) anomalyLines.push('BUDGET EXHAUSTION: spending >15% above expected daily pace');
 
-    // ── Snapshot history ─────────────────────────────────────────────────────
+    // ── Snapshot history (with prior verdicts so the agent isn't stateless) ──
+    // Filter out synthetic verdicts written by the cooldown / all-green short-circuits.
+    // Those weren't real Claude decisions — feeding them into the consistency nudge
+    // would anchor the agent to "no_action" purely because the recent history was quiet.
+    const isSyntheticVerdict = (s: AuditSnapshotDocument) => {
+      const insight = s.verdict?.contextInsight ?? '';
+      return /\| Cooldown — | No anomalies — agent skipped$/.test(insight);
+    };
     const snapshotSummary = snapshots
-      .slice(0, 3)
+      .filter(s => !isSyntheticVerdict(s))
+      .slice(0, 5)
       .map((s, i) => {
         const d = new Date(s.auditedAt);
-        return `  Audit ${i + 1} (${d.toLocaleDateString()}): spend=₹${s.metrics.spend.toFixed(0)} ctr=${s.metrics.ctr.toFixed(2)}% roas=${s.metrics.roas.toFixed(2)}x conv=${s.metrics.conversions}`;
+        const metricsLine = `spend=₹${s.metrics.spend.toFixed(0)} ctr=${s.metrics.ctr.toFixed(2)}% roas=${s.metrics.roas.toFixed(2)}x conv=${s.metrics.conversions}`;
+        if (!s.verdict) {
+          return `  Audit ${i + 1} (${d.toLocaleDateString()}): ${metricsLine} | verdict=none`;
+        }
+        const v = s.verdict;
+        const actionSummary = v.recommendedActions?.length
+          ? v.recommendedActions.map((a) => {
+              const target = a.targetName || a.targetId;
+              if (a.type === 'shift_budget_between_adsets' && a.params) {
+                const toRef = a.params.toAdSetId ?? '?';
+                const pct = a.params.shiftPercent ?? '?';
+                return `${a.type}: ${target}→${toRef} @${pct}%`;
+              }
+              return `${a.type}→${target}`;
+            }).join(', ')
+          : 'no actions';
+        const insight = v.contextInsight ? ` — "${v.contextInsight.slice(0, 140)}"` : '';
+        return `  Audit ${i + 1} (${d.toLocaleDateString()}): ${metricsLine}\n    verdict=${v.verdict}${v.urgency ? `/${v.urgency}` : ''} | ${actionSummary}${insight}`;
       })
       .join('\n') || '  No prior snapshots';
 
@@ -235,9 +270,9 @@ ${hookSummary ? `━━━ HOOK STYLE PERFORMANCE ━━━\n${hookSummary}\n` :
 ━━━ TRENDS (last 3 audits) ━━━
   CTR: ${signals.trends.ctrTrend} | ROAS: ${signals.trends.roasTrend} | Frequency: ${signals.trends.frequencyTrend}
 
-━━━ BENCHMARKS (${company.name}) ━━━
-  Expected CTR: ${signals.benchmarks.expectedCTRRange ? `${signals.benchmarks.expectedCTRRange.min.toFixed(2)}–${signals.benchmarks.expectedCTRRange.max.toFixed(2)}%` : 'no benchmark'}
-  CTR vs benchmark: ${signals.benchmarks.currentCTRVsBenchmark}
+━━━ BENCHMARKS (${company.name} | vertical: ${company.industry || 'unknown'}) ━━━
+  Expected CTR: ${signals.benchmarks.expectedCTRRange ? `${signals.benchmarks.expectedCTRRange.min.toFixed(2)}–${signals.benchmarks.expectedCTRRange.max.toFixed(2)}%` : 'no benchmark'} | current: ${signals.benchmarks.currentCTRVsBenchmark}
+  Expected CPA: ${signals.benchmarks.expectedCPARange ? `₹${signals.benchmarks.expectedCPARange.min.toFixed(0)}–₹${signals.benchmarks.expectedCPARange.max.toFixed(0)}` : 'no benchmark'} | current: ${signals.benchmarks.currentCPAVsBenchmark}
   Best audience type: ${signals.benchmarks.bestAudienceType ?? 'unknown'}
   Winning hooks: ${learnings?.creative?.winningHooks?.slice(0, 3).join(', ') ?? 'none'}
 
@@ -249,8 +284,9 @@ ${signals.opportunities.winningAdSets.length > 0 ? signals.opportunities.winning
 ${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
 ${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
 
-━━━ AUDIT HISTORY (${snapshots.length} snapshots) ━━━
+━━━ PRIOR AUDIT DECISIONS (most recent first; cooldown/skip entries excluded) ━━━
 ${snapshotSummary}
+  (In the contextInsight, briefly state whether your verdict aligns with or reverses the prior decisions, and why. Both directions need explanation — do not default to consistency.)
 
 ${relevantCases ? `━━━ CASE STUDIES ━━━\n${relevantCases}\n` : ''}
 === END AUDIT DATA ===
@@ -276,6 +312,22 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
               if (!/^\d+$/.test(String(a.targetId))) {
                 this.logger.warn(`Dropping action with invalid targetId: "${a.targetId}" (expected numeric Meta ID)`);
                 return false;
+              }
+              if (a.type === 'shift_budget_between_adsets') {
+                const toId = a.params?.toAdSetId;
+                const shiftPct = Number(a.params?.shiftPercent);
+                if (!toId || !/^\d+$/.test(String(toId))) {
+                  this.logger.warn(`Dropping shift_budget action — missing/invalid params.toAdSetId`);
+                  return false;
+                }
+                if (String(toId) === String(a.targetId)) {
+                  this.logger.warn(`Dropping shift_budget action — donor and recipient are the same ad set`);
+                  return false;
+                }
+                if (!Number.isFinite(shiftPct) || shiftPct <= 0 || shiftPct > 50) {
+                  this.logger.warn(`Dropping shift_budget action — params.shiftPercent must be in (0, 50], got ${shiftPct}`);
+                  return false;
+                }
               }
               return true;
             })
