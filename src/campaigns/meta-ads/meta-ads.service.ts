@@ -56,6 +56,7 @@ export interface MetaCampaignConfig {
   videoThumbnailHash?: string;          // thumbnail extracted from video (used only in video ads)
   videoId?: string;                     // Meta video ID (uploaded before launch)
   landingUrl: string;
+  declaredSpecialAdCategories?: string[];  // for safety check on regulated copy
 }
 
 // Track all created Meta objects for rollback on failure
@@ -223,6 +224,25 @@ export class MetaAdsService {
     this.logger.log(
       `Launching campaign: ${config.campaignName} | budget: ₹${config.budget} | adSets: ${config.adSets.length}`,
     );
+
+    // ── Safety pre-check on every copy variant ─────────────────────────────
+    // Same gate as createAdInAdSet, but applied here so initial campaign launches
+    // (the dominant launch path) are also screened. One BM strike on policy-violating
+    // copy can restrict the account for days — cheap regex check, asymmetric upside.
+    for (let i = 0; i < config.copyVariants.length; i++) {
+      const v = config.copyVariants[i];
+      const safety = checkCopySafety({
+        primaryText: v.primaryText,
+        headline: v.headline,
+        cta: v.cta,
+        declaredSpecialAdCategories: config.declaredSpecialAdCategories,
+      });
+      if (!safety.safe) {
+        const errorMsg = `${formatSafetyError(safety)}\n(failed on copyVariant index ${i} of campaign "${config.campaignName}")`;
+        this.logger.error(`Refusing to launch campaign — ${errorMsg}`);
+        throw new Error(errorMsg);
+      }
+    }
 
     const created: CreatedObjects = {
       campaignId: null,

@@ -440,6 +440,7 @@ export class CampaignCreatorService {
       videoThumbnailHash,
       videoId,
       landingUrl,
+      declaredSpecialAdCategories: (company.meta as any)?.specialAdCategories ?? [],
     });
 
     // Only activate if all expected ads were created

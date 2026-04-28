@@ -374,6 +374,23 @@ export class CampaignOptimizerService {
       throw new Error('refresh_audience: provide either newAudienceId or useAdvantagePlus=true');
     }
 
+    // ── Retarget guard ────────────────────────────────────────────────────
+    // Retarget pods naturally run at frequency 6-8 (warm audience, repeat exposure works) —
+    // the fatigue detector applies a 1.75× multiplier to suppress false alarms there. But
+    // refreshAudience's flat 4.5 floor doesn't know that, so a healthy retarget pod at freq
+    // 7 with good CTR could fall into the refresh path. Duplicating a retarget pod into a
+    // different audience strips it of its website-visitor seed → ROAS collapse.
+    // Block when source is retarget/custom unless the operator explicitly wants Advantage+
+    // (which doesn't make sense for retarget either, but is at least an explicit choice).
+    const sourceAdSetForGuard = ((campaign as any).adSets ?? []).find((a: any) => a.metaAdSetId === sourceAdSetId);
+    const sourceAudienceType = sourceAdSetForGuard?.audienceType ?? 'unknown';
+    if ((sourceAudienceType === 'retarget' || sourceAudienceType === 'custom') && !newAudience.useAdvantagePlus) {
+      throw new Error(
+        `refresh_audience refused: source ad set is retarget/custom (audience seeded by website visitors). Duplicating into a different audience strips the seed and collapses ROAS. ` +
+        `For retarget fatigue, prefer extending the lookback window (e.g. visitors_30d → visitors_60d) or pausing this pod and creating a fresh one with add_adset.`,
+      );
+    }
+
     const { newAdSetId } = await this.metaAdsService.duplicateAdSetWithNewAudience(
       sourceAdSetId, company.meta!.accessToken, newAudience,
     );

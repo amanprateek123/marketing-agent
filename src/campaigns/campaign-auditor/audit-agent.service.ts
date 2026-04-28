@@ -324,6 +324,16 @@ export class AuditAgentService {
       cpa: snapshot?.metrics?.cpa ?? snapshot?.cpa ?? 0,
       roas: snapshot?.metrics?.roas ?? snapshot?.roas ?? 0,
       frequency: snapshot?.metrics?.frequency ?? snapshot?.frequency ?? 0,
+      // Per-ad-set baseline — needed for shift_budget regret evaluation at +72h
+      // (recipient's conversion delta vs. baseline tells us if the LLM's pick was right).
+      adSets: Array.isArray(snapshot?.adSets) ? snapshot.adSets.map((as: any) => ({
+        adSetId: as.metaAdSetId ?? as.adSetId,
+        spend: as.spend ?? 0,
+        clicks: as.clicks ?? 0,
+        conversions: as.conversions ?? 0,
+        ctr: as.ctr ?? 0,
+        cpa: as.cpa ?? 0,
+      })) : [],
     };
   }
 

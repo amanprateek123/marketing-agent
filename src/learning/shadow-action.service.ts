@@ -190,10 +190,20 @@ export class ShadowActionService {
         conversionEvent,
       );
       const c = full.campaign;
+      // Schema's metricsAtT is `type: Object` (loose) — extending with `adSets` is safe
+      // without a migration. shift_budget regret labeling needs per-ad-set deltas.
       return {
         spend: c.spend, impressions: c.impressions, clicks: c.clicks, conversions: c.conversions,
         ctr: c.ctr, cpc: c.cpc, cpa: c.cpa, roas: c.roas, frequency: c.frequency,
-      };
+        adSets: full.adSets.map(as => ({
+          adSetId: as.adSetId,
+          spend: as.spend,
+          clicks: as.clicks,
+          conversions: as.conversions,
+          ctr: as.ctr,
+          cpa: as.cpa,
+        })),
+      } as any;
     } catch (err: any) {
       this.logger.warn(`Shadow fetchCurrentMetrics failed: ${err.message}`);
       return null;
@@ -242,10 +252,54 @@ export class ShadowActionService {
       return 'inconclusive';
     }
     if (type === 'shift_budget_between_adsets') {
-      // We blocked a budget shift to thin recipient. Did recipient eventually accumulate conversions?
-      // We'd need ad-set-level metrics to truly evaluate; fall back to "inconclusive" if recipient unknown.
-      const recipientConvAtT72 = shadow.proposedAction.params?.toAdSetId; // we'd need to fetch ad-set-level metrics
-      if (!recipientConvAtT72) return 'inconclusive';
+      // Evaluate using per-ad-set deltas. Two distinct cases:
+      //   1. blockedReason='recipient_thin_evidence': we BLOCKED the shift. Counterfactual: did
+      //      recipient eventually cross the conversion threshold (LLM was right) or stay thin
+      //      (block was right)?
+      //   2. blockedReason='bandit_disagreement': action RAN despite disagreement. Counterfactual:
+      //      did the LLM's pick outperform the bandit's leader on incremental conversions?
+      const toAdSetId = String(shadow.proposedAction.params?.toAdSetId ?? '');
+      const banditLeaderId = String(shadow.proposedAction.params?.banditLeaderId ?? '');
+      const tAdSets: any[] = Array.isArray(t.adSets) ? t.adSets : [];
+      const t72AdSets: any[] = Array.isArray((t72 as any).adSets) ? (t72 as any).adSets : [];
+
+      const findAdSet = (list: any[], id: string) => list.find(as => String(as.adSetId) === id);
+      const recipientT = findAdSet(tAdSets, toAdSetId);
+      const recipientT72 = findAdSet(t72AdSets, toAdSetId);
+      if (!recipientT || !recipientT72) return 'inconclusive';
+
+      const recipientConvDelta = (recipientT72.conversions ?? 0) - (recipientT.conversions ?? 0);
+      const recipientSpendDelta = (recipientT72.spend ?? 0) - (recipientT.spend ?? 0);
+
+      if (shadow.blockedReason === 'recipient_thin_evidence') {
+        // Recipient was thin (<10 conv) at T. Did 72h of natural delivery prove the LLM right?
+        // If recipient picked up >=5 incremental conversions, LLM was right (we should have shifted).
+        if (recipientConvDelta >= 5) return 'missed_signal';
+        // If recipient spent meaningfully and stayed thin, the block was right.
+        if (recipientSpendDelta > 500 && recipientConvDelta < 2) return 'correct_block';
+        return 'inconclusive';
+      }
+
+      if (shadow.blockedReason === 'bandit_disagreement') {
+        // Action ran. Counterfactual: did LLM's recipient outperform the bandit's leader on incremental ROAS?
+        const bLeaderT = findAdSet(tAdSets, banditLeaderId);
+        const bLeaderT72 = findAdSet(t72AdSets, banditLeaderId);
+        if (!bLeaderT || !bLeaderT72) return 'inconclusive';
+
+        const llmIncrSpend = recipientSpendDelta;
+        const llmIncrConv = recipientConvDelta;
+        const banditIncrSpend = (bLeaderT72.spend ?? 0) - (bLeaderT.spend ?? 0);
+        const banditIncrConv = (bLeaderT72.conversions ?? 0) - (bLeaderT.conversions ?? 0);
+
+        if (llmIncrSpend < 200 || banditIncrSpend < 200) return 'inconclusive';
+        const llmCPA = llmIncrConv > 0 ? llmIncrSpend / llmIncrConv : Infinity;
+        const banditCPA = banditIncrConv > 0 ? banditIncrSpend / banditIncrConv : Infinity;
+        // 'correct_block' here is misnamed — the action ran. We use it to mean "the LLM's
+        // override was correct" (LLM beat bandit). 'missed_signal' = "bandit was right, LLM picked worse."
+        if (llmCPA < banditCPA * 0.85) return 'correct_block';
+        if (banditCPA < llmCPA * 0.85) return 'missed_signal';
+        return 'inconclusive';
+      }
       return 'inconclusive';
     }
     if (type === 'reduce_total_budget' || type === 'narrow_placement' || type === 'dayparting') {
