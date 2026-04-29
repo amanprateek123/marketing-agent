@@ -30,11 +30,15 @@ export class CopyWriterService {
       hook: string;
       keyMessage: string;
       conversionBridge: string;
+      forcedHookStyle?: string;
+      avoidHookStyles?: string[];
     },
     company: CompanyDocument,
     runId: string,
   ): Promise<CopyPackage> {
     const creative = company.learnings?.creative;
+    const activeProduct = (company.products ?? []).find(p => p.active);
+    const priceTag = activeProduct ? `${activeProduct.currency}${activeProduct.price}` : '[price]';
 
     const learningsBlock = creative
       ? `
@@ -49,6 +53,16 @@ LOSING PATTERNS (avoid these):
       `.trim()
       : 'No learnings yet — use your best judgement.';
 
+    // Hook taxonomy aligned with Creative Team primary path (creative-team.service.ts:411-419)
+    // — both paths now share the same vocabulary so downstream learning isn't taxonomy-split.
+    const allowedHookStyles = ['pain_point', 'bold_claim', 'price_shock', 'social_proof', 'curiosity_gap', 'before_after', 'urgency'];
+    const hookStyleRule = brief.forcedHookStyle
+      ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
+      : `one of [${allowedHookStyles.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle.`;
+    const avoidBlock = brief.avoidHookStyles && brief.avoidHookStyles.length > 0
+      ? `\n⚠ AVOID THESE HOOK STYLES (saturated/fatigued — do NOT generate variants with these): ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}`
+      : '';
+
     const result = await this.claudeService.runAgent({
       tenantId: company.tenantId,
       runId,
@@ -56,7 +70,7 @@ LOSING PATTERNS (avoid these):
       systemPrompt: '',
       liveContext: this.liveContextBuilder.build(company),
       userMessage: `
-Write 3 ad copy variants for ${company.name} for the following content brief.
+Write 4 ad copy variants for ${company.name} for the following content brief.
 
 BRIEF:
 Topic: ${brief.topic}
@@ -66,14 +80,21 @@ Target audience: ${brief.audience}
 Hook: ${brief.hook}
 Key message: ${brief.keyMessage}
 Conversion bridge: ${brief.conversionBridge}
+${activeProduct ? `Product: ${activeProduct.name} @ ${priceTag}` : ''}
 
 ${learningsBlock}
 
 For each variant write:
-- primaryText: the main ad body copy (2-4 sentences, Hinglish where appropriate)
-- headline: short punchy headline (5-8 words max)
-- cta: call to action button text (3-5 words)
-- hookStyle: tag this variant's hook style (e.g. "personal_story", "question", "bold_claim", "social_proof", "fear_then_relief")
+- primaryText: the main ad body copy (3-5 sentences, Hinglish where natural). MUST mention product name AND price (${priceTag}).
+- headline: short punchy headline (5-7 words max)
+- cta: call to action button text — "Shop Now" / "Order Now" / "Buy Today" (NOT "Learn More" unless considering purchase)
+- hookStyle: ${hookStyleRule}${avoidBlock}
+
+COPY RULES:
+- Specific beats vague: numbers, names, concrete moments
+- No generic phrases ("best quality", "amazing", "don't miss out")
+- Price (${priceTag}) in EVERY variant — no exceptions
+- ${brief.forcedHookStyle ? `All 4 variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.` : '4 variants must use 4 DIFFERENT hookStyles from the allowed list.'}
 
 Also pick which variant is best for this brief and why.
 
@@ -81,12 +102,7 @@ Return ONLY valid JSON in this format:
 \`\`\`json
 {
   "variants": [
-    {
-      "primaryText": "...",
-      "headline": "...",
-      "cta": "...",
-      "hookStyle": "..."
-    }
+    { "primaryText": "...", "headline": "...", "cta": "...", "hookStyle": "..." }
   ],
   "selectedIndex": 0,
   "selectionReason": "one sentence why this variant wins"

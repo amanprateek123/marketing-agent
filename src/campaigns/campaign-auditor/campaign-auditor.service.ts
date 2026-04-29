@@ -366,6 +366,25 @@ export class CampaignAuditorService {
     snapshotData.verdict = verdict as any;
     await this.snapshotModel.create(snapshotData);
 
+    // Persist hook saturation onto the company doc so the Creative Team + Strategy Team
+    // can avoid hookStyles already saturated on each audience. Without this, the audit
+    // detects fatigue but the generator keeps producing the same exhausted hook.
+    // Merge strategy: max(existing, new) per (audienceType, hookStyle) — safer to overstate
+    // saturation and avoid a hook than understate and re-saturate it.
+    if (signals.hookSaturation && signals.hookSaturation.length > 0) {
+      try {
+        const existing = (company.learnings?.creative?.audienceHookSaturation ?? {}) as Record<string, Record<string, number>>;
+        const merged: Record<string, Record<string, number>> = JSON.parse(JSON.stringify(existing));
+        for (const h of signals.hookSaturation) {
+          if (!merged[h.audienceType]) merged[h.audienceType] = {};
+          merged[h.audienceType][h.hookStyle] = Math.max(merged[h.audienceType][h.hookStyle] ?? 0, h.saturationPct);
+        }
+        await this.companiesService.updateHookSaturation(company.tenantId, merged);
+      } catch (err: any) {
+        this.logger.warn(`Failed to persist hookSaturation: ${err.message}`);
+      }
+    }
+
     // ── Layer 4: Actions only for agent-created campaigns ────────────────────
     // Manual/imported campaigns: audit runs but no actions are created or executed
     if (campaign.source === 'agent' && verdict.verdict === 'act') {

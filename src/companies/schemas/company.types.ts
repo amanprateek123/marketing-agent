@@ -141,6 +141,16 @@ export interface CreativeLearnings {
   ctaInsights: string[];         // which CTA styles drive conversions
   copyToneInsights: string[];    // tone patterns that resonate (aspirational, urgent, etc.)
   visualInsights: string[];      // image/video patterns that performed well
+
+  /**
+   * Hook saturation per (audienceType → hookStyle → saturationPct).
+   * Updated by the audit loop after each campaign-level signal-detector pass.
+   * The Creative Team and Strategy Team avoid hookStyles where saturationPct ≥ 60
+   * for the target audience — closes the death-spiral where the audit detects
+   * fatigue but the generator keeps producing the same exhausted hook.
+   */
+  audienceHookSaturation?: Record<string, Record<string, number>>;
+  audienceHookSaturationUpdatedAt?: Date;
 }
 
 export interface CampaignLearnings {

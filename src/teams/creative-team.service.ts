@@ -10,6 +10,7 @@ import { CopyVariant } from '../creative/schemas/creative-package.schema';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputDocument } from '../pipeline/schemas/meta-ads-library-output.schema';
+import { resolveVertical } from '../common/benchmarks/vertical-benchmarks';
 
 export interface CreativeTeamOutput {
   variants: CopyVariant[];
@@ -58,6 +59,8 @@ export class CreativeTeamService {
       conversionBridge: string;
       product?: string;
       targetSegment?: string;
+      forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
+      avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
     },
     company: CompanyDocument,
     runId: string,
@@ -78,6 +81,7 @@ export class CreativeTeamService {
       topic: string; angle: string; platform: string; format: string;
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       product?: string; targetSegment?: string;
+      forcedHookStyle?: string; avoidHookStyles?: string[];
     },
     company: CompanyDocument,
     runId: string,
@@ -106,6 +110,7 @@ export class CreativeTeamService {
       topic: string; angle: string; platform: string; format: string;
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       product?: string; targetSegment?: string;
+      forcedHookStyle?: string; avoidHookStyles?: string[];
     },
     company: CompanyDocument,
     runId: string,
@@ -207,6 +212,7 @@ Return ONLY this JSON (no markdown, no explanation):
       topic: string; angle: string; platform: string; format: string;
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       product?: string; targetSegment?: string;
+      forcedHookStyle?: string; avoidHookStyles?: string[];
     },
     company: CompanyDocument,
     runId: string,
@@ -264,6 +270,8 @@ Return ONLY this JSON (no markdown, no explanation):
       conversionBridge: string;
       product?: string;
       targetSegment?: string;
+      forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
+      avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
     },
     company: CompanyDocument,
     runId: string,
@@ -357,6 +365,8 @@ Brand Guidelines: ${company.brandGuidelines || 'Not specified'}
 Tone: ${company.tone}
 Avoid: ${company.avoid?.join(', ') || 'nothing specified'}
 
+${this.buildVerticalContextBlock(company.industry)}
+
 ${liveContext}
 
 ${caseStudyContext}
@@ -399,16 +409,20 @@ MEME COPY RULES:
   LINE 5 — CTA LINE: Create urgency. Push action TODAY.
 - headline: 5-7 words below the image/video. Lead with benefit or price.
 - cta: button text — "Shop Now", "Order Now", "Buy Today" (NOT "Learn More" unless considered purchase)
-- hookStyle: one of the options below (each variant must use a DIFFERENT one)
+- hookStyle: ${brief.forcedHookStyle
+    ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (this is a forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
+    : 'one of the options below (each variant must use a DIFFERENT one)'}
 
-HOOK STYLES (use one per variant — pick 4 different styles, one per variant):
+HOOK STYLES${brief.forcedHookStyle ? ` (locked to "${brief.forcedHookStyle}" — see rule above):` : ' (use one per variant — pick 4 different styles, one per variant):'}
   "pain_point" — open with the audience's frustration
   "bold_claim" — specific, provable promise
   "price_shock" — lead with value proposition + price
   "social_proof" — open with result or testimonial
   "curiosity_gap" — make them need to know more
   "before_after" — transformation (frame as aspiration, not guarantee)
-  "urgency" — time or stock scarcity
+  "urgency" — time or stock scarcity${brief.avoidHookStyles && brief.avoidHookStyles.length > 0
+    ? `\n\n⚠ AVOID THESE HOOK STYLES (saturated on the target audience or recently failed):\n  ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}\nDo not generate variants with these hookStyles. The audience has been over-exposed.`
+    : ''}
 
 COPY RULES:
 - Hinglish where natural for ${company.targetAudience}
@@ -654,5 +668,61 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
       this.logger.error(`Creative Team output parse failed: ${err.message} | content snippet: ${content.slice(0, 300)}`);
       throw new Error(`Creative Team returned invalid JSON: ${err.message}`);
     }
+  }
+
+  /**
+   * Vertical-specific creative context — vocabulary, voice rules, do/don't lists,
+   * and verbatim winning-style examples. Without this, generic-spirituality copy
+   * (which underperforms astro-specific copy by 2-3× on cold prospect) ships by default.
+   *
+   * Spirituality is the only vertical with a dedicated block today; other verticals
+   * fall through to a no-op. Add per-vertical blocks here as the tenant base grows.
+   */
+  private buildVerticalContextBlock(industry: string | undefined | null): string {
+    const vertical = resolveVertical(industry);
+    if (vertical === 'spirituality') {
+      return `═══════════════════════════════════════════════════════
+SPIRITUALITY VERTICAL — ASTROLOGY CONTEXT (REQUIRED READING)
+═══════════════════════════════════════════════════════
+
+VOCABULARY YOU MUST USE WHEN THE TOPIC FITS:
+- Sade Sati (Saturn's 7.5-year transit through three signs — peak anxiety driver for Capricorn/Aquarius/Pisces)
+- Mahadasha / Antar Dasha (planetary periods that govern life phases)
+- Mercury Retrograde / Saturn Retrograde (transits that disrupt communication / career)
+- Rahu / Ketu placements (north/south node — destiny patterns, relationship issues)
+- Manglik Dosha / Pitra Dosh / Kaal Sarp Dosh / Shani Dosh (chart afflictions — high-intent search terms)
+- Kundli / Janam Kundli (birth chart — the central artifact of astro consultations)
+- Nakshatra (lunar mansion — granular personality reading)
+- Gochar (current planetary transits affecting the chart)
+- Panchang (auspicious timing for decisions)
+
+VOICE RULE — speak AS the astrologer revealing a secret, NOT as a brand selling a product.
+- ✓ "Aapki kundli mein Shani ki dhaiyya start ho gayi hai. Career mein 2-3 saal mushkil hain — par ek upay hai."
+- ✗ "Get the most accurate astrology readings online! Book now."
+- The astrologer voice is warm, knowing, slightly mystical, factual when stating chart positions, never preachy, never sounds like a discount retailer.
+
+HIGH-CONVERTING HOOK PATTERNS (winners in this vertical):
+- TRANSIT-EVENT: "Mangal ka transit start ho gaya — career mein bade decisions abhi mat lo"
+- DOSHA-CALLOUT: "Aapki kundli mein Manglik dosh hai? Shaadi karne se pehle ye padh lo"
+- SECRET-REVEAL (curiosity gap): "99% astrologers ye nahi batate — Sade Sati mein ye 3 cheezein avoid karo"
+- ASTROLOGER-WARNING: "Pandit ji kehte hain — agar Shani 7th house mein hai, toh aaj ye karo"
+- PERSONAL-PREDICTION: "Aapka rashi number kya hai? Iss hafte ka prediction free mein paao"
+- SPECIFIC-TIMEFRAME: "Agle 21 din mein aapki kundli ka 1 grah change hone wala hai"
+
+DO / DON'T:
+✓ Use Hinglish naturally — Devanagari is fine for emotional weight, Roman for accessibility
+✓ Reference specific astrology concepts — generic "spiritual guidance" loses to "Saturn transit relief"
+✓ Speak in first-person astrologer voice OR second-person reader-callout
+✓ Acknowledge specific pain (career stuck, marriage delayed, family conflict, financial loss) — vague "find peace" is dead
+✗ Don't promise GUARANTEED outcomes ("Manglik dosh removed in 21 days") — Meta will reject; safety check will block
+✗ Don't use Western "spiritual wellness" aesthetic (crystals, mandalas, generic chakras) — losses to authentic Indian-astro
+✗ Don't say "100% accurate predictions" — Meta auto-flag
+
+FOR HEADLINES specifically: short Hinglish phrases beat English (e.g. "Kundli check karo — ₹1 mein" beats "Get your kundli reading at ₹1").
+
+═══════════════════════════════════════════════════════`;
+    }
+    // No vertical-specific block — fall through.
+    return '';
   }
 }

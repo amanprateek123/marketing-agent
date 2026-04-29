@@ -81,6 +81,17 @@ export class CreativeReplacementProcessor extends WorkerHost {
           conversionBridge: (brief as any).conversionBridge,
           product: (brief as any).product,
           targetSegment: (brief as any).targetSegment,
+          // Force the requested hookStyle on all variants — closes the loophole where
+          // the auditor asked for replacementHook='social_proof' but the Creative Team
+          // generated 4 different hookStyles and shipped one at random (~75% mismatch rate).
+          forcedHookStyle: replacementHook,
+          // Always avoid the fatigued hook (it's why we're here) and any hookStyle currently
+          // saturated on this audience (LiveContextBuilder also surfaces this, but explicit
+          // here ensures the constraint reaches the prompt even on cold-cache runs).
+          avoidHookStyles: [
+            ...(fatiguedHook ? [fatiguedHook] : []),
+            ...this.getSaturatedHooksForAudience(company, (brief as any).targetSegment),
+          ],
         },
       );
     } catch (err: any) {
@@ -129,6 +140,17 @@ export class CreativeReplacementProcessor extends WorkerHost {
           (company.meta as any)?.specialAdCategories ?? [],
         );
 
+        // Record the ACTUAL shipped hookStyle, not the requested one. With forcedHookStyle
+        // these should match, but if the LLM drifts despite the prompt rule the downstream
+        // learning data must reflect what really shipped (otherwise hookSaturation tracking
+        // and per-hook performance attribution become inconsistent).
+        const actualShippedHook = selectedVariant.hookStyle ?? replacementHook;
+        if (actualShippedHook !== replacementHook) {
+          this.logger.warn(
+            `Hook drift on add_creative: requested "${replacementHook}", LLM shipped "${actualShippedHook}". Recording actual.`,
+          );
+        }
+
         // Add the new ad to the campaign document
         if (campaign) {
           const targetAdSet = (campaign as any).adSets?.find((as: any) => as.metaAdSetId === adSetId);
@@ -137,11 +159,11 @@ export class CreativeReplacementProcessor extends WorkerHost {
             targetAdSet.ads.push({
               metaAdId: adId,
               copyVariantIndex: selectedIndex,
-              hookStyle: replacementHook,
+              hookStyle: actualShippedHook,
               status: 'active',
               replacementHistory: [{
                 oldHook: '',
-                newHook: replacementHook,
+                newHook: actualShippedHook,
                 replacedAt: new Date(),
                 reason: 'Added fresh creative — early fatigue detected on existing ads',
               }],
@@ -150,7 +172,7 @@ export class CreativeReplacementProcessor extends WorkerHost {
           }
         }
 
-        this.logger.log(`New ad created in ad set ${adSetId}: adId=${adId} hook=${replacementHook}`);
+        this.logger.log(`New ad created in ad set ${adSetId}: adId=${adId} hook=${actualShippedHook}`);
       } catch (err: any) {
         this.logger.error(`Failed to create ad in ad set: ${err.message}`);
         await updateReplacementStatus('failed');
@@ -199,5 +221,28 @@ export class CreativeReplacementProcessor extends WorkerHost {
     }
 
     this.logger.log(`Creative ${isAddMode ? 'addition' : 'replacement'} done: hook=${replacementHook}`);
+  }
+
+  /**
+   * Pull saturated hookStyles for the given audienceType from the company's
+   * persisted saturation map. Used to populate avoidHookStyles in replacement
+   * briefs so the generator doesn't pick a hook the audience is already exhausted on.
+   */
+  private getSaturatedHooksForAudience(company: any, targetSegment?: string): string[] {
+    const map = company?.learnings?.creative?.audienceHookSaturation as
+      | Record<string, Record<string, number>>
+      | undefined;
+    if (!map) return [];
+    // If we have a targetSegment, prefer that; otherwise union across all audiences.
+    const buckets = targetSegment && map[targetSegment]
+      ? [map[targetSegment]]
+      : Object.values(map);
+    const saturated = new Set<string>();
+    for (const b of buckets) {
+      for (const [hook, pct] of Object.entries(b)) {
+        if (pct >= 60) saturated.add(hook);
+      }
+    }
+    return [...saturated];
   }
 }

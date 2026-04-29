@@ -144,6 +144,26 @@ export class CompaniesService {
     this.logger.log(`Creative copy insights updated for: ${tenantId}`);
   }
 
+  /**
+   * Persist hook-saturation map (audienceType → hookStyle → pct). Updated by audit
+   * loop after every signal-detector pass; consumed by Strategy Team + Creative Team
+   * to avoid generating saturated hookStyles for the target audience.
+   */
+  async updateHookSaturation(
+    tenantId: string,
+    audienceHookSaturation: Record<string, Record<string, number>>,
+  ): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.creative.audienceHookSaturation': audienceHookSaturation,
+          'learnings.creative.audienceHookSaturationUpdatedAt': new Date(),
+        },
+      },
+    );
+  }
+
   async findByApiKey(apiKey: string): Promise<CompanyDocument | null> {
     return this.companyModel.findOne({ apiKey }).exec();
   }

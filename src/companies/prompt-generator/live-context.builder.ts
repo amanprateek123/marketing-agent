@@ -51,6 +51,25 @@ ${company.learnings
       if (creative.winningFormats?.length) lines.push(`- Winning formats: ${creative.winningFormats.join(', ')}`);
       if (creative.losingFormats?.length) lines.push(`- Losing formats (avoid): ${creative.losingFormats.join(', ')}`);
       if (creative.ctaInsights?.length) lines.push(`- CTA insights: ${creative.ctaInsights.join('; ')}`);
+
+      // Hook saturation per audience — Strategy Team and Creative Team must AVOID
+      // hookStyles flagged saturated for the target audience. Without this, the
+      // audit detects fatigue but the generator keeps producing the same hook.
+      if (creative.audienceHookSaturation && Object.keys(creative.audienceHookSaturation).length > 0) {
+        const satLines: string[] = [];
+        for (const [audienceType, hooks] of Object.entries(creative.audienceHookSaturation as Record<string, Record<string, number>>)) {
+          const saturated = Object.entries(hooks).filter(([, pct]) => (pct as number) >= 60);
+          if (saturated.length === 0) continue;
+          const formatted = saturated
+            .sort((a, b) => (b[1] as number) - (a[1] as number))
+            .map(([hook, pct]) => `${hook} (${pct}%)`)
+            .join(', ');
+          satLines.push(`  ${audienceType}: AVOID ${formatted}`);
+        }
+        if (satLines.length > 0) {
+          lines.push(`- Hook saturation (≥60% — DO NOT generate these for the listed audience):\n${satLines.join('\n')}`);
+        }
+      }
     }
 
     const campaign = learnings.campaign;
