@@ -24,6 +24,7 @@ export interface BriefData {
   forcedHookStyle?: string;        // when set, ALL variants must use this hookStyle (replace_creative path)
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
+  explorationArm?: boolean;                 // when true, Creative Team skips winningHooks/winningExemplars injection (closed-loop drift mitigation)
 }
 
 @Injectable()

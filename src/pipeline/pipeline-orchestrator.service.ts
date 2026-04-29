@@ -547,6 +547,12 @@ export class PipelineOrchestratorService implements OnModuleInit {
             // to 'cold' on the schema for prospecting). Closes the gap where first-pass
             // creatives always defaulted to cold even if the brief was warm-shaped.
             audienceStage: (selectedBrief as any).audienceStage,
+            // Exploration-arm flag — Strategy Team flags 1-of-N briefs to use a
+            // hookStyle outside winningHooks/losingHooks (closed-loop drift
+            // mitigation). Without plumbing it through here, the Creative Team's
+            // isExploration check resolves to undefined and winning exemplars
+            // get injected anyway — defeating the entire arm.
+            explorationArm: !!(selectedBrief as any).explorationArm,
           },
         );
       }
