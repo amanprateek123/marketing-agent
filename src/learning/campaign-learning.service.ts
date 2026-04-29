@@ -112,6 +112,16 @@ export class CampaignLearningService {
       return;
     }
 
+    // Pre-construct matched pairs in TypeScript so the LLM only describes
+    // controlled comparisons rather than discovers them. Without this the LLM
+    // routinely confabulated `controlledFor: ["same audience"]` because the
+    // raw JSON dump is too noisy to confound-detect from. Matched pairs are
+    // strictly stronger evidence than unstructured rows.
+    const matchedPairs = this.buildMatchedPairs(campaignData);
+    const matchedPairsBlock = matchedPairs.length > 0
+      ? `\n\nPRE-COMPUTED MATCHED PAIRS (use these for causalInsights — each pair holds all variables constant except ONE):\n${JSON.stringify(matchedPairs, null, 2)}`
+      : `\n\n(No matched pairs found in the data — emit causalInsights only if you can describe a single-variable comparison; otherwise leave the array empty.)`;
+
     let result;
     try {
       result = await this.claudeService.runAgent({
@@ -130,7 +140,7 @@ Company thresholds (use these to define winning vs losing):
   weeklyBudgetCap: ${company.weeklyBudgetCap}
 
 Campaign data (brief + creative + performance):
-${JSON.stringify(campaignData, null, 2)}
+${JSON.stringify(campaignData, null, 2)}${matchedPairsBlock}
 
 Previous campaign learnings (v${company.learnings?.version ?? 0}):
 ${JSON.stringify(company.learnings?.campaign ?? null, null, 2)}
@@ -361,6 +371,84 @@ Return as a single causal insight JSON:
           : null,
       };
     });
+  }
+
+  /**
+   * Group campaigns into matched pairs that hold all variables constant except
+   * one, so the LLM can describe a controlled comparison instead of guessing
+   * what was controlled. Group key = (product, audienceType, monthBucket).
+   * Within a group, emit a pair iff exactly one of {format, hookStyle,
+   * budget-band} differs between the two campaigns. Strictly stronger evidence
+   * than the raw row dump and short enough to fit in prompt budget.
+   */
+  private buildMatchedPairs(campaignData: any[]): Array<{
+    isolated: 'format' | 'hookStyle' | 'budget_band';
+    held_constant: { product: string; audienceType: string; monthBucket: string };
+    a: { briefId: string; format: string; hookStyle: string; budget: number; roas: number; ctr: number };
+    b: { briefId: string; format: string; hookStyle: string; budget: number; roas: number; ctr: number };
+  }> {
+    const monthBucket = (d: any) =>
+      d ? new Date(d).toISOString().slice(0, 7) : 'unknown';
+    const budgetBand = (b: number) =>
+      b < 1000 ? 'low' : b < 5000 ? 'mid' : b < 15000 ? 'high' : 'top';
+
+    type Row = {
+      briefId: string;
+      product: string;
+      audienceType: string;
+      monthBucket: string;
+      format: string;
+      hookStyle: string;
+      budget: number;
+      budget_band: string;
+      roas: number;
+      ctr: number;
+    };
+    const rows: Row[] = campaignData
+      .filter((c) => c.campaign?.roas != null && c.campaign?.status !== 'paused')
+      .map((c) => ({
+        briefId: c.briefId,
+        product: c.product ?? 'unknown',
+        audienceType: c.audience ?? 'unknown',
+        monthBucket: monthBucket((c as any).launchedAt ?? (c as any).createdAt),
+        format: c.format ?? 'unknown',
+        hookStyle: c.creative?.hookStyle ?? 'unknown',
+        budget: c.campaign?.budget ?? 0,
+        budget_band: budgetBand(c.campaign?.budget ?? 0),
+        roas: c.campaign.roas,
+        ctr: c.campaign?.ctr ?? 0,
+      }));
+
+    const groups = new Map<string, Row[]>();
+    for (const r of rows) {
+      const k = `${r.product}|${r.audienceType}|${r.monthBucket}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k)!.push(r);
+    }
+
+    const pairs: ReturnType<typeof this.buildMatchedPairs> = [];
+    for (const [, group] of groups) {
+      if (group.length < 2) continue;
+      for (let i = 0; i < group.length; i++) {
+        for (let j = i + 1; j < group.length; j++) {
+          const a = group[i];
+          const b = group[j];
+          const diffs: Array<'format' | 'hookStyle' | 'budget_band'> = [];
+          if (a.format !== b.format) diffs.push('format');
+          if (a.hookStyle !== b.hookStyle) diffs.push('hookStyle');
+          if (a.budget_band !== b.budget_band) diffs.push('budget_band');
+          if (diffs.length !== 1) continue;   // we want EXACTLY one variable to differ
+          pairs.push({
+            isolated: diffs[0],
+            held_constant: { product: a.product, audienceType: a.audienceType, monthBucket: a.monthBucket },
+            a: { briefId: a.briefId, format: a.format, hookStyle: a.hookStyle, budget: a.budget, roas: a.roas, ctr: a.ctr },
+            b: { briefId: b.briefId, format: b.format, hookStyle: b.hookStyle, budget: b.budget, roas: b.roas, ctr: b.ctr },
+          });
+        }
+      }
+    }
+    // Cap to keep prompt size bounded.
+    return pairs.slice(0, 20);
   }
 
   private parseCampaignLearnings(content: string): {

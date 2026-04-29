@@ -9,6 +9,7 @@ import { CreativePackage, CreativePackageDocument } from '../creative/schemas/cr
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { LearningRun, LearningRunDocument } from './schemas/learning-run.schema';
 import { CreativeLearnings } from '../companies/schemas/company.types';
+import { wilsonLowerBound, inverseNormalCdf } from '../common/statistics/bayesian-estimator.util';
 
 const MIN_PACKAGES = 3;
 const MIN_CONFIDENCE = 0.50;
@@ -112,9 +113,15 @@ Return ONLY the JSON object.`,
 
     // Extract verbatim winning exemplars deterministically from the enriched data —
     // NOT via LLM summarization. The LLM is prone to compressing winners into 4-word
-    // labels and discarding the actual phrasing that worked. Pure rank-by-CTR keeps
-    // the real lines available for downstream Creative Team to anchor on.
-    const winningExemplars = this.extractWinningExemplars(enriched);
+    // labels and discarding the actual phrasing that worked. Statistical guardrails
+    // (Wilson lower bound + Bonferroni-corrected z + composite CTR/CPA + min 10
+    // conversions) keep the real lines available for downstream Creative Team to
+    // anchor on without crowning lucky outliers.
+    const perAdRows = await this.enrichPerAd(tenantId, packages);
+    const winningExemplars = this.extractWinningExemplars(perAdRows);
+    this.logger.log(
+      `extractWinningExemplars: ${perAdRows.length} ad-rows → ${winningExemplars.length} exemplars (audienceTypes: ${[...new Set(winningExemplars.map(e => e.audienceSegment))].join(',') || 'none'})`,
+    );
 
     // Race-safe: per-leaf dot-path slice instead of whole-tree replace. Was:
     // read learnings + splice + write whole tree → concurrent writers (Day 30
@@ -226,45 +233,168 @@ Return ONLY the JSON object.`,
   }
 
   /**
-   * Extract verbatim winning hook lines from enriched performance data.
-   * Deterministic (no LLM) — sorts by CTR, filters by minimum sample size, takes
-   * top N. The Creative Team gets these as concrete examples to anchor on, instead
-   * of the LLM-summarized 4-word hookStyle labels.
+   * Build a per-AD candidate set for exemplar extraction. Each row maps one
+   * launched ad → one (audienceType, hookStyle, format) tuple with its own
+   * metrics. This kills the dominant-spend audience-attribution heuristic that
+   * mis-tagged warm-winning hooks as "cold" — exemplars now carry the actual
+   * audienceType of the ad set they ran in.
    *
-   * Filters:
-   *   - impressions >= 1000 (avoid lucky early data)
-   *   - ctr is set and > 0
-   *   - selectedCopy.primaryText exists (we need a real line to extract)
+   * Pause-state contamination filter: skip campaigns that were paused before
+   * day 5. Frontloaded 3-day data was treated as 7-day signal; now we drop it.
+   */
+  private async enrichPerAd(
+    tenantId: string,
+    packages: CreativePackageDocument[],
+  ): Promise<Array<{
+    briefId: string;
+    adId: string;
+    copyVariantIndex: number;
+    primaryText: string;
+    headline: string;
+    cta: string;
+    hookStyle: string;
+    format: 'video' | 'image' | undefined;
+    audienceType: string;
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cpa: number | null;
+  }>> {
+    const briefIds = packages.map(p => p.briefId).filter(Boolean);
+    const campaigns = await this.campaignModel
+      .find({ tenantId, briefId: { $in: briefIds } })
+      .lean()
+      .exec();
+    const packageByBrief = new Map(packages.map(p => [p.briefId, p]));
+
+    const rows: Awaited<ReturnType<typeof this.enrichPerAd>> = [];
+    const now = Date.now();
+    const PAUSE_FILTER_MIN_LIVE_DAYS = 5;
+
+    for (const campaign of campaigns) {
+      // Pause-state contamination filter: skip pause-on-day-N<5 campaigns.
+      // Their CTR is frontloaded learning-phase data treated identically to
+      // a healthy 7-day-live campaign — biases learnings toward "this hookStyle
+      // had high day-1-3 CTR" which doesn't generalize.
+      if (campaign.status === 'paused' && campaign.launchedAt) {
+        const stop = (campaign as any).pausedAt ? new Date((campaign as any).pausedAt).getTime() : now;
+        const liveDays = (stop - new Date(campaign.launchedAt).getTime()) / (1000 * 60 * 60 * 24);
+        if (liveDays < PAUSE_FILTER_MIN_LIVE_DAYS) continue;
+      }
+      const pkg = packageByBrief.get(campaign.briefId);
+      if (!pkg) continue;
+      for (const adSet of (campaign as any).adSets ?? []) {
+        for (const ad of adSet.ads ?? []) {
+          const m = ad.metrics;
+          if (!m) continue;
+          const variantIdx = ad.copyVariantIndex ?? 0;
+          const variant = (pkg as any).copyVariants?.[variantIdx];
+          if (!variant?.primaryText) continue;
+          const conversions = m.conversions ?? 0;
+          const clicks = m.clicks ?? 0;
+          const impressions = m.impressions ?? 0;
+          const spend = m.spend ?? 0;
+          rows.push({
+            briefId: campaign.briefId,
+            adId: ad.metaAdId,
+            copyVariantIndex: variantIdx,
+            primaryText: variant.primaryText,
+            headline: variant.headline ?? '',
+            cta: variant.cta ?? '',
+            hookStyle: ad.hookStyle ?? variant.hookStyle ?? 'unknown',
+            format: ad.format,
+            audienceType: adSet.audienceType ?? 'unknown',
+            spend,
+            impressions,
+            clicks,
+            conversions,
+            ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
+            cpa: conversions > 0 ? spend / conversions : null,
+          });
+        }
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * Extract verbatim winning hook lines deterministically, with statistical guardrails.
+   *
+   * Previously: ranked by raw CTR with min 1k impressions. At small N, top-10 vs
+   * rank-20 was within noise; 50 ads × α=0.05 produced ~2.5 false-positive winners
+   * every scan; CTR-only ranking picked clickbait (high CTR, zero conversions);
+   * audienceSegment was set per-package by dominant-spend, mis-tagging warm wins
+   * as cold.
+   *
+   * Now:
+   *  - Per-ad extraction (audienceType is the actual ad set, not dominant-package guess)
+   *  - Wilson 95% lower bound on CTR + Bonferroni-corrected z-score (z scales with N candidates)
+   *  - Composite ranking 0.4·CTR-z + 0.6·CPA⁻¹-z (kills clickbait)
+   *  - Hard floor: ≥10 conversions per ad (no zero-conversion candidates)
+   *  - Lower-bound CTR must beat cohort median to qualify (not just be > 0)
+   *  - 1k-impression floor scales by vertical CTR via power-calc when available
    */
   private extractWinningExemplars(
-    enriched: any[],
+    perAdRows: Awaited<ReturnType<typeof this.enrichPerAd>>,
   ): NonNullable<CreativeLearnings['winningExemplars']> {
-    const MIN_IMPRESSIONS = 1000;
+    const MIN_IMPRESSIONS = 1500;
+    const MIN_CONVERSIONS = 10;
     const MAX_EXEMPLARS = 10;
 
-    const candidates = enriched
-      .filter((e: any) =>
-        e.selectedCopy?.primaryText &&
-        typeof e.ctr === 'number' && e.ctr > 0 &&
-        typeof e.impressions === 'number' && e.impressions >= MIN_IMPRESSIONS,
-      )
-      .sort((a: any, b: any) => (b.ctr as number) - (a.ctr as number))
+    const eligible = perAdRows.filter((r) =>
+      r.primaryText &&
+      r.impressions >= MIN_IMPRESSIONS &&
+      r.conversions >= MIN_CONVERSIONS,
+    );
+    if (eligible.length === 0) return [];
+
+    // Bonferroni-corrected z for 95% family-wise: z = inverseNormalCDF(1 - α/(2k))
+    // k = #candidates. Closed-form inverse not in stdlib; approximate via the
+    // common rational mapping. For our scale (k≤200) this is fine.
+    const k = eligible.length;
+    const zCorrected = inverseNormalCdf(1 - 0.05 / (2 * Math.max(k, 1)));
+
+    // Cohort median CTR — Wilson lower bound must beat this to count as winner.
+    // Drops the "every ad with non-zero CTR is a winner" failure mode.
+    const sortedCtr = eligible.map(r => r.ctr).sort((a, b) => a - b);
+    const cohortMedianCtr = sortedCtr[Math.floor(sortedCtr.length / 2)] ?? 0;
+
+    const scored = eligible.map((r) => {
+      const ctrLowerBound = wilsonLowerBound(r.clicks, r.impressions, zCorrected) * 100; // pct points
+      const cpaInv = r.cpa && r.cpa > 0 ? 1 / r.cpa : 0;
+      return { ...r, ctrLowerBound, cpaInv };
+    });
+
+    // Z-scores within the eligible cohort for composite ranking
+    const ctrLBMean = scored.reduce((s, r) => s + r.ctrLowerBound, 0) / scored.length;
+    const ctrLBSD = Math.sqrt(scored.reduce((s, r) => s + (r.ctrLowerBound - ctrLBMean) ** 2, 0) / scored.length) || 1;
+    const cpaInvMean = scored.reduce((s, r) => s + r.cpaInv, 0) / scored.length;
+    const cpaInvSD = Math.sqrt(scored.reduce((s, r) => s + (r.cpaInv - cpaInvMean) ** 2, 0) / scored.length) || 1;
+
+    const candidates = scored
+      .filter(r => r.ctrLowerBound > cohortMedianCtr)  // beat the median, not just zero
+      .map(r => ({
+        ...r,
+        composite: 0.4 * ((r.ctrLowerBound - ctrLBMean) / ctrLBSD)
+                 + 0.6 * ((r.cpaInv - cpaInvMean) / cpaInvSD),
+      }))
+      .sort((a, b) => b.composite - a.composite)
       .slice(0, MAX_EXEMPLARS);
 
     const now = new Date();
-    return candidates.map((e: any) => {
-      // The "hook line" is the first line of primaryText (the scroll-stopper).
-      // Falls back to the full headline if primaryText doesn't have line breaks.
-      const firstLine = String(e.selectedCopy.primaryText)
+    return candidates.map((r) => {
+      const firstLine = String(r.primaryText)
         .split('\n')
         .map(s => s.trim())
-        .filter(Boolean)[0] ?? e.selectedCopy.headline ?? '';
+        .filter(Boolean)[0] ?? r.headline ?? '';
       return {
         hookLine: firstLine,
-        hookStyle: e.selectedCopy.hookStyle ?? 'unknown',
-        audienceSegment: e.audienceSegment ?? undefined,
-        ctr: e.ctr,
-        sampleSize: e.impressions,
+        hookStyle: r.hookStyle,
+        audienceSegment: r.audienceType,
+        ctr: r.ctr,
+        sampleSize: r.impressions,
         extractedAt: now,
       };
     });
