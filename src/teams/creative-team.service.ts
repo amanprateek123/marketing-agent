@@ -185,7 +185,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its hook..."
   ],
-  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Cinematic b-roll visuals with text overlays and off-screen Hindi voiceover narration, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
+  "videoPrompt": "Pick duration + opener + music based on the SELECTED variant's hookStyle. Example below for hookStyle='pain_point' (30-40s, story-arc):\\n\\nDuration: 35 seconds, 9:16 vertical for Reels/Stories. Cinematic b-roll only — no avatars, no talking-head. Off-screen Hindi voiceover, Indian instrumental music.\\n\\nFIRST FRAME (controls thumbnail): Close-up of stressed hands gripping a phone, late-night room lighting, blurred kundli paper visible on the table beside the phone. Bold Hindi/Hinglish text overlay = the hook line.\\n\\n0-3s: Hold on the first frame, hook text fully visible. Single tanpura drone, no other sound. Establishes pain instantly.\\n\\n3-15s: PERSONAL STORY beat. Hard cut to a different relatable scene — woman staring out a rainy window, pages of a kundli rifling on a table, a circled date on a wall calendar. Hindi voiceover begins in conversational tone (warm, knowing — never preachy): names the specific astrology pain (Sade Sati / Mangal dosh / Mercury Retrograde — match to the brief's topic). Slow sitar/bansuri solo joins, minor key.\\n\\n15-25s: SHIFT to a brighter beat. Visual transitions to a lit puja desk with the relevant deity iconography (Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — match to topic), open kundli with planetary lines highlighted, hands tracing transit positions. Voiceover delivers the resolution / what becomes possible. Tabla layers in.\\n\\n25-35s: CTA beat. Bold text overlay: \\\"${resolvedProduct?.name ?? 'Product'} — ₹${resolvedProduct?.price}\\\" with a specific CTA line below (\\\"Aaj hi consultation book karo\\\" / \\\"Pehli baat ₹1 mein\\\"). Final voiceover urgency line. Music hits one final tabla beat → clean stop. Black frame for 0.5s.\\n\\nNEGATIVE: no English-only text, no watermarks, no celebrity faces, no Western spiritual aesthetic (crystals/mandalas/Buddha statues), no fade transitions, no slow zooms.",
   "complianceNotes": "what was reviewed and any changes made",
   "debateRounds": 2,
   "debateLog": [
@@ -224,6 +224,11 @@ Return ONLY this JSON (no markdown, no explanation):
     const stepsIdx = fullPrompt.indexOf('═══════════════════════════════════════════════════════\nSTEPS');
     const withoutSteps = stepsIdx !== -1 ? fullPrompt.slice(0, stepsIdx).trimEnd() : fullPrompt;
 
+    // Resolve product so the JSON example shown to the LLM has concrete name + price
+    // (so the example reads as real, not as a template).
+    const resolvedProduct = (company.products ?? []).find(p => p.name === brief.product)
+      ?? (company.products ?? []).find(p => p.active) ?? null;
+
     return `${withoutSteps}
 
 ═══════════════════════════════════════════════════════
@@ -251,7 +256,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its specific hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its specific hook..."
   ],
-  "videoPrompt": "Create a 15-second 9:16 vertical Meta conversion ad for [Brand]. Cinematic b-roll visuals with text overlays and off-screen Hindi voiceover narration, Indian instrumental background music.\\n\\nTEXT OVERLAYS:\\n0-3s: [Hook line in bold Hindi/Hinglish — instant self-identification]\\n3-7s: [Pain/desire — specific, resonant, 1 sentence]\\n7-12s: [Product name + benefit]\\n12-15s: ₹[price] | [CTA action] — bold, urgent\\n\\nBACKGROUND: [Specific culturally relevant Indian visual — warm, high-contrast, emotionally matched to hook]\\n\\nMUSIC: [Indian classical instrument — starts 15%, rises to 45% at CTA, no vocals, builds toward urgency]\\n\\nGOAL: Viewer feels recognized at 3s, desires product by 12s, taps CTA at 15s.",
+  "videoPrompt": "Pick duration + opener + music based on the SELECTED variant's hookStyle. Example below for hookStyle='pain_point' (30-40s, story-arc):\\n\\nDuration: 35 seconds, 9:16 vertical for Reels/Stories. Cinematic b-roll only — no avatars, no talking-head. Off-screen Hindi voiceover, Indian instrumental music.\\n\\nFIRST FRAME (controls thumbnail): Close-up of stressed hands gripping a phone, late-night room lighting, blurred kundli paper visible on the table beside the phone. Bold Hindi/Hinglish text overlay = the hook line.\\n\\n0-3s: Hold on the first frame, hook text fully visible. Single tanpura drone, no other sound. Establishes pain instantly.\\n\\n3-15s: PERSONAL STORY beat. Hard cut to a different relatable scene — woman staring out a rainy window, pages of a kundli rifling on a table, a circled date on a wall calendar. Hindi voiceover begins in conversational tone (warm, knowing — never preachy): names the specific astrology pain (Sade Sati / Mangal dosh / Mercury Retrograde — match to the brief's topic). Slow sitar/bansuri solo joins, minor key.\\n\\n15-25s: SHIFT to a brighter beat. Visual transitions to a lit puja desk with the relevant deity iconography (Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — match to topic), open kundli with planetary lines highlighted, hands tracing transit positions. Voiceover delivers the resolution / what becomes possible. Tabla layers in.\\n\\n25-35s: CTA beat. Bold text overlay: \\\"${resolvedProduct?.name ?? 'Product'} — ₹${resolvedProduct?.price}\\\" with a specific CTA line below (\\\"Aaj hi consultation book karo\\\" / \\\"Pehli baat ₹1 mein\\\"). Final voiceover urgency line. Music hits one final tabla beat → clean stop. Black frame for 0.5s.\\n\\nNEGATIVE: no English-only text, no watermarks, no celebrity faces, no Western spiritual aesthetic (crystals/mandalas/Buddha statues), no fade transitions, no slow zooms.",
   "complianceNotes": "",
   "debateRounds": 1,
   "debateLog": [{"round": 1, "from": "creative-director", "summary": "drafted creative package"}]
@@ -482,39 +487,82 @@ AVOID:
 
 ━━━ c) VIDEO CREATIVE — Heygen Video Agent prompt ━━━
 
-Write a CINEMATIC SCRIPT prompt for Heygen's AI Video Generator (V3 Video Agent API). This prompt is sent DIRECTLY to Heygen — write it as a natural-language film script that Heygen's AI can interpret and render.
+Write a CINEMATIC SCRIPT prompt for Heygen's AI Video Generator (V3 Video Agent API). This prompt is sent DIRECTLY to Heygen — write it as a natural-language film script that Heygen's AI can interpret and render. Cinematic b-roll visuals + on-screen text + off-screen voiceover (no avatars, no talking-head — voice is heard, no person shown speaking).
 
-FORMAT: Write the prompt as a single flowing script. Describe visuals, text on screen, voiceover narration, and music as a continuous cinematic direction. Do NOT use numbered scenes or brackets — write it like you're directing a short film.
+FORMAT: Single flowing script. Describe visuals, text overlays, voiceover narration, and music as continuous cinematic direction. Do NOT use numbered scenes or brackets — write it like you're directing a short film.
 
-THE AD MUST CREATE:
-1. CURIOSITY — an irresistible open loop in the first 2 seconds that makes the viewer NEED to keep watching
-2. BUY INTENT — build desire so strong that tapping the CTA feels inevitable, not optional
+═══ STEP 1: PICK DURATION + STRUCTURE FROM SELECTED VARIANT'S hookStyle ═══
 
-STRUCTURE (15 seconds total, 9:16 vertical format):
+The video is for the SELECTED copyVariant only. Pick duration and structure based on its hookStyle. This is mandatory — do not default to a generic 15s template:
 
-OPENING (0–3s): Start with a DARK background. A single bold Hindi/Hinglish text line fades in — large, white or gold on black. This is the curiosity hook — a provocative question or shocking statement from the brief that makes the viewer freeze mid-scroll. The text should feel like a personal whisper, not an ad. Add a soft, mysterious sound — a single tanpura drone or a deep bell.
+| hookStyle        | Duration | Why                                                                |
+|------------------|----------|--------------------------------------------------------------------|
+| pain_point       | 30-40s   | needs personal-story room (3-15s pain → 15-25s relief → 25-40s CTA)|
+| before_after     | 30-40s   | transformation arc requires room                                    |
+| social_proof     | 20-30s   | testimonial-style narrative beat                                    |
+| curiosity_gap    | 20-25s   | open-loop tension + reveal                                          |
+| price_shock      | 12-15s   | punchy, single beat                                                 |
+| urgency          | 12-15s   | tight, scarcity-driven                                              |
+| bold_claim       | 15-20s   | claim → proof → CTA, no story arc                                   |
 
-TENSION (3–7s): The dark background shifts to a moody, cinematic visual — specific to the Indian context. Describe the exact setting, lighting, and mood (e.g., "dimly lit puja room with a single diya flame flickering, casting shadows on an open kundli chart"). A Hindi voiceover narration begins — speaking directly to the viewer's deepest fear or desire related to the brief's topic. The voice is warm, confident, slightly urgent — like a trusted elder revealing a secret. A second text overlay appears reinforcing the pain point. Music builds slowly — add tabla or soft sitar underneath the tanpura.
+═══ STEP 2: PICK OPENER PATTERN BASED ON hookStyle ═══
 
-REVEAL (7–12s): Visual shifts to the product/transformation — brighter, warmer tones contrasting the dark opening. Show what changes with ${resolvedProduct?.name ?? 'the product'}. Voiceover delivers the key promise in one powerful Hindi/Hinglish line. Bold text overlay shows the product name. Music lifts — energy increases, instruments layer in.
+The first 0-3s decides thumb-stop ratio. The first frame becomes the Reel/Story thumbnail — make it count. NEVER default to a "dark text card" — that's predictable when every video does it.
 
-CTA (12–15s): Dark background returns. Large, high-contrast text: "₹${resolvedProduct?.price} | [specific CTA action]". Voiceover delivers a final urgency line — "Aaj hi jaano" / "Sirf aaj" / "Pehla kadam lo". Music hits a final beat and stops clean. Silence after the beat creates tension.
+| hookStyle      | Opener (first frame must visualize this)                                                          |
+|----------------|---------------------------------------------------------------------------------------------------|
+| pain_point     | Specific relatable struggle — close-up of stressed hands gripping a phone, anxious face turning away from a kundli, late-night insomnia stare. Hindi/Hinglish text overlay = the hook line. |
+| before_after   | Split or transition visual — "before" on left/top (struggle) vs "after" on right/bottom (calm). Hook text bridges both. |
+| social_proof   | Number / testimonial visual — "10,000+ logon ne X kiya" with crowd b-roll, OR a real-feeling testimonial frame (no avatar — abstracted close-ups). |
+| curiosity_gap  | Object-question — single mysterious object centered (open kundli, planetary chart, glowing diya), text overlay = the unanswered question. |
+| price_shock    | The price as the first frame — large ₹{price} number on warm gradient, instantly recognizable as cheap. Optional small visual element above. |
+| urgency        | Countdown/clock/calendar visual — circled date, ticking clock close-up, "[N] din baaki" text. Ticking percussive sound. |
+| bold_claim     | The claim itself as the first frame — large bold Hindi/Hinglish text on a context-relevant b-roll background. |
 
-AUDIO DIRECTION:
-- Background music: Indian classical instrumental that builds across the ad. Start minimal (single tanpura/drone), end full (tabla + sitar/bansuri + tanpura). The music must create a MOOD — mysterious, then hopeful, then urgent.
-- Voiceover: Hindi/Hinglish, male or female voice that sounds wise and trustworthy. NOT a sales pitch tone — more like a caring friend sharing important news. The voiceover must speak in conversational Hindi, not formal/textbook Hindi.
-- Sound design: Use a subtle whoosh or reveal sound when transitioning from dark to product reveal.
+═══ STEP 3: PICK MUSIC STYLE BASED ON hookStyle ═══
 
-VISUAL RULES:
-- 9:16 vertical format for Instagram/Facebook Reels
-- DARK backgrounds dominate — scenes 1 and 4 are pure dark/black, scenes 2 and 3 use moody low-light cinematography
-- All text overlays: bold sans-serif font, large enough to read on mobile, white or gold on dark backgrounds
+| hookStyle      | Music                                                                                          |
+|----------------|------------------------------------------------------------------------------------------------|
+| pain_point     | Slow melodic sitar/bansuri solo, minor key. Builds at relief beat. No tabla until 60% mark.   |
+| before_after   | Slow open → tempo lift at the "after" reveal. Bansuri for hope.                                |
+| social_proof   | Warm tabla + sitar from start, conversational pace. Major key. No mystery sustains.            |
+| curiosity_gap  | Mystery sustains (single tanpura drone, soft bell), unresolved until the reveal beat.          |
+| price_shock    | Upbeat tabla rhythm from frame 1. No slow build — punch immediately.                           |
+| urgency        | Sharp percussion — tabla + ghatam. Tight, time-running-out feel. Final beat is a hard stop.    |
+| bold_claim     | Confident, declarative — full ensemble (tabla + sitar + tanpura) from start.                   |
+
+═══ STEP 4: WRITE THE SCRIPT ═══
+
+Match the duration / opener / music to the SELECTED variant's hookStyle. Three beats:
+
+(A) HOOK — 0 to ~20% of duration. Use the opener pattern. Hook text overlay = the hook line. First frame must visualize the hook concept (controls thumbnail).
+(B) BODY — middle 50-60% of duration. For story-driven hooks, this is the personal-story / transformation / proof beat. For punch hooks, this is the value proposition + product reveal. Voiceover speaks in conversational Hindi (or the brief's audience language) — NEVER textbook Hindi. Specific b-roll, hard cuts, no fades.
+(C) CTA — final ~20% of duration. Product name "${resolvedProduct?.name ?? 'Product'}" + ₹${resolvedProduct?.price} as bold text overlay. Voiceover delivers the urgency line ("Abhi karo" / "Aaj hi" / "Pehla kadam lo"). Final music beat → clean stop.
+
+═══ ASTROLOGY-SPECIFIC B-ROLL VOCABULARY (use when topic fits) ═══
+
+Astro hooks demand astro visuals. Generic "spiritual aesthetic" loses to specific iconography:
+- Sade Sati / Saturn-related → Shani iconography: blue-black, oil lamp, crow imagery, Saturn glyph
+- Wealth / Lakshmi-related → gold coins, lotus, owl, red-and-gold palette, Lakshmi yantra
+- Protection / Hanuman-related → saffron, mace, monkey iconography, Sundarkand text
+- Knowledge / Saraswati-related → white, swan, veena, books, lotus
+- Chart specifics → close-up of a kundli paper, planetary diagram, transit lines, nakshatra wheel
+- Devotional props (general) → diya flame, rudraksha mala, tilak, sacred thread, agarbatti smoke
+- Astrologer archetype (NO talking-head — show hands/objects only) → hands holding a kundli, a finger tracing planetary positions, a candle-lit puja desk with an open chart
+
+DO NOT default to generic "moody puja room with diya" for every video. Match iconography to the topic — Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection, etc.
+
+═══ VISUAL RULES (non-negotiable) ═══
+
+- 9:16 vertical format for Reels/Stories
+- All text overlays: bold sans-serif, large for mobile, white/gold/saffron on dark or warm grounds
 - All text in Hindi or Hinglish — zero English-only lines
-- Each visual must be DIFFERENT from the previous — hard cuts, no fade transitions
-- Be hyper-specific with visuals — "close-up of trembling hands holding a tattered kundli paper, warm diya light from below" not "person looking at horoscope"
-- Product name "${resolvedProduct?.name ?? 'Product'}" and price ₹${resolvedProduct?.price} must appear as exact text, never as placeholders
-- No talking head, no avatar, no face-to-camera — cinematic b-roll visuals with text overlays and OFF-SCREEN Hindi voiceover narration (voice is heard but no person is shown speaking)
-- No stock footage look, no watermarks, no celebrity faces, no religious imagery beyond astrology/spiritual context
+- Hard cuts only between scenes — no fade transitions
+- Hyper-specific visuals — "close-up of trembling hands holding a tattered kundli paper, warm diya light from below" beats "person looking at horoscope"
+- Product name "${resolvedProduct?.name ?? 'Product'}" and price ₹${resolvedProduct?.price} must appear as exact text — never placeholders
+- NO talking-head, NO avatar, NO face-to-camera — cinematic b-roll only with off-screen Hindi voiceover
+- NO stock footage look, NO watermarks, NO celebrity faces
+- NO Western "spiritual wellness" aesthetic (crystals, mandalas, Buddha statues, sage smudging) — Indian-astro only
 
 ═══════════════════════════════════════════════════════
 RULES
@@ -596,7 +644,7 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its social_proof hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its urgency hook..."
   ],
-  "videoPrompt": "[Scene 1] 0–3s — HOOK\\nVisual: [specific Indian setting matching hook emotion]\\nText overlay: [exact Hindi/Hinglish hook words]\\n\\n[Scene 2] 3–7s — PAIN/DESIRE\\nVisual: [different location showing problem or desire]\\nText overlay: [exact pain/desire line]\\n\\n[Scene 3] 7–12s — PRODUCT REVEAL\\nVisual: [product or transformation visual]\\nText overlay: [product name + benefit in Hindi/Hinglish]\\n\\n[Scene 4] 12–15s — CTA\\nVisual: [urgency visual]\\nText overlay: ₹[price] | [CTA action]\\n\\nMUSIC: [Indian classical instrument — tanpura/sitar/bansuri/tabla]. Builds across all 4 scenes. No vocals.\\n\\nNEGATIVE PROMPTS: No English-only overlays. No watermarks. No celebrity faces. No AI artifacts. No cursive fonts. No slow fades — hard cuts only.",
+  "videoPrompt": "Pick duration + opener + music based on the SELECTED variant's hookStyle. Write as a single flowing cinematic script, NOT bracketed scenes. Match opener to hookStyle (see prompt rules above) — first frame controls the thumbnail, do NOT default to a dark text card. Match music to hookStyle. Match duration to hookStyle (12-15s for punch hooks like price_shock/urgency, 30-40s for story hooks like pain_point/before_after, 20-30s for social_proof/curiosity_gap). Use astrology-specific b-roll vocabulary (Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — never generic Western spiritual). Cinematic b-roll only — no avatars, no talking-head. Off-screen Hindi voiceover. Product name '${resolvedProduct?.name ?? 'Product'}' + ₹${resolvedProduct?.price} as exact text in CTA frame. NEGATIVE: no English-only overlays, no watermarks, no celebrity faces, no AI artifacts, no slow fades — hard cuts only.",
   "complianceNotes": "what was flagged and fixed during review",
   "debateRounds": 2,
   "debateLog": [
