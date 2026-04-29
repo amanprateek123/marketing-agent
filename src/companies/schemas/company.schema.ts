@@ -158,6 +158,28 @@ export class Company {
   @Prop({ type: Object, default: null })
   prompts: CompanyPrompts | null;
 
+  /**
+   * Monotonically incremented every time prompt-generator successfully writes
+   * new prompts. Stamped on PipelineRun and Campaign at start so we can later
+   * answer "did v3 perform better than v4?" Foundation for measurement-driven
+   * rollback. Default 1 — first regen bumps to 2.
+   */
+  @Prop({ default: 1 })
+  promptsVersion: number;
+
+  /**
+   * Last 5 prompt versions for rollback. Each entry is the full CompanyPrompts
+   * snapshot at write time so we can restore without re-running the generator.
+   * Capped at 5 to bound storage; prompts are ~5-15kb each.
+   */
+  @Prop({ type: [Object], default: [] })
+  promptsHistory: Array<{
+    version: number;
+    prompts: CompanyPrompts;
+    generatedAt: Date;
+    learningVersion: number;   // learnings.version at the time of regen — useful for "what learnings produced these prompts"
+  }>;
+
   @Prop({ type: Object, default: null })
   learnings: CompanyLearnings | null;
 

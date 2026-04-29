@@ -51,6 +51,14 @@ export class PipelineRun {
 
   @Prop({ default: 0 })
   costUSD: number;
+
+  /**
+   * Snapshot of company.promptsVersion at the moment this run started. Used to
+   * answer "which prompt version produced this run's briefs/campaigns?" so
+   * rollback decisions can be made on real performance data.
+   */
+  @Prop()
+  promptsVersion?: number;
 }
 
 export const PipelineRunSchema = SchemaFactory.createForClass(PipelineRun);

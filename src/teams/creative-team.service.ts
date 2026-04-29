@@ -332,9 +332,14 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
   Target segment: ${brief.targetSegment ?? 'general'}`;
     })();
 
-    // Visual learnings for image/video prompts
+    // Visual learnings for image/video prompts. Exploration-arm briefs skip
+    // these entirely — closed-loop drift mitigation. The Strategy Team flagged
+    // this brief as a "use a hookStyle outside winningHooks" probe; injecting
+    // the very list it should ignore would defeat the experiment.
     const creative = company.learnings?.creative;
+    const isExploration = !!(brief as any).explorationArm;
     const visualLearnings = (() => {
+      if (isExploration) return 'EXPLORATION-ARM BRIEF: ignore prior winning/losing hook patterns — generate fresh creative direction from the brief alone.';
       const lines: string[] = [];
       if (creative?.visualInsights?.length) lines.push(`Visual patterns that work: ${creative.visualInsights.join('; ')}`);
       if (creative?.winningHooks?.length) lines.push(`Winning hook styles (use in text overlays): ${creative.winningHooks.join(', ')}`);
@@ -348,6 +353,10 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
     // tell you the phrasing patterns. Use them as inspiration for tone/structure/specificity,
     // NOT for direct copying — re-running an old line on a saturated audience underperforms.
     const winningExemplarsBlock = (() => {
+      // Exploration-arm briefs skip exemplar injection — see visualLearnings
+      // above. Exemplars are the strongest exploitation signal; suppressing
+      // them is the whole point of the exploration arm.
+      if (isExploration) return '';
       const exemplars = creative?.winningExemplars ?? [];
       if (exemplars.length === 0) return '';
 

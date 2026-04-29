@@ -64,6 +64,15 @@ export class Campaign {
   @Prop()
   pauseReason?: string;
 
+  /**
+   * Snapshot of company.promptsVersion at the moment this campaign was created.
+   * Lets us correlate campaign performance with prompt-version drift over time
+   * and answer "did campaigns generated under v3 outperform v4?" before
+   * permanently rolling back to an older prompt version.
+   */
+  @Prop()
+  promptsVersion?: number;
+
   // Live metrics (written back by auditor in Phase 6)
   @Prop({ default: 0 })
   spend: number;

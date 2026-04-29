@@ -1069,7 +1069,7 @@ export class CampaignAuditorService {
     const brief = await this.briefModel.findOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }).lean().exec();
     if (!brief) return false;
 
-    // Campaign-level metrics
+    // Campaign-level metrics (legacy — kept for back-compat with existing readers)
     const perf = {
       roas: full.campaign.roas,
       ctr: full.campaign.ctr,
@@ -1077,7 +1077,9 @@ export class CampaignAuditorService {
       conversions: full.campaign.conversions,
     };
 
-    // Per-hookStyle breakdown from ad-level metrics
+    // Per-hookStyle breakdown — legacy aggregation across ad sets. Mixed ad
+    // sets (cold + retargeting) blend wins and losses under one hookStyle —
+    // see adSetPerformance below for the disambiguated breakdown.
     const hookPerformance: Record<string, { spend: number; conversions: number; clicks: number; impressions: number; ctr: number; conversionRate: number }> = {};
     for (const adSet of (campaign as any).adSets ?? []) {
       for (const ad of adSet.ads ?? []) {
@@ -1093,37 +1095,82 @@ export class CampaignAuditorService {
         hookPerformance[hook].impressions += metrics.impressions ?? 0;
       }
     }
-    // Calculate blended CTR and conversion rate per hook
     for (const hook of Object.keys(hookPerformance)) {
       const h = hookPerformance[hook];
       h.ctr = h.impressions > 0 ? (h.clicks / h.impressions) * 100 : 0;
       h.conversionRate = h.clicks > 0 ? (h.conversions / h.clicks) * 100 : 0;
     }
 
+    // Per-ad-set breakdown — the unit of analysis that actually disentangles
+    // hookStyle × audienceType × format. Replaces the misleading blended ROAS
+    // that previously got written to brief.day*Performance. Causal layer
+    // (campaign-learning.runDeepRun) should read this instead of the blended
+    // perf when constructing matched pairs.
+    const capturedAtDay: 7 | 14 | 30 = ageDays >= 30 ? 30 : ageDays >= 14 ? 14 : 7;
+    const adSetPerformance: NonNullable<typeof brief.adSetPerformance> = [];
+    for (const adSet of (campaign as any).adSets ?? []) {
+      const m = adSet.metrics;
+      if (!m) continue;
+      const hookStyles = Array.from(new Set((adSet.ads ?? []).map((a: any) => a.hookStyle).filter(Boolean))) as string[];
+      const formats = Array.from(new Set((adSet.ads ?? []).map((a: any) => a.format).filter(Boolean))) as string[];
+      adSetPerformance.push({
+        adSetId: adSet.metaAdSetId,
+        name: adSet.name,
+        audienceType: adSet.audienceType,
+        hookStyles,
+        formats,
+        spend: m.spend ?? 0,
+        impressions: m.impressions ?? 0,
+        clicks: m.clicks ?? 0,
+        conversions: m.conversions ?? 0,
+        ctr: m.ctr ?? 0,
+        cpa: m.cpa ?? 0,
+        roas: m.roas ?? 0,
+        capturedAt: new Date(),
+        capturedAtDay,
+      });
+    }
+
     let written = false;
 
+    // Order matters here: do the slow learning trigger BEFORE flipping the
+    // performanceWritten flag. Was: flag flipped → quickScan fired → process
+    // dies → flag persisted → scan never re-runs (gated by !performanceWritten).
+    // Brief silently never contributed to learnings forever. Now: scan runs
+    // first; only mark written after scan promise resolves (or rejects — at
+    // worst we re-run a scan, which is idempotent on the company.learnings side
+    // after L1.1 dot-path writes).
     if (ageDays >= 7 && !brief.performanceWritten?.day7) {
+      try {
+        await this.creativeLearning.runQuickScan(campaign.tenantId);
+      } catch (err: any) {
+        this.logger.error(`Quick scan failed (day7) — flag NOT flipped, will retry next audit: ${err.message}`);
+        // Don't flip the flag. Don't return — still write metrics so dashboard sees them.
+      }
       await this.briefModel.updateOne(
         { tenantId: campaign.tenantId, briefId: campaign.briefId },
-        { day7Performance: perf, hookPerformance, 'performanceWritten.day7': true },
+        { day7Performance: perf, hookPerformance, adSetPerformance, 'performanceWritten.day7': true },
       );
       written = true;
-      this.creativeLearning.runQuickScan(campaign.tenantId).catch(err => this.logger.error(`Quick scan failed: ${err.message}`));
     }
     if (ageDays >= 14 && !brief.performanceWritten?.day14) {
       await this.briefModel.updateOne(
         { tenantId: campaign.tenantId, briefId: campaign.briefId },
-        { day14Performance: perf, hookPerformance, 'performanceWritten.day14': true },
+        { day14Performance: perf, hookPerformance, adSetPerformance, 'performanceWritten.day14': true },
       );
       written = true;
     }
     if (ageDays >= 30 && !brief.performanceWritten?.day30) {
+      try {
+        await this.campaignLearning.runDeepRun(campaign.tenantId);
+      } catch (err: any) {
+        this.logger.error(`Deep run failed (day30) — flag NOT flipped, will retry next audit: ${err.message}`);
+      }
       await this.briefModel.updateOne(
         { tenantId: campaign.tenantId, briefId: campaign.briefId },
-        { day30Performance: perf, hookPerformance, 'performanceWritten.day30': true },
+        { day30Performance: perf, hookPerformance, adSetPerformance, 'performanceWritten.day30': true },
       );
       written = true;
-      this.campaignLearning.runDeepRun(campaign.tenantId).catch(err => this.logger.error(`Deep run failed: ${err.message}`));
     }
 
     return written;

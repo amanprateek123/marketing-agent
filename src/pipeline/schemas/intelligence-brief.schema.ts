@@ -51,6 +51,18 @@ export class IntelligenceBrief {
   @Prop({ required: false, enum: ['cold', 'warm', 'hot'], default: 'cold' })
   audienceStage?: 'cold' | 'warm' | 'hot';
 
+  /**
+   * Exploration-arm flag — closed-loop drift mitigation. Set to true on 1-of-N
+   * briefs per run by the Strategy Team when the brief uses a hookStyle NOT in
+   * winningHooks AND NOT in losingHooks. Downstream Creative Team must NOT
+   * inject winningHooks/winningExemplars for these briefs (let the LLM
+   * generate freely). Performance of exploration-arm briefs vs exploitation
+   * briefs over rolling windows tells us whether the closed loop is drifting.
+   * Default false — most briefs are exploitation.
+   */
+  @Prop({ required: false, default: false })
+  explorationArm?: boolean;
+
   @Prop({ required: true, default: 0 })
   confidenceScore: number;
 
@@ -85,6 +97,32 @@ export class IntelligenceBrief {
 
   @Prop({ type: Object })
   day30Performance?: { roas: number; ctr: number; cpc: number; conversions: number };
+
+  /**
+   * Per-ad-set performance breakdown — kills the blended-ROAS problem where a
+   * brief that launched 4 ad sets (1 winner ROAS 4.0 + 3 losers 0.5) was filed
+   * as ROAS 1.0 and treated as mediocre. Causal-attribution layers can now
+   * read per-ad-set rows and reason about hookStyle × audienceType × format
+   * effects independently. Populated by campaign-auditor.writePerformanceBack
+   * at each Day 7/14/30 cycle alongside the legacy day*Performance fields.
+   */
+  @Prop({ type: [Object], default: [] })
+  adSetPerformance?: Array<{
+    adSetId: string;
+    name: string;
+    audienceType: string;
+    hookStyles: string[];     // distinct hookStyles in this ad set's ads
+    formats: string[];        // distinct formats ('video' | 'image') in this ad set
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cpa: number;
+    roas: number;
+    capturedAt: Date;
+    capturedAtDay: 7 | 14 | 30;
+  }>;
 }
 
 export const IntelligenceBriefSchema = SchemaFactory.createForClass(IntelligenceBrief);

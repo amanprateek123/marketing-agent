@@ -318,68 +318,61 @@ export class MetaLearningImporterService {
 
     const productPatterns = this.patternCalculator.calculatePatterns(enrichedCampaigns, products, conversionTypes);
 
-    // Save patterns to company.learnings
+    // Save patterns to company.learnings (race-safe per-slice writes)
     if (productPatterns.length > 0) {
       const bestPattern = productPatterns[0];
-      await this.companiesService.updateLearnings(tenantId, {
-        version: 1,
-        updatedAt: new Date(),
-        topicScores: {},
-        creative: {
-          winningHooks: bestPattern.hookPerformance
-            .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
-            .sort((a, b) => b.avgCTR - a.avgCTR)
-            .slice(0, 3)
-            .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`),
-          losingHooks: (() => {
-            const winners = new Set(
-              bestPattern.hookPerformance
-                .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
-                .sort((a, b) => b.avgCTR - a.avgCTR)
-                .slice(0, 3)
-                .map(h => h.style),
-            );
-            return bestPattern.hookPerformance
-              .filter(h => h.adCount >= 3 && !winners.has(h.style) && h.style !== 'unknown')
-              .sort((a, b) => a.avgCTR - b.avgCTR)
-              .slice(0, 2)
-              .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
-          })(),
-          winningFormats: bestPattern.formatPerformance
-            .filter(f => f.format !== 'unknown')
-            .sort((a, b) => b.conversionShare - a.conversionShare)
-            .slice(0, 2)
-            .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`),
-          losingFormats: (() => {
-            const winFmts = new Set(
-              bestPattern.formatPerformance
-                .filter(f => f.format !== 'unknown')
-                .sort((a, b) => b.conversionShare - a.conversionShare)
-                .slice(0, 2)
-                .map(f => f.format),
-            );
-            return bestPattern.formatPerformance
-              .filter(f => f.adCount >= 3 && !winFmts.has(f.format) && f.format !== 'unknown')
-              .sort((a, b) => a.conversionShare - b.conversionShare)
-              .slice(0, 2)
-              .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`);
-          })(),
-          ctaInsights: [],
-          copyToneInsights: [],
-          visualInsights: [],
-        },
-        campaign: {
-          audienceScores: Object.fromEntries(
-            bestPattern.audiencePerformance.map(a => [a.audienceType, a.avgROAS]),
-          ),
-          platformROAS: {},
-          budgetInsights: bestPattern.budgetInsights,
-          timingInsights: bestPattern.seasonalPeaks.length > 0
-            ? [`Seasonal peaks: ${bestPattern.seasonalPeaks.join(', ')}`]
-            : [],
-          objectiveInsights: [],
-        },
-        causalInsights: [],
+      const winningHooks = bestPattern.hookPerformance
+        .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
+        .sort((a, b) => b.avgCTR - a.avgCTR)
+        .slice(0, 3)
+        .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
+      const winnerSet = new Set(
+        bestPattern.hookPerformance
+          .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
+          .sort((a, b) => b.avgCTR - a.avgCTR)
+          .slice(0, 3)
+          .map(h => h.style),
+      );
+      const losingHooks = bestPattern.hookPerformance
+        .filter(h => h.adCount >= 3 && !winnerSet.has(h.style) && h.style !== 'unknown')
+        .sort((a, b) => a.avgCTR - b.avgCTR)
+        .slice(0, 2)
+        .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
+      const winningFormats = bestPattern.formatPerformance
+        .filter(f => f.format !== 'unknown')
+        .sort((a, b) => b.conversionShare - a.conversionShare)
+        .slice(0, 2)
+        .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`);
+      const winFmtSet = new Set(
+        bestPattern.formatPerformance
+          .filter(f => f.format !== 'unknown')
+          .sort((a, b) => b.conversionShare - a.conversionShare)
+          .slice(0, 2)
+          .map(f => f.format),
+      );
+      const losingFormats = bestPattern.formatPerformance
+        .filter(f => f.adCount >= 3 && !winFmtSet.has(f.format) && f.format !== 'unknown')
+        .sort((a, b) => a.conversionShare - b.conversionShare)
+        .slice(0, 2)
+        .map(f => `${f.format} (${f.conversionShare.toFixed(0)}% of conversions)`);
+
+      // Race-safe: per-slice dot-path writes. Was: whole-tree updateLearnings
+      // → clobbered concurrent Day-7 quick scan / Day-30 deep run / root-cause
+      // analysis writes. Each slice is now an independent updateOne.
+      await this.companiesService.setCreativeLearningSlice(tenantId, {
+        winningHooks,
+        losingHooks,
+        winningFormats,
+        losingFormats,
+      }, { incrementVersion: true });
+      await this.companiesService.setCampaignLearningSlice(tenantId, {
+        audienceScores: Object.fromEntries(
+          bestPattern.audiencePerformance.map(a => [a.audienceType, a.avgROAS]),
+        ),
+        budgetInsights: bestPattern.budgetInsights,
+        timingInsights: bestPattern.seasonalPeaks.length > 0
+          ? [`Seasonal peaks: ${bestPattern.seasonalPeaks.join(', ')}`]
+          : [],
       });
 
       this.logger.log(

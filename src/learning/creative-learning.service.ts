@@ -116,20 +116,16 @@ Return ONLY the JSON object.`,
     // the real lines available for downstream Creative Team to anchor on.
     const winningExemplars = this.extractWinningExemplars(enriched);
 
-    await this.companiesService.updateLearnings(tenantId, {
-      version: (currentLearnings?.version ?? 0) + 1,
-      updatedAt: new Date(),
-      topicScores: currentLearnings?.topicScores ?? {},
-      creative: {
-        ...creativeLearnings,
-        // Preserve hook saturation map written by the audit loop — don't blow it away.
-        audienceHookSaturation: currentLearnings?.creative?.audienceHookSaturation,
-        audienceHookSaturationUpdatedAt: currentLearnings?.creative?.audienceHookSaturationUpdatedAt,
-        winningExemplars,
-      },
-      campaign: currentLearnings?.campaign ?? this.emptyCampaignLearnings(),
-      causalInsights: currentLearnings?.causalInsights ?? [],
-    });
+    // Race-safe: per-leaf dot-path slice instead of whole-tree replace. Was:
+    // read learnings + splice + write whole tree → concurrent writers (Day 30
+    // deep run + Meta importer) clobbered each other and version went backwards.
+    // hookSaturation is owned by the audit loop and isn't touched here, so it
+    // no longer needs explicit preservation — that was a band-aid for the old
+    // race-prone path.
+    await this.companiesService.setCreativeLearningSlice(tenantId, {
+      ...creativeLearnings,
+      winningExemplars,
+    }, { incrementVersion: true });
 
     await this.actionLogger.log({
       tenantId,

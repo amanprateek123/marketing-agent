@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Company, CompanyDocument } from './schemas/company.schema';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
-import { CompanyPrompts, CompanyLearnings } from './schemas/company.types';
+import { CompanyPrompts, CompanyLearnings, CreativeLearnings, CampaignLearnings, CausalInsight } from './schemas/company.types';
 
 // Fields that require prompt regeneration when changed
 const PROMPT_RELEVANT_FIELDS: (keyof UpdateCompanyDto)[] = [
@@ -114,9 +114,123 @@ export class CompaniesService {
     this.logger.log(`Prompts updated for: ${tenantId}`);
   }
 
+  /**
+   * Whole-tree replacement of learnings. Kept for backward compat but DEPRECATED
+   * for concurrent-writer paths — every audit + Day-7 quick scan + Day-30 deep
+   * run + Meta importer used to read learnings, splice in their slice, and
+   * write the whole tree back. Concurrent writers clobbered each other and
+   * `version` could even go backwards. New code MUST use the granular setters
+   * below: setCreativeLearningSlice, setCampaignLearningSlice, appendCausalInsight,
+   * setTopicScores. This method now serves only first-write seeding.
+   */
   async updateLearnings(tenantId: string, learnings: CompanyLearnings): Promise<void> {
     await this.companyModel.updateOne({ tenantId }, { $set: { learnings } });
     this.logger.log(`Learnings updated for: ${tenantId} (v${learnings.version})`);
+  }
+
+  /**
+   * Patch a subset of learnings.creative via per-leaf-field dot-paths. Two
+   * concurrent writers updating different fields no longer clobber each other.
+   * Caller passes only the fields it owns; absent fields are left untouched.
+   * Increments learnings.version atomically via $inc when incrementVersion=true.
+   */
+  async setCreativeLearningSlice(
+    tenantId: string,
+    slice: Partial<CreativeLearnings>,
+    options: { incrementVersion?: boolean } = {},
+  ): Promise<void> {
+    const dotSet: Record<string, unknown> = {
+      'learnings.updatedAt': new Date(),
+    };
+    for (const [key, value] of Object.entries(slice)) {
+      if (value === undefined) continue;
+      dotSet[`learnings.creative.${key}`] = value;
+    }
+    const update: any = { $set: dotSet };
+    if (options.incrementVersion) {
+      update.$inc = { 'learnings.version': 1 };
+    }
+    await this.companyModel.updateOne({ tenantId }, update);
+    this.logger.log(`Creative learnings sliced for: ${tenantId} (${Object.keys(slice).join(',')})`);
+  }
+
+  /**
+   * Patch a subset of learnings.campaign via per-leaf-field dot-paths.
+   * Same race-safety guarantees as setCreativeLearningSlice.
+   */
+  async setCampaignLearningSlice(
+    tenantId: string,
+    slice: Partial<CampaignLearnings>,
+    options: { incrementVersion?: boolean } = {},
+  ): Promise<void> {
+    const dotSet: Record<string, unknown> = {
+      'learnings.updatedAt': new Date(),
+    };
+    for (const [key, value] of Object.entries(slice)) {
+      if (value === undefined) continue;
+      dotSet[`learnings.campaign.${key}`] = value;
+    }
+    const update: any = { $set: dotSet };
+    if (options.incrementVersion) {
+      update.$inc = { 'learnings.version': 1 };
+    }
+    await this.companyModel.updateOne({ tenantId }, update);
+    this.logger.log(`Campaign learnings sliced for: ${tenantId} (${Object.keys(slice).join(',')})`);
+  }
+
+  /**
+   * Append a causal insight with $push + $slice cap. Race-safe — two concurrent
+   * appenders both succeed; oldest is dropped past the cap. Was: read the array,
+   * concat, write — concurrent appenders lost each other's insights.
+   */
+  async appendCausalInsight(
+    tenantId: string,
+    insight: CausalInsight,
+    cap: number = 25,
+  ): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $push: {
+          'learnings.causalInsights': { $each: [insight], $slice: -cap },
+        },
+        $set: { 'learnings.updatedAt': new Date() },
+        $inc: { 'learnings.version': 1 },
+      },
+    );
+    this.logger.log(`Causal insight appended for: ${tenantId} (${insight.rootCause}, conf=${insight.confidence})`);
+  }
+
+  /**
+   * Replace topicScores map atomically. Single-leaf write — race-safe.
+   */
+  async setTopicScores(tenantId: string, topicScores: Record<string, number>): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.topicScores': topicScores,
+          'learnings.updatedAt': new Date(),
+        },
+      },
+    );
+  }
+
+  /**
+   * Replace causalInsights wholesale (deep-run path rebuilds the full list).
+   * For incremental appends use appendCausalInsight. Bumps version.
+   */
+  async replaceCausalInsights(tenantId: string, insights: CausalInsight[]): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.causalInsights': insights,
+          'learnings.updatedAt': new Date(),
+        },
+        $inc: { 'learnings.version': 1 },
+      },
+    );
   }
 
   async updateProductAudiences(tenantId: string, productName: string, audiences: any[]): Promise<void> {
@@ -168,5 +282,50 @@ export class CompaniesService {
 
   async findByApiKey(apiKey: string): Promise<CompanyDocument | null> {
     return this.companyModel.findOne({ apiKey }).exec();
+  }
+
+  /**
+   * Bump promptsVersion + append a snapshot to promptsHistory (capped at 5).
+   * Called by prompt-generator after a successful regen. The snapshot lets us
+   * roll back without re-running the generator if a new version underperforms.
+   */
+  async bumpPromptsVersionAndPushHistory(tenantId: string, prompts: CompanyPrompts): Promise<number> {
+    const company = await this.companyModel.findOne({ tenantId }).select('promptsVersion').lean().exec();
+    const currentVersion = (company as any)?.promptsVersion ?? 1;
+    const newVersion = currentVersion + 1;
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: { promptsVersion: newVersion },
+        $push: {
+          promptsHistory: {
+            $each: [{
+              version: newVersion,
+              prompts,
+              generatedAt: new Date(),
+              learningVersion: 0,  // populated downstream from learnings.version
+            }],
+            $slice: -5,
+          },
+        },
+      },
+    );
+    this.logger.log(`Prompts versioned: ${tenantId} → v${newVersion}`);
+    return newVersion;
+  }
+
+  /**
+   * Roll back to a prior promptsHistory entry. Restores the snapshotted prompts
+   * to company.prompts but does NOT decrement promptsVersion — instead it
+   * creates a new version cloned from the target. Audit-friendly: every change
+   * to live prompts is a forward step.
+   */
+  async rollbackPromptsToVersion(tenantId: string, targetVersion: number): Promise<number> {
+    const company = await this.companyModel.findOne({ tenantId }).select('promptsHistory promptsVersion').lean().exec();
+    if (!company) throw new NotFoundException(`Company ${tenantId} not found`);
+    const history = (company as any).promptsHistory ?? [];
+    const target = history.find((h: any) => h.version === targetVersion);
+    if (!target) throw new NotFoundException(`Prompts version ${targetVersion} not in history (have: ${history.map((h: any) => h.version).join(',')})`);
+    return this.bumpPromptsVersionAndPushHistory(tenantId, target.prompts);
   }
 }

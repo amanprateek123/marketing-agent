@@ -222,6 +222,41 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
     const winner = validBriefs.find((b: any) => b.briefId === winnerId);
     if (!winner) throw new Error(`Strategy Team winner not found in briefs for run ${runId}`);
 
+    // ── Exploration arm assignment (closed-loop drift mitigation) ─────────────
+    // Round-N winners drive round-N+1 prompt generation drives round-N+1
+    // creative drives round-N+1 winners → autoregressive bias → monoculture.
+    // Force 1-of-N briefs to use a hookStyle NOT in winningHooks AND NOT in
+    // losingHooks. Creative Team prompts will skip injecting winning exemplars
+    // for these briefs, letting the LLM generate freely. Tagged for downstream
+    // measurement of exploration vs exploitation performance over time.
+    if (validBriefs.length >= 3) {
+      const winningHookSet = new Set(
+        (company.learnings?.creative?.winningHooks ?? [])
+          .map(h => h.split(' ')[0]?.toLowerCase()) // strip "(2.34% CTR, 5 ads)" suffix
+          .filter(Boolean),
+      );
+      const losingHookSet = new Set(
+        (company.learnings?.creative?.losingHooks ?? [])
+          .map(h => h.split(' ')[0]?.toLowerCase())
+          .filter(Boolean),
+      );
+      // Pick the brief whose hookStyle is in NEITHER set (true exploration).
+      // Fallback: if none qualify, pick the lowest priorityScore brief — that's
+      // the one the Strategy Team itself was least confident in, which is a
+      // reasonable proxy for "outside the optimal exploitation distribution."
+      const explorationCandidate =
+        validBriefs.find((b: any) => {
+          const hs = (b.hookStyle ?? '').toLowerCase();
+          return hs && !winningHookSet.has(hs) && !losingHookSet.has(hs);
+        }) ?? validBriefs.slice().sort((a: any, b: any) => (a.priorityScore ?? 0) - (b.priorityScore ?? 0))[0];
+      if (explorationCandidate && explorationCandidate.briefId !== winnerId) {
+        explorationCandidate._explorationArm = true;
+        this.logger.log(
+          `Strategy Team: exploration arm assigned to brief "${explorationCandidate.topic}" (hookStyle: ${explorationCandidate.hookStyle ?? 'unknown'}, winningHooks: [${[...winningHookSet].join(',')}])`,
+        );
+      }
+    }
+
     await this.intelligenceBriefModel.deleteMany({ tenantId, runId });
     await this.intelligenceBriefModel.insertMany(
       validBriefs.map((b: any) => ({
@@ -235,6 +270,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
         // (most first-pass briefs target prospecting). 'warm' / 'hot' only when the
         // audience description explicitly signals retargeting / cart-recovery.
         audienceStage: ['cold', 'warm', 'hot'].includes(b.audienceStage) ? b.audienceStage : 'cold',
+        explorationArm: !!b._explorationArm,
         confidenceScore: 0,
         urgencyScore: b.urgent ? 10 : 5,
         finalScore: b.priorityScore ?? 0,
@@ -256,6 +292,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       // field is dropped at this boundary and the Campaign Review Team always
       // sees undefined → falls back to cold prospecting regardless of brief intent.
       audienceStage: ['cold', 'warm', 'hot'].includes(winner.audienceStage) ? winner.audienceStage : 'cold',
+      explorationArm: !!winner._explorationArm,
       suggestedBudget: winner.suggestedBudget ?? 0,
       finalScore: winner.priorityScore ?? 0,
       selected: true,

@@ -50,6 +50,15 @@ export class CreativeBrief {
   @Prop({ required: false, enum: ['cold', 'warm', 'hot'], default: 'cold' })
   audienceStage?: 'cold' | 'warm' | 'hot';
 
+  /**
+   * Exploration-arm flag carried over from IntelligenceBrief — when true, the
+   * Creative Team must NOT inject winningHooks/winningExemplars into its
+   * prompts (closed-loop drift mitigation). See intelligence-brief.schema.ts
+   * for full rationale.
+   */
+  @Prop({ required: false, default: false })
+  explorationArm?: boolean;
+
   @Prop({ required: true, default: 0 })
   suggestedBudget: number;
 

@@ -358,6 +358,16 @@ export class PromptGeneratorService {
     const prompts = { ...batch1, ...batch2 } as CompanyPrompts;
     await this.companiesService.updatePrompts(tenantId, prompts);
 
+    // Versioning + history snapshot — foundation for measurement-driven rollback.
+    // PipelineRuns + Campaigns stamp promptsVersion at create time, so we can
+    // later correlate performance to prompt version and revert if v(n+1)
+    // underperforms v(n). Capped at 5 entries to bound storage.
+    try {
+      await this.companiesService.bumpPromptsVersionAndPushHistory(tenantId, prompts);
+    } catch (err: any) {
+      this.logger.error(`Prompt versioning write failed (prompts saved, version not bumped): ${err.message}`);
+    }
+
     this.logger.log(`All 11 prompts generated and saved for: ${tenantId}`);
     return prompts;
   }

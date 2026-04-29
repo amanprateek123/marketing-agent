@@ -159,14 +159,14 @@ Return ONLY the JSON object described in your instructions.`,
     const { campaign, topicScores, causalInsights } = this.parseCampaignLearnings(result.content);
     const newVersion = (company.learnings?.version ?? 0) + 1;
 
-    await this.companiesService.updateLearnings(tenantId, {
-      version: newVersion,
-      updatedAt: new Date(),
-      topicScores,
-      creative: company.learnings?.creative ?? this.emptyCreativeLearnings(),
-      campaign,
-      causalInsights,
-    });
+    // Race-safe: per-slice dot-path writes. Was: whole-tree replace → clobbered
+    // concurrent creative-learning writes from a parallel Day-7 quick scan or
+    // Meta importer pass. Now each writer owns its leaf fields.
+    // causalInsights is replaced wholesale here (deep run rebuilds the list);
+    // for incremental appends use companiesService.appendCausalInsight.
+    await this.companiesService.setCampaignLearningSlice(tenantId, campaign);
+    await this.companiesService.setTopicScores(tenantId, topicScores);
+    await this.companiesService.replaceCausalInsights(tenantId, causalInsights);
 
     // Deep run regenerates prompts — campaign creator, auditor, coordinator
     await this.promptGenerator.generate(tenantId);
@@ -292,15 +292,10 @@ Return as a single causal insight JSON:
       const raw = result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1);
       const insight: CausalInsight = JSON.parse(raw);
 
-      const existing = company.learnings;
-      await this.companiesService.updateLearnings(tenantId, {
-        version: (existing?.version ?? 0) + 1,
-        updatedAt: new Date(),
-        topicScores: existing?.topicScores ?? {},
-        creative: existing?.creative ?? this.emptyCreativeLearnings(),
-        campaign: existing?.campaign ?? this.emptyCampaignLearnings(),
-        causalInsights: [...(existing?.causalInsights ?? []), insight].slice(-25),
-      });
+      // Race-safe: single $push with cap. Was: read array + concat + write
+      // whole tree → concurrent root-cause analyses could lose each other's
+      // insights via clobber.
+      await this.companiesService.appendCausalInsight(tenantId, insight, 25);
 
       this.logger.log(
         `Root cause identified: tenantId=${tenantId} cause=${insight.rootCause} confidence=${insight.confidence}`,

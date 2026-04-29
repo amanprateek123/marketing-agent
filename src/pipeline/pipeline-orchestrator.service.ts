@@ -153,7 +153,11 @@ export class PipelineOrchestratorService implements OnModuleInit {
 
     // Fresh run
     const runId = uuidv4();
-    await this.pipelineRunModel.create({ tenantId, runId, status: 'pending', startedAt: new Date() });
+    await this.pipelineRunModel.create({
+      tenantId, runId, status: 'pending', startedAt: new Date(),
+      // Stamp prompt version so we can later correlate run quality with prompt drift
+      promptsVersion: (company as any).promptsVersion ?? 1,
+    });
 
     this.executeDAG(tenantId, runId).catch((err) => {
       this.logger.error(`Pipeline DAG failed: ${err.message}`, err.stack);
@@ -203,7 +207,11 @@ export class PipelineOrchestratorService implements OnModuleInit {
       await this.pipelineRunModel.updateOne({ runId }, { status: 'pending', error: null });
     } else {
       runId = uuidv4();
-      await this.pipelineRunModel.create({ tenantId, runId, status: 'pending', startedAt: new Date() });
+      await this.pipelineRunModel.create({
+      tenantId, runId, status: 'pending', startedAt: new Date(),
+      // Stamp prompt version so we can later correlate run quality with prompt drift
+      promptsVersion: (company as any).promptsVersion ?? 1,
+    });
     }
 
     // Await the DAG — throw propagates to BullMQ which records job failure.

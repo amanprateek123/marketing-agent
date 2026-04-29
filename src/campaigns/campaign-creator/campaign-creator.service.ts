@@ -187,6 +187,9 @@ export class CampaignCreatorService {
       reviewAdjustments: review?.adjustments ?? undefined,
       reviewDebateLog: review?.debateLog ?? [],
       campaignConfig: review?.campaign ?? undefined,
+      // Stamp prompt version so we can later answer "did campaigns generated
+      // under v(N) outperform v(N+1)?" before deciding to roll back prompts.
+      promptsVersion: (company as any).promptsVersion ?? 1,
     });
 
     await this.actionLogger.log({
