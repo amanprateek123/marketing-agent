@@ -237,10 +237,14 @@ export class CreativeReplacementProcessor extends WorkerHost {
    * briefs so the generator doesn't pick a hook the audience is already exhausted on.
    */
   /**
-   * Map a target ad set's audienceType to a CreativeBrief audienceStage. Retarget
-   * and custom audiences get 'warm' so the generator writes offer-recall copy that
-   * makes sense to someone who already engaged with the brand. Everything else
-   * (broad / advantage_plus / lookalike / interest) is cold prospecting.
+   * Map a target ad set's audienceType to a CreativeBrief audienceStage. Retarget,
+   * custom, and lookalike audiences get 'warm' so the generator writes offer-recall
+   * copy that makes sense to a warm-source audience. Everything else (broad /
+   * advantage_plus / interest) is cold prospecting.
+   *
+   * Lookalike note: a 1-3% LAL of recent-purchaser source is functionally warm —
+   * the source signal is high-intent. Treating LAL as cold meant scaled prospecting
+   * pods got cold-prospect "Kya aap bhi…" hooks even when modeled on past buyers.
    */
   private deriveAudienceStage(
     campaign: any,
@@ -249,7 +253,9 @@ export class CreativeReplacementProcessor extends WorkerHost {
     if (!adSetId) return 'cold';
     const adSet = (campaign?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId);
     const audienceType = adSet?.audienceType ?? 'unknown';
-    if (audienceType === 'retarget' || audienceType === 'custom') return 'warm';
+    if (audienceType === 'retarget' || audienceType === 'custom' || audienceType === 'lookalike') {
+      return 'warm';
+    }
     return 'cold';
   }
 

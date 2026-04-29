@@ -22,6 +22,7 @@ import { CampaignLearningService } from '../../learning/campaign-learning.servic
 import { ShadowActionService } from '../../learning/shadow-action.service';
 import { CampaignOptimizerService } from './campaign-optimizer.service';
 import { QUEUES } from '../../scheduler/queue.constants';
+import { HOOK_STYLES_DR } from '../../common/creative/hook-styles';
 
 export interface AuditResult {
   tenantId: string;
@@ -1128,9 +1129,15 @@ export class CampaignAuditorService {
    * then pick the best from company learnings. Falls back to a default rotation.
    */
   /**
-   * Map a target ad set's audienceType to a CreativeBrief audienceStage. Retarget
-   * and custom audiences get 'warm' so the regenerated copy is offer-recall-shaped
-   * instead of cold-prospect-shaped (which feels weird to someone who already engaged).
+   * Map a target ad set's audienceType to a CreativeBrief audienceStage. Retarget,
+   * custom, and lookalike audiences get 'warm' so regenerated copy is offer-recall-
+   * shaped instead of cold-prospect-shaped (which feels weird to someone who already
+   * engaged or was modeled on a buyer).
+   *
+   * Lookalike note: a 1-3% LAL of recent-purchaser source IS functionally warm —
+   * the source signal is high-intent. Treating LAL as cold (the previous behavior)
+   * meant scaled prospecting always got "Kya aap bhi…" cold hooks even when the
+   * audience was modeled on past customers.
    */
   private deriveAudienceStageFromAdSet(
     campaign: any,
@@ -1139,7 +1146,9 @@ export class CampaignAuditorService {
     if (!adSetId) return 'cold';
     const adSet = (campaign?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId);
     const audienceType = adSet?.audienceType ?? 'unknown';
-    if (audienceType === 'retarget' || audienceType === 'custom') return 'warm';
+    if (audienceType === 'retarget' || audienceType === 'custom' || audienceType === 'lookalike') {
+      return 'warm';
+    }
     return 'cold';
   }
 
@@ -1148,7 +1157,11 @@ export class CampaignAuditorService {
     fatiguedAdId: string,
     company: CompanyDocument,
   ): string {
-    const DEFAULT_HOOKS = ['pain_point', 'social_proof', 'price_shock', 'curiosity', 'urgency', 'benefit_led'];
+    // Canonical 7-style set — same source of truth used by creative-team and copy-writer.
+    // Pre-fix this had 'curiosity' (should be 'curiosity_gap'), 'benefit_led' (off-taxonomy),
+    // missing 'before_after' and 'bold_claim' entirely. Drift here meant the auditor would
+    // request hooks the generator's enum didn't list → silent fuzzy-match drift in shipped ads.
+    const DEFAULT_HOOKS: string[] = [...HOOK_STYLES_DR];
 
     // Collect all hookStyles already in use on this campaign
     const usedHooks = new Set<string>();

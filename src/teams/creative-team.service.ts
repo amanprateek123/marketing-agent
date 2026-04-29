@@ -599,7 +599,9 @@ RULES
 ═══════════════════════════════════════════════════════
 
 - These are META DIRECT RESPONSE ADS — optimise for tap-through rate, not likes or comments
-- Every copy variant must use a different hookStyle — 3 completely different opening strategies
+- ${brief.forcedHookStyle
+    ? `All 4 variants MUST use hookStyle "${brief.forcedHookStyle}" — differentiate by emotional position, voicing, and example, NOT by hookStyle (this is a forced replacement; the AD COPY VARIANTS section already states this — restating here so the rule is unambiguous)`
+    : `All 4 copy variants must use a DIFFERENT hookStyle — 4 completely different opening strategies`}
 - Image and video prompts must visually reinforce the brief's hook and key message
 - Do NOT pick the winning variant before compliance review — the review may change the best choice
 - If a variant gets flagged and cannot be fixed without gutting the message, replace it entirely

@@ -4,6 +4,7 @@ import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { CopyVariant } from '../schemas/creative-package.schema';
+import { HOOK_STYLES_DR } from '../../common/creative/hook-styles';
 
 export interface CopyPackage {
   variants: CopyVariant[];
@@ -32,6 +33,7 @@ export class CopyWriterService {
       conversionBridge: string;
       forcedHookStyle?: string;
       avoidHookStyles?: string[];
+      audienceStage?: 'cold' | 'warm' | 'hot';   // cold = prospecting, warm = retarget, hot = cart-recovery
     },
     company: CompanyDocument,
     runId: string,
@@ -53,15 +55,27 @@ LOSING PATTERNS (avoid these):
       `.trim()
       : 'No learnings yet — use your best judgement.';
 
-    // Hook taxonomy aligned with Creative Team primary path (creative-team.service.ts:411-419)
-    // — both paths now share the same vocabulary so downstream learning isn't taxonomy-split.
-    const allowedHookStyles = ['pain_point', 'bold_claim', 'price_shock', 'social_proof', 'curiosity_gap', 'before_after', 'urgency'];
+    // Canonical hookStyle taxonomy — single source of truth shared with creative-team
+    // primary path and audit's pickReplacementHook. Drift here corrupts learning data.
     const hookStyleRule = brief.forcedHookStyle
       ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
-      : `one of [${allowedHookStyles.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle.`;
+      : `one of [${HOOK_STYLES_DR.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle.`;
     const avoidBlock = brief.avoidHookStyles && brief.avoidHookStyles.length > 0
       ? `\n⚠ AVOID THESE HOOK STYLES (saturated/fatigued — do NOT generate variants with these): ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}`
       : '';
+
+    // Audience-stage rule — mirrors creative-team.service.ts:408-413. Without this the
+    // fallback path silently generates cold-prospect copy for warm retarget pods.
+    const audienceStageRule = (() => {
+      const stage = brief.audienceStage ?? 'cold';
+      if (stage === 'warm') {
+        return `\nAUDIENCE STAGE: warm (retargeting site visitors). SKIP brand intro — they already know the brand. Lead with offer-recall ("Aapki ₹1 reading wait kar rahi hai"), objection-handling ("Pehli baat free — kuch lagega bhi nahi"), or specific reason-to-return. 2-3 line primaryText is enough. NEVER use cold-prospect hooks like "Kya aap bhi…" — they sound weird to someone who already engaged.`;
+      }
+      if (stage === 'hot') {
+        return `\nAUDIENCE STAGE: hot (cart abandoners / 30d engaged). Cart-recovery urgency. Reference the specific abandoned action. Time-bound urgency ("Aaj raat tak ₹1 mein"). 1-2 line primaryText, ruthlessly short. Hook = the offer + a deadline.`;
+      }
+      return `\nAUDIENCE STAGE: cold (prospecting). Audience has NOT seen this brand before. Problem-first structure: agitate pain, introduce brand AS the solution, end with offer + CTA. Brand introduction is required. Hook must stop the scroll cold.`;
+    })();
 
     const result = await this.claudeService.runAgent({
       tenantId: company.tenantId,
@@ -81,6 +95,7 @@ Hook: ${brief.hook}
 Key message: ${brief.keyMessage}
 Conversion bridge: ${brief.conversionBridge}
 ${activeProduct ? `Product: ${activeProduct.name} @ ${priceTag}` : ''}
+${audienceStageRule}
 
 ${learningsBlock}
 

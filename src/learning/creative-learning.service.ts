@@ -173,6 +173,20 @@ Return ONLY the JSON object.`,
     return packages.map((pkg) => {
       const campaign = campaignMap.get(pkg.briefId);
       const selectedVariant = pkg.copyVariants?.[pkg.selectedCopyIndex];
+      // Audience attribution for downstream exemplar filtering. Without this,
+      // winningExemplars.audienceSegment is permanently undefined and warm/hot
+      // briefs anchor on cold-prospect winners (and vice versa).
+      // Heuristic: dominant active ad set's audienceType. If multiple ad sets
+      // have different audienceTypes, take the highest-spend one.
+      const audienceSegment = (() => {
+        const activeAdSets = ((campaign as any)?.adSets ?? []).filter((as: any) => as.status !== 'paused');
+        if (activeAdSets.length === 0) return undefined;
+        const dominant = activeAdSets
+          .slice()
+          .sort((a: any, b: any) => (Number(b.spend) || 0) - (Number(a.spend) || 0))[0];
+        return dominant?.audienceType ?? undefined;
+      })();
+
       return {
         briefId: pkg.briefId,
         selectedCopy: selectedVariant
@@ -188,6 +202,7 @@ Return ONLY the JSON object.`,
         clicks: campaign?.clicks ?? null,
         impressions: campaign?.impressions ?? null,
         spend: campaign?.spend ?? null,
+        audienceSegment,
       };
     });
   }
