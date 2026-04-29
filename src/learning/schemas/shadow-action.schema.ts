@@ -81,10 +81,13 @@ export class ShadowAction {
   // - correct_block: the underlying metric improved or held → block was right
   // - missed_signal: the underlying metric got worse → block was wrong, action would have helped
   // - inconclusive: not enough subsequent data (campaign paused, ad set deleted, etc.)
-  @Prop({ enum: ['correct_block', 'missed_signal', 'inconclusive', null], default: null })
+  // Explicit type:String — TS reflection can't pick a single type from
+  // ('correct_block' | 'missed_signal' | 'inconclusive' | null), so @Prop()
+  // throws CannotDetermineTypeError at decoration time on newer Node + reflect-metadata.
+  @Prop({ type: String, enum: ['correct_block', 'missed_signal', 'inconclusive', null], default: null })
   regretLabel: 'correct_block' | 'missed_signal' | 'inconclusive' | null;
 
-  @Prop({ default: null })
+  @Prop({ type: Date, default: null })
   evaluatedAt: Date | null;
 
   // Schedule fields
@@ -94,7 +97,7 @@ export class ShadowAction {
   @Prop({ required: true, index: true })
   evaluateAt72h: Date;
 
-  @Prop({ default: 'pending', enum: ['pending', 'evaluated_24h', 'evaluated_72h', 'final'] })
+  @Prop({ type: String, default: 'pending', enum: ['pending', 'evaluated_24h', 'evaluated_72h', 'final'] })
   status: 'pending' | 'evaluated_24h' | 'evaluated_72h' | 'final';
 }
 
