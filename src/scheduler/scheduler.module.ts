@@ -22,7 +22,19 @@ import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/
 
 @Module({
   imports: [
-    BullModule.registerQueue({ name: QUEUES.PIPELINE }),
+    BullModule.registerQueue({
+      name: QUEUES.PIPELINE,
+      // Pipeline DAG is now awaited inside the processor (see pipeline.processor.ts).
+      // attempts=2 covers transient Claude SDK / Mongo / Meta API hiccups; the
+      // DAG itself is mostly idempotent across resume (each phase findOne-gates
+      // on runId before re-executing). exponential backoff to avoid retry storms.
+      defaultJobOptions: {
+        attempts: 2,
+        backoff: { type: 'exponential', delay: 30_000 },
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 50 },
+      },
+    }),
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_AUDIT }),
     BullModule.registerQueue({ name: QUEUES.MONTHLY_LEARNING }),
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),

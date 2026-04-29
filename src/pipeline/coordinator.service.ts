@@ -88,7 +88,20 @@ export class CoordinatorService {
       maxTurns: 5,
     });
 
-    const { topSignals, viralTrends } = this.extractTopSignalsAndViralTrends(result.content);
+    const { topSignals: rawTopSignals, viralTrends: rawViralTrends } = this.extractTopSignalsAndViralTrends(result.content);
+
+    // ── Brand-relevance filter ─────────────────────────────────────────────────
+    // Without this, scout output for an unrelated trend (K-pop, IPL, election)
+    // can pass through the coordinator and become a campaign brief for an
+    // unrelated tenant (e.g. 91astrology). Filter signals by keyword overlap
+    // with company.industry + product.trendKeywords. Skip if no keywords are
+    // configured (don't block tenants that haven't set keywords yet).
+    const { topSignals, viralTrends } = this.applyBrandRelevanceFilter(rawTopSignals, rawViralTrends, company);
+    if (rawTopSignals.length !== topSignals.length || rawViralTrends.length !== viralTrends.length) {
+      this.logger.log(
+        `Coordinator brand-relevance filter dropped ${rawTopSignals.length - topSignals.length}/${rawTopSignals.length} signals + ${rawViralTrends.length - viralTrends.length}/${rawViralTrends.length} viral trends`,
+      );
+    }
 
     const saved = await this.coordinatorOutputModel.create({
       tenantId,
@@ -411,6 +424,50 @@ Rules:
 - urgent: true if this meme will be dead within 7 days
 - Use exactly these field names
     `.trim();
+  }
+
+  /**
+   * Drop signals whose topic doesn't share any keyword with the tenant's industry
+   * or product trendKeywords. Prevents unrelated viral trends (K-pop, IPL,
+   * election-news) from becoming campaign briefs for unrelated tenants.
+   * Viral trends use the same filter but get a softer pass — viral memes often
+   * tie back via cultural context that doesn't match keyword strictly.
+   */
+  private applyBrandRelevanceFilter(
+    topSignals: CoordinatorResult['topSignals'],
+    viralTrends: CoordinatorResult['viralTrends'],
+    company: CompanyDocument,
+  ): { topSignals: CoordinatorResult['topSignals']; viralTrends: CoordinatorResult['viralTrends'] } {
+    const keywords = new Set<string>();
+    if (company.industry) {
+      company.industry.toLowerCase().split(/[\s,/]+/).filter(w => w.length > 2).forEach(w => keywords.add(w));
+    }
+    for (const product of company.products ?? []) {
+      for (const kw of (product as any).trendKeywords ?? []) {
+        kw.toLowerCase().split(/[\s,/]+/).filter((w: string) => w.length > 2).forEach((w: string) => keywords.add(w));
+      }
+    }
+    if (keywords.size === 0) {
+      // No keywords configured — don't filter (don't block tenants that haven't set up trendKeywords)
+      return { topSignals, viralTrends };
+    }
+    const matches = (text: string): boolean => {
+      const lower = (text || '').toLowerCase();
+      for (const kw of keywords) {
+        if (lower.includes(kw)) return true;
+      }
+      return false;
+    };
+    const filteredTopSignals = topSignals.filter((s) =>
+      matches(s.topic) || matches(s.rationale),
+    );
+    // Viral trends: require keyword match in trend OR brandTieIn (the LLM's
+    // explanation of why the brand should ride it). brandTieIn match catches
+    // legit "K-pop comeback × astrology birth-chart" type cross-cultural angles.
+    const filteredViralTrends = viralTrends.filter((v) =>
+      matches(v.trend) || matches(v.brandTieIn),
+    );
+    return { topSignals: filteredTopSignals, viralTrends: filteredViralTrends };
   }
 
   private extractTopSignalsAndViralTrends(content: string): {

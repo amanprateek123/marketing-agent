@@ -109,6 +109,29 @@ export class PipelineOrchestratorService implements OnModuleInit {
       throw new Error(`Company ${tenantId} has no prompts. Run /regenerate first.`);
     }
 
+    // ── Concurrent-run guard ───────────────────────────────────────────────────
+    // Manual /trigger + scheduled BullMQ + recoverStuckRuns can all fire for
+    // the same tenant. Two parallel executeDAGs share tenantId, write into
+    // separate runId namespaces, double Claude spend, double Slack delivery,
+    // and racing campaign launches both hit Meta. Guard via in-flight check.
+    // Status set: pending = queued, running = executing, in_progress = mid-DAG.
+    const inFlight = await this.pipelineRunModel
+      .findOne({ tenantId, status: { $in: ['pending', 'running', 'in_progress'] } })
+      .lean()
+      .exec();
+    if (inFlight) {
+      // Stale-run rescue: if the pending/running doc is older than the recovery
+      // window, treat it as orphaned (process crashed) — let the caller proceed
+      // (recoverStuckRuns will reclaim it). Otherwise reject the trigger.
+      const ageMs = Date.now() - new Date((inFlight as any).startedAt).getTime();
+      const STALE_MS = 2 * 60 * 60 * 1000; // 2h matches existing recovery TTL
+      if (ageMs < STALE_MS) {
+        this.logger.warn(`[${inFlight.runId}] Trigger rejected — pipeline already in flight (status=${inFlight.status}, age=${Math.round(ageMs / 1000)}s)`);
+        return { runId: inFlight.runId, status: inFlight.status, resumed: false };
+      }
+      this.logger.warn(`[${inFlight.runId}] Stale in-flight run detected (age=${Math.round(ageMs / 60000)}m) — proceeding with new trigger; recovery will reconcile`);
+    }
+
     // Check for a resumable failed run
     const failedRun = await this.pipelineRunModel
       .findOne({ tenantId, status: 'failed' })
@@ -137,6 +160,55 @@ export class PipelineOrchestratorService implements OnModuleInit {
     });
 
     return { runId, status: 'pending', resumed: false };
+  }
+
+  /**
+   * Synchronous variant of trigger() for BullMQ workers. Awaits the full DAG
+   * execution and re-throws on failure so BullMQ records the job as failed and
+   * retries per the queue's `attempts` config. The HTTP `trigger()` path
+   * deliberately fires-and-forgets so the controller can return runId quickly;
+   * worker jobs need the opposite — the job lifecycle must reflect DAG outcome.
+   */
+  async runForJob(tenantId: string): Promise<TriggerPipelineResult> {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.prompts) {
+      throw new Error(`Company ${tenantId} has no prompts. Run /regenerate first.`);
+    }
+
+    // Same in-flight + resume gating as trigger(), minus the fire-and-forget.
+    const inFlight = await this.pipelineRunModel
+      .findOne({ tenantId, status: { $in: ['pending', 'running', 'in_progress'] } })
+      .lean()
+      .exec();
+    if (inFlight) {
+      const ageMs = Date.now() - new Date((inFlight as any).startedAt).getTime();
+      const STALE_MS = 2 * 60 * 60 * 1000;
+      if (ageMs < STALE_MS) {
+        this.logger.warn(`[${inFlight.runId}] runForJob: skipping — pipeline already in flight`);
+        return { runId: inFlight.runId, status: inFlight.status, resumed: false };
+      }
+    }
+
+    const failedRun = await this.pipelineRunModel
+      .findOne({ tenantId, status: 'failed' })
+      .sort({ startedAt: -1 })
+      .lean()
+      .exec();
+
+    let runId: string;
+    let resumed = false;
+    if (failedRun) {
+      runId = failedRun.runId;
+      resumed = true;
+      await this.pipelineRunModel.updateOne({ runId }, { status: 'pending', error: null });
+    } else {
+      runId = uuidv4();
+      await this.pipelineRunModel.create({ tenantId, runId, status: 'pending', startedAt: new Date() });
+    }
+
+    // Await the DAG — throw propagates to BullMQ which records job failure.
+    await this.executeDAG(tenantId, runId);
+    return { runId, status: 'completed', resumed };
   }
 
   async getStatus(tenantId: string, runId: string): Promise<PipelineRunDocument | null> {

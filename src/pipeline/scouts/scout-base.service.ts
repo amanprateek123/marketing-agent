@@ -159,6 +159,20 @@ After Phase 3, compile your final verified signals and return the JSON output as
     recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
   ): string;
 
+  /**
+   * Per-platform engagement-value floor for a "trending" signal. Scouts override
+   * to enforce realistic thresholds — e.g. a YouTube short with 200 views or a
+   * Reddit post with 15 upvotes is not trending no matter what the LLM thinks.
+   * Return 0 to skip the floor check (Twitter/Instagram have no reliable engagement
+   * numbers via the current scraping path).
+   *
+   * Units must match the values the LLM puts in `engagementProof.value` — typically
+   * views (YouTube), upvotes (Reddit), retweets (Twitter), likes (Instagram).
+   */
+  protected getEngagementFloor(): number {
+    return 0;
+  }
+
   // Helper — scouts call this to append the exclusion block to their prompt
   protected buildExclusionBlock(
     recentlyCovered: { topic: string; angle: string; type: 'industry' | 'viral' }[],
@@ -221,7 +235,12 @@ ${lines}
     if (!Array.isArray(parsed.trending_topics)) throw new Error('Missing field: trending_topics');
     if (typeof parsed.raw_summary !== 'string') throw new Error('Missing field: raw_summary');
 
-    // Validate industry topics — drop if signalScore missing or below quality floor
+    // Validate industry topics — drop if signalScore missing OR below platform-aware
+    // engagement floor. Previously the only filter was the LLM's self-assigned
+    // signalScore ≥ 3, which let through 200-view YouTube shorts as "trending."
+    // Each platform has its own units (views vs upvotes vs retweets), so the floor
+    // is platform-aware. Twitter/Instagram have no API pre-fetch path, so engagement
+    // floors there can't be reliably enforced — fall back to score-only.
     const validTopics = (parsed.trending_topics as TrendingTopic[]).filter((t) => {
       if (typeof t.signalScore !== 'number') {
         this.logger.warn(`Dropping signal "${t.topic}" — missing signalScore`);
@@ -237,6 +256,18 @@ ${lines}
       if (t.signalScore < 3) {
         this.logger.warn(`Dropping signal "${t.topic}" — score ${t.signalScore} below quality floor (3)`);
         return false;
+      }
+      // Platform-tiered engagement floor — drop signals whose engagementProof.value
+      // is below the realistic "trending" threshold for the platform. Skip if no
+      // numeric value present (Twitter/Instagram scrape often lacks reliable counts).
+      if (typeof t.engagementProof?.value === 'number' && t.engagementProof.value > 0) {
+        const floor = this.getEngagementFloor();
+        if (floor > 0 && t.engagementProof.value < floor) {
+          this.logger.warn(
+            `Dropping signal "${t.topic}" — engagement ${t.engagementProof.value} (${t.engagementProof.metric}) below ${this.platform} floor (${floor})`,
+          );
+          return false;
+        }
       }
       return true;
     });

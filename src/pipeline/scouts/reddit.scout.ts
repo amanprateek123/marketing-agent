@@ -15,6 +15,13 @@ export class RedditScout extends ScoutBaseService {
   readonly platform = 'reddit';
   readonly agentType = AgentType.REDDIT_SCOUT;
 
+  // Reddit engagement metric is `upvotes`. 200 upvotes is the floor where a
+  // post is reliably trending on niche subreddits like r/india / r/hinduism.
+  // Default sub algo demotes content below ~100 within hours.
+  protected getEngagementFloor(): number {
+    return 200;
+  }
+
   constructor(
     claudeService: ClaudeService,
     liveContextBuilder: LiveContextBuilder,

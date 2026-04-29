@@ -15,6 +15,13 @@ export class YoutubeScout extends ScoutBaseService {
   readonly platform = 'youtube';
   readonly agentType = AgentType.YOUTUBE_SCOUT;
 
+  // YouTube engagement metric is typically `views`. 100k views = realistic
+  // floor for "trending in India" — niche channels can hit this in days; below
+  // that we're picking up niche-of-niche content the LLM mislabeled as viral.
+  protected getEngagementFloor(): number {
+    return 100_000;
+  }
+
   constructor(
     claudeService: ClaudeService,
     liveContextBuilder: LiveContextBuilder,

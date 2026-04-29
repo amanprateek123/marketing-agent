@@ -35,6 +35,12 @@ export class PipelineProcessor extends WorkerHost {
     }
 
     this.logger.log(`Processing scheduled pipeline: tenantId=${tenantId} jobId=${job.id}`);
-    await this.orchestrator.trigger(tenantId);
+    // Run the full pipeline DAG synchronously inside the BullMQ job. Was: await
+    // trigger() which returned immediately after firing executeDAG in background
+    // → BullMQ marked the job complete the moment runId was created, retries
+    // were impossible (job was already "done"), and a worker crash mid-DAG
+    // produced an orphan run that only the OnModuleInit recovery could clean.
+    // Now: throw on DAG failure → BullMQ retries per attempts config.
+    await this.orchestrator.runForJob(tenantId);
   }
 }
