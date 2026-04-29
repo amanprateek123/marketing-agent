@@ -135,7 +135,7 @@ export class Campaign {
       interests?: string[];
       optimizationGoal: string;
       ads: number[];
-      creativeFormat?: 'video' | 'image' | 'both';
+      creativeFormat?: 'video' | 'image' | 'both' | 'mixed';
     }[];
     scaleRules: string;
     pauseRules: string;

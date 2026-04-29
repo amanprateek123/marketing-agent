@@ -24,8 +24,9 @@ export interface AdSetConfig {
   geoLocations?: string[];          // country codes e.g. ["IN"]
   interests?: string[];             // Meta interest targeting
   optimizationGoal: string;         // e.g. "OFFSITE_CONVERSIONS"
-  ads: number[];                    // indices into copy variants (e.g. [0, 1, 2])
-  creativeFormat?: 'video' | 'image' | 'both'; // which creative type to use for this ad set
+  ads: number[];                    // indices into copy variants (e.g. [0, 1, 2, 3])
+  creativeFormat?: 'video' | 'image' | 'both' | 'mixed'; // which creative type to use for this ad set
+  // 'mixed' = selected variant → video ad; other variants → image ads (1 video + N image, recommended for prospecting)
 }
 
 export interface StructuredCampaignConfig {
@@ -359,8 +360,8 @@ Return ONLY this JSON (no markdown, no explanation):
         "audienceType": "advantage_plus",
         "geoLocations": ["IN"],
         "optimizationGoal": "OFFSITE_CONVERSIONS",
-        "ads": [0, 1, 2],
-        "creativeFormat": "both"
+        "ads": [0, 1, 2, 3],
+        "creativeFormat": "mixed"
       }
     ],
     "scaleRules": "ROAS > 1.5x AND conversions >= 2 after 7d → scale 20%",
@@ -467,26 +468,35 @@ ${audiencePerfContext ? 'Audience data available — see context brief.' : 'No a
 
     const selectedCopyIndex = creativePackage?.selectedCopyIndex ?? 0;
 
+    const variantCount = (creativePackage as any)?.copyVariants?.length ?? 0;
+    const allVariantsArr = variantCount > 0
+      ? `[${Array.from({ length: variantCount }, (_, i) => i).join(', ')}]`
+      : `[0, 1, 2, 3]`;
+
     const formatSection = hasFormatData
       ? `CREATIVE FORMAT — video vs image per ad set:
-Each ad set must have "creativeFormat": "video" | "image" | "both".
+Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both".
 Format performance: Winning: ${winningFormats.join(', ')}. Losing: ${losingFormats.join(', ') || 'none'}.
 - Assign winning format to largest budget ad sets. Test the other on smallest budget ad set.
-- If both winning → split test across ad sets.
+- If both winning → split test across ad sets, or use "mixed".
 - Budget < ₹1,500/day → don't split, use winning format only.
-IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for all variants.
-- Video ad sets → must use ads: [${selectedCopyIndex}] only (video matches this variant's hook)
-- Image ad sets → can use ads: [0, 1, 2] (each variant has its own image)`
+IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for ALL ${variantCount || 4} variants.
+- "mixed" (RECOMMENDED for prospecting): use ads: ${allVariantsArr} — selected variant ships as video, others as image. 1 video + ${Math.max(variantCount - 1, 3)} image ads in one ad set.
+- "video" ad sets → must use ads: [${selectedCopyIndex}] only (single video, video matches this variant's hook)
+- "image" ad sets → use ads: ${allVariantsArr} (each variant has its own image)
+- "both" → DEPRECATED for prospecting (creates duplicate ads). Use "mixed" instead.`
       : `CREATIVE FORMAT — video vs image per ad set:
-Each ad set must have "creativeFormat": "video" | "image" | "both".
+Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both".
 No format data yet. Decide from first principles:
-- Young/impulse/lifestyle audiences → video. Professionals/B2B → image. Broad/advantage_plus → video default. Retarget → image.
-- Demo/transformation/testimonial → video. Discount/urgency/simple product → image.
-- Conflicting signals or unsure → "both" (let Meta optimize).
-- Budget < ₹1,500/day → don't split formats, pick one.
-IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for all variants.
-- Video ad sets → must use ads: [${selectedCopyIndex}] only (video matches this variant's hook)
-- Image ad sets → can use ads: [0, 1, 2] (each variant has its own image)`;
+- Prospecting / advantage_plus / lookalike / broad → "mixed" (1 video + N image, lets Meta pick).
+- Retargeting / past visitors → "image" (warm audience, simpler ads convert).
+- Pure video test (rare) → "video" but only if you have strong reason (e.g. demo product).
+- Budget < ₹1,500/day → "image" only — don't split formats.
+IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for ALL ${variantCount || 4} variants.
+- "mixed" (RECOMMENDED for prospecting): use ads: ${allVariantsArr} — selected variant ships as video, others as image. 1 video + ${Math.max(variantCount - 1, 3)} image ads in one ad set.
+- "video" ad sets → must use ads: [${selectedCopyIndex}] only (single video, video matches this variant's hook)
+- "image" ad sets → use ads: ${allVariantsArr} (each variant has its own image)
+- "both" → DEPRECATED for prospecting (creates duplicate ads, reuses single video across all variants). Use "mixed" instead.`;
 
     // ═════════════════════════════════════════════════════════════════════════
     // PROMPT: Data first → Rules → Steps
@@ -519,7 +529,7 @@ ${((creativePackage as any)?.copyVariants ?? []).length > 0
   ).join('\n')
   : `  Variant 0 [hookStyle: unknown] ← SELECTED\n  Headline: ${selectedCopy?.headline ?? 'N/A'}\n  Hook: ${selectedCopy?.primaryText?.split('\n')[0] ?? 'N/A'}\n  CTA: ${selectedCopy?.cta ?? 'N/A'}`
 }
-Images: ${(creativePackage as any)?.images?.filter((img: any) => img.imageUrl).length ?? 0}/3 generated
+Images: ${(creativePackage as any)?.images?.filter((img: any) => img.imageUrl).length ?? 0}/${variantCount || 4} generated
 Video: ${(creativePackage as any)?.video?.videoUrl ? 'Generated' : 'Pending'}
 
 ${productBlock}
@@ -556,10 +566,10 @@ AD SETS:
 - No Meta audiences → use audienceType "advantage_plus" (NOT "interest" without real IDs).
 - Exclude past buyer audiences from prospecting ad sets.
 - "ads" array: assign copy variants by index using hookStyle from the variants listed above:
-  * Prospecting / lookalike / broad / advantage_plus → all 3 variants [0, 1, 2] — let Meta optimize
-  * Interest-based cold → all 3 variants [0, 1, 2]
+  * Prospecting / lookalike / broad / advantage_plus → ALL variants ${allVariantsArr} — let Meta optimize across all hooks
+  * Interest-based cold → ALL variants ${allVariantsArr}
   * Retargeting / past visitors → only the variant whose hookStyle is "social_proof", "urgency", or "price_anchor" — check hookStyle above and pick that index
-  * If no retargeting-appropriate hookStyle exists → use selected variant only e.g. [selectedCopyIndex]
+  * If no retargeting-appropriate hookStyle exists → use selected variant only e.g. [${selectedCopyIndex}]
   * Never assign "curiosity", "problem_awareness", or "question" hookStyle to retargeting — they already know the problem
 - budgetPercent across all ad sets must sum to 100.
 
@@ -640,8 +650,8 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
         "audienceType": "advantage_plus",
         "geoLocations": ["IN"],
         "optimizationGoal": "OFFSITE_CONVERSIONS",
-        "ads": [0, 1, 2],
-        "creativeFormat": "both"
+        "ads": [0, 1, 2, 3],
+        "creativeFormat": "mixed"
       }
     ],
     "scaleRules": "ROAS > 1.5x AND conversions >= 2 after 7d �� scale 20%",

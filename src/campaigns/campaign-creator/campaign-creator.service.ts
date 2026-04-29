@@ -311,7 +311,11 @@ export class CampaignCreatorService {
       // Merge all advantage_plus ad sets into one
       const allVariants = [...new Set(advantagePlusAdSets.flatMap((as: any) => as.ads))].sort();
       const totalBudgetPercent = advantagePlusAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
-      const mergedCreativeFormat = advantagePlusAdSets.some((as: any) => as.creativeFormat === 'both') ? 'both'
+      // Format precedence: mixed > both > video > image. 'mixed' (1 video + N image)
+      // is preferred when any source ad set wanted that — keeps creative diversity in
+      // the consolidated bucket without duplicating the single video across N variants.
+      const mergedCreativeFormat = advantagePlusAdSets.some((as: any) => as.creativeFormat === 'mixed') ? 'mixed'
+        : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'both') ? 'both'
         : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'video') ? 'video' : 'image';
 
       const merged = {
@@ -334,7 +338,10 @@ export class CampaignCreatorService {
       (config.adSets as any[])[0].budgetPercent = 100;
     }
 
-    // Enforce video-variant restriction: video was only generated for the selected variant
+    // Enforce video-variant restriction: video was only generated for the selected variant.
+    // Applies ONLY to 'video' format (single-format video ad set) — 'mixed' is the path
+    // that intentionally pairs the selected variant's video with image ads for the rest,
+    // so don't collapse 'mixed' down to a single variant here.
     const selectedCopyIndex = (creativePackage as any)?.selectedCopyIndex ?? 0;
     for (const adSet of config.adSets as any[]) {
       if (adSet.creativeFormat === 'video' && videoUrl) {
@@ -361,7 +368,12 @@ export class CampaignCreatorService {
         this.logger.warn(`Ad set ${i} (${adSet.name}) requires video but videoUrl is empty — falling back to image`);
         adSet.creativeFormat = hasAnyImage ? 'image' : undefined;
       }
-      if ((adSet.creativeFormat === 'image' || !adSet.creativeFormat)) {
+      // 'mixed' degrades gracefully: no video → all variants ship as image (still 4-way A/B)
+      if (adSet.creativeFormat === 'mixed' && !videoUrl) {
+        this.logger.warn(`Ad set ${i} (${adSet.name}) is 'mixed' but videoUrl is empty — degrading to 'image' (all variants ship as image ads)`);
+        adSet.creativeFormat = 'image';
+      }
+      if ((adSet.creativeFormat === 'image' || adSet.creativeFormat === 'mixed' || !adSet.creativeFormat)) {
         const variantImages = adSet.ads.map((idx: number) => images.find((img: any) => img.variantIndex === idx));
         const missingImages = variantImages.filter((img: any) => !img?.imageUrl);
         if (missingImages.length === adSet.ads.length) {
@@ -439,6 +451,7 @@ export class CampaignCreatorService {
       imageHashes,
       videoThumbnailHash,
       videoId,
+      selectedCopyIndex,
       landingUrl,
       declaredSpecialAdCategories: (company.meta as any)?.specialAdCategories ?? [],
     });

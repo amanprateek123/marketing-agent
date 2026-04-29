@@ -27,7 +27,11 @@ export interface MetaAdSetConfig {
   name: string;
   budgetPercent: number;
   audienceType: string;
-  creativeFormat?: 'video' | 'image' | 'both';
+  creativeFormat?: 'video' | 'image' | 'both' | 'mixed';
+  // 'mixed' = the selected variant ships as a video ad, all OTHER variants in adSet.ads
+  // ship as image ads. Lets a single ad set test 1 video + N images side-by-side
+  // (Meta-recommended creative diversity within one optimization bucket) without
+  // duplicating the same video across N copy variants the way 'both' does.
   metaAudienceId?: string;
   excludeAudienceIds?: string[];
   ageMin?: number;
@@ -55,6 +59,7 @@ export interface MetaCampaignConfig {
   imageHashes?: Record<number, string>; // per-variant image hashes (variantIndex → hash)
   videoThumbnailHash?: string;          // thumbnail extracted from video (used only in video ads)
   videoId?: string;                     // Meta video ID (uploaded before launch)
+  selectedCopyIndex?: number;           // which copy variant the video matches (for 'mixed' format)
   landingUrl: string;
   declaredSpecialAdCategories?: string[];  // for safety check on regulated copy
 }
@@ -282,15 +287,56 @@ export class MetaAdsService {
         // Create ads (one per copy variant)
         const adResults: MetaLaunchResult['adSets'][0]['ads'] = [];
         const creativeFormat = adSetConfig.creativeFormat ?? 'image';
+        const selectedCopyIndex = config.selectedCopyIndex ?? 0;
 
         for (const variantIndex of adSetConfig.ads) {
           const variant = config.copyVariants[variantIndex];
           if (!variant) continue;
 
-          const adName = `${adSetConfig.name} — Variant ${variantIndex + 1}`;
+          // hookStyle in ad name for Meta UI clarity + downstream attribution by name
+          const hookStyle = (variant as any).hookStyle ? ` (${(variant as any).hookStyle})` : '';
+          const adName = `${adSetConfig.name} — Variant ${variantIndex + 1}${hookStyle}`;
 
           // Resolve per-variant image hash
           const variantImageHash = config.imageHashes?.[variantIndex];
+
+          // 'mixed': only the selected variant gets video; rest get image ads
+          //   -> single video ad (matched to its hookStyle) competes with N image ads in one bucket
+          //   -> Meta optimizes across both formats inside the same ad set
+          if (creativeFormat === 'mixed') {
+            const isSelected = variantIndex === selectedCopyIndex;
+            if (isSelected && config.videoId) {
+              const { adId, creativeId } = await this.createVideoAd(
+                config.accountId,
+                config.accessToken,
+                adSetId,
+                `${adName} (video)`,
+                variant,
+                config.videoId,
+                config.pageId!,
+                config.landingUrl,
+                config.videoThumbnailHash ?? variantImageHash,
+              );
+              created.creativeIds.push(creativeId);
+              created.adIds.push(adId);
+              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+            } else if (variantImageHash) {
+              const { adId, creativeId } = await this.createAd(
+                config.accountId,
+                config.accessToken,
+                adSetId,
+                adName,
+                variant,
+                variantImageHash,
+                config.pageId ?? '',
+                config.landingUrl,
+              );
+              created.creativeIds.push(creativeId);
+              created.adIds.push(adId);
+              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+            }
+            continue;
+          }
 
           // video-only or both → create video ad if videoId available
           if ((creativeFormat === 'video' || creativeFormat === 'both') && config.videoId) {
