@@ -368,17 +368,23 @@ export class CampaignAuditorService {
     await this.snapshotModel.create(snapshotData);
 
     // Persist hook saturation onto the company doc so the Creative Team + Strategy Team
-    // can avoid hookStyles already saturated on each audience. Without this, the audit
-    // detects fatigue but the generator keeps producing the same exhausted hook.
-    // Merge strategy: max(existing, new) per (audienceType, hookStyle) — safer to overstate
-    // saturation and avoid a hook than understate and re-saturate it.
+    // can avoid hookStyles already saturated on each audience.
+    //
+    // Merge strategy: OVERWRITE per (audienceType, hookStyle) with the latest measurement
+    // + a timestamp. Pre-B2 this was Math.max merge (monotonic, never decayed) — by month 3
+    // the generator was permanently locked out of 2-3 hookStyles per audience. Now each
+    // audit refreshes the values it observes; readers (LiveContextBuilder) drop entries
+    // older than 14 days so a stale flag from a paused ad set doesn't restrict generation
+    // forever. We don't try to AVERAGE across campaigns — the latest measurement IS the
+    // current state.
     if (signals.hookSaturation && signals.hookSaturation.length > 0) {
       try {
-        const existing = (company.learnings?.creative?.audienceHookSaturation ?? {}) as Record<string, Record<string, number>>;
-        const merged: Record<string, Record<string, number>> = JSON.parse(JSON.stringify(existing));
+        const existing = (company.learnings?.creative?.audienceHookSaturation ?? {}) as Record<string, Record<string, { pct: number; updatedAt: Date }>>;
+        const merged: Record<string, Record<string, { pct: number; updatedAt: Date }>> = JSON.parse(JSON.stringify(existing));
+        const now = new Date();
         for (const h of signals.hookSaturation) {
           if (!merged[h.audienceType]) merged[h.audienceType] = {};
-          merged[h.audienceType][h.hookStyle] = Math.max(merged[h.audienceType][h.hookStyle] ?? 0, h.saturationPct);
+          merged[h.audienceType][h.hookStyle] = { pct: h.saturationPct, updatedAt: now };
         }
         await this.companiesService.updateHookSaturation(company.tenantId, merged);
       } catch (err: any) {

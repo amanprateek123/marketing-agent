@@ -463,6 +463,10 @@ export class PipelineOrchestratorService implements OnModuleInit {
             conversionBridge: selectedBrief.conversionBridge,
             product: selectedBrief.product,
             targetSegment: selectedBrief.targetSegment,
+            // Stage from the brief (Strategy Team / IdeaPool now sets this; defaults
+            // to 'cold' on the schema for prospecting). Closes the gap where first-pass
+            // creatives always defaulted to cold even if the brief was warm-shaped.
+            audienceStage: (selectedBrief as any).audienceStage,
           },
         );
       }

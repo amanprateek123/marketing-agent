@@ -455,6 +455,7 @@ export class PipelineController {
           hook: (brief as any).hook ?? '',
           keyMessage: (brief as any).keyMessage ?? '',
           conversionBridge: (brief as any).conversionBridge ?? '',
+          audienceStage: (brief as any).audienceStage,
         },
       );
 

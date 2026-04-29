@@ -231,6 +231,10 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
         topic: b.topic, angle: b.angle, platform: b.platform,
         format: b.format, audience: b.audience,
         hook: b.hook ?? '', keyMessage: b.keyMessage ?? '', conversionBridge: b.conversionBridge ?? '',
+        // audienceStage from LLM output, validated against the enum. Defaults to 'cold'
+        // (most first-pass briefs target prospecting). 'warm' / 'hot' only when the
+        // audience description explicitly signals retargeting / cart-recovery.
+        audienceStage: ['cold', 'warm', 'hot'].includes(b.audienceStage) ? b.audienceStage : 'cold',
         confidenceScore: 0,
         urgencyScore: b.urgent ? 10 : 5,
         finalScore: b.priorityScore ?? 0,
@@ -265,6 +269,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
         audience: b.audience, hook: b.hook ?? '', keyMessage: b.keyMessage ?? '',
         conversionBridge: b.conversionBridge ?? '', suggestedBudget: b.suggestedBudget ?? 0,
         finalScore: b.priorityScore ?? 0,
+        audienceStage: ['cold', 'warm', 'hot'].includes(b.audienceStage) ? b.audienceStage : 'cold',
       })),
       selectedBriefId: winnerId,
       selectionReason: winner.selectionReason ?? parsed.debateRationale ?? '',
@@ -519,6 +524,7 @@ STEP 8: Return ONLY this JSON (no markdown, no explanation):
       "platform": "instagram|facebook|youtube|reddit",
       "format": "reel|carousel|video|single_image|collection",
       "audience": "full audience description",
+      "audienceStage": "cold|warm|hot — cold for prospecting (default for fresh audiences); warm if audience description signals retargeting / past-visitors / lookalike-of-buyers; hot for cart-abandoners / 30d-engaged-no-purchase",
       "hook": "opening line or visual hook",
       "keyMessage": "what the audience should believe after seeing this",
       "conversionBridge": "how this leads to buying the specific product",
@@ -718,6 +724,7 @@ Return ONLY a JSON array of exactly ${poolSize} brief objects (no markdown, no e
     "platform": "instagram|facebook|youtube|reddit",
     "format": "reel|carousel|video|single_image|collection",
     "audience": "full audience description",
+    "audienceStage": "cold|warm|hot — cold for prospecting (default); warm if retargeting / lookalike-of-buyers; hot for cart-abandoners",
     "hook": "opening line or visual hook",
     "keyMessage": "what the audience should believe after seeing this",
     "conversionBridge": "how this leads to buying the specific product",

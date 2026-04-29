@@ -53,21 +53,36 @@ ${company.learnings
       if (creative.ctaInsights?.length) lines.push(`- CTA insights: ${creative.ctaInsights.join('; ')}`);
 
       // Hook saturation per audience — Strategy Team and Creative Team must AVOID
-      // hookStyles flagged saturated for the target audience. Without this, the
-      // audit detects fatigue but the generator keeps producing the same hook.
+      // hookStyles flagged saturated for the target audience. Decay filter: drop
+      // entries older than 14 days so the generator isn't permanently locked out
+      // of a hookStyle after one over-exposure event.
       if (creative.audienceHookSaturation && Object.keys(creative.audienceHookSaturation).length > 0) {
+        const SATURATION_FRESHNESS_DAYS = 14;
+        const SATURATION_THRESHOLD_PCT = 60;
+        const cutoff = Date.now() - SATURATION_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
         const satLines: string[] = [];
-        for (const [audienceType, hooks] of Object.entries(creative.audienceHookSaturation as Record<string, Record<string, number>>)) {
-          const saturated = Object.entries(hooks).filter(([, pct]) => (pct as number) >= 60);
+        const map = creative.audienceHookSaturation as Record<string, Record<string, { pct: number; updatedAt: Date | string }>>;
+        for (const [audienceType, hooks] of Object.entries(map)) {
+          const saturated: Array<[string, number]> = [];
+          for (const [hookStyle, entry] of Object.entries(hooks)) {
+            // Backwards-compat: old data may have stored a flat number; treat as fresh.
+            const pct = typeof entry === 'number' ? (entry as number) : (entry?.pct ?? 0);
+            const updatedAt = typeof entry === 'number'
+              ? new Date()
+              : new Date(entry?.updatedAt ?? Date.now());
+            if (pct < SATURATION_THRESHOLD_PCT) continue;
+            if (updatedAt.getTime() < cutoff) continue;
+            saturated.push([hookStyle, pct]);
+          }
           if (saturated.length === 0) continue;
           const formatted = saturated
-            .sort((a, b) => (b[1] as number) - (a[1] as number))
+            .sort((a, b) => b[1] - a[1])
             .map(([hook, pct]) => `${hook} (${pct}%)`)
             .join(', ');
           satLines.push(`  ${audienceType}: AVOID ${formatted}`);
         }
         if (satLines.length > 0) {
-          lines.push(`- Hook saturation (≥60% — DO NOT generate these for the listed audience):\n${satLines.join('\n')}`);
+          lines.push(`- Hook saturation (≥${SATURATION_THRESHOLD_PCT}% in last ${SATURATION_FRESHNESS_DAYS}d — DO NOT generate for the listed audience):\n${satLines.join('\n')}`);
         }
       }
     }

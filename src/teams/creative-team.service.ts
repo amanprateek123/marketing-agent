@@ -350,15 +350,38 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
     const winningExemplarsBlock = (() => {
       const exemplars = creative?.winningExemplars ?? [];
       if (exemplars.length === 0) return '';
-      const top5 = [...exemplars]
-        .sort((a, b) => b.ctr - a.ctr)
-        .slice(0, 5);
+
+      // Filter by audienceStage when set on the brief — cold winners shouldn't anchor
+      // warm briefs and vice versa. Audience attribution comes from A3 work in
+      // creative-learning.service.ts:enrichWithCTR (dominant ad set's audienceType).
+      // Map exemplar.audienceSegment → stage with the same logic the auditor uses.
+      const stageOfSegment = (segment: string | undefined): 'cold' | 'warm' | 'hot' => {
+        if (segment === 'retarget' || segment === 'custom' || segment === 'lookalike') return 'warm';
+        return 'cold';
+      };
+      const briefStage = brief.audienceStage ?? 'cold';
+      let pool = exemplars;
+      if (brief.audienceStage) {
+        const matching = exemplars.filter((e: any) => stageOfSegment(e.audienceSegment) === briefStage);
+        // If filtered set is too small (<3), fall back to full pool — better to have
+        // some inspiration than none. Logged via the rendering itself (mixed-stage banner).
+        pool = matching.length >= 3 ? matching : exemplars;
+      }
+
+      const top5 = [...pool].sort((a, b) => b.ctr - a.ctr).slice(0, 5);
+      const allFromBriefStage = brief.audienceStage
+        ? top5.every((e: any) => stageOfSegment(e.audienceSegment) === briefStage)
+        : true;
+
       const formatted = top5
         .map((e: any, i: number) =>
           `  ${i + 1}. [${e.hookStyle}, CTR ${e.ctr.toFixed(2)}%${e.audienceSegment ? `, ${e.audienceSegment}` : ''}] "${e.hookLine}"`,
         )
         .join('\n');
-      return `\nPAST WINNING HOOK LINES (verbatim — use as inspiration for structure/tone/specificity, NOT to copy):\n${formatted}\n`;
+      const stageBanner = brief.audienceStage && !allFromBriefStage
+        ? ` (mixed stages — pool was thin for ${brief.audienceStage})`
+        : '';
+      return `\nPAST WINNING HOOK LINES${stageBanner} (verbatim — use as inspiration for structure/tone/specificity, NOT to copy):\n${formatted}\n`;
     })();
 
     // Strategy mode
@@ -393,7 +416,7 @@ Brand Guidelines: ${company.brandGuidelines || 'Not specified'}
 Tone: ${company.tone}
 Avoid: ${company.avoid?.join(', ') || 'nothing specified'}
 
-${this.buildVerticalContextBlock(company.industry)}
+${this.buildVerticalContextBlock(company.industry, brief.audienceStage, brief.avoidHookStyles)}
 
 ${liveContext}
 
@@ -569,7 +592,7 @@ Match the duration / opener / music to the SELECTED variant's hookStyle. Three b
 (B) BODY — middle 50-60% of duration. For story-driven hooks, this is the personal-story / transformation / proof beat. For punch hooks, this is the value proposition + product reveal. Voiceover speaks in conversational Hindi (or the brief's audience language) — NEVER textbook Hindi. Specific b-roll, hard cuts, no fades.
 (C) CTA — final ~20% of duration. Product name "${resolvedProduct?.name ?? 'Product'}" + ₹${resolvedProduct?.price} as bold text overlay. Voiceover delivers the urgency line ("Abhi karo" / "Aaj hi" / "Pehla kadam lo"). Final music beat → clean stop.
 
-═══ ASTROLOGY-SPECIFIC B-ROLL VOCABULARY (use when topic fits) ═══
+${resolveVertical(company.industry) === 'spirituality' ? `═══ ASTROLOGY-SPECIFIC B-ROLL VOCABULARY (use when topic fits) ═══
 
 Astro hooks demand astro visuals. Generic "spiritual aesthetic" loses to specific iconography:
 - Sade Sati / Saturn-related → Shani iconography: blue-black, oil lamp, crow imagery, Saturn glyph
@@ -582,17 +605,17 @@ Astro hooks demand astro visuals. Generic "spiritual aesthetic" loses to specifi
 
 DO NOT default to generic "moody puja room with diya" for every video. Match iconography to the topic — Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection, etc.
 
-═══ VISUAL RULES (non-negotiable) ═══
+` : ''}═══ VISUAL RULES (non-negotiable) ═══
 
 - 9:16 vertical format for Reels/Stories
 - All text overlays: bold sans-serif, large for mobile, white/gold/saffron on dark or warm grounds
 - All text in Hindi or Hinglish — zero English-only lines
 - Hard cuts only between scenes — no fade transitions
-- Hyper-specific visuals — "close-up of trembling hands holding a tattered kundli paper, warm diya light from below" beats "person looking at horoscope"
+- Hyper-specific visuals — match the brief's topic with concrete, named props/lighting
 - Product name "${resolvedProduct?.name ?? 'Product'}" and price ₹${resolvedProduct?.price} must appear as exact text — never placeholders
-- NO talking-head, NO avatar, NO face-to-camera — cinematic b-roll only with off-screen Hindi voiceover
-- NO stock footage look, NO watermarks, NO celebrity faces
-- NO Western "spiritual wellness" aesthetic (crystals, mandalas, Buddha statues, sage smudging) — Indian-astro only
+- NO talking-head, NO avatar, NO face-to-camera — cinematic b-roll only with off-screen voiceover (in the audience's language — Hindi/Hinglish for India)
+- NO stock footage look, NO watermarks, NO celebrity faces${resolveVertical(company.industry) === 'spirituality' ? `
+- NO Western "spiritual wellness" aesthetic (crystals, mandalas, Buddha statues, sage smudging) — Indian-astro only` : ''}
 
 ═══════════════════════════════════════════════════════
 RULES
@@ -758,10 +781,51 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
    * Spirituality is the only vertical with a dedicated block today; other verticals
    * fall through to a no-op. Add per-vertical blocks here as the tenant base grows.
    */
-  private buildVerticalContextBlock(industry: string | undefined | null): string {
+  private buildVerticalContextBlock(
+    industry: string | undefined | null,
+    audienceStage?: 'cold' | 'warm' | 'hot',
+    avoidHookStyles?: string[],
+  ): string {
     const vertical = resolveVertical(industry);
-    if (vertical === 'spirituality') {
-      return `═══════════════════════════════════════════════════════
+    if (vertical !== 'spirituality') return '';
+
+    // Astro hook examples — tagged with hookStyle + applicable stages so we can
+    // filter when the brief is warm (retarget) vs hot (cart-recovery) instead of
+    // pushing cold-prospect framings universally.
+    const ASTRO_HOOK_PATTERNS: Array<{
+      tag: string;
+      example: string;
+      hookStyle: string;
+      stages: Array<'cold' | 'warm' | 'hot'>;
+    }> = [
+      { tag: 'TRANSIT-EVENT',       example: '"Mangal ka transit start ho gaya — career mein bade decisions abhi mat lo"', hookStyle: 'urgency',       stages: ['cold', 'warm'] },
+      { tag: 'DOSHA-CALLOUT',       example: '"Aapki kundli mein Manglik dosh hai? Shaadi karne se pehle ye padh lo"',     hookStyle: 'pain_point',    stages: ['cold'] },
+      { tag: 'SECRET-REVEAL',       example: '"99% astrologers ye nahi batate — Sade Sati mein ye 3 cheezein avoid karo"', hookStyle: 'curiosity_gap', stages: ['cold', 'warm'] },
+      { tag: 'ASTROLOGER-WARNING',  example: '"Pandit ji kehte hain — agar Shani 7th house mein hai, toh aaj ye karo"',    hookStyle: 'social_proof',  stages: ['cold', 'warm'] },
+      { tag: 'PERSONAL-PREDICTION', example: '"Aapka rashi number kya hai? Iss hafte ka prediction free mein paao"',       hookStyle: 'curiosity_gap', stages: ['cold'] },
+      { tag: 'SPECIFIC-TIMEFRAME',  example: '"Agle 21 din mein aapki kundli ka 1 grah change hone wala hai"',              hookStyle: 'urgency',       stages: ['cold', 'warm'] },
+      // Warm/hot retargeting-specific patterns — added in B3 so warm briefs have
+      // examples that don't sound like cold-prospect framings.
+      { tag: 'OFFER-RECALL',        example: '"Aapki ₹1 reading wait kar rahi hai — kundli check kar lo aaj"',              hookStyle: 'urgency',       stages: ['warm', 'hot'] },
+      { tag: 'OBJECTION-HANDLE',    example: '"Pehli baat free — kuch lagega bhi nahi. Pandit ji ka time abhi available hai."', hookStyle: 'social_proof', stages: ['warm', 'hot'] },
+      { tag: 'CART-DEADLINE',       example: '"Aaj raat tak ₹1 mein consultation — kal full price ₹399"',                  hookStyle: 'urgency',       stages: ['hot'] },
+    ];
+
+    const stage = audienceStage ?? 'cold';
+    const avoidSet = new Set(avoidHookStyles ?? []);
+    const filtered = ASTRO_HOOK_PATTERNS
+      .filter(p => p.stages.includes(stage))
+      .filter(p => !avoidSet.has(p.hookStyle));
+    // If everything got filtered out (over-restrictive avoidHookStyles), fall back
+    // to stage-only filter so the LLM still has at least 2-3 examples to anchor on.
+    const examplesToShow = filtered.length >= 2
+      ? filtered
+      : ASTRO_HOOK_PATTERNS.filter(p => p.stages.includes(stage));
+    const formatted = examplesToShow
+      .map(p => `- ${p.tag}: ${p.example}`)
+      .join('\n');
+
+    return `═══════════════════════════════════════════════════════
 SPIRITUALITY VERTICAL — ASTROLOGY CONTEXT (REQUIRED READING)
 ═══════════════════════════════════════════════════════
 
@@ -781,13 +845,8 @@ VOICE RULE — speak AS the astrologer revealing a secret, NOT as a brand sellin
 - ✗ "Get the most accurate astrology readings online! Book now."
 - The astrologer voice is warm, knowing, slightly mystical, factual when stating chart positions, never preachy, never sounds like a discount retailer.
 
-HIGH-CONVERTING HOOK PATTERNS (winners in this vertical):
-- TRANSIT-EVENT: "Mangal ka transit start ho gaya — career mein bade decisions abhi mat lo"
-- DOSHA-CALLOUT: "Aapki kundli mein Manglik dosh hai? Shaadi karne se pehle ye padh lo"
-- SECRET-REVEAL (curiosity gap): "99% astrologers ye nahi batate — Sade Sati mein ye 3 cheezein avoid karo"
-- ASTROLOGER-WARNING: "Pandit ji kehte hain — agar Shani 7th house mein hai, toh aaj ye karo"
-- PERSONAL-PREDICTION: "Aapka rashi number kya hai? Iss hafte ka prediction free mein paao"
-- SPECIFIC-TIMEFRAME: "Agle 21 din mein aapki kundli ka 1 grah change hone wala hai"
+HIGH-CONVERTING HOOK PATTERNS (filtered for stage="${stage}"${avoidSet.size > 0 ? `, avoiding: ${[...avoidSet].join(', ')}` : ''}; use as inspiration for STRUCTURE/FRAMING — do NOT copy verbatim):
+${formatted}
 
 DO / DON'T:
 ✓ Use Hinglish naturally — Devanagari is fine for emotional weight, Roman for accessibility
@@ -801,8 +860,5 @@ DO / DON'T:
 FOR HEADLINES specifically: short Hinglish phrases beat English (e.g. "Kundli check karo — ₹1 mein" beats "Get your kundli reading at ₹1").
 
 ═══════════════════════════════════════════════════════`;
-    }
-    // No vertical-specific block — fall through.
-    return '';
   }
 }

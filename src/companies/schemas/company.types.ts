@@ -143,13 +143,18 @@ export interface CreativeLearnings {
   visualInsights: string[];      // image/video patterns that performed well
 
   /**
-   * Hook saturation per (audienceType → hookStyle → saturationPct).
+   * Hook saturation per (audienceType → hookStyle → { pct, updatedAt }).
    * Updated by the audit loop after each campaign-level signal-detector pass.
-   * The Creative Team and Strategy Team avoid hookStyles where saturationPct ≥ 60
-   * for the target audience — closes the death-spiral where the audit detects
-   * fatigue but the generator keeps producing the same exhausted hook.
+   * Per-entry timestamps enable decay: LiveContextBuilder filters entries older
+   * than ~14 days so the generator isn't permanently locked out of a hookStyle
+   * after one over-exposure event.
+   *
+   * Pre-B2 this was a flat number map merged via Math.max — monotonic, never
+   * decayed, by month 3 the generator was restricted to 2-3 hookStyles for
+   * the broadest audience. Now: each audit overwrites per-entry with current
+   * value + timestamp; readers filter by age.
    */
-  audienceHookSaturation?: Record<string, Record<string, number>>;
+  audienceHookSaturation?: Record<string, Record<string, { pct: number; updatedAt: Date }>>;
   audienceHookSaturationUpdatedAt?: Date;
 
   /**

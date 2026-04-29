@@ -41,6 +41,16 @@ export class IntelligenceBrief {
   @Prop({ default: '' })
   conversionBridge: string;
 
+  /**
+   * Audience funnel stage — determines whether the creative team writes
+   * cold-prospect copy (problem-first 5-line, brand intro), warm-retarget copy
+   * (offer-recall 2-3 line, no brand intro, no "Kya aap bhi…" hooks), or hot
+   * cart-recovery copy (1-2 line urgency referencing the abandoned action).
+   * Defaults to 'cold' since most first-pass strategy briefs target prospecting.
+   */
+  @Prop({ required: false, enum: ['cold', 'warm', 'hot'], default: 'cold' })
+  audienceStage?: 'cold' | 'warm' | 'hot';
+
   @Prop({ required: true, default: 0 })
   confidenceScore: number;
 

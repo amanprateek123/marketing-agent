@@ -145,13 +145,15 @@ export class CompaniesService {
   }
 
   /**
-   * Persist hook-saturation map (audienceType → hookStyle → pct). Updated by audit
-   * loop after every signal-detector pass; consumed by Strategy Team + Creative Team
-   * to avoid generating saturated hookStyles for the target audience.
+   * Persist hook-saturation map (audienceType → hookStyle → {pct, updatedAt}).
+   * Updated by audit loop after every signal-detector pass; consumed by
+   * Strategy Team + Creative Team to avoid generating saturated hookStyles
+   * for the target audience. Per-entry timestamps enable downstream decay
+   * filtering — readers drop entries older than ~14 days.
    */
   async updateHookSaturation(
     tenantId: string,
-    audienceHookSaturation: Record<string, Record<string, number>>,
+    audienceHookSaturation: Record<string, Record<string, { pct: number; updatedAt: Date }>>,
   ): Promise<void> {
     await this.companyModel.updateOne(
       { tenantId },

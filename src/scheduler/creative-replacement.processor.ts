@@ -261,17 +261,25 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
   private getSaturatedHooksForAudience(company: any, targetSegment?: string): string[] {
     const map = company?.learnings?.creative?.audienceHookSaturation as
-      | Record<string, Record<string, number>>
+      | Record<string, Record<string, { pct: number; updatedAt: Date | string } | number>>
       | undefined;
     if (!map) return [];
     // If we have a targetSegment, prefer that; otherwise union across all audiences.
     const buckets = targetSegment && map[targetSegment]
       ? [map[targetSegment]]
       : Object.values(map);
+    // Decay filter — entries older than 14 days are stale (paused ad sets, audience refresh)
+    // and shouldn't restrict generation. Backwards-compat: pre-B2 entries were flat numbers.
+    const FRESHNESS_DAYS = 14;
+    const cutoff = Date.now() - FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
     const saturated = new Set<string>();
     for (const b of buckets) {
-      for (const [hook, pct] of Object.entries(b)) {
-        if (pct >= 60) saturated.add(hook);
+      for (const [hook, entry] of Object.entries(b)) {
+        const pct = typeof entry === 'number' ? entry : (entry?.pct ?? 0);
+        const updatedAtMs = typeof entry === 'number'
+          ? Date.now()
+          : new Date(entry?.updatedAt ?? Date.now()).getTime();
+        if (pct >= 60 && updatedAtMs >= cutoff) saturated.add(hook);
       }
     }
     return [...saturated];
