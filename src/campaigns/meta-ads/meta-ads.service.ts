@@ -526,6 +526,20 @@ export class MetaAdsService {
       targeting.excluded_custom_audiences = config.excludeAudienceIds.map(id => ({ id }));
     }
 
+    // Skip Audience Network by default — for Indian DTC, AN is mostly garbage
+    // app-install clicks. 5-15% of budget historically burned there before the
+    // auditor caught it. Meta's `narrowAdSetPlacements` helper can still expand
+    // back to AN later if data warrants. Override only if config explicitly sets
+    // publisher_platforms (some retargeting flows do want AN).
+    if (!(config as any).publisherPlatforms) {
+      targeting.publisher_platforms = ['facebook', 'instagram'];
+      // When publisher_platforms is set, Meta requires explicit positions per platform
+      targeting.facebook_positions = ['feed', 'video_feeds', 'story', 'instream_video', 'marketplace'];
+      targeting.instagram_positions = ['stream', 'story', 'reels', 'explore'];
+    } else {
+      targeting.publisher_platforms = (config as any).publisherPlatforms;
+    }
+
     const adSetData: any = {
       name: config.name,
       campaign_id: campaignId,
@@ -538,8 +552,13 @@ export class MetaAdsService {
       access_token: accessToken,
     };
 
-    // Attribution: 7-day click — gives Meta enough signal for considered purchases
-    adSetData.attribution_spec = [{ event_type: 'CLICK_THROUGH', window_days: 7 }];
+    // Attribution: 7-day click + 1-day view — view-through captures 15-25% more
+    // attributed conversions for video-heavy creative. Click-only under-counts
+    // video performance and biases the audit loop's format-comparison toward image.
+    adSetData.attribution_spec = [
+      { event_type: 'CLICK_THROUGH', window_days: 7 },
+      { event_type: 'VIEW_THROUGH', window_days: 1 },
+    ];
 
     // Pixel for conversion optimization
     if (customConversionId && pixelId) {

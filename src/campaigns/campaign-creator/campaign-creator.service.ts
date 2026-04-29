@@ -343,6 +343,86 @@ export class CampaignCreatorService {
       (config.adSets as any[])[0].budgetPercent = 100;
     }
 
+    // ── 'mixed' → split into 2 sibling ad sets ─────────────────────────────────
+    // Meta's intra-ad-set auction skews to lowest-CPM creative (~always video),
+    // so 1 video + N image in one bucket → video wins 90%+ of impressions and
+    // the image variants get no statistical signal. Split-format-by-ad-set is
+    // Meta's recommended pattern for clean per-format attribution: one ad set
+    // ships the video (selected variant only), a sibling ships all OTHER copy
+    // variants as image ads. Each ad set has its own learning phase + bid logic.
+    // Skip splitting when total daily budget is too low to fund 2 ad sets'
+    // learning phases — degrade to image-only to keep all signal in one bucket.
+    const SPLIT_MIN_DAILY = 6000;        // ₹6k/day total → ~₹2k video + ₹4k image, both above the per-ad-set learning floor
+    const VIDEO_BUDGET_FRACTION = 0.30;  // video ad set takes 30% of original budgetPercent (1 ad vs 3 ads)
+    const splitAdSets: any[] = [];
+    const selectedCopyIndexForSplit = (creativePackage as any)?.selectedCopyIndex ?? 0;
+    for (const adSet of config.adSets as any[]) {
+      if (adSet.creativeFormat !== 'mixed') {
+        splitAdSets.push(adSet);
+        continue;
+      }
+      const dailyForAdSet = (campaign.budget * (adSet.budgetPercent ?? 0)) / 100;
+      const otherVariants = (adSet.ads ?? []).filter((idx: number) => idx !== selectedCopyIndexForSplit);
+      if (!videoUrl || dailyForAdSet < SPLIT_MIN_DAILY || otherVariants.length === 0) {
+        // Degrade: keep one ad set, ship as image (existing fallback handles missing-video case below too)
+        this.logger.log(
+          `Ad set "${adSet.name}": mixed → image (daily ₹${Math.round(dailyForAdSet)} < ₹${SPLIT_MIN_DAILY} split floor OR no video OR no other variants)`,
+        );
+        splitAdSets.push({ ...adSet, creativeFormat: videoUrl ? adSet.creativeFormat : 'image' });
+        continue;
+      }
+      const videoPct = Math.round((adSet.budgetPercent ?? 0) * VIDEO_BUDGET_FRACTION);
+      const imagePct = (adSet.budgetPercent ?? 0) - videoPct;
+      splitAdSets.push({
+        ...adSet,
+        name: `${adSet.name}_VIDEO`,
+        creativeFormat: 'video',
+        ads: [selectedCopyIndexForSplit],
+        budgetPercent: videoPct,
+      });
+      splitAdSets.push({
+        ...adSet,
+        name: `${adSet.name}_IMAGE`,
+        creativeFormat: 'image',
+        ads: otherVariants,
+        budgetPercent: imagePct,
+      });
+      this.logger.log(
+        `Ad set "${adSet.name}": split mixed → ${adSet.name}_VIDEO (${videoPct}%, [${selectedCopyIndexForSplit}]) + ${adSet.name}_IMAGE (${imagePct}%, [${otherVariants.join(',')}])`,
+      );
+    }
+    config.adSets = splitAdSets;
+
+    // ── Auto-exclude past purchasers from prospecting ad sets ──────────────────
+    // Without this, prospecting (advantage_plus / lookalike / broad / interest)
+    // budget burns retargeting people who already bought the product. Industry
+    // baseline: 5-15% of prospecting spend leaks into past buyers without an
+    // explicit exclusion. The Campaign Review Team prompt asks the LLM to set
+    // this, but relying on the LLM is unreliable — enforce in TS so it can't be
+    // forgotten. Skip for retargeting/custom ad sets which DO want to reach
+    // existing audiences.
+    const purchasersAudId = (company.products ?? [])
+      .flatMap((p: any) => p.metaAudiences ?? [])
+      .find((a: any) => /Purchasers?_/i.test(a?.name ?? ''))?.id;
+    if (purchasersAudId) {
+      const PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
+      let injected = 0;
+      for (const adSet of config.adSets as any[]) {
+        if (!PROSPECTING_TYPES.has(adSet.audienceType)) continue;
+        const existing = new Set(adSet.excludeAudienceIds ?? []);
+        if (!existing.has(purchasersAudId)) {
+          existing.add(purchasersAudId);
+          adSet.excludeAudienceIds = Array.from(existing);
+          injected++;
+        }
+      }
+      if (injected > 0) {
+        this.logger.log(`Auto-excluded purchasers audience ${purchasersAudId} from ${injected} prospecting ad set(s)`);
+      }
+    } else {
+      this.logger.warn(`No Purchasers audience found in product.metaAudiences — prospecting ad sets will reach past buyers (5-15% wasted spend baseline)`);
+    }
+
     // Enforce video-variant restriction: video was only generated for the selected variant.
     // Applies ONLY to 'video' format (single-format video ad set) — 'mixed' is the path
     // that intentionally pairs the selected variant's video with image ads for the rest,
