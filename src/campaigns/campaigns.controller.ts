@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Param,
   Body,
   Query,
@@ -17,6 +18,9 @@ import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
 import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
+import { Campaign, CampaignDocument } from './schemas/campaign.schema';
+import { ShadowAction, ShadowActionDocument } from '../learning/schemas/shadow-action.schema';
+import { SafetyChecks } from './campaign-creator/safety-checks';
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -29,6 +33,10 @@ export class CampaignsController {
     private readonly campaignSyncService: CampaignSyncService,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
+    @InjectModel(Campaign.name)
+    private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(ShadowAction.name)
+    private readonly shadowActionModel: Model<ShadowActionDocument>,
   ) {}
 
   @Get(':tenantId')
@@ -188,6 +196,69 @@ export class CampaignsController {
     }
     await this.campaignsService.reject(tenantId, campaignId, reason ?? 'Rejected by tenant');
     return { success: true, message: 'Campaign rejected' };
+  }
+
+  /**
+   * PATCH /api/v1/campaigns/:tenantId/:campaignId/budget
+   * Edit a pending_approval campaign's daily budget. Re-runs the same TS-level
+   * budget validation (per-campaign cap + weekly cap) that initial creation ran,
+   * so the LLM/operator can't override safety here either. Used by the
+   * Approvals Inbox "✏️ Edit Budget" button.
+   */
+  @Patch(':tenantId/:campaignId/budget')
+  async editBudget(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body('budget') budget: number,
+  ) {
+    if (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0) {
+      throw new BadRequestException('budget must be a positive number');
+    }
+    const campaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (campaign.status !== 'pending_approval') {
+      throw new BadRequestException(`Only pending_approval campaigns can edit budget (current: ${campaign.status})`);
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+
+    // Same gates that ran at create time — TS-level safety, never overridable.
+    SafetyChecks.checkCampaignBudget(budget, company);
+    await SafetyChecks.checkWeeklyBudget(tenantId, budget, company, this.campaignsService);
+
+    await this.campaignModel.updateOne(
+      { _id: campaignId, tenantId },
+      { $set: { budget } },
+    );
+
+    return {
+      campaignId,
+      budget,
+      status: campaign.status,
+      message: `Budget updated to ₹${budget}/day`,
+    };
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/shadow-actions
+   * Returns the LLM-proposed-but-blocked actions for this campaign with their
+   * regretLabel (correct_block / missed_signal / inconclusive — set by the
+   * shadow-eval cron 72h after the block). Lets the dashboard show whether
+   * the safety guards were correctly tuned.
+   */
+  @Get(':tenantId/:campaignId/shadow-actions')
+  async getShadowActions(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    const campaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).select('_id').lean().exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    return this.shadowActionModel
+      .find({ tenantId, campaignId })
+      .sort({ blockedAt: -1 })
+      .limit(50)
+      .lean()
+      .exec();
   }
 
   /**

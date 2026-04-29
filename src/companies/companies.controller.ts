@@ -5,12 +5,17 @@ import {
   Put,
   Body,
   Param,
+  Query,
   HttpCode,
   HttpStatus,
   Inject,
   Logger,
+  ParseIntPipe,
   forwardRef,
 } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CompaniesService } from './companies.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
@@ -28,6 +33,8 @@ export class CompaniesController {
     private readonly metaLearningImporter: MetaLearningImporterService,
     @Inject(forwardRef(() => SchedulerService))
     private readonly schedulerService: SchedulerService,
+    @InjectModel(UsageLog.name)
+    private readonly usageLogModel: Model<UsageLog>,
   ) {}
 
   @Post()
@@ -159,6 +166,111 @@ export class CompaniesController {
     );
 
     return { tenantId, message: 'Prompt regeneration started.' };
+  }
+
+  /**
+   * POST /api/v1/companies/:tenantId/prompts/rollback/:version
+   * Restore a prior prompts version from history. The target version is
+   * cloned forward as a new version (audit-friendly — every change is a
+   * forward step, never destructive).
+   */
+  @Post(':tenantId/prompts/rollback/:version')
+  async rollbackPrompts(
+    @Param('tenantId') tenantId: string,
+    @Param('version', ParseIntPipe) version: number,
+  ) {
+    const newVersion = await this.companiesService.rollbackPromptsToVersion(tenantId, version);
+    this.logger.log(`Prompts rolled back: tenantId=${tenantId} target=v${version} → new=v${newVersion}`);
+    return {
+      tenantId,
+      rolledBackTo: version,
+      promptsVersion: newVersion,
+      message: `Rolled back to v${version} as new v${newVersion}.`,
+    };
+  }
+
+  /**
+   * GET /api/v1/companies/:tenantId/usage?from=ISO&to=ISO
+   * Aggregate Claude API spend over a window — by day, by agent, by run.
+   * Reads usage_logs collection (each runAgent() call writes a row).
+   */
+  @Get(':tenantId/usage')
+  async getUsage(
+    @Param('tenantId') tenantId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const toDate = to ? new Date(to) : new Date();
+
+    const match = { tenantId, timestamp: { $gte: fromDate, $lte: toDate } };
+
+    const [totals, byDay, byAgent, byRun] = await Promise.all([
+      this.usageLogModel.aggregate([
+        { $match: match },
+        { $group: { _id: null, totalUSD: { $sum: '$costUSD' }, callCount: { $sum: 1 } } },
+      ]),
+      this.usageLogModel.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              date: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
+              agent: '$agent',
+            },
+            costUSD: { $sum: '$costUSD' },
+          },
+        },
+        {
+          $group: {
+            _id: '$_id.date',
+            costUSD: { $sum: '$costUSD' },
+            agentBreakdown: { $push: { k: '$_id.agent', v: '$costUSD' } },
+          },
+        },
+        { $project: { _id: 0, date: '$_id', costUSD: 1, agentBreakdown: { $arrayToObject: '$agentBreakdown' } } },
+        { $sort: { date: 1 } },
+      ]),
+      this.usageLogModel.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: '$agent',
+            callCount: { $sum: 1 },
+            totalUSD: { $sum: '$costUSD' },
+            avgUSD: { $avg: '$costUSD' },
+            inputTokens: { $sum: '$inputTokens' },
+            outputTokens: { $sum: '$outputTokens' },
+          },
+        },
+        { $project: { _id: 0, agentType: '$_id', callCount: 1, totalUSD: 1, avgUSD: 1, inputTokens: 1, outputTokens: 1 } },
+        { $sort: { totalUSD: -1 } },
+      ]),
+      this.usageLogModel.aggregate([
+        { $match: { ...match, runId: { $ne: null, $exists: true } } },
+        {
+          $group: {
+            _id: '$runId',
+            startedAt: { $min: '$timestamp' },
+            totalUSD: { $sum: '$costUSD' },
+            callCount: { $sum: 1 },
+          },
+        },
+        { $project: { _id: 0, runId: '$_id', startedAt: 1, totalUSD: 1, callCount: 1 } },
+        { $sort: { startedAt: -1 } },
+        { $limit: 100 },
+      ]),
+    ]);
+
+    return {
+      tenantId,
+      window: { from: fromDate, to: toDate },
+      totalUSD: totals[0]?.totalUSD ?? 0,
+      callCount: totals[0]?.callCount ?? 0,
+      byDay,
+      byAgent,
+      byRun,
+    };
   }
 
   /**

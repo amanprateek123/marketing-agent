@@ -26,6 +26,7 @@ import { CampaignSyncService } from './meta-ads/campaign-sync.service';
 import { CampaignCaseStudy, CampaignCaseStudySchema } from './schemas/campaign-case-study.schema';
 import { MetaLearningImport, MetaLearningImportSchema } from './schemas/meta-learning-import.schema';
 import { EnrichedCampaign, EnrichedCampaignSchema } from './schemas/enriched-campaign.schema';
+import { ShadowAction, ShadowActionSchema } from '../learning/schemas/shadow-action.schema';
 import { DeliveryModule } from '../delivery/delivery.module';
 import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 import { QUEUES } from '../scheduler/queue.constants';
@@ -42,6 +43,8 @@ import { QUEUES } from '../scheduler/queue.constants';
       { name: CampaignCaseStudy.name, schema: CampaignCaseStudySchema },
       { name: MetaLearningImport.name, schema: MetaLearningImportSchema },
       { name: EnrichedCampaign.name, schema: EnrichedCampaignSchema },
+      // Read-only access for the /shadow-actions endpoint (writes happen in LearningModule)
+      { name: ShadowAction.name, schema: ShadowActionSchema },
     ]),
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
     BullModule.registerQueue({ name: QUEUES.CREATIVE_PRODUCTION }),

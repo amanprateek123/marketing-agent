@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { CompaniesController } from './companies.controller';
 import { CompaniesService } from './companies.service';
 import { Company, CompanySchema } from './schemas/company.schema';
+import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { ClaudeModule } from '../claude/claude.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { SchedulerModule } from '../scheduler/scheduler.module';
@@ -14,6 +15,8 @@ import { LiveContextBuilder } from './prompt-generator/live-context.builder';
   imports: [
     MongooseModule.forFeature([
       { name: Company.name, schema: CompanySchema },
+      // Read-only access for the /usage aggregation endpoint
+      { name: UsageLog.name, schema: UsageLogSchema },
     ]),
     ClaudeModule,
     CommonModule,
