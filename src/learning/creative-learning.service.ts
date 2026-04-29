@@ -110,11 +110,23 @@ Return ONLY the JSON object.`,
     const creativeLearnings = this.parseCreativeLearnings(result.content);
     const currentLearnings = company.learnings;
 
+    // Extract verbatim winning exemplars deterministically from the enriched data —
+    // NOT via LLM summarization. The LLM is prone to compressing winners into 4-word
+    // labels and discarding the actual phrasing that worked. Pure rank-by-CTR keeps
+    // the real lines available for downstream Creative Team to anchor on.
+    const winningExemplars = this.extractWinningExemplars(enriched);
+
     await this.companiesService.updateLearnings(tenantId, {
       version: (currentLearnings?.version ?? 0) + 1,
       updatedAt: new Date(),
       topicScores: currentLearnings?.topicScores ?? {},
-      creative: creativeLearnings,
+      creative: {
+        ...creativeLearnings,
+        // Preserve hook saturation map written by the audit loop — don't blow it away.
+        audienceHookSaturation: currentLearnings?.creative?.audienceHookSaturation,
+        audienceHookSaturationUpdatedAt: currentLearnings?.creative?.audienceHookSaturationUpdatedAt,
+        winningExemplars,
+      },
       campaign: currentLearnings?.campaign ?? this.emptyCampaignLearnings(),
       causalInsights: currentLearnings?.causalInsights ?? [],
     });
@@ -200,6 +212,51 @@ Return ONLY the JSON object.`,
       this.logger.error(`Failed to parse creative learnings: ${err.message}`);
       throw new Error(`Creative Learning Agent returned invalid JSON: ${err.message}`);
     }
+  }
+
+  /**
+   * Extract verbatim winning hook lines from enriched performance data.
+   * Deterministic (no LLM) — sorts by CTR, filters by minimum sample size, takes
+   * top N. The Creative Team gets these as concrete examples to anchor on, instead
+   * of the LLM-summarized 4-word hookStyle labels.
+   *
+   * Filters:
+   *   - impressions >= 1000 (avoid lucky early data)
+   *   - ctr is set and > 0
+   *   - selectedCopy.primaryText exists (we need a real line to extract)
+   */
+  private extractWinningExemplars(
+    enriched: any[],
+  ): NonNullable<CreativeLearnings['winningExemplars']> {
+    const MIN_IMPRESSIONS = 1000;
+    const MAX_EXEMPLARS = 10;
+
+    const candidates = enriched
+      .filter((e: any) =>
+        e.selectedCopy?.primaryText &&
+        typeof e.ctr === 'number' && e.ctr > 0 &&
+        typeof e.impressions === 'number' && e.impressions >= MIN_IMPRESSIONS,
+      )
+      .sort((a: any, b: any) => (b.ctr as number) - (a.ctr as number))
+      .slice(0, MAX_EXEMPLARS);
+
+    const now = new Date();
+    return candidates.map((e: any) => {
+      // The "hook line" is the first line of primaryText (the scroll-stopper).
+      // Falls back to the full headline if primaryText doesn't have line breaks.
+      const firstLine = String(e.selectedCopy.primaryText)
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean)[0] ?? e.selectedCopy.headline ?? '';
+      return {
+        hookLine: firstLine,
+        hookStyle: e.selectedCopy.hookStyle ?? 'unknown',
+        audienceSegment: e.audienceSegment ?? undefined,
+        ctr: e.ctr,
+        sampleSize: e.impressions,
+        extractedAt: now,
+      };
+    });
   }
 
   private emptyCampaignLearnings() {

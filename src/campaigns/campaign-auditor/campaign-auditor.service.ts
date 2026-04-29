@@ -767,6 +767,9 @@ export class CampaignAuditorService {
           action.replacementStatus = 'queued';
 
           // Queue creative production job for autonomous replacement
+          const sourceAdSetId = (campaign as any).adSets
+            ?.find((as: any) => as.ads?.some((a: any) => a.metaAdId === action.targetId))
+            ?.metaAdSetId ?? '';
           await this.creativeQueue.add(
             `replace-creative-${action.targetId}`,
             {
@@ -776,9 +779,8 @@ export class CampaignAuditorService {
               fatiguedAdId: action.targetId,
               fatiguedHook: action.metrics?.fatiguedHook ?? '',
               replacementHook,
-              adSetId: (campaign as any).adSets
-                ?.find((as: any) => as.ads?.some((a: any) => a.metaAdId === action.targetId))
-                ?.metaAdSetId ?? '',
+              adSetId: sourceAdSetId,
+              audienceStage: this.deriveAudienceStageFromAdSet(campaign, sourceAdSetId),
             },
             { attempts: 2, backoff: { type: 'exponential', delay: 60000 } },
           );
@@ -815,6 +817,7 @@ export class CampaignAuditorService {
               fatiguedHook: '',
               replacementHook: hookStyle,
               adSetId: action.targetId,  // targetId is the ad set ID for add_creative
+              audienceStage: this.deriveAudienceStageFromAdSet(campaign, action.targetId),
             },
             { attempts: 2, backoff: { type: 'exponential', delay: 60000 } },
           );
@@ -1124,6 +1127,22 @@ export class CampaignAuditorService {
    * Strategy: exclude the fatigued hook + all hooks already used in this campaign,
    * then pick the best from company learnings. Falls back to a default rotation.
    */
+  /**
+   * Map a target ad set's audienceType to a CreativeBrief audienceStage. Retarget
+   * and custom audiences get 'warm' so the regenerated copy is offer-recall-shaped
+   * instead of cold-prospect-shaped (which feels weird to someone who already engaged).
+   */
+  private deriveAudienceStageFromAdSet(
+    campaign: any,
+    adSetId: string,
+  ): 'cold' | 'warm' | 'hot' {
+    if (!adSetId) return 'cold';
+    const adSet = (campaign?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId);
+    const audienceType = adSet?.audienceType ?? 'unknown';
+    if (audienceType === 'retarget' || audienceType === 'custom') return 'warm';
+    return 'cold';
+  }
+
   private pickReplacementHook(
     campaign: CampaignDocument,
     fatiguedAdId: string,

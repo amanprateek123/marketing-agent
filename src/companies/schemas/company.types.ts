@@ -151,6 +151,22 @@ export interface CreativeLearnings {
    */
   audienceHookSaturation?: Record<string, Record<string, number>>;
   audienceHookSaturationUpdatedAt?: Date;
+
+  /**
+   * Verbatim winning hook lines extracted from past Day-7 quick scans. Stored
+   * as exemplars (not just hookStyle labels) so the Creative Team can anchor
+   * on real examples of phrasings that converted, not abstract category names.
+   * Top 5 by CTR are injected into Call 1 prompt as inspiration (NOT for direct
+   * copying — the LLM should learn the pattern, not repeat the line).
+   */
+  winningExemplars?: Array<{
+    hookLine: string;            // verbatim primaryText opening line
+    hookStyle: string;
+    audienceSegment?: string;    // which audience this won on
+    ctr: number;                 // CTR % at time of extraction
+    sampleSize: number;          // total impressions when measured
+    extractedAt: Date;
+  }>;
 }
 
 export interface CampaignLearnings {

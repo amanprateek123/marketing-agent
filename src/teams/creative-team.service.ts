@@ -61,6 +61,7 @@ export class CreativeTeamService {
       targetSegment?: string;
       forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
       avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
+      audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting (problem-first); warm = retarget (offer-recall); hot = cart-recovery (urgency)
     },
     company: CompanyDocument,
     runId: string,
@@ -82,6 +83,7 @@ export class CreativeTeamService {
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       product?: string; targetSegment?: string;
       forcedHookStyle?: string; avoidHookStyles?: string[];
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     company: CompanyDocument,
     runId: string,
@@ -111,6 +113,7 @@ export class CreativeTeamService {
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       product?: string; targetSegment?: string;
       forcedHookStyle?: string; avoidHookStyles?: string[];
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     company: CompanyDocument,
     runId: string,
@@ -213,6 +216,7 @@ Return ONLY this JSON (no markdown, no explanation):
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       product?: string; targetSegment?: string;
       forcedHookStyle?: string; avoidHookStyles?: string[];
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     company: CompanyDocument,
     runId: string,
@@ -277,6 +281,7 @@ Return ONLY this JSON (no markdown, no explanation):
       targetSegment?: string;
       forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
       avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
+      audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting (problem-first); warm = retarget (offer-recall); hot = cart-recovery (urgency)
     },
     company: CompanyDocument,
     runId: string,
@@ -338,6 +343,24 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
       return lines.length > 0 ? lines.join('\n') : 'No visual learnings yet.';
     })();
 
+    // Verbatim winning exemplars — anchor on lines that ACTUALLY converted.
+    // The hookStyle labels above tell you the category that's working; the exemplars
+    // tell you the phrasing patterns. Use them as inspiration for tone/structure/specificity,
+    // NOT for direct copying — re-running an old line on a saturated audience underperforms.
+    const winningExemplarsBlock = (() => {
+      const exemplars = creative?.winningExemplars ?? [];
+      if (exemplars.length === 0) return '';
+      const top5 = [...exemplars]
+        .sort((a, b) => b.ctr - a.ctr)
+        .slice(0, 5);
+      const formatted = top5
+        .map((e: any, i: number) =>
+          `  ${i + 1}. [${e.hookStyle}, CTR ${e.ctr.toFixed(2)}%${e.audienceSegment ? `, ${e.audienceSegment}` : ''}] "${e.hookLine}"`,
+        )
+        .join('\n');
+      return `\nPAST WINNING HOOK LINES (verbatim — use as inspiration for structure/tone/specificity, NOT to copy):\n${formatted}\n`;
+    })();
+
     // Strategy mode
     const strategy = company.pipelineConfig?.campaignStrategy ?? 'balanced';
     const strategyMode = strategy === 'conservative'
@@ -381,6 +404,13 @@ ${competitorHooks}
 Study what angles competitors are already running. If they own "pain_point", try "bold_claim" or "before_after" instead.
 
 CAMPAIGN STRATEGY: ${strategyMode}
+
+AUDIENCE STAGE: ${brief.audienceStage ?? 'cold'} — copy MUST match this stage:
+${(brief.audienceStage ?? 'cold') === 'cold'
+  ? '• COLD (prospecting): Audience has NOT seen this brand before. Problem-first structure: agitate pain, introduce brand AS the solution, end with offer + CTA. Full 3-5 line primaryText. Brand introduction is required. Hook must stop the scroll cold.'
+  : (brief.audienceStage === 'warm')
+  ? '• WARM (retargeting site visitors): Audience already knows the brand from a recent visit. SKIP brand intro. Lead with offer-recall ("Aapki ₹1 reading wait kar rahi hai"), objection-handling ("Pehli baat free — kuch lagega bhi nahi"), or specific reason-to-return. 2-3 line primaryText is enough. NEVER use cold-prospect hooks like "Kya aap bhi…" — they sound weird to someone who already engaged.'
+  : '• HOT (cart abandoners / 30d engaged): Audience has shown high purchase intent recently. Cart-recovery urgency. Reference the specific abandoned action ("Aapki kundli reading 2 din se wait kar rahi hai"). Time-bound urgency ("Aaj raat tak ₹1 mein"). 1-2 line primaryText, ruthlessly short. Hook = the offer + a deadline.'}
 
 ═══════════════════════════════════════════════════════
 CREATIVE SPECS
@@ -476,7 +506,7 @@ FORMAT: Vertical 9:16, photorealistic, 5-6 sentences.
 
 PAST VISUAL LEARNINGS:
 ${visualLearnings}
-
+${winningExemplarsBlock}
 AVOID:
 - Generic images where the main concept is small/hidden — if the ad is about a specific date, that date must DOMINATE
 - Lifestyle photos with no clear focal point

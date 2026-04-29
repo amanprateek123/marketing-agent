@@ -19,6 +19,7 @@ interface ReplacementJobData {
   fatiguedHook: string;
   replacementHook: string;
   adSetId: string;         // target ad set for add_creative mode
+  audienceStage?: 'cold' | 'warm' | 'hot';  // retarget pods get 'warm' so generated copy isn't cold-prospect-shaped
 }
 
 @Processor(QUEUES.CREATIVE_PRODUCTION)
@@ -39,7 +40,7 @@ export class CreativeReplacementProcessor extends WorkerHost {
   }
 
   async process(job: Job<ReplacementJobData>): Promise<void> {
-    const { tenantId, campaignId, briefId, fatiguedAdId, fatiguedHook, replacementHook, adSetId } = job.data;
+    const { tenantId, campaignId, briefId, fatiguedAdId, fatiguedHook, replacementHook, adSetId, audienceStage } = job.data;
     const isAddMode = !fatiguedAdId; // add_creative vs replace_creative
     this.logger.log(`Creative ${isAddMode ? 'addition' : 'replacement'} starting: tenantId=${tenantId} hook=${replacementHook}`);
 
@@ -59,6 +60,10 @@ export class CreativeReplacementProcessor extends WorkerHost {
       await updateReplacementStatus('failed');
       return;
     }
+
+    // Load campaign early so deriveAudienceStage can read its adSets[].audienceType.
+    // Re-loaded later (line further down) for the post-launch ad-set update — that's fine.
+    const campaignForStage = await this.campaignModel.findOne({ _id: campaignId }).lean().exec();
 
     await updateReplacementStatus('producing');
 
@@ -92,6 +97,9 @@ export class CreativeReplacementProcessor extends WorkerHost {
             ...(fatiguedHook ? [fatiguedHook] : []),
             ...this.getSaturatedHooksForAudience(company, (brief as any).targetSegment),
           ],
+          // Retarget pods get 'warm' stage so the generator writes offer-recall copy,
+          // not cold-prospect "Kya aap bhi…" hooks the audience already engaged past.
+          audienceStage: audienceStage ?? this.deriveAudienceStage(campaignForStage, adSetId),
         },
       );
     } catch (err: any) {
@@ -228,6 +236,23 @@ export class CreativeReplacementProcessor extends WorkerHost {
    * persisted saturation map. Used to populate avoidHookStyles in replacement
    * briefs so the generator doesn't pick a hook the audience is already exhausted on.
    */
+  /**
+   * Map a target ad set's audienceType to a CreativeBrief audienceStage. Retarget
+   * and custom audiences get 'warm' so the generator writes offer-recall copy that
+   * makes sense to someone who already engaged with the brand. Everything else
+   * (broad / advantage_plus / lookalike / interest) is cold prospecting.
+   */
+  private deriveAudienceStage(
+    campaign: any,
+    adSetId: string,
+  ): 'cold' | 'warm' | 'hot' {
+    if (!adSetId) return 'cold';
+    const adSet = (campaign?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId);
+    const audienceType = adSet?.audienceType ?? 'unknown';
+    if (audienceType === 'retarget' || audienceType === 'custom') return 'warm';
+    return 'cold';
+  }
+
   private getSaturatedHooksForAudience(company: any, targetSegment?: string): string[] {
     const map = company?.learnings?.creative?.audienceHookSaturation as
       | Record<string, Record<string, number>>

@@ -23,6 +23,7 @@ export interface BriefData {
   referenceVideoPrompt?: string;  // Original video prompt to replicate style for creative replacements
   forcedHookStyle?: string;        // when set, ALL variants must use this hookStyle (replace_creative path)
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
+  audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
 }
 
 @Injectable()
