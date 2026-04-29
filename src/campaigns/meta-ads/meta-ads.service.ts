@@ -19,6 +19,7 @@ export interface MetaLaunchResult {
       adId: string;
       creativeId: string;
       copyVariantIndex: number;
+      format: 'video' | 'image';   // populated at launch — required to measure mixed-format ad sets
     }[];
   }[];
 }
@@ -265,6 +266,7 @@ export class MetaAdsService {
         config.accessToken,
         config.campaignName,
         config.objective,
+        config.declaredSpecialAdCategories ?? [],
       );
 
       // Step 2: Create ad sets + ads
@@ -319,7 +321,7 @@ export class MetaAdsService {
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
-              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'video' });
             } else if (variantImageHash) {
               const { adId, creativeId } = await this.createAd(
                 config.accountId,
@@ -333,7 +335,7 @@ export class MetaAdsService {
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
-              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'image' });
             }
             continue;
           }
@@ -353,7 +355,7 @@ export class MetaAdsService {
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
-            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'video' });
           }
 
           // image-only or both → create image ad using variant-specific hash
@@ -371,7 +373,7 @@ export class MetaAdsService {
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
-            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex });
+            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'image' });
           }
 
           // fallback: if neither image nor video available, skip this variant
@@ -448,8 +450,9 @@ export class MetaAdsService {
     accessToken: string,
     name: string,
     objective: string,
+    specialAdCategories: string[],
   ): Promise<string> {
-    this.logger.log(`Creating campaign: ${name}`);
+    this.logger.log(`Creating campaign: ${name}${specialAdCategories.length ? ` | special_ad_categories: ${specialAdCategories.join(',')}` : ''}`);
 
     const response = await this.metaApiCall(
       'POST',
@@ -458,7 +461,10 @@ export class MetaAdsService {
         name,
         objective,
         status: 'PAUSED',
-        special_ad_categories: [],
+        // Was hardcoded `[]` — regulated verticals (credit/employment/housing/
+        // social-issues) launched without the declaration → strike risk. Now
+        // sourced from company.meta.specialAdCategories per tenant.
+        special_ad_categories: specialAdCategories,
         access_token: accessToken,
       },
     );

@@ -75,12 +75,22 @@ export interface DeliveryConfig {
   notionDatabaseId?: string;
 }
 
+export type MetaSpecialAdCategory = 'CREDIT' | 'EMPLOYMENT' | 'HOUSING' | 'ISSUES_ELECTIONS_POLITICS';
+
 export interface MetaAdsConfig {
   accessToken: string;    // Meta Ads API access token (per tenant)
   accountId: string;      // Primary Meta Ads account ID (e.g. act_123456)
   accountIds?: string[];  // All Meta Ads account IDs — importer pulls from all of them
   pixelId?: string;       // Meta Pixel for conversion tracking (shared across accounts)
   pageId?: string;        // Facebook Page ID for ad identity
+  /**
+   * Meta-required special-ad-categories declaration. MUST be set for tenants in
+   * regulated verticals — credit (loans/EMI), employment (hiring/jobs), housing
+   * (rentals/sales), or social issues / elections / politics. Running ads in
+   * these verticals without the declaration is a high-severity Meta policy
+   * violation and risks Business Manager restriction.
+   */
+  specialAdCategories?: MetaSpecialAdCategory[];
 }
 
 export interface CompanyPrompts {

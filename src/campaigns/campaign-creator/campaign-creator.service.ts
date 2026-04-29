@@ -75,6 +75,11 @@ export class CampaignCreatorService {
             keyMessage: brief.keyMessage,
             conversionBridge: brief.conversionBridge,
             suggestedBudget: brief.suggestedBudget,
+            // Without `product`, the review team's `(brief as any).product` resolved
+            // to undefined — productBlock, audience segments, conversionEvent, and
+            // landing-URL lookup all fell through to defaults on every campaign.
+            product: brief.product ?? '',
+            audienceStage: (brief as any).audienceStage ?? 'cold',
           },
           creativePackage,
           company,
@@ -453,7 +458,7 @@ export class CampaignCreatorService {
       videoId,
       selectedCopyIndex,
       landingUrl,
-      declaredSpecialAdCategories: (company.meta as any)?.specialAdCategories ?? [],
+      declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
     });
 
     // Only activate if all expected ads were created
@@ -491,6 +496,7 @@ export class CampaignCreatorService {
             metaAdId: ad.adId,
             copyVariantIndex: ad.copyVariantIndex,
             hookStyle: copyVariants[ad.copyVariantIndex]?.hookStyle ?? '',
+            format: ad.format,    // 'video' | 'image' — required to attribute mixed-format performance
             status: 'active',
           })),
         })),

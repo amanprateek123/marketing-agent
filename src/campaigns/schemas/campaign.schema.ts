@@ -194,6 +194,11 @@ export class Campaign {
       metaAdId: string;
       copyVariantIndex: number;
       hookStyle: string;
+      // Which creative format actually shipped — 'video' or 'image'. Set at launch.
+      // Required for measuring 'mixed' ad sets (1 video + N image): without this,
+      // audit + hookStyle learning conflate format-level performance with
+      // hook-level performance because both are in the same ad set bucket.
+      format?: 'video' | 'image';
       status: string;
       metrics?: {
         spend: number;

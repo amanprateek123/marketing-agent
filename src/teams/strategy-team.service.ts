@@ -251,6 +251,11 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       topic: winner.topic, angle: winner.angle, platform: winner.platform,
       format: winner.format, audience: winner.audience,
       hook: winner.hook, keyMessage: winner.keyMessage, conversionBridge: winner.conversionBridge,
+      // Persist audienceStage on the CreativeBrief too — campaign-creator reads
+      // from CreativeBriefDocument, not IntelligenceBrief, so without this the
+      // field is dropped at this boundary and the Campaign Review Team always
+      // sees undefined → falls back to cold prospecting regardless of brief intent.
+      audienceStage: ['cold', 'warm', 'hot'].includes(winner.audienceStage) ? winner.audienceStage : 'cold',
       suggestedBudget: winner.suggestedBudget ?? 0,
       finalScore: winner.priorityScore ?? 0,
       selected: true,

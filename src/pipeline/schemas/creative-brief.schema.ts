@@ -41,6 +41,15 @@ export class CreativeBrief {
   @Prop({ required: true })
   conversionBridge: string;
 
+  /**
+   * Funnel stage carried over from the IntelligenceBrief — drives the Campaign
+   * Review Team's ad-set targeting choice (cold → AP/lookalike prospecting,
+   * warm → LAL + visitors retarget, hot → cart-30d retarget). Default 'cold'
+   * for backward compat with briefs created before this field existed.
+   */
+  @Prop({ required: false, enum: ['cold', 'warm', 'hot'], default: 'cold' })
+  audienceStage?: 'cold' | 'warm' | 'hot';
+
   @Prop({ required: true, default: 0 })
   suggestedBudget: number;
 

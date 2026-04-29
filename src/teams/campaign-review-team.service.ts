@@ -85,6 +85,8 @@ export class CampaignReviewTeamService {
       keyMessage: string;
       conversionBridge: string;
       suggestedBudget: number;
+      product?: string;                       // product name — drives productBlock + landing URL + audience lookup
+      audienceStage?: 'cold' | 'warm' | 'hot'; // cold prospecting / warm retarget / hot cart-recovery — branches ad-set targeting
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -106,6 +108,8 @@ export class CampaignReviewTeamService {
       topic: string; angle: string; platform: string; format: string;
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       suggestedBudget: number;
+      product?: string;
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -135,6 +139,8 @@ export class CampaignReviewTeamService {
       topic: string; angle: string; platform: string; format: string;
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       suggestedBudget: number;
+      product?: string;
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -318,6 +324,8 @@ Rules:
       topic: string; angle: string; platform: string; format: string;
       audience: string; hook: string; keyMessage: string; conversionBridge: string;
       suggestedBudget: number;
+      product?: string;
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -389,6 +397,8 @@ Return ONLY this JSON (no markdown, no explanation):
       keyMessage: string;
       conversionBridge: string;
       suggestedBudget: number;
+      product?: string;
+      audienceStage?: 'cold' | 'warm' | 'hot';
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -472,6 +482,32 @@ ${audiencePerfContext ? 'Audience data available — see context brief.' : 'No a
     const allVariantsArr = variantCount > 0
       ? `[${Array.from({ length: variantCount }, (_, i) => i).join(', ')}]`
       : `[0, 1, 2, 3]`;
+
+    // ── Audience-stage branch — drives ad-set targeting choice ───────────────
+    // The Strategy Team labels each brief cold | warm | hot. Without branching here,
+    // a hot cart-recovery brief launches as cold prospecting (advantage_plus broad)
+    // — wrong audience entirely, all spend wasted on people who already saw the
+    // product but didn't convert. Each stage demands a different ad-set shape.
+    const audienceStage = brief.audienceStage ?? 'cold';
+    const audienceStageBlock = audienceStage === 'hot'
+      ? `AUDIENCE STAGE: HOT (cart-recovery / abandoned-checkout)
+- This brief targets people who started checkout in the last 30 days but did not buy.
+- REQUIRED: ad sets must use a custom audience of cart-abandoners (look for an audience whose name contains "Cart" / "AddToCart" / "Abandoned" in the AVAILABLE META AUDIENCES list).
+- Excluded: advantage_plus, lookalike, broad — none of these target the actual hot audience.
+- If no cart-abandoner audience exists → fall back to "Visitors_30d" custom audience or, last resort, the Purchasers exclude on a tight LAL.
+- Budget: hot is the smallest, highest-intent audience — use 1 ad set, max ₹2,000/day even if total budget is higher (distribution is bounded by audience size, not budget).`
+      : audienceStage === 'warm'
+      ? `AUDIENCE STAGE: WARM (retargeting / past visitors / lookalike-of-buyers)
+- This brief targets people who interacted with the brand or look like past buyers — not cold prospecting.
+- REQUIRED: ad sets must use either a "Visitors_30d" custom audience, a "Lookalike_1pct" audience, or both.
+- Discouraged: pure "advantage_plus" / broad — those are prospecting, defeat the warm-stage intent.
+- Use 1-2 ad sets max — visitors retarget + LAL are usually enough.
+- Excluded audiences: always exclude past Purchasers from prospecting ad sets (don't pay to retarget existing buyers).`
+      : `AUDIENCE STAGE: COLD (prospecting — first-time exposure)
+- This brief targets people who haven't engaged with the brand yet.
+- Standard prospecting: advantage_plus + (lookalike-1% if available) + (interest-based if you have real Meta interest IDs).
+- Excluded audiences: ALWAYS exclude past Purchasers and recent Visitors from prospecting ad sets — don't pay to re-show ads to people already in the funnel.
+- Use 1-3 ad sets following the AD SET COUNT rules below.`;
 
     const formatSection = hasFormatData
       ? `CREATIVE FORMAT — video vs image per ad set:
@@ -572,6 +608,8 @@ AD SETS:
   * If no retargeting-appropriate hookStyle exists → use selected variant only e.g. [${selectedCopyIndex}]
   * Never assign "curiosity", "problem_awareness", or "question" hookStyle to retargeting — they already know the problem
 - budgetPercent across all ad sets must sum to 100.
+
+${audienceStageBlock}
 
 ${formatSection}
 
