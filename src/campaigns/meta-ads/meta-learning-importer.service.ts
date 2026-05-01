@@ -14,6 +14,7 @@ import { EnrichedCampaign, EnrichedCampaignDocument } from '../schemas/enriched-
 import { PatternCalculatorService } from './pattern-calculator.service';
 import { CampaignSyncService } from './campaign-sync.service';
 import { extractConversions } from './conversion-extractor.util';
+import { inferFormatFromCreative as sharedInferFormatFromCreative } from '../../common/creative/hook-inference.util';
 import { CompaniesService } from '../../companies/companies.service';
 import { QUEUES } from '../../scheduler/queue.constants';
 
@@ -318,26 +319,28 @@ export class MetaLearningImporterService {
 
     const productPatterns = this.patternCalculator.calculatePatterns(enrichedCampaigns, products, conversionTypes);
 
-    // Save patterns to company.learnings (race-safe per-slice writes)
+    // Save patterns to company.learnings (race-safe per-slice writes).
+    // Hook ranking now uses Wilson lower bound (lowerCTR) + min-ad-count +
+    // min-impression floor — same statistical guards as Day-7 quick scan.
+    // Was: raw avgCTR sort which could crown 1-ad outliers. Format ranking
+    // still uses conversionShare since formats have low cardinality (4-5).
     if (productPatterns.length > 0) {
       const bestPattern = productPatterns[0];
-      const winningHooks = bestPattern.hookPerformance
-        .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
-        .sort((a, b) => b.avgCTR - a.avgCTR)
-        .slice(0, 3)
-        .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
-      const winnerSet = new Set(
-        bestPattern.hookPerformance
-          .filter(h => h.avgCTR > 0 && h.style !== 'unknown')
-          .sort((a, b) => b.avgCTR - a.avgCTR)
-          .slice(0, 3)
-          .map(h => h.style),
+      const HOOK_MIN_ADS = 5;
+      const HOOK_MIN_IMPS = 1500;
+      const eligibleHooks = bestPattern.hookPerformance.filter(
+        h => h.style !== 'unknown' && h.adCount >= HOOK_MIN_ADS && h.totalImpressions >= HOOK_MIN_IMPS,
       );
-      const losingHooks = bestPattern.hookPerformance
-        .filter(h => h.adCount >= 3 && !winnerSet.has(h.style) && h.style !== 'unknown')
-        .sort((a, b) => a.avgCTR - b.avgCTR)
+      const sortedByLB = [...eligibleHooks].sort((a, b) => b.lowerCTR - a.lowerCTR);
+      const winningHooks = sortedByLB
+        .slice(0, 3)
+        .map(h => `${h.style} (LB ${h.lowerCTR.toFixed(2)}% / mean ${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads, ${h.totalImpressions.toLocaleString()} imp)`);
+      const winnerSet = new Set(sortedByLB.slice(0, 3).map(h => h.style));
+      const losingHooks = eligibleHooks
+        .filter(h => !winnerSet.has(h.style))
+        .sort((a, b) => a.lowerCTR - b.lowerCTR)
         .slice(0, 2)
-        .map(h => `${h.style} (${h.avgCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
+        .map(h => `${h.style} (LB ${h.lowerCTR.toFixed(2)}% CTR, ${h.adCount} ads)`);
       const winningFormats = bestPattern.formatPerformance
         .filter(f => f.format !== 'unknown')
         .sort((a, b) => b.conversionShare - a.conversionShare)
@@ -497,9 +500,13 @@ export class MetaLearningImporterService {
       query.product = { $regex: filters.product, $options: 'i' };
     }
 
+    // Was: sort by 'whatWorked.bestROAS' — but bestROAS was hallucinated
+    // (revenue never fetched from Meta) and is no longer written by IM1.
+    // Sort by real winner-volume signals instead: most conversions first,
+    // tiebreak on lowest CPA (only meaningful if conversions > 0).
     const studies = await this.caseStudyModel
       .find(query)
-      .sort({ 'whatWorked.bestROAS': -1 })
+      .sort({ totalConversions: -1, 'whatWorked.bestCPA': 1 })
       .limit(filters.limit ?? 5)
       .lean()
       .exec();
@@ -990,35 +997,31 @@ ${JSON.stringify(campaignSummaries, null, 2)}
 For EACH campaign, create a case study. Return ONLY valid JSON array:
 [
   {
-    "campaignName": "exact campaign name",
+    "campaignName": "exact campaign name (must match input)",
     "product": "which product this campaign sold (best guess from name/context)",
-    "dateRange": "start - end date",
-    "durationDays": number,
-    "totalSpend": number in INR,
-    "totalConversions": number,
     "context": "what was the market context — any seasonal event, trend, or competitor move that influenced this",
     "whatWorked": {
-      "hooks": ["hook styles that performed (infer from ad names/copy)"],
-      "audiences": ["audience types that converted"],
-      "formats": ["ad formats that worked"],
-      "bestCPA": lowest CPA number,
-      "bestROAS": highest ROAS number
+      "hooks": ["hookStyle labels that performed — use ONLY: pain_point, bold_claim, price_shock, social_proof, curiosity_gap, before_after, urgency"],
+      "audiences": ["audience types that converted — lookalike, advantage_plus, retarget, broad, interest, custom"],
+      "formats": ["ad formats — derive from ads[].format field in the input data, NEVER guess from ad names"]
     },
     "whatFailed": {
-      "hooks": ["hook styles that flopped"],
+      "hooks": ["hookStyles that flopped (same allowlist as above)"],
       "audiences": ["audiences that wasted budget"],
-      "reason": "why it likely failed"
+      "reason": "ONE sentence on why it likely failed — must reference a specific metric (CTR, CPA, frequency, spend) from the input"
     },
-    "lesson": "one sentence — the key takeaway for future campaigns"
+    "lesson": "ONE sentence key takeaway. MUST cite a number or named entity from the input data — no folk wisdom."
   }
 ]
 
 Rules:
-- Only include campaigns with spend > ₹500
-- Be specific about WHY something worked or failed — don't just say "it worked"
-- Infer product from campaign name (e.g. "Nadi Report" → Nadi Report product)
-- If you can't determine hook style from ad names, say "unknown"
-- Keep each lesson to 1-2 sentences max`,
+- Numeric fields (totalSpend, totalConversions, bestCPA, durationDays, dateRange) are computed by the system — DO NOT include them in your output. Focus on narrative + categorical fields only.
+- Format MUST come from each ad's "format" field in the input — image-only campaigns must NOT have "video" in formats.
+- Hook labels MUST be from the canonical taxonomy above. "ugc" / "personal_story" / "question" are NOT valid — map them to social_proof / curiosity_gap.
+- Be specific about WHY something worked or failed — cite a metric.
+- Infer product from campaign name (e.g. "Nadi Report" → Nadi Report product).
+- If you can't determine hook style from ad copy, omit that hook (don't guess).
+- Keep each lesson to 1-2 sentences max.`,
       maxTurns: 3,
     });
 
@@ -1028,20 +1031,51 @@ Rules:
         ? fenceMatch[1].trim()
         : result.content.slice(result.content.indexOf('['), result.content.lastIndexOf(']') + 1);
       const parsed = JSON.parse(jsonStr);
-      // Sanitize numeric fields — Claude sometimes returns "Unknown" or null
-      return parsed.map((cs: any) => ({
-        ...cs,
-        durationDays: typeof cs.durationDays === 'number' ? cs.durationDays : 0,
-        totalSpend: typeof cs.totalSpend === 'number' ? cs.totalSpend : parseFloat(cs.totalSpend) || 0,
-        totalConversions: typeof cs.totalConversions === 'number' ? cs.totalConversions : parseInt(cs.totalConversions) || 0,
-        whatWorked: {
-          ...cs.whatWorked,
-          bestCPA: typeof cs.whatWorked?.bestCPA === 'number' ? cs.whatWorked.bestCPA : parseFloat(cs.whatWorked?.bestCPA) || 0,
-          bestROAS: typeof cs.whatWorked?.bestROAS === 'number' ? cs.whatWorked.bestROAS : parseFloat(cs.whatWorked?.bestROAS) || 0,
-        },
-      }));
-    } catch {
-      this.logger.warn('Failed to parse case studies JSON');
+
+      // ── Server-side numeric writeback ────────────────────────────────────
+      // The LLM no longer extracts totalSpend/totalConversions/bestCPA/dateRange
+      // — those are computed deterministically from the source data and joined
+      // back here. bestROAS is dropped entirely (revenue isn't fetched from
+      // Meta, so any number the LLM produced was hallucinated). Was: LLM
+      // re-extracted numbers from the same data it was about to summarize and
+      // there was no comparison check, so it could "round" or invent.
+      const summaryByName = new Map(campaigns.map(c => [c.name, this.summarizeCampaign(c)]));
+      return parsed
+        .map((cs: any) => {
+          const src = summaryByName.get(cs.campaignName);
+          if (!src) {
+            this.logger.warn(`Case study refers to unknown campaign "${cs.campaignName}" — dropping`);
+            return null;
+          }
+          const adCpas = (src.ads ?? [])
+            .map((a: any) => a.conversions > 0 ? a.spend / a.conversions : null)
+            .filter((x: number | null): x is number => x !== null && x > 0);
+          const bestCPA = adCpas.length > 0 ? Math.min(...adCpas) : (src.cpa ?? 0);
+          const start = src.startDate ? new Date(src.startDate) : null;
+          const end = src.endDate ? new Date(src.endDate) : new Date();
+          const durationDays = start
+            ? Math.max(1, Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)))
+            : 0;
+          const dateRange = start
+            ? `${start.toISOString().slice(0, 10)} → ${end.toISOString().slice(0, 10)}`
+            : 'unknown';
+          return {
+            ...cs,
+            // Trusted numeric fields — overwritten from deterministic computation
+            durationDays,
+            dateRange,
+            totalSpend: src.spend ?? 0,
+            totalConversions: src.conversions ?? 0,
+            whatWorked: {
+              ...cs.whatWorked,
+              bestCPA,
+              // bestROAS deliberately omitted — never fetched from Meta, was hallucinated
+            },
+          };
+        })
+        .filter(Boolean);
+    } catch (err: any) {
+      this.logger.warn(`Failed to parse case studies JSON: ${err.message}`);
       return [];
     }
   }
@@ -1084,10 +1118,17 @@ Rules:
         const title = creative?.creative?.title
           ?? creative?.creative?.object_story_spec?.link_data?.name
           ?? '';
+        // Format must be EXTRACTED from the creative payload, not inferred by
+        // the LLM from ad names. Was: ad-name regex guessed at format and the
+        // LLM then "verified" it from those name guesses → image-only campaigns
+        // got falsely tagged "video out-converted" in case studies.
+        const format = sharedInferFormatFromCreative(creative?.creative, ad.ad_name ?? '');
         return {
           name: ad.ad_name,
+          format,
           spend: parseFloat(ad.spend ?? '0'),
           clicks: parseInt(ad.clicks ?? '0', 10),
+          impressions: parseInt(ad.impressions ?? '0', 10),
           ctr: parseFloat(ad.ctr ?? '0'),
           conversions: this.extractConversions(ad.actions, conversionTypes),
           copyBody: body.slice(0, 300),

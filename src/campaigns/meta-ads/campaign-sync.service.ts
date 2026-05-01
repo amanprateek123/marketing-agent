@@ -5,6 +5,11 @@ import axios from 'axios';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { extractConversions } from './conversion-extractor.util';
+import {
+  inferHookStyleFromCopy,
+  inferAudienceType as sharedInferAudienceType,
+  inferFormatFromCreative as sharedInferFormatFromCreative,
+} from '../../common/creative/hook-inference.util';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -472,41 +477,20 @@ export class CampaignSyncService {
     });
   }
 
+  // Inference helpers delegated to shared util (single source of truth).
+  // Was: divergent regex banks producing 9 styles incl `ugc / question /
+  // fear_then_relief / curiosity / personal_story` — none of which exist in
+  // the canonical hook-styles taxonomy used by Day-7 saturation + replacement.
   private inferAudienceType(adSetName: string): string {
-    const lower = adSetName.toLowerCase();
-    if (lower.includes('lookalike') || lower.includes('lal') || lower.includes('lla')) return 'lookalike';
-    if (lower.includes('advantage') || lower.includes('a+')) return 'advantage_plus';
-    if (lower.includes('retarget') || lower.includes('remarket')) return 'retarget';
-    if (lower.includes('interest') || lower.includes('inmarket')) return 'interest';
-    if (lower.includes('broad')) return 'broad';
-    if (lower.includes('performing')) return 'performing_export';
-    if (lower.includes('custom')) return 'custom';
-    return 'other';
+    return sharedInferAudienceType(adSetName);
   }
 
   private inferFormatFromCreative(creative: any, adName: string): string {
-    if (creative?.object_story_spec?.video_data) return 'video';
-    if (creative?.object_story_spec?.link_data?.child_attachments?.length > 0) return 'carousel';
-    if (creative?.object_story_spec?.link_data) return 'image';
-    const name = adName.toLowerCase();
-    if (name.includes('reel')) return 'reel';
-    if (name.includes('story') || name.includes('stories')) return 'story';
-    if (name.includes('video')) return 'video';
-    if (name.includes('carousel')) return 'carousel';
-    return 'image';
+    return sharedInferFormatFromCreative(creative, adName);
   }
 
   private inferHookStyle(adName: string, copyBody: string, copyTitle: string): string {
-    const combined = `${adName} ${copyBody} ${copyTitle}`.toLowerCase();
-    if (/ugc|testimonial|real customer|meri kahani/.test(combined)) return 'ugc';
-    if (/\d+[\s,]*(?:lakh|lac|k)\+?\s*(?:customer|log|review)/.test(combined)) return 'social_proof';
-    if (/\?|kya aap|kyun|kaise|did you know|are you/.test(combined)) return 'question';
-    if (/problem|pareshaan|tension|dard|dosha|sade sati/.test(combined)) return 'fear_then_relief';
-    if (/secret|jaano|discover|raaz|khulasa/.test(combined)) return 'curiosity';
-    if (/sirf aaj|limited|abhi|last chance|jaldi/.test(combined)) return 'urgency';
-    if (/guaranteed|100%|proven|sabse|best|#1/.test(combined)) return 'bold_claim';
-    if (/meri|mera|maine|my story|i was|personal/.test(combined)) return 'personal_story';
-    return 'unknown';
+    return inferHookStyleFromCopy(adName, copyBody, copyTitle);
   }
 
   private extractConversions(actions: any[] | undefined, conversionTypes: Set<string>): number {

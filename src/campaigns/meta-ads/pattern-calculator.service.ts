@@ -1,5 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { extractConversions } from './conversion-extractor.util';
+import {
+  inferHookStyleFromCopy,
+  inferAudienceType as sharedInferAudienceType,
+  inferFormatFromCreative as sharedInferFormatFromCreative,
+  computeUnknownRatio,
+} from '../../common/creative/hook-inference.util';
+import { wilsonLowerBound, inverseNormalCdf } from '../../common/statistics/bayesian-estimator.util';
 
 /**
  * PatternCalculator — pure TypeScript math, no Claude.
@@ -18,12 +25,16 @@ export interface ProductPatterns {
   avgCPA: number;
   avgROAS: number;
 
-  // Hook performance
+  // Hook performance — now includes Wilson LB on impressions-weighted CTR
+  // (was: simple avgCTR sort that ranked 1-ad outliers above 50-ad workhorses)
   hookPerformance: {
     style: string;
-    avgCTR: number;
+    avgCTR: number;          // impressions-weighted (Σclicks/Σimpressions) — was unweighted before
+    lowerCTR: number;        // Wilson 95% lower bound on the impressions-weighted CTR (Bonferroni-corrected z)
     avgCPA: number;
     adCount: number;
+    totalImpressions: number;
+    totalClicks: number;
     winRate: number;       // % of times this hook beat the ad-set average
   }[];
   bestHookStyle: string | null;
@@ -195,14 +206,24 @@ export class PatternCalculatorService {
       ? (totalConversions * product.price) / totalSpend
       : 0;
 
-    // Hook performance — infer hook style from ad name + copy body
+    // Hook performance — infer hook style from ad name + copy body, then rank
+    // by Wilson lower bound on impressions-weighted CTR (Bonferroni-corrected
+    // for the cohort size). Was: raw avgCTR sort with no min-N floor → a 1-ad
+    // outlier at 4% CTR could beat a 50-ad workhorse at 3.5%. Day-7 quick scan
+    // got this same treatment in commit a916f64; mirroring it here so the seed
+    // learnings use the same statistical guards as the ongoing learning loop.
     const hookPerformance = this.calculateHookPerformance(allAds);
-    const sortedHooksByCtr = [...hookPerformance].sort((a, b) => b.avgCTR - a.avgCTR);
-    const bestHook = sortedHooksByCtr[0];
-    const winningHookStyles = new Set(sortedHooksByCtr.slice(0, 3).map(h => h.style));
-    const worstHook = [...hookPerformance]
-      .filter(h => h.adCount >= 3 && !winningHookStyles.has(h.style))
-      .sort((a, b) => a.avgCTR - b.avgCTR)[0] ?? null;
+    const HOOK_MIN_AD_COUNT = 5;
+    const HOOK_MIN_IMPRESSIONS = 1500;
+    const eligibleHooks = hookPerformance.filter(
+      h => h.style !== 'unknown' && h.adCount >= HOOK_MIN_AD_COUNT && h.totalImpressions >= HOOK_MIN_IMPRESSIONS,
+    );
+    const sortedHooksByLB = [...eligibleHooks].sort((a, b) => b.lowerCTR - a.lowerCTR);
+    const bestHook = sortedHooksByLB[0];
+    const winningHookStyles = new Set(sortedHooksByLB.slice(0, 3).map(h => h.style));
+    const worstHook = eligibleHooks
+      .filter(h => !winningHookStyles.has(h.style))
+      .sort((a, b) => a.lowerCTR - b.lowerCTR)[0] ?? null;
 
     // Format performance — creative type from Meta + adset-level conversions (accurate)
     const formatPerformance = this.calculateFormatPerformance(allAdSets, totalConversions);
@@ -210,9 +231,16 @@ export class PatternCalculatorService {
     const bestFormat = sortedFormats[0];
     const winningFormats = new Set(sortedFormats.slice(0, 2).map(f => f.format));
 
-    // Audience performance
+    // Audience performance — bestAudience now requires min ad-set count to
+    // qualify. Was: a `lookalike` with 2 ad sets and 8 lucky conversions
+    // ranked above `broad` with 40 ad sets and 200 conversions.
     const audiencePerformance = this.calculateAudiencePerformance(allAdSets, product.price);
-    const bestAudience = audiencePerformance.sort((a, b) => b.avgROAS - a.avgROAS)[0];
+    const AUDIENCE_MIN_ADSET_COUNT = 3;
+    const eligibleAudiences = audiencePerformance.filter(
+      a => a.audienceType !== 'other' && a.adSetCount >= AUDIENCE_MIN_ADSET_COUNT,
+    );
+    const bestAudience = eligibleAudiences.sort((a, b) => b.avgROAS - a.avgROAS)[0]
+                       ?? audiencePerformance.sort((a, b) => b.avgROAS - a.avgROAS)[0];   // fallback when no audience meets floor
 
     // Demographics
     const topDemographic = this.calculateTopDemographic(allDemographics);
@@ -259,34 +287,65 @@ export class PatternCalculatorService {
   }
 
   private calculateHookPerformance(ads: any[]): ProductPatterns['hookPerformance'] {
-    const hookMap = new Map<string, { totalCTR: number; totalCPA: number; count: number; wins: number }>();
+    // Now tracks Σimpressions + Σclicks per hook (was: sum of per-ad CTR
+    // averages, which weighted a 100-impression outlier identically to a
+    // 100k-impression workhorse). Wilson lower bound on the impressions-
+    // weighted rate gives a defensible "is this hook actually winning"
+    // signal at small N.
+    type HookAgg = {
+      totalClicks: number;
+      totalImpressions: number;
+      totalSpend: number;
+      totalConversions: number;
+      count: number;
+    };
+    const hookMap = new Map<string, HookAgg>();
 
     for (const ad of ads) {
       const hookStyle = this.inferHookStyle(ad.ad_name ?? ad.name ?? '', ad.copyBody, ad.copyTitle);
-      const ctr = parseFloat(ad.ctr ?? '0');
+      const impressions = parseFloat(ad.impressions ?? '0');
+      const clicks = parseFloat(ad.clicks ?? '0');
       const spend = parseFloat(ad.spend ?? '0');
       const conversions = this.extractConversions(ad.actions, ad.conversionTypes);
-      const cpa = conversions > 0 ? spend / conversions : 0;
 
       if (!hookMap.has(hookStyle)) {
-        hookMap.set(hookStyle, { totalCTR: 0, totalCPA: 0, count: 0, wins: 0 });
+        hookMap.set(hookStyle, { totalClicks: 0, totalImpressions: 0, totalSpend: 0, totalConversions: 0, count: 0 });
       }
       const entry = hookMap.get(hookStyle)!;
-      entry.totalCTR += ctr;
-      entry.totalCPA += cpa;
+      entry.totalClicks += clicks;
+      entry.totalImpressions += impressions;
+      entry.totalSpend += spend;
+      entry.totalConversions += conversions;
       entry.count++;
     }
 
-    // Calculate win rate (hooks with above-average CTR)
-    const overallAvgCTR = ads.reduce((sum, a) => sum + parseFloat(a.ctr ?? '0'), 0) / (ads.length || 1);
+    // Bonferroni z — z scales with k = #hookStyles being compared so the
+    // family-wise error stays at α=0.05. At k=7 (canonical DR taxonomy),
+    // z ≈ 2.45; at k=10, z ≈ 2.56. inverseNormalCdf clamps gracefully.
+    const k = Math.max(hookMap.size, 1);
+    const zCorrected = inverseNormalCdf(1 - 0.05 / (2 * k));
 
-    return Array.from(hookMap.entries()).map(([style, data]) => ({
-      style,
-      avgCTR: data.count > 0 ? data.totalCTR / data.count : 0,
-      avgCPA: data.count > 0 ? data.totalCPA / data.count : 0,
-      adCount: data.count,
-      winRate: data.count > 0 ? (data.totalCTR / data.count > overallAvgCTR ? 1 : 0) * 100 : 0,
-    }));
+    // Pooled-CTR baseline for winRate (impressions-weighted, not the broken
+    // unweighted mean we used before).
+    const totalImps = ads.reduce((s, a) => s + parseFloat(a.impressions ?? '0'), 0);
+    const totalClk = ads.reduce((s, a) => s + parseFloat(a.clicks ?? '0'), 0);
+    const overallCtr = totalImps > 0 ? (totalClk / totalImps) * 100 : 0;
+
+    return Array.from(hookMap.entries()).map(([style, data]) => {
+      const avgCTR = data.totalImpressions > 0 ? (data.totalClicks / data.totalImpressions) * 100 : 0;
+      const avgCPA = data.totalConversions > 0 ? data.totalSpend / data.totalConversions : 0;
+      const lowerCTR = wilsonLowerBound(data.totalClicks, data.totalImpressions, zCorrected) * 100;
+      return {
+        style,
+        avgCTR,
+        lowerCTR,
+        avgCPA,
+        adCount: data.count,
+        totalImpressions: data.totalImpressions,
+        totalClicks: data.totalClicks,
+        winRate: avgCTR > overallCtr ? 100 : 0,
+      };
+    });
   }
 
   private calculateFormatPerformance(
@@ -339,18 +398,11 @@ export class PatternCalculatorService {
 
   /**
    * Detect format from creative object type — definitive, not inferred from name.
+   * Delegated to shared util so the same logic runs in pattern-calculator,
+   * campaign-sync, and case-study summarization.
    */
   private inferFormatFromCreative(creative: any, adName: string): string {
-    if (!creative) return this.inferFormat(adName, '');
-
-    const spec = creative.object_story_spec;
-    if (spec?.video_data) return 'video';
-    if (spec?.link_data?.child_attachments?.length > 0) return 'carousel';
-    if (spec?.link_data) return 'image';
-
-    // creative.title/body present but no spec — likely a story or reel
-    // Fall back to name inference
-    return this.inferFormat(adName, '');
+    return sharedInferFormatFromCreative(creative, adName);
   }
 
   private calculateAudiencePerformance(
@@ -528,58 +580,18 @@ export class PatternCalculatorService {
     };
   }
 
-  // ─── Inference helpers ──────────────────────────────────────────────────────
+  // ─── Inference helpers (delegated to shared util — single source of truth) ─
 
   private inferHookStyle(adName: string, copyBody?: string, copyTitle?: string): string {
-    const combined = `${adName} ${copyBody ?? ''} ${copyTitle ?? ''}`.toLowerCase();
-
-    // UGC / testimonial — check first as most specific
-    if (/ugc|testimonial|real customer|actual customer|meri kahani|mere saath hua|meri story/.test(combined)) return 'ugc';
-
-    // Social proof — numbers, ratings, reviews
-    if (/\d+[\s,]*(?:lakh|lac|k|thousand|crore)\+?\s*(?:customer|log|review|order)|(?:4\.\d|5\.0)\s*(?:star|rating)|top rated|best seller|#1/.test(combined)) return 'social_proof';
-
-    // Question hook
-    if (/\?|kya aap|kya aapka|kya ho|kyun|kaise|kitna|kaun sa|kab|kya pata|jaante hain|did you know|are you|do you|have you/.test(combined)) return 'question';
-
-    // Fear / problem → relief
-    if (/problem|pareshaan|tension|dard|struggle|pareshan|takleef|mushkil|worry|anxious|scared|dar|bhay|crisis|failed|fail|negative|dosha|dosh|pap|grahan|sade sati|dhaiya/.test(combined)) return 'fear_then_relief';
-
-    // Curiosity / secret / reveal
-    if (/secret|hidden|jaano|discover|pata karo|reveal|untold|exclusive|insider|raaz|chhupayi|ankhon|khulasa/.test(combined)) return 'curiosity';
-
-    // Urgency / scarcity
-    if (/sirf aaj|limited|abhi|last chance|offer ends|hurry|jaldi|kal se|today only|expir|deadline|closing/.test(combined)) return 'urgency';
-
-    // Bold claim / fact
-    if (/guaranteed|100%|proven|scientific|authentic|original|genuine|sabse|best|number 1|#1|padh|fact|research|study|data/.test(combined)) return 'bold_claim';
-
-    // Personal story / emotional
-    if (/meri|mera|mere|maine|hamari|hamare|ek din|ek baar|my story|i was|i am|when i|my life|personal|changed my/.test(combined)) return 'personal_story';
-
-    return 'unknown';
+    return inferHookStyleFromCopy(adName, copyBody, copyTitle);
   }
 
   private inferFormat(adName: string, campaignName: string): string {
-    const combined = `${adName} ${campaignName}`.toLowerCase();
-    if (combined.includes('reel')) return 'reel';
-    if (combined.includes('carousel')) return 'carousel';
-    if (combined.includes('story') || combined.includes('stories')) return 'story';
-    if (combined.includes('video') || combined.includes('short')) return 'video';
-    if (combined.includes('feed') || combined.includes('image')) return 'feed_image';
-    return 'unknown';
+    return sharedInferFormatFromCreative(null, `${adName} ${campaignName}`);
   }
 
   private inferAudienceType(adSetName: string): string {
-    const lower = adSetName.toLowerCase();
-    if (lower.includes('lookalike') || lower.includes('lal')) return 'lookalike';
-    if (lower.includes('advantage') || lower.includes('a+')) return 'advantage_plus';
-    if (lower.includes('retarget') || lower.includes('remarket')) return 'retarget';
-    if (lower.includes('interest') || lower.includes('inmarket')) return 'interest';
-    if (lower.includes('broad')) return 'broad';
-    if (lower.includes('performing')) return 'performing_export';
-    if (lower.includes('custom')) return 'custom';
-    return 'other';
+    return sharedInferAudienceType(adSetName);
   }
 
   private extractConversions(actions: any[] | undefined, conversionTypes?: Set<string>): number {
