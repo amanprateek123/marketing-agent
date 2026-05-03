@@ -90,6 +90,13 @@ export interface RunAgentParams {
    *   { type: 'disabled' }
    */
   thinking?: { type: 'enabled'; budgetTokens?: number } | { type: 'adaptive' } | { type: 'disabled' };
+  /**
+   * Skill names to preload into the agent's context per Claude Agent SDK's
+   * `skills` option. Each name must match a directory in `.claude/skills/`.
+   * Without this, skills sit on disk but are NOT in agent context — even if
+   * the prompt references them. Pass the per-agent list from agent-skill-map.ts.
+   */
+  skills?: string[];
 }
 
 export interface AgentResult {

@@ -59,6 +59,14 @@ export class CreativeBrief {
   @Prop({ required: false, default: false })
   explorationArm?: boolean;
 
+  /**
+   * Audience segment NAME from product.audienceSegments[]. Carried from
+   * IntelligenceBrief so campaign-creator's TS resolver can translate it
+   * into ad-set targeting (age/gender/interests) at launch time.
+   */
+  @Prop({ required: false, default: '' })
+  targetSegment?: string;
+
   @Prop({ required: true, default: 0 })
   suggestedBudget: number;
 

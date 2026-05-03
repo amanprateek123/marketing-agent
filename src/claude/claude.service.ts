@@ -94,6 +94,13 @@ export class ClaudeService {
             : ['WebSearch', 'WebFetch', 'Bash'],
       };
       if (params.thinking) queryOptions.thinking = params.thinking;
+      // SDK preloads named skills from .claude/skills/ into the agent context.
+      // Without this option, the directory is unused at runtime — the prompt's
+      // "apply paid-ads skill" directive points at content the LLM doesn't have.
+      if (params.skills && params.skills.length > 0) {
+        queryOptions.skills = params.skills;
+        this.logger.log(`[${params.agentType}] Preloading skills: ${params.skills.join(', ')}`);
+      }
 
       for await (const message of query({ prompt: userMessage, options: queryOptions as any })) {
         this.logger.log(`[${params.agentType}] Message: type=${message.type} subtype=${(message as any).subtype ?? '-'}`);

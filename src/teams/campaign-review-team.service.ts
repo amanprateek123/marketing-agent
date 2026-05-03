@@ -9,6 +9,7 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
+import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
 
 const META_API_BASE = 'https://graph.facebook.com/v21.0';
 
@@ -160,6 +161,7 @@ export class CampaignReviewTeamService {
       liveContext: '',
       userMessage: call1Prompt,
       maxTurns: 5,
+      skills: skillsForAgent('CAMPAIGN_REVIEW'),   // paid-ads + ab-test-setup + marketing-psychology + competitor-alternatives
     });
 
     this.logger.log(`Campaign Review Team sequential — Call 1 done (${call1.content.length} chars)`);
@@ -194,6 +196,33 @@ export class CampaignReviewTeamService {
       // Learnings unavailable — proceed without
     }
 
+    // Conditionally include the budget-tier rule. For warm/hot briefs, the
+    // "≤₹5k → advantage_plus" rule conflicts with the audienceStage rule
+    // (warm/hot CANNOT use advantage_plus). The conflict caused the Performance
+    // Analyst to flip lookalike → advantage_plus citing the budget rule. For
+    // warm/hot, replace the budget rule with stage-aware ad-set sizing that
+    // doesn't mention advantage_plus.
+    const briefStageForReview = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
+    const isWarmOrHot = briefStageForReview === 'warm' || briefStageForReview === 'hot';
+    const adSetCountRule = isWarmOrHot
+      ? `2. AD SET COUNT (warm/hot stage — DO NOT downgrade to advantage_plus regardless of budget):
+   - Budget ≤₹3,000/day → MUST be 1 ad set, audienceType MUST be lookalike or custom (NOT advantage_plus)
+   - Budget ₹3-15k → max 2 ad sets (lookalike + custom retarget). Each ad set needs ₹2,500+/day minimum.
+   - Budget >₹15k → max 3 ad sets. Stage-appropriate audiences only.
+   - The audienceStage rule WINS over any budget-based simplification — keep lookalike/custom even at small budgets.`
+      : `2. AD SET COUNT (cold stage):
+   - Budget ≤₹5,000/day → MUST be 1 ad set (advantage_plus is acceptable here for cold prospecting only).
+   - Budget ₹5-15k → max 2 ad sets. Each ad set needs ₹3,000+/day minimum.
+   - Budget >₹15k → max 3 ad sets.
+   - If the Strategist proposed too many ad sets for the budget, consolidate them.`;
+
+    // Targeting-fix rule (#3 in original prompt): for warm/hot, do NOT auto-convert
+    // lookalike-without-id to advantage_plus. Keep as lookalike, flag the missing
+    // ID, let the launch-time audience guard pick a fallback lookalike.
+    const targetingFixRule = isWarmOrHot
+      ? `3. TARGETING (warm/hot stage): If a "lookalike" ad set has no metaAudienceId, DO NOT convert to advantage_plus — instead pick a real lookalike audience ID from the AVAILABLE META AUDIENCES list above. If none exists, keep the audienceType as "lookalike" with metaAudienceId=null and let the launch-time guard pick a fallback. NEVER downgrade to advantage_plus for warm/hot.`
+      : `3. TARGETING: Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.`;
+
     const call2UserMessage = `You are the Performance Analyst reviewing a Meta Ads campaign config for ${company.name}.
 
 Your job: challenge budget, targeting, and timing decisions with data. Be conservative on unproven, aggressive on proven.
@@ -217,12 +246,12 @@ ${analystAudiencePerf}
 
 YOUR JOB:
 1. BUDGET: Is the proposed daily budget right for the data available? Adjust if needed.
-2. AD SET COUNT: Budget ≤₹5,000/day → MUST be 1 ad set (advantage_plus). ₹5-15k → max 2. >₹15k → max 3. Each ad set needs ₹3,000+/day minimum. If the Strategist proposed too many ad sets for the budget, consolidate them.
-3. TARGETING: Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.
+${adSetCountRule}
+${targetingFixRule}
 4. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
 5. RISK: What's the downside scenario? Does the config protect against it?
 6. Fix issues directly in the output config. Set approved: true unless there is a fundamental unfixable problem.
-7. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.
+7. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.${isWarmOrHot ? '\n8. NEVER compare advantage_plus CPA to lookalike CPA — they reach different audiences. Apples-to-oranges. CPA comparisons only meaningful WITHIN the same audienceStage.' : ''}
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -256,6 +285,7 @@ Return ONLY this JSON (no markdown, no explanation):
       liveContext: '',
       userMessage: call2UserMessage,
       maxTurns: 3,
+      skills: skillsForAgent('CAMPAIGN_REVIEW'),   // critical: ab-test-setup tells Analyst learning-phase math, paid-ads kills cross-stage CPA mistake
     });
 
     this.logger.log(`Campaign Review Team sequential — Call 2 done | tenant: ${tenantId} | run: ${runId}`);
@@ -492,17 +522,21 @@ ${audiencePerfContext ? 'Audience data available — see context brief.' : 'No a
     const audienceStageBlock = audienceStage === 'hot'
       ? `AUDIENCE STAGE: HOT (cart-recovery / abandoned-checkout)
 - This brief targets people who started checkout in the last 30 days but did not buy.
-- REQUIRED: ad sets must use a custom audience of cart-abandoners (look for an audience whose name contains "Cart" / "AddToCart" / "Abandoned" in the AVAILABLE META AUDIENCES list).
-- Excluded: advantage_plus, lookalike, broad — none of these target the actual hot audience.
-- If no cart-abandoner audience exists → fall back to "Visitors_30d" custom audience or, last resort, the Purchasers exclude on a tight LAL.
-- Budget: hot is the smallest, highest-intent audience — use 1 ad set, max ₹2,000/day even if total budget is higher (distribution is bounded by audience size, not budget).`
+- HARD REQUIREMENT (overrides budget-tier rule): ad sets MUST use a custom audience of cart-abandoners (look for "Cart" / "AddToCart" / "Abandoned" in AVAILABLE META AUDIENCES).
+- FORBIDDEN: "advantage_plus", "broad", "interest" — these are cold prospecting types and defeat the hot-stage intent. Do NOT downgrade to advantage_plus even at ≤₹5k.
+- If no cart-abandoner audience exists → fall back to "Visitors_30d" custom audience, then a tight LAL with Purchasers exclude.
+- Budget: hot is smallest, highest-intent — use 1 ad set, max ₹2,000/day (distribution bounded by audience size, not budget).`
       : audienceStage === 'warm'
       ? `AUDIENCE STAGE: WARM (retargeting / past visitors / lookalike-of-buyers)
 - This brief targets people who interacted with the brand or look like past buyers — not cold prospecting.
-- REQUIRED: ad sets must use either a "Visitors_30d" custom audience, a "Lookalike_1pct" audience, or both.
-- Discouraged: pure "advantage_plus" / broad — those are prospecting, defeat the warm-stage intent.
-- Use 1-2 ad sets max — visitors retarget + LAL are usually enough.
-- Excluded audiences: always exclude past Purchasers from prospecting ad sets (don't pay to retarget existing buyers).`
+- HARD REQUIREMENT (overrides budget-tier rule below): ad sets MUST use one of: "lookalike", "retarget", "custom" audienceType.
+- FORBIDDEN: "advantage_plus" or "broad" audienceType. These are COLD prospecting types and defeat the warm-stage intent.
+  Even at ≤₹5k budget, do NOT downgrade warm to advantage_plus. The audienceStage rule wins over the budget-tier rule.
+- HARD REQUIREMENT: every ad set must have a metaAudienceId from the AVAILABLE META AUDIENCES list (lookalike or custom).
+- DO NOT compare advantage_plus CPA to lookalike CPA — they target different audiences. Apples-to-oranges.
+  Only compare CPA WITHIN the same audienceStage (lookalike vs another lookalike, etc.).
+- Use 1-2 ad sets max — visitors retarget + LAL are usually enough at warm stage.
+- Always exclude past Purchasers from these ad sets (don't pay to retarget existing buyers).`
       : `AUDIENCE STAGE: COLD (prospecting — first-time exposure)
 - This brief targets people who haven't engaged with the brand yet.
 - Standard prospecting: advantage_plus + (lookalike-1% if available) + (interest-based if you have real Meta interest IDs).
@@ -538,6 +572,7 @@ IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was 
     // PROMPT: Data first → Rules → Steps
     // ═════════════════════════════════════════════════════════════════════════
     return `
+${buildSkillBlock('CAMPAIGN_REVIEW')}
 You ARE the Campaign Strategist for ${company.name}. You will review a campaign before it goes live on Meta Ads, debating with a Performance Analyst.
 
 ═══════════════════════════════════════════════════════

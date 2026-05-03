@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
+import { buildSkillBlock, skillsForAgent } from '../../common/skills/agent-skill-map';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { AuditSignalPacket } from './signal-detector.service';
@@ -211,8 +212,13 @@ export class AuditAgentService {
     const caseStudies = (company as any).caseStudies ?? [];
 
     const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot);
+    // Skill directive prepended so the LLM applies paid-ads + ab-test-setup
+    // frameworks when reasoning about pause/scale/replace verdicts. Otherwise
+    // the auditor defaults to generic CTR/ROAS thresholds and ignores
+    // statistical guards (Wilson LB, learning-phase floors).
     const systemPrompt =
-      (company.prompts as any)?.campaignAuditor || buildDefaultAuditSystemPrompt(company.name);
+      buildSkillBlock('AUDIT_AGENT')
+      + ((company.prompts as any)?.campaignAuditor || buildDefaultAuditSystemPrompt(company.name));
     // Tenant context goes in the user message (prepended under "## TENANT CONTEXT"), not the
     // system prompt. Keeps instructions vs data separated and prevents prompt-injection-style
     // bleed-through from tenant fields like calendarContext.
@@ -230,6 +236,7 @@ export class AuditAgentService {
         // Hidden CoT before emitting JSON-only verdict. Lets the model reason about
         // sample sizes, prior decisions, and alternatives without breaking the JSON contract.
         thinking: { type: 'enabled', budgetTokens: 4000 },
+        skills: skillsForAgent('AUDIT_AGENT'),   // paid-ads + ab-test-setup loaded into auditor context
       });
 
       const verdict = this.parseVerdict(result.content);

@@ -7,6 +7,7 @@ import { AgentType } from '../claude/claude.types';
 import { ClaudeService } from '../claude/claude.service';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
+import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
 import { CreativeBrief, CreativeBriefDocument } from '../pipeline/schemas/creative-brief.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
@@ -122,6 +123,7 @@ export class StrategyTeamService {
       liveContext: '',
       userMessage: call1Prompt,
       maxTurns: 5,
+      skills: skillsForAgent('STRATEGY_TEAM'),   // SDK preloads paid-ads + marketing-psychology + product-marketing-context + customer-research + market-research + competitor-alternatives
     });
 
     this.logger.log(`Strategy Team sequential — Call 1 done (${call1.content.length} chars)`);
@@ -178,6 +180,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       liveContext: '',
       userMessage: call2UserMessage,
       maxTurns: 3,
+      skills: skillsForAgent('STRATEGY_TEAM'),   // contrarian gets same skills as strategist
     });
 
     this.logger.log(`Strategy Team sequential — Call 2 done | tenant: ${tenantId} | run: ${runId}`);
@@ -271,6 +274,11 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
         // audience description explicitly signals retargeting / cart-recovery.
         audienceStage: ['cold', 'warm', 'hot'].includes(b.audienceStage) ? b.audienceStage : 'cold',
         explorationArm: !!b._explorationArm,
+        // targetSegment from LLM — should match a name in product.audienceSegments[].
+        // The TS resolver in campaign-creator.launch() reads this and applies the
+        // segment's age/gender/interests to ad sets. Empty string = no specific
+        // segment, fallback to default targeting.
+        targetSegment: b.targetSegment ?? '',
         confidenceScore: 0,
         urgencyScore: b.urgent ? 10 : 5,
         finalScore: b.priorityScore ?? 0,
@@ -293,6 +301,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       // sees undefined → falls back to cold prospecting regardless of brief intent.
       audienceStage: ['cold', 'warm', 'hot'].includes(winner.audienceStage) ? winner.audienceStage : 'cold',
       explorationArm: !!winner._explorationArm,
+      targetSegment: winner.targetSegment ?? '',
       suggestedBudget: winner.suggestedBudget ?? 0,
       finalScore: winner.priorityScore ?? 0,
       selected: true,
@@ -435,6 +444,7 @@ Dominant format: ${adLibraryInsights.dominantFormat}${adLibraryInsights.rawSumma
     // PROMPT: Data first → Rules → Steps
     // ═════════════════════════════════════════════════════════════════════════
     return `
+${buildSkillBlock('STRATEGY_TEAM')}
 You ARE the Strategist for ${company.name}. You will generate ~${poolSize} raw campaign ideas from ALL intelligence below, then debate with a Contrarian to find the best ${ideasPerRun}.
 
 ═══════════════════════════════════════════════════════
@@ -702,6 +712,7 @@ Dominant format: ${adLibraryInsights.dominantFormat}${adLibraryInsights.rawSumma
         : `BALANCED MODE: Mix proven winners with new tests. At least 2 ideas should use proven hooks/audiences/formats. At least 1 idea should test something new. Steady ROAS + continuous learning.`;
 
     return `
+${buildSkillBlock('STRATEGY_TEAM')}
 You are the Strategist for ${company.name}. Generate exactly ${poolSize} raw campaign ideas from ALL intelligence below.
 
 This is Phase 1 of a 2-phase review. You generate ideas here; a separate Contrarian will review and cut them.

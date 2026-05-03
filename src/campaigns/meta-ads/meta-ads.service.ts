@@ -38,8 +38,10 @@ export interface MetaAdSetConfig {
   ageMin?: number;
   ageMax?: number;
   gender?: string;
-  geoLocations?: string[];
-  interests?: string[];
+  geoLocations?: string[];   // ISO country codes (e.g. ['IN'])
+  geoStates?: string[];      // Meta region keys (e.g. ['480'] for Maharashtra)
+  geoCities?: string[];      // Meta city keys (e.g. ['2295411'] for Mumbai)
+  interests?: string[];      // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
   optimizationGoal: string;
   ads: number[];
 }
@@ -490,12 +492,21 @@ export class MetaAdsService {
     // ABO: budget at ad set level for testing new creatives/audiences
     const dailyBudgetPaise = Math.round((totalBudget * config.budgetPercent / 100) * 100);
 
-    const targeting: any = {
-      geo_locations: {
-        countries: config.geoLocations ?? ['IN'],
-        location_types: ['home', 'recent'],
-      },
+    // Geo targeting — country always set; states + cities optional layers.
+    // For India tenants, the targeting resolver populates geoStates with
+    // top-purchase-intent states (Maharashtra, TN, Karnataka, etc.) so we
+    // don't waste budget on low-conversion regions.
+    const geoLocations: any = {
+      countries: config.geoLocations ?? ['IN'],
+      location_types: ['home', 'recent'],
     };
+    if (config.geoStates && config.geoStates.length > 0) {
+      geoLocations.regions = config.geoStates.map((key) => ({ key }));
+    }
+    if (config.geoCities && config.geoCities.length > 0) {
+      geoLocations.cities = config.geoCities.map((key) => ({ key, radius: 25, distance_unit: 'kilometer' }));
+    }
+    const targeting: any = { geo_locations: geoLocations };
 
     // Audience type specific targeting
     if (['lookalike', 'retarget', 'custom'].includes(config.audienceType) && config.metaAudienceId) {
@@ -517,9 +528,15 @@ export class MetaAdsService {
       else if (config.gender === 'female') targeting.genders = [2];
     }
 
-    // Interest targeting — Meta requires interest IDs not names.
-    // We skip name-based interests and rely on advantage_plus or custom audiences instead.
-    // If interest IDs are ever added to product.metaAudiences, they'll be picked up via custom_audiences above.
+    // Interest targeting — Meta requires real interest IDs (not names — names
+    // are rejected). Populated by the targeting resolver from product.audience
+    // Segments[].interests where each interest is { id, name }. The audience
+    // resolver filters out plain-string interests so we never ship names here.
+    if (config.interests && config.interests.length > 0) {
+      targeting.flexible_spec = [{
+        interests: config.interests.map((id) => ({ id, name: id })),
+      }];
+    }
 
     // Exclude audiences (past buyers)
     if (config.excludeAudienceIds && config.excludeAudienceIds.length > 0) {
@@ -802,15 +819,20 @@ export class MetaAdsService {
     pixelId: string,
     rule: { event: string; retentionDays: number },
   ): Promise<string> {
+    // Meta deprecated `subtype: 'WEBSITE'` for pixel-event audiences in
+    // Graph API v19+. v21 rejects it with code 2654 / subcode 1870053:
+    // "The parameter 'subtype' is not supported in the current API version."
+    // The audience type is now inferred from the `rule` shape — presence of
+    // event_sources + filters means it's a pixel-event custom audience.
     const response = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/customaudiences`, {
       name,
-      subtype: 'WEBSITE',
       retention_days: rule.retentionDays,
       rule: JSON.stringify({
         inclusions: {
           operator: 'or',
           rules: [{
-            event_sources: [pixelId],
+            event_sources: [{ id: pixelId, type: 'pixel' }],
+            retention_seconds: rule.retentionDays * 86400,
             filter: { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: rule.event }] },
           }],
         },

@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { AgentType } from '../claude/claude.types';
 import { ClaudeService } from '../claude/claude.service';
+import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
@@ -134,6 +135,7 @@ export class CreativeTeamService {
       liveContext: '',
       userMessage: call1Prompt,
       maxTurns: 5,
+      skills: skillsForAgent('CREATIVE_TEAM'),   // ad-creative + copywriting + marketing-psychology + video + image
     });
 
     this.logger.log(`Creative Team sequential — Call 1 done (${call1.content.length} chars)`);
@@ -204,6 +206,7 @@ Return ONLY this JSON (no markdown, no explanation):
       liveContext: '',
       userMessage: call2UserMessage,
       maxTurns: 3,
+      skills: skillsForAgent('CREATIVE_TEAM'),
     });
 
     this.logger.log(`Creative Team sequential — Call 2 done | tenant: ${tenantId} | run: ${runId}`);
@@ -405,6 +408,7 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
     // PROMPT: Data first → Creative specs → Rules → Steps
     // ═════════════════════════════════════════════════════════════════════════
     return `
+${buildSkillBlock('CREATIVE_TEAM')}
 You ARE the Creative Director for ${company.name}. You will create the full ad creative package and debate it with a Brand Compliance Reviewer.
 
 ═══════════════════════════════════════════════════════

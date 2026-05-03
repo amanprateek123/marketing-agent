@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
@@ -68,9 +69,61 @@ export class PipelineOrchestratorService implements OnModuleInit {
     await this.recoverStuckRuns();
   }
 
+  /**
+   * Periodic stuck-run sweeper. Runs every 15 min and marks runs that have
+   * been silent for >45 min as failed. Catches:
+   *   - Process restart orphans (REST /trigger fire-and-forget Promises killed
+   *     by ts-node-dev / nodemon / PM2 restart mid-run — original 5h 40min bug)
+   *   - CLI tmux hangs (per memory: TeamDelete gets stuck on shutdown)
+   *   - True hangs (Sonnet rate-limit retry loops, infinite tool-use)
+   *
+   * Threshold = 45 min. Worst legit phase duration ~25 min (Strategy Team CLI
+   * 15 min + Creative Team 10 min back-to-back). Phase-boundary status writes
+   * (A1+A2+A3) auto-bump updatedAt, so a healthy long phase that's actively
+   * progressing won't trip — only truly idle ones get marked failed.
+   *
+   * Note: 'failed' is a recoverable terminal status. The next /trigger call
+   * detects the failed run and resumes from the failed phase, reusing all
+   * completed phase outputs.
+   */
+  @Cron('*/15 * * * *')   // every 15 min — CronExpression.EVERY_15_MINUTES not available on this nestjs/schedule version
+  async sweepStuckRuns(): Promise<void> {
+    const STUCK_THRESHOLD_MIN = 45;
+    const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MIN * 60 * 1000);
+    const liveStatuses = [
+      'pending',
+      'scouts_running',
+      'intelligence_running',
+      'research_running',
+      'idea_pool_running',
+      'digest_running',
+      'creative_running',
+      'campaign_launching',
+    ];
+
+    const stale = await this.pipelineRunModel
+      .find({ status: { $in: liveStatuses }, updatedAt: { $lt: cutoff } })
+      .lean()
+      .exec();
+    if (stale.length === 0) return;
+
+    this.logger.warn(`Stuck-run sweeper: marking ${stale.length} run(s) as failed (idle >${STUCK_THRESHOLD_MIN}min)`);
+    for (const run of stale) {
+      await this.pipelineRunModel.updateOne(
+        { runId: run.runId },
+        {
+          status: 'failed',
+          error: `Auto-marked failed by stuck-run sweeper after ${STUCK_THRESHOLD_MIN} min idle (last status: ${run.status})`,
+          completedAt: new Date(),
+        },
+      );
+      this.logger.warn(`  ${run.runId} (tenant=${run.tenantId}, was=${run.status}, idle since ${(run as any).updatedAt?.toISOString()})`);
+    }
+  }
+
   private async recoverStuckRuns(): Promise<void> {
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    const stuckStatuses = ['pending', 'scouts_running', 'intelligence_running', 'idea_pool_running'];
+    const stuckStatuses = ['pending', 'scouts_running', 'intelligence_running', 'research_running', 'idea_pool_running', 'digest_running', 'creative_running', 'campaign_launching'];
 
     const stuckRuns = await this.pipelineRunModel
       .find({
@@ -402,6 +455,9 @@ export class PipelineOrchestratorService implements OnModuleInit {
         competitorResearch = existingCompetitor.structured ?? fallbackResearch(existingCompetitor.content ?? '');
         marketResearch = existingMarket.structured ?? fallbackResearch(existingMarket.content ?? '');
       } else {
+        // A1: visibility — was previously stuck at 'intelligence_running' for the
+        // entire research duration (5-12 min for competitor research with 15 turns).
+        await update('research_running', 'research');
         this.logger.log(`[${runId}] Phase C: intelligence agents (competitor: ${existingCompetitor ? 'cached' : 'running'}, market: ${existingMarket ? 'cached' : 'running'})`);
 
         // Only run what's missing — use allSettled so one failure doesn't kill both
@@ -504,6 +560,10 @@ export class PipelineOrchestratorService implements OnModuleInit {
       if (existingDigest) {
         this.logger.log(`[${runId}] Phase E: skipped — digest already complete`);
       } else {
+        // A2: visibility — without this, status reads 'idea_pool_running' for the
+        // entire digest writer + Slack delivery window. That's the exact moment
+        // the user gets the 10 ideas in Slack but the dashboard says "stuck."
+        await update('digest_running', 'digest');
         this.logger.log(`[${runId}] Phase E: digest writer`);
         await this.digestWriterService.run(company, runId, coordinatorResult, ideaPoolResult);
       }
@@ -516,11 +576,14 @@ export class PipelineOrchestratorService implements OnModuleInit {
 
       let creativePackage: any;
 
+      // A3: status update fires regardless of resume — even when resuming a
+      // pending creative_package, we still want the dashboard to reflect that
+      // we're working on Phase F. Was: only fired when creative was net-new.
+      await update('creative_running', 'creative');
       if (existingCreative) {
         this.logger.log(`[${runId}] Phase F: skipped — creative already complete`);
         creativePackage = existingCreative;
       } else {
-        await update('creative_running', 'creative');
         this.logger.log(`[${runId}] Phase F: creative production`);
 
         const selectedBrief = ideaPoolResult.briefs.find(
@@ -560,10 +623,11 @@ export class PipelineOrchestratorService implements OnModuleInit {
       // ── Phase G: Campaign Launch ───────────────────────────────────────────
       const existingCampaign = await this.campaignsService.findByRunId(tenantId, runId);
 
+      // A3: status update fires regardless of resume — see Phase F note.
+      await update('campaign_launching', 'campaign');
       if (existingCampaign) {
         this.logger.log(`[${runId}] Phase G: skipped — campaign already launched`);
       } else {
-        await update('campaign_launching', 'campaign');
         this.logger.log(`[${runId}] Phase G: campaign launch`);
 
         const creativeBriefDoc = await this.creativeBriefModel

@@ -63,6 +63,17 @@ export class IntelligenceBrief {
   @Prop({ required: false, default: false })
   explorationArm?: boolean;
 
+  /**
+   * Audience segment NAME from product.audienceSegments[] that this brief
+   * targets. Strategy Team picks one per brief (e.g. "career_anxious" or
+   * "dosha_worried"). Campaign-creator's TS resolver translates this name
+   * into concrete ad-set targeting (age/gender/interests) at launch time.
+   * Replaces the previous "Campaign Review Team picks targeting from
+   * free-text" path which drifted toward advantage_plus + zero filters.
+   */
+  @Prop({ required: false, default: '' })
+  targetSegment?: string;
+
   @Prop({ required: true, default: 0 })
   confidenceScore: number;
 

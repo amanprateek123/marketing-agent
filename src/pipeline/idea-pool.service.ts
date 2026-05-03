@@ -6,6 +6,7 @@ import { ClaudeService } from '../claude/claude.service';
 import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
+import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
 import { IntelligenceBrief, IntelligenceBriefDocument } from './schemas/intelligence-brief.schema';
 import { CreativeBrief, CreativeBriefDocument } from './schemas/creative-brief.schema';
 import { CoordinatorResult } from './coordinator.service';
@@ -93,10 +94,14 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
       tenantId,
       runId,
       agentType: AgentType.IDEA_POOL,
-      systemPrompt: company.prompts?.ideaPool ?? '',
+      // Skill directive prepended so the IdeaPool fallback (used when Strategy
+      // Team errors) reasons via paid-ads + product-marketing-context +
+      // marketing-psychology rather than freestyle generation.
+      systemPrompt: buildSkillBlock('IDEA_POOL') + (company.prompts?.ideaPool ?? ''),
       liveContext,
       userMessage: generateMessage,
       maxTurns: 8,
+      skills: skillsForAgent('IDEA_POOL'),   // paid-ads + product-marketing-context + marketing-psychology + customer-research
     });
 
     const briefs = this.parseBriefs(generated.content);

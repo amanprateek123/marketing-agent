@@ -13,6 +13,7 @@ import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/cam
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
+import { applyAudienceTargeting } from './audience-targeting-resolver';
 import axios from 'axios';
 
 @Injectable()
@@ -136,6 +137,36 @@ export class CampaignCreatorService {
       }
       await SafetyChecks.checkWeeklyBudget(company.tenantId, finalBudget, company, this.campaignsService);
 
+      // ── audienceStage guard: warm/hot CANNOT use advantage_plus ─────────────
+      // The Performance Analyst sometimes downgrades lookalike → advantage_plus
+      // citing budget-tier rule + cross-stage CPA comparisons. For warm/hot
+      // briefs that's a category error (advantage_plus is cold prospecting).
+      // Auto-rewrite back to lookalike when a real lookalike audience exists,
+      // otherwise reject the campaign entirely.
+      const briefStage = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
+      if (briefStage === 'warm' || briefStage === 'hot') {
+        const product = (company.products ?? []).find(p => p.name === (brief as any).product) ?? (company.products ?? [])[0];
+        const lookalikeAudiences = (product?.metaAudiences ?? []).filter((a: any) => a.type === 'lookalike');
+        const customAudiences = (product?.metaAudiences ?? []).filter((a: any) => a.type === 'custom');
+        const fallbackAudience = lookalikeAudiences[0] ?? customAudiences[0];
+
+        for (const adSet of (review.campaign?.adSets ?? []) as any[]) {
+          if (adSet.audienceType === 'advantage_plus' || adSet.audienceType === 'broad') {
+            if (fallbackAudience) {
+              this.logger.warn(
+                `Ad set "${adSet.name}": ${adSet.audienceType} forbidden for ${briefStage} brief — auto-rewriting to ${fallbackAudience.type} (${fallbackAudience.name})`,
+              );
+              adSet.audienceType = fallbackAudience.type;
+              adSet.metaAudienceId = fallbackAudience.id;
+            } else {
+              throw new Error(
+                `Campaign rejected: ${briefStage} brief has no valid lookalike/custom audience to fall back to. Review team picked advantage_plus which is forbidden for ${briefStage} stage.`,
+              );
+            }
+          }
+        }
+      }
+
       this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds} | adSets: ${review.campaign?.adSets?.length ?? 0}`);
     } else {
       this.logger.error(`Campaign Review Team failed after 2 attempts — saving campaign as failed`);
@@ -168,8 +199,10 @@ export class CampaignCreatorService {
     }
 
     // ── Save as pending_approval — do NOT launch yet ─────────────────────────
+    // AGENT_ prefix lets the marketing team distinguish autonomous-agent campaigns
+    // from human-created ones in the Meta Ads Manager list view.
     const topicSlug = brief.topic.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
-    const campaignName = `${topicSlug}_${new Date().toISOString().split('T')[0]}`;
+    const campaignName = `AGENT_${topicSlug}_${new Date().toISOString().split('T')[0]}`;
 
     const campaign = await this.campaignModel.create({
       tenantId: company.tenantId,
@@ -232,19 +265,43 @@ export class CampaignCreatorService {
     company: CompanyDocument,
     accountId: string,
   ): Promise<CampaignDocument> {
-    const campaign = await this.campaignModel.findOne({
-      _id: campaignId,
-      tenantId: company.tenantId,
-    }).exec();
-    if (!campaign) throw new Error(`Campaign ${campaignId} not found for tenant ${company.tenantId}`);
-    if (campaign.status !== 'pending_approval') {
-      throw new Error(`Campaign ${campaignId} is not pending approval (status: ${campaign.status})`);
+    // ── Atomic claim — prevents /approve double-launch race ──────────────────
+    // Was: findOne → check status → check metaCampaignId → later update.
+    // Race: two concurrent /approve calls both pass the read-then-check, both
+    // proceed into 60-90s of Meta API calls, both create live Meta campaigns,
+    // only one gets tracked in DB → orphan live campaign spending money. The
+    // single biggest production-time bug per the SRE review.
+    //
+    // Now: atomic findOneAndUpdate gates on (status=pending_approval AND
+    // metaCampaignId='') and immediately flips to 'launching'. If null
+    // returned, another /approve call already won the race — throw. Rollback
+    // path resets status to 'pending_approval' on launch failure.
+    const campaign = await this.campaignModel.findOneAndUpdate(
+      {
+        _id: campaignId,
+        tenantId: company.tenantId,
+        status: 'pending_approval',
+        $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
+      },
+      { $set: { status: 'launching' } },
+      { new: true },
+    ).exec();
+    if (!campaign) {
+      // Distinguish "not found" from "already launching/launched" for clearer error
+      const existing = await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).select('status metaCampaignId').lean().exec();
+      if (!existing) throw new Error(`Campaign ${campaignId} not found for tenant ${company.tenantId}`);
+      if (existing.metaCampaignId) {
+        throw new Error(`Campaign ${campaignId} already launched (metaCampaignId: ${existing.metaCampaignId})`);
+      }
+      throw new Error(`Campaign ${campaignId} cannot be launched (status: ${existing.status} — must be pending_approval)`);
     }
 
-    // Idempotency: prevent double-launch on duplicate /approve calls
-    if (campaign.metaCampaignId) {
-      throw new Error(`Campaign ${campaignId} already launched (metaCampaignId: ${campaign.metaCampaignId})`);
-    }
+    // Load creative brief early — needed by the audience-expiry fallback path
+    // (line ~330) so warm/hot stages can be detected before the audience
+    // validator decides whether to fall back to advantage_plus or another LAL.
+    const creativeBrief = campaign.briefId
+      ? await this.campaignsService.findCreativeBrief(company.tenantId, campaign.briefId)
+      : null;
 
     if (!company.meta?.accessToken) {
       throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
@@ -292,12 +349,31 @@ export class CampaignCreatorService {
       this.logger.warn(`Audience validation failed (proceeding without check): ${err.message}`);
     }
 
+    // For warm/hot briefs, expired-audience fallback must NOT degrade to
+    // advantage_plus (that's cold prospecting). Try another live lookalike
+    // from the product's metaAudiences first; if none exist, throw.
+    const launchProduct = creativeBrief
+      ? (company.products ?? []).find(p => p.name === ((creativeBrief as any).product ?? ''))
+      : null;
+    const liveLookalikes = (launchProduct?.metaAudiences ?? [])
+      .filter((a: any) => a.type === 'lookalike' && validAudienceIds.has(a.id));
+    const briefStageForLaunch = (creativeBrief as any)?.audienceStage as 'cold' | 'warm' | 'hot' | undefined;
+
     if (validAudienceIds.size > 0) {
       for (const adSet of config.adSets as any[]) {
         if (adSet.metaAudienceId && !validAudienceIds.has(adSet.metaAudienceId)) {
-          this.logger.warn(`Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — converting to advantage_plus`);
-          delete adSet.metaAudienceId;
-          adSet.audienceType = 'advantage_plus';
+          if ((briefStageForLaunch === 'warm' || briefStageForLaunch === 'hot') && liveLookalikes.length > 0) {
+            const fallback = liveLookalikes[0];
+            this.logger.warn(
+              `Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — falling back to live lookalike ${fallback.id} (${fallback.name}) instead of advantage_plus (forbidden for ${briefStageForLaunch} stage)`,
+            );
+            adSet.metaAudienceId = fallback.id;
+            adSet.audienceType = 'lookalike';
+          } else {
+            this.logger.warn(`Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — converting to advantage_plus`);
+            delete adSet.metaAudienceId;
+            adSet.audienceType = 'advantage_plus';
+          }
         }
         if (adSet.excludeAudienceIds?.length) {
           const before = adSet.excludeAudienceIds.length;
@@ -367,11 +443,19 @@ export class CampaignCreatorService {
       const dailyForAdSet = (campaign.budget * (adSet.budgetPercent ?? 0)) / 100;
       const otherVariants = (adSet.ads ?? []).filter((idx: number) => idx !== selectedCopyIndexForSplit);
       if (!videoUrl || dailyForAdSet < SPLIT_MIN_DAILY || otherVariants.length === 0) {
-        // Degrade: keep one ad set, ship as image (existing fallback handles missing-video case below too)
+        // ALWAYS downgrade to image-only at this point. Was: kept creativeFormat='mixed'
+        // when videoUrl existed even though we couldn't afford to split → the in-ad-set
+        // mixed logic in meta-ads.service runs → packs 1 video + N image into ONE ad
+        // set → Meta intra-bucket auction skews to the video → image variants get no
+        // signal. The exact problem split was meant to fix. At sub-₹6k budgets we
+        // keep the campaign single-ad-set AND ship image-only to avoid the skew.
+        const reason = !videoUrl ? 'no video'
+                     : dailyForAdSet < SPLIT_MIN_DAILY ? `daily ₹${Math.round(dailyForAdSet)} below ₹${SPLIT_MIN_DAILY} split floor (per-sibling would be <₹3k learning floor)`
+                     : 'no other variants';
         this.logger.log(
-          `Ad set "${adSet.name}": mixed → image (daily ₹${Math.round(dailyForAdSet)} < ₹${SPLIT_MIN_DAILY} split floor OR no video OR no other variants)`,
+          `Ad set "${adSet.name}": mixed → image-only (${reason})`,
         );
-        splitAdSets.push({ ...adSet, creativeFormat: videoUrl ? adSet.creativeFormat : 'image' });
+        splitAdSets.push({ ...adSet, creativeFormat: 'image' });
         continue;
       }
       const videoPct = Math.round((adSet.budgetPercent ?? 0) * VIDEO_BUDGET_FRACTION);
@@ -441,6 +525,50 @@ export class CampaignCreatorService {
       }
     }
 
+    // ── Field-name normalization (LLM-vs-schema drift) ────────────────────────
+    // The Campaign Review Team has historically emitted `excludedAudiences`
+    // instead of the schema's `excludeAudienceIds`, causing silent drop of
+    // past-purchaser exclusions at launch. Normalize both → schema name.
+    for (const adSet of config.adSets as any[]) {
+      if (adSet.excludedAudiences && !adSet.excludeAudienceIds) {
+        adSet.excludeAudienceIds = adSet.excludedAudiences;
+      }
+    }
+
+    // ── Deterministic targeting resolver ──────────────────────────────────────
+    // Fills age/gender/interests/geoStates on ad sets that the Campaign Review
+    // Team didn't populate. Reads brief.targetSegment + product.audienceSegments
+    // and India-default top states. This is the fix for "agent ships
+    // country=IN, no age, no gender, no interests, no states" → high CPA waste.
+    // Doesn't override ad sets that already have explicit targeting.
+    //
+    // Null-brief guard: if creativeBrief is null (manual campaigns, missing
+    // briefId, or upstream brief deletion), skip the resolver entirely. Was:
+    // ran with undefined targetSegment + undefined product → still patched
+    // geoStates from India defaults but no segment match → silent partial
+    // mis-targeting. Now: explicit warning + skip → operator must manually
+    // set targeting OR the LLM-emitted ad-set fields stand as-is.
+    if (!creativeBrief) {
+      this.logger.warn(
+        `Targeting resolver SKIPPED for campaign ${campaignId}: no creativeBrief found (briefId=${campaign.briefId || 'empty'}). Ad sets ship with whatever targeting the Campaign Review Team produced. No automatic age/gender/interests/states injection.`,
+      );
+    } else {
+      const briefForTargeting = creativeBrief as any;
+      const productForTargeting = (company.products ?? []).find(
+        (p) => p.name === briefForTargeting?.product,
+      );
+      const targetingResult = applyAudienceTargeting({
+        adSets: config.adSets as any[],
+        productSegments: productForTargeting?.audienceSegments as any,
+        briefTargetSegment: briefForTargeting?.targetSegment,
+        briefAudienceStage: briefForTargeting?.audienceStage,
+        geography: company.geography,
+      });
+      this.logger.log(
+        `Targeting resolver: segment=${targetingResult.segmentUsed ?? 'none'}, patches=${targetingResult.patches}, matched=${targetingResult.segmentMatched}`,
+      );
+    }
+
     // Validate ad sets before touching Meta API
     for (const [i, adSet] of (config.adSets as any[]).entries()) {
       if (!adSet.ads || adSet.ads.length === 0) {
@@ -471,9 +599,7 @@ export class CampaignCreatorService {
     }
 
     // Find the product for landing URL — match by brief.product name first, fallback to conversionEvent
-    const creativeBrief = campaign.briefId
-      ? await this.campaignsService.findCreativeBrief(company.tenantId, campaign.briefId)
-      : null;
+    // creativeBrief was loaded earlier (top of launch) for the audience-expiry guard.
     const briefProduct = creativeBrief ? ((creativeBrief as any).product ?? '') : '';
     const product = (company.products ?? []).find(p =>
       briefProduct ? p.name === briefProduct : p.conversionEvent === config.conversionEvent,
@@ -481,7 +607,7 @@ export class CampaignCreatorService {
     const landingUrl = product?.landingUrl ?? '';
 
     const topicSlug = ((campaign as any).topic ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
-    const campaignName = `${topicSlug || 'CAMPAIGN'}_${new Date().toISOString().split('T')[0]}`;
+    const campaignName = `AGENT_${topicSlug || 'CAMPAIGN'}_${new Date().toISOString().split('T')[0]}`;
 
     // Upload one image per variant to Meta
     const imageHashes: Record<number, string> = {};
@@ -520,29 +646,44 @@ export class CampaignCreatorService {
       }
     }
 
-    // Launch: campaign → ad sets → ads via Meta Graph API
-    const launchResult = await this.metaAdsService.launchCampaign({
-      accountId: accountId,
-      accessToken: company.meta.accessToken,
-      pageId: company.meta.pageId,
-      pixelId: product?.pixelId ?? company.meta.pixelId,
-      campaignName,
-      budget: campaign.budget,
-      objective: config.objective ?? 'OUTCOME_SALES',
-      conversionEvent: config.conversionEvent ?? 'Purchase',
-      customEventName: product?.customEventName,
-      customConversionId: product?.customConversionId,
-      adSets: config.adSets,
-      copyVariants: copyVariants.length > 0 ? copyVariants : [
-        { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
-      ],
-      imageHashes,
-      videoThumbnailHash,
-      videoId,
-      selectedCopyIndex,
-      landingUrl,
-      declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
-    });
+    // Launch: campaign → ad sets → ads via Meta Graph API.
+    // Wrapped in try/catch so failures reset status from 'launching' back to
+    // 'pending_approval', allowing retry. Without this, an exception during
+    // Meta API calls leaves the campaign stuck in 'launching' forever and
+    // the atomic claim above blocks all future /approve attempts.
+    let launchResult;
+    try {
+      launchResult = await this.metaAdsService.launchCampaign({
+        accountId: accountId,
+        accessToken: company.meta.accessToken,
+        pageId: company.meta.pageId,
+        pixelId: product?.pixelId ?? company.meta.pixelId,
+        campaignName,
+        budget: campaign.budget,
+        objective: config.objective ?? 'OUTCOME_SALES',
+        conversionEvent: config.conversionEvent ?? 'Purchase',
+        customEventName: product?.customEventName,
+        customConversionId: product?.customConversionId,
+        adSets: config.adSets,
+        copyVariants: copyVariants.length > 0 ? copyVariants : [
+          { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
+        ],
+        imageHashes,
+        videoThumbnailHash,
+        videoId,
+        selectedCopyIndex,
+        landingUrl,
+        declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
+      });
+    } catch (err: any) {
+      // Reset claim so /approve can be retried
+      await this.campaignModel.updateOne(
+        { _id: campaignId, status: 'launching' },
+        { $set: { status: 'pending_approval' } },
+      );
+      this.logger.error(`Meta launch failed for campaign ${campaignId}, claim released for retry: ${err.message}`);
+      throw err;
+    }
 
     // Only activate if all expected ads were created
     const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
