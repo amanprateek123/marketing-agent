@@ -120,7 +120,9 @@ export class CampaignsService {
   }
 
   async countByRunId(tenantId: string, runId: string): Promise<number> {
-    return this.campaignModel.countDocuments({ tenantId, runId });
+    // Exclude superseded — those are explicitly retired by the regenerate flow.
+    // Counting them blocks regenerate against the per-run campaign cap.
+    return this.campaignModel.countDocuments({ tenantId, runId, status: { $ne: 'superseded' } });
   }
 
   async reject(tenantId: string, campaignId: string, reason: string): Promise<void> {

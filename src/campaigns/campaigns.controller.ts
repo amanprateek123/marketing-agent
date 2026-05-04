@@ -20,6 +20,8 @@ import { CampaignSyncService } from './meta-ads/campaign-sync.service';
 import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
 import { Campaign, CampaignDocument } from './schemas/campaign.schema';
 import { ShadowAction, ShadowActionDocument } from '../learning/schemas/shadow-action.schema';
+import { CreativeBrief, CreativeBriefDocument } from '../pipeline/schemas/creative-brief.schema';
+import { CreativePackage, CreativePackageDocument } from '../creative/schemas/creative-package.schema';
 import { SafetyChecks } from './campaign-creator/safety-checks';
 
 @Controller('campaigns')
@@ -37,6 +39,10 @@ export class CampaignsController {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(ShadowAction.name)
     private readonly shadowActionModel: Model<ShadowActionDocument>,
+    @InjectModel(CreativeBrief.name)
+    private readonly creativeBriefModel: Model<CreativeBriefDocument>,
+    @InjectModel(CreativePackage.name)
+    private readonly creativePackageModel: Model<CreativePackageDocument>,
   ) {}
 
   @Get(':tenantId')
@@ -196,6 +202,88 @@ export class CampaignsController {
     }
     await this.campaignsService.reject(tenantId, campaignId, reason ?? 'Rejected by tenant');
     return { success: true, message: 'Campaign rejected' };
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/regenerate
+   * Re-runs Phase G (Campaign Review Team → campaign creation) for an existing
+   * pending_approval campaign. Reuses the original brief + creative package —
+   * no scout/research/creative-production rerun. Marks the old campaign as
+   * 'superseded' and returns the freshly-created pending_approval campaign.
+   *
+   * Use when: review team produced a config that needs a re-debate (e.g. wrong
+   * budget shape, stale prompt) but the underlying creatives are still good.
+   */
+  @Post(':tenantId/:campaignId/regenerate')
+  async regenerate(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body('reason') reason?: string,
+  ) {
+    try {
+      const oldCampaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).exec();
+      if (!oldCampaign) throw new NotFoundException('Campaign not found');
+      if (oldCampaign.status !== 'pending_approval') {
+        throw new BadRequestException(
+          `Only pending_approval campaigns can be regenerated (current: ${oldCampaign.status})`,
+        );
+      }
+      if (!oldCampaign.briefId) {
+        throw new BadRequestException('Campaign has no briefId — cannot reload original brief');
+      }
+
+      const brief = await this.creativeBriefModel
+        .findOne({ tenantId, briefId: oldCampaign.briefId })
+        .exec();
+      if (!brief) throw new NotFoundException(`Brief ${oldCampaign.briefId} not found`);
+
+      const creativePackage = await this.creativePackageModel
+        .findOne({ tenantId, briefId: oldCampaign.briefId, status: 'completed' })
+        .exec();
+      if (!creativePackage) {
+        throw new NotFoundException(`No completed creative package found for brief ${oldCampaign.briefId}`);
+      }
+
+      const company = await this.companiesService.findByTenantId(tenantId);
+
+      // Mark old campaign superseded BEFORE creating new — idempotency check on
+      // create() filters out superseded so the new one will save cleanly.
+      await this.campaignModel.updateOne(
+        { _id: campaignId, tenantId },
+        {
+          $set: {
+            status: 'superseded',
+            pauseReason: reason ?? 'Regenerated via /regenerate endpoint',
+            pausedAt: new Date(),
+          },
+        },
+      );
+
+      let newCampaign;
+      try {
+        newCampaign = await this.campaignCreator.create(brief, creativePackage, company, oldCampaign.runId);
+      } catch (err: any) {
+        // Restore old campaign if regenerate fails — don't leave the tenant
+        // with no pending campaign at all.
+        await this.campaignModel.updateOne(
+          { _id: campaignId, tenantId },
+          { $set: { status: 'pending_approval' }, $unset: { pauseReason: '', pausedAt: '' } },
+        );
+        throw err;
+      }
+
+      return {
+        success: true,
+        oldCampaignId: campaignId,
+        newCampaignId: (newCampaign as any)._id.toString(),
+        newCampaignName: newCampaign.name,
+        newBudget: newCampaign.budget,
+        message: `Old campaign superseded — new pending_approval campaign created`,
+      };
+    } catch (err: any) {
+      if (err instanceof NotFoundException || err instanceof BadRequestException) throw err;
+      throw new BadRequestException(err.message);
+    }
   }
 
   /**

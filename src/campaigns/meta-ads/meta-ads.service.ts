@@ -467,6 +467,12 @@ export class MetaAdsService {
         // social-issues) launched without the declaration → strike risk. Now
         // sourced from company.meta.specialAdCategories per tenant.
         special_ad_categories: specialAdCategories,
+        // Required by Meta when not using CBO (we use ABO — budget at ad set
+        // level). false = each ad set keeps its own budget, no 20% sharing.
+        is_adset_budget_sharing_enabled: false,
+        // bid_strategy lives at AD SET level under ABO — Meta rejects it on
+        // the campaign with subcode 1885737 ("No budget for campaign") because
+        // campaign-level bid_strategy requires CBO (campaign-level budget).
         access_token: accessToken,
       },
     );
@@ -492,19 +498,23 @@ export class MetaAdsService {
     // ABO: budget at ad set level for testing new creatives/audiences
     const dailyBudgetPaise = Math.round((totalBudget * config.budgetPercent / 100) * 100);
 
-    // Geo targeting — country always set; states + cities optional layers.
-    // For India tenants, the targeting resolver populates geoStates with
-    // top-purchase-intent states (Maharashtra, TN, Karnataka, etc.) so we
-    // don't waste budget on low-conversion regions.
-    const geoLocations: any = {
-      countries: config.geoLocations ?? ['IN'],
-      location_types: ['home', 'recent'],
-    };
-    if (config.geoStates && config.geoStates.length > 0) {
-      geoLocations.regions = config.geoStates.map((key) => ({ key }));
+    // Geo targeting — Meta rejects overlapping locations (subcode 1487756) if
+    // we send both countries AND regions/cities of the same country. So when
+    // states or cities are set, drop the country and use the narrower layer
+    // alone. The targeting resolver populates geoStates with top-purchase-
+    // intent states (Maharashtra, TN, Karnataka, etc.) so we don't waste
+    // budget on low-conversion regions.
+    const hasStates = config.geoStates && config.geoStates.length > 0;
+    const hasCities = config.geoCities && config.geoCities.length > 0;
+    const geoLocations: any = { location_types: ['home', 'recent'] };
+    if (hasStates) {
+      geoLocations.regions = config.geoStates!.map((key) => ({ key }));
     }
-    if (config.geoCities && config.geoCities.length > 0) {
-      geoLocations.cities = config.geoCities.map((key) => ({ key, radius: 25, distance_unit: 'kilometer' }));
+    if (hasCities) {
+      geoLocations.cities = config.geoCities!.map((key) => ({ key, radius: 25, distance_unit: 'kilometer' }));
+    }
+    if (!hasStates && !hasCities) {
+      geoLocations.countries = config.geoLocations ?? ['IN'];
     }
     const targeting: any = { geo_locations: geoLocations };
 
@@ -551,7 +561,9 @@ export class MetaAdsService {
     if (!(config as any).publisherPlatforms) {
       targeting.publisher_platforms = ['facebook', 'instagram'];
       // When publisher_platforms is set, Meta requires explicit positions per platform
-      targeting.facebook_positions = ['feed', 'video_feeds', 'story', 'instream_video', 'marketplace'];
+      // 'video_feeds' was deprecated in v21.0 (subcode 2490562). Reels-style
+      // surface lives under 'facebook_reels' now.
+      targeting.facebook_positions = ['feed', 'facebook_reels', 'story', 'instream_video', 'marketplace'];
       targeting.instagram_positions = ['stream', 'story', 'reels', 'explore'];
     } else {
       targeting.publisher_platforms = (config as any).publisherPlatforms;
@@ -564,6 +576,12 @@ export class MetaAdsService {
       billing_event: 'IMPRESSIONS',
       optimization_goal: config.optimizationGoal || 'OFFSITE_CONVERSIONS',
       destination_type: 'WEBSITE',
+      // Pin bid strategy at ad set level (we run ABO — campaign-level
+      // bid_strategy is rejected without CBO budget). LOWEST_COST_WITHOUT_CAP
+      // = Meta auto-bids to spend the full daily budget at the lowest CPA,
+      // no bid_amount required. Switch to COST_CAP (with bid_amount) once a
+      // CPA target is validated by data.
+      bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
       targeting,
       status: 'PAUSED',
       access_token: accessToken,
@@ -578,10 +596,12 @@ export class MetaAdsService {
     ];
 
     // Pixel for conversion optimization
-    if (customConversionId && pixelId) {
-      // Custom Conversion — pixel_id required alongside custom_conversion_id
+    if (customConversionId) {
+      // Custom Conversion — custom_conversion_id alone is sufficient.
+      // Sending pixel_id alongside triggers subcode 1885014 ("invalid
+      // combination of parameters") because Meta derives the pixel from
+      // the custom conversion internally.
       adSetData.promoted_object = {
-        pixel_id: pixelId,
         custom_conversion_id: customConversionId,
       };
     } else if (pixelId && conversionEvent) {

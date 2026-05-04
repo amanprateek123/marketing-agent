@@ -188,10 +188,13 @@ export class CampaignCreatorService {
     }
 
     // ── Idempotency: don't create duplicate campaigns for same brief ──────────
+    // Superseded campaigns are explicitly retired (regenerate flow) — ignore them
+    // so the regenerate endpoint can produce a fresh pending_approval campaign.
     const existingCampaign = await this.campaignModel.findOne({
       tenantId: company.tenantId,
       runId,
       briefId: brief.briefId,
+      status: { $ne: 'superseded' },
     }).exec();
     if (existingCampaign) {
       this.logger.warn(`Campaign already exists for briefId=${brief.briefId} runId=${runId} — returning existing`);

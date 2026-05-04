@@ -36,23 +36,22 @@ export interface AdSetTargetingPatch {
 }
 
 /**
- * Indian-market geo defaults — top states by Vedic-astrology purchase intent
- * (per performance-marketing review 2026-05-02). Used when an ad set has no
- * geoStates set. NOT exhaustive — operator can extend per tenant.
- *
- * Excludes: J&K, all NE states, Goa (low purchase index for ₹1799+ AOV).
+ * Indian-market geo defaults — top states by Vedic-astrology purchase intent.
+ * Region keys verified against Meta's adgeolocation search API
+ * (graph.facebook.com/v21.0/search?type=adgeolocation&country_code=IN) on
+ * 2026-05-04. Excludes J&K, NE states, Goa (low purchase index for ₹1799+ AOV).
  */
 export const INDIA_TOP_ASTROLOGY_STATES: Array<{ key: string; name: string }> = [
-  { key: '4008', name: 'Maharashtra' },
-  { key: '4017', name: 'Tamil Nadu' },     // Nadi astrology home turf
-  { key: '4005', name: 'Karnataka' },
-  { key: '3994', name: 'Delhi' },
-  { key: '4023', name: 'Telangana' },
-  { key: '3996', name: 'Gujarat' },
-  { key: '4019', name: 'Uttar Pradesh' },
-  { key: '3998', name: 'Haryana' },
-  { key: '3993', name: 'Andhra Pradesh' },
-  { key: '4011', name: 'Punjab' },
+  { key: '1735', name: 'Maharashtra' },
+  { key: '1744', name: 'Tamil Nadu' },     // Nadi astrology home turf
+  { key: '1738', name: 'Karnataka' },
+  { key: '1728', name: 'Delhi' },
+  { key: '4100', name: 'Telangana' },
+  { key: '1729', name: 'Gujarat' },
+  { key: '1754', name: 'Uttar Pradesh' },
+  { key: '1730', name: 'Haryana' },
+  { key: '1724', name: 'Andhra Pradesh' },
+  { key: '1742', name: 'Punjab' },
 ];
 
 /**
@@ -87,7 +86,6 @@ export function applyAudienceTargeting(input: {
   const segment = findSegment(productSegments, briefTargetSegment);
   let totalPatches = 0;
 
-  // Default geo states for India tenants. Future: per-tenant geo index.
   const isIndia = !geography || geography.toLowerCase().includes('india');
   const defaultGeoStates = isIndia ? INDIA_TOP_ASTROLOGY_STATES.map((s) => s.key) : [];
 
@@ -120,10 +118,8 @@ export function applyAudienceTargeting(input: {
       }
     }
 
-    // 4. Geo states — apply defaults when ad set only has country-level geo
-    // (i.e. geoLocations is empty or just ['IN']). For warm/hot, narrow to
-    // top states; for cold, pure prospecting also benefits from state filter
-    // since CPM in low-purchase-power states inflates cost.
+    // 4. Geo states — narrow to top-purchase-intent states when ad set has
+    // only country-level geo. Saves budget vs CPM in low-conversion regions.
     const hasOnlyCountry = !adSet.geoStates || adSet.geoStates.length === 0;
     if (hasOnlyCountry && defaultGeoStates.length > 0) {
       adSet.geoStates = defaultGeoStates;

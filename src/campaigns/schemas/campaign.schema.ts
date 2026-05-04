@@ -3,7 +3,7 @@ import { HydratedDocument } from 'mongoose';
 
 export type CampaignDocument = HydratedDocument<Campaign>;
 
-export type CampaignStatus = 'pending_approval' | 'active' | 'paused' | 'completed' | 'failed';
+export type CampaignStatus = 'pending_approval' | 'active' | 'paused' | 'completed' | 'failed' | 'superseded';
 export type CampaignSource = 'agent' | 'manual';
 
 @Schema({ collection: 'campaigns', timestamps: true })

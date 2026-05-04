@@ -234,10 +234,12 @@ PRODUCT DATA:
 - At ₹${product?.performance?.avgCPA ?? '???'} CPA, budget of ₹${brief.suggestedBudget}/day = ~${product?.performance?.avgCPA ? Math.floor(brief.suggestedBudget / product.performance.avgCPA * 7) : '?'} conversions/week expected
 
 CONSTRAINTS:
-- Hard budget cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
+- BUDGET IS DAILY ₹/day ONLY. This system does not support Meta lifetime_budget. Never propose a "lifetime"/"total" amount — always ₹/day.
+- Hard daily cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
+- "budget" you write MUST be ≤ ₹${company.maxBudgetPerCampaign}. Larger numbers are silently clamped and break your guardrail math.
 - Pause if ROAS < ${company.pauseIfROASBelow ?? 'not set'} | CTR < ${company.pauseIfCTRBelow ?? 'not set'}
 - Max scale: ${company.maxBudgetScalePercent}%
-- No past data → conservative start at 50-60% of proposed budget
+- No past data → conservative start at 50-60% of proposed daily budget
 
 PROPOSED CAMPAIGN CONFIG TO REVIEW:
 ${JSON.stringify(call1Parsed.campaign, null, 2)}
@@ -245,7 +247,7 @@ ${analystCaseStudies}
 ${analystAudiencePerf}
 
 YOUR JOB:
-1. BUDGET: Is the proposed daily budget right for the data available? Adjust if needed.
+1. BUDGET: Is the proposed DAILY budget (₹/day) right for the data available? Adjust if needed. MUST be ≤ ₹${company.maxBudgetPerCampaign}/day. Never write a multi-day total — always per-day.
 ${adSetCountRule}
 ${targetingFixRule}
 4. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
@@ -622,10 +624,11 @@ RULES
 ═══════════════════════════════════════════════════════
 
 BUDGET:
-- "budget" = TOTAL DAILY BUDGET across all ad sets combined (₹/day)
+- "budget" = TOTAL DAILY BUDGET across all ad sets combined (₹/day). DAILY ONLY. This system does not support Meta lifetime_budget — never write a multi-day total.
 - Each ad set gets: budget × (budgetPercent / 100) per day
 - Proposed anchor: ₹${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)}/day
 - Hard cap: ₹${company.maxBudgetPerCampaign}/day | Weekly cap: ₹${company.weeklyBudgetCap}
+- "budget" MUST be ≤ ₹${company.maxBudgetPerCampaign}. Numbers above the cap are silently clamped, which breaks pause/scale guardrail thresholds.
 - Max scale: ${company.maxBudgetScalePercent}%
 - Pause if ROAS < ${company.pauseIfROASBelow ?? 'not set'} | CTR < ${company.pauseIfCTRBelow ?? 'not set'} | Frequency > ${company.pauseIfFrequencyAbove ?? 'not set'}
 - The debate adjusts UP or DOWN from the anchor — does NOT invent from scratch
