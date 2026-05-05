@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
 import { checkCopySafety, formatSafetyError } from '../../common/safety/copy-safety-checker.util';
+import { withUtmParams } from './meta-utm.util';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -293,6 +294,12 @@ export class MetaAdsService {
         const creativeFormat = adSetConfig.creativeFormat ?? 'image';
         const selectedCopyIndex = config.selectedCopyIndex ?? 0;
 
+        const buildLandingUrl = (adName: string) => withUtmParams(config.landingUrl, {
+          campaignName: config.campaignName,
+          adSetName: adSetConfig.name,
+          adName,
+        });
+
         for (const variantIndex of adSetConfig.ads) {
           const variant = config.copyVariants[variantIndex];
           if (!variant) continue;
@@ -310,15 +317,16 @@ export class MetaAdsService {
           if (creativeFormat === 'mixed') {
             const isSelected = variantIndex === selectedCopyIndex;
             if (isSelected && config.videoId) {
+              const videoAdName = `${adName} (video)`;
               const { adId, creativeId } = await this.createVideoAd(
                 config.accountId,
                 config.accessToken,
                 adSetId,
-                `${adName} (video)`,
+                videoAdName,
                 variant,
                 config.videoId,
                 config.pageId!,
-                config.landingUrl,
+                buildLandingUrl(videoAdName),
                 config.videoThumbnailHash ?? variantImageHash,
               );
               created.creativeIds.push(creativeId);
@@ -333,7 +341,7 @@ export class MetaAdsService {
                 variant,
                 variantImageHash,
                 config.pageId ?? '',
-                config.landingUrl,
+                buildLandingUrl(adName),
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
@@ -344,15 +352,16 @@ export class MetaAdsService {
 
           // video-only or both → create video ad if videoId available
           if ((creativeFormat === 'video' || creativeFormat === 'both') && config.videoId) {
+            const videoAdName = `${adName} (video)`;
             const { adId, creativeId } = await this.createVideoAd(
               config.accountId,
               config.accessToken,
               adSetId,
-              `${adName} (video)`,
+              videoAdName,
               variant,
               config.videoId,
               config.pageId!,
-              config.landingUrl,
+              buildLandingUrl(videoAdName),
               config.videoThumbnailHash ?? variantImageHash, // thumbnail for video ads only
             );
             created.creativeIds.push(creativeId);
@@ -371,7 +380,7 @@ export class MetaAdsService {
               variant,
               variantImageHash,
               config.pageId ?? '',
-              config.landingUrl,
+              buildLandingUrl(adName2),
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);

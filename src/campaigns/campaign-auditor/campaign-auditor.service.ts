@@ -15,6 +15,7 @@ import { SignalDetectorService, AuditSignalPacket } from './signal-detector.serv
 import { AuditAgentService, AuditVerdict } from './audit-agent.service';
 import { MetaMetricsService, FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
+import { withUtmParams } from '../meta-ads/meta-utm.util';
 import { SlackService } from '../../delivery/slack.service';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
 import { CreativeLearningService } from '../../learning/creative-learning.service';
@@ -427,10 +428,17 @@ export class CampaignAuditorService {
         const isPause = action.type === 'pause_ad' || action.type === 'pause_adset';
         const isGrowth = action.type === 'scale_adset' || action.type === 'add_creative' || action.type === 'add_adset';
         const isCreativeFix = action.type === 'replace_creative';
+        // Throttle = less destructive than pause. The auditor prompt explicitly tells the LLM
+        // to use these for safety-rail breaches in day 0-3 (e.g. budget cap creep). If a
+        // high-priority pause is allowed through, a high-priority throttle must be too —
+        // otherwise the only escape from a budget breach in day 0-3 is the more destructive
+        // pause action, which contradicts the prompt's "throttle before pause" rule.
+        const isSafetyThrottle = action.type === 'reduce_total_budget';
 
         if (ageDays < 3) {
-          // Day 0-3: only allow pauses if safety-related (overspending, frequency breach)
-          if (isPause && action.priority === 'high') {
+          // Day 0-3: only allow pauses or safety throttles if priority=high (overspending,
+          // frequency breach). LLM is responsible for setting priority=high on safety cases.
+          if ((isPause || isSafetyThrottle) && action.priority === 'high') {
             this.logger.log(`Timing guard: allowing high-priority ${action.type} on "${action.targetName}" in day 0-3 (safety exception)`);
             return true;
           }
@@ -914,15 +922,21 @@ export class CampaignAuditorService {
           let newAdId = '';
           if (bestImage?.imageUrl) {
             const product = (company.products ?? []).find((p: any) => p.active);
+            const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;
+            const taggedLandingUrl = withUtmParams(product?.landingUrl ?? '', {
+              campaignName: campaign.name ?? String(campaign._id),
+              adSetName,
+              adName: newAdName,
+            });
             try {
               const { adId } = await this.metaAds.createAdInAdSet(
                 newAdSetId,
                 company.meta!.accessToken,
-                `${adSetName} — Variant ${bestVariantIndex + 1}`,
+                newAdName,
                 { primaryText: bestVariant.primaryText, headline: bestVariant.headline, cta: bestVariant.cta },
                 bestImage.imageUrl,
                 company.meta!.pageId ?? '',
-                product?.landingUrl ?? '',
+                taggedLandingUrl,
                 (company.meta as any)?.specialAdCategories ?? [],
               );
               newAdId = adId;

@@ -5,6 +5,7 @@ import { Model } from 'mongoose';
 import { Job } from 'bullmq';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { MetaAdsService } from '../campaigns/meta-ads/meta-ads.service';
+import { withUtmParams } from '../campaigns/meta-ads/meta-utm.util';
 import { CompaniesService } from '../companies/companies.service';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
@@ -137,14 +138,21 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
       try {
         const product = (company.products ?? []).find((p: any) => p.active);
+        const adName = `Ad (${replacementHook}) — added ${new Date().toISOString().split('T')[0]}`;
+        const adSetName = ((campaign as any)?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId)?.name ?? adSetId;
+        const taggedLandingUrl = withUtmParams(product?.landingUrl ?? '', {
+          campaignName: campaign?.name ?? campaignId,
+          adSetName,
+          adName,
+        });
         const { adId } = await this.metaAds.createAdInAdSet(
           adSetId,
           accessToken,
-          `Ad (${replacementHook}) — added ${new Date().toISOString().split('T')[0]}`,
+          adName,
           { primaryText: selectedVariant.primaryText, headline: selectedVariant.headline, cta: selectedVariant.cta },
           selectedImage.imageUrl,
           company.meta?.pageId ?? '',
-          product?.landingUrl ?? '',
+          taggedLandingUrl,
           (company.meta as any)?.specialAdCategories ?? [],
         );
 
