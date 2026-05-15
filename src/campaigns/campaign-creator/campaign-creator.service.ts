@@ -137,33 +137,42 @@ export class CampaignCreatorService {
       }
       await SafetyChecks.checkWeeklyBudget(company.tenantId, finalBudget, company, this.campaignsService);
 
-      // ── audienceStage guard: warm/hot CANNOT use advantage_plus ─────────────
-      // The Performance Analyst sometimes downgrades lookalike → advantage_plus
-      // citing budget-tier rule + cross-stage CPA comparisons. For warm/hot
-      // briefs that's a category error (advantage_plus is cold prospecting).
-      // Auto-rewrite back to lookalike when a real lookalike audience exists,
-      // otherwise reject the campaign entirely.
+      // ── audienceStage guard: warm/hot MUST use custom-audience retargeting ──
+      // Funnel-stage taxonomy (industry-standard):
+      //   cold = lookalikes / interests / advantage_plus / broad (no brand engagement)
+      //   warm = custom retargeting (site visitors / engagers / video viewers)
+      //   hot  = cart abandoners / initiate_checkout / 30d engaged
+      // Lookalikes are NEVER warm — being a lookalike of a buyer is still
+      // prospecting because that person has not engaged with our brand.
+      // For warm/hot briefs, ONLY custom/retarget audience types are valid;
+      // lookalike/advantage_plus/interest are category errors → reject.
       const briefStage = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
       if (briefStage === 'warm' || briefStage === 'hot') {
-        const product = (company.products ?? []).find(p => p.name === (brief as any).product) ?? (company.products ?? [])[0];
-        const lookalikeAudiences = (product?.metaAudiences ?? []).filter((a: any) => a.type === 'lookalike');
-        const customAudiences = (product?.metaAudiences ?? []).filter((a: any) => a.type === 'custom');
-        const fallbackAudience = lookalikeAudiences[0] ?? customAudiences[0];
+        const PROSPECTING_TYPES = new Set(['advantage_plus', 'broad', 'lookalike', 'interest']);
+        const offenders = ((review.campaign?.adSets ?? []) as any[])
+          .filter(as => PROSPECTING_TYPES.has(as.audienceType))
+          .map(as => `${as.name} (${as.audienceType})`);
+        if (offenders.length > 0) {
+          throw new Error(
+            `Campaign rejected: ${briefStage} brief requires retargeting custom audiences (audienceType "custom" or "retarget"), but ${offenders.length} ad set(s) used cold-prospecting types: ${offenders.join(', ')}. Lookalike/advantage_plus/interest are NEVER warm — they reach people who have not engaged with our brand. Review the brief: either retag as cold, or supply a real custom-audience metaAudienceId.`,
+          );
+        }
 
-        for (const adSet of (review.campaign?.adSets ?? []) as any[]) {
-          if (adSet.audienceType === 'advantage_plus' || adSet.audienceType === 'broad') {
-            if (fallbackAudience) {
-              this.logger.warn(
-                `Ad set "${adSet.name}": ${adSet.audienceType} forbidden for ${briefStage} brief — auto-rewriting to ${fallbackAudience.type} (${fallbackAudience.name})`,
-              );
-              adSet.audienceType = fallbackAudience.type;
-              adSet.metaAudienceId = fallbackAudience.id;
-            } else {
-              throw new Error(
-                `Campaign rejected: ${briefStage} brief has no valid lookalike/custom audience to fall back to. Review team picked advantage_plus which is forbidden for ${briefStage} stage.`,
-              );
-            }
-          }
+        // ── Second guard: warm/hot + retarget/custom MUST have a metaAudienceId ──
+        // The May 14 KAAL_SARPA campaign exposed this gap: Review Team picked
+        // audienceType="retarget" (correct) but omitted metaAudienceId. At Meta
+        // launch, meta-ads.service.ts:531 requires both to attach custom_audiences;
+        // missing metaAudienceId silently fell through to Advantage+ broad
+        // delivery — warm copy ("Aapki kundli wait kar rahi hai") got served
+        // to cold audience. Throw early so the operator picks an audience.
+        const RETARGET_TYPES = new Set(['retarget', 'custom']);
+        const adSetsWithoutAudience = ((review.campaign?.adSets ?? []) as any[])
+          .filter(as => RETARGET_TYPES.has(as.audienceType) && !as.metaAudienceId)
+          .map(as => as.name);
+        if (adSetsWithoutAudience.length > 0) {
+          throw new Error(
+            `Campaign rejected: ${briefStage} brief has ${adSetsWithoutAudience.length} ad set(s) with audienceType=retarget/custom but no metaAudienceId set: ${adSetsWithoutAudience.join(', ')}. Without metaAudienceId, Meta launches with no custom_audiences attached → defaults to Advantage+ broad delivery (cold prospecting traffic gets warm copy). Set metaAudienceId to a real custom audience ID from product.metaAudiences.`,
+          );
         }
       }
 
@@ -365,18 +374,18 @@ export class CampaignCreatorService {
     if (validAudienceIds.size > 0) {
       for (const adSet of config.adSets as any[]) {
         if (adSet.metaAudienceId && !validAudienceIds.has(adSet.metaAudienceId)) {
-          if ((briefStageForLaunch === 'warm' || briefStageForLaunch === 'hot') && liveLookalikes.length > 0) {
-            const fallback = liveLookalikes[0];
-            this.logger.warn(
-              `Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — falling back to live lookalike ${fallback.id} (${fallback.name}) instead of advantage_plus (forbidden for ${briefStageForLaunch} stage)`,
+          // Warm/hot stages require custom-audience retargeting. Lookalike is
+          // cold-prospecting under the new taxonomy — falling back from an
+          // expired retargeting audience to a lookalike would change funnel
+          // stage entirely. Fail loudly instead so a human can swap the audience.
+          if (briefStageForLaunch === 'warm' || briefStageForLaunch === 'hot') {
+            throw new Error(
+              `Ad set "${adSet.name}": custom audience ${adSet.metaAudienceId} expired and no replacement custom/retarget audience available for ${briefStageForLaunch} brief. Cannot fall back to lookalike (that's cold prospecting). Refresh the custom audience and re-run.`,
             );
-            adSet.metaAudienceId = fallback.id;
-            adSet.audienceType = 'lookalike';
-          } else {
-            this.logger.warn(`Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — converting to advantage_plus`);
-            delete adSet.metaAudienceId;
-            adSet.audienceType = 'advantage_plus';
           }
+          this.logger.warn(`Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — converting to advantage_plus`);
+          delete adSet.metaAudienceId;
+          adSet.audienceType = 'advantage_plus';
         }
         if (adSet.excludeAudienceIds?.length) {
           const before = adSet.excludeAudienceIds.length;
@@ -513,17 +522,39 @@ export class CampaignCreatorService {
       this.logger.warn(`No Purchasers audience found in product.metaAudiences — prospecting ad sets will reach past buyers (5-15% wasted spend baseline)`);
     }
 
-    // Enforce video-variant restriction: video was only generated for the selected variant.
-    // Applies ONLY to 'video' format (single-format video ad set) — 'mixed' is the path
-    // that intentionally pairs the selected variant's video with image ads for the rest,
-    // so don't collapse 'mixed' down to a single variant here.
+    // Enforce per-format variant rules:
+    //   video  → MUST be only the selected variant (video was generated for that one only)
+    //   image  → MUST include EVERY variant that has an image available
+    //   mixed  → handled upstream by the split logic; pass through here
+    //
+    // The Campaign Review Team prompt instructs the LLM to set ads=[0,1,2,3] for
+    // image ad sets, but it has historically narrowed to a single variant
+    // (e.g. May 2026 KAAL_SARPA campaign launched with ads=[1] only → 1 ad on
+    // Meta instead of 4, wasted 75% of generated creative). Enforce in TS so
+    // LLM drift can't kill variant diversity.
     const selectedCopyIndex = (creativePackage as any)?.selectedCopyIndex ?? 0;
+    const availableImageVariants: number[] = ((creativePackage as any)?.images ?? [])
+      .map((img: any) => img?.variantIndex)
+      .filter((idx: any) => typeof idx === 'number' && idx >= 0)
+      .sort((a: number, b: number) => a - b);
+    const allImageVariants = availableImageVariants.length > 0
+      ? availableImageVariants
+      : (copyVariants ?? []).map((_: any, i: number) => i);
+
     for (const adSet of config.adSets as any[]) {
       if (adSet.creativeFormat === 'video' && videoUrl) {
-        // Video-only ad sets MUST use only the selected variant
         if (adSet.ads.length > 1 || !adSet.ads.includes(selectedCopyIndex)) {
           this.logger.warn(`Ad set "${adSet.name}": video format restricted to variant ${selectedCopyIndex} (was: [${adSet.ads}])`);
           adSet.ads = [selectedCopyIndex];
+        }
+      } else if (adSet.creativeFormat === 'image' && allImageVariants.length > 0) {
+        const proposed = (adSet.ads ?? []).filter((v: number) => allImageVariants.includes(v));
+        // LLM narrowed below available — expand back to all available image variants.
+        if (proposed.length < allImageVariants.length) {
+          this.logger.warn(
+            `Ad set "${adSet.name}": image format had ads=[${adSet.ads}] — expanding to all available image variants [${allImageVariants.join(',')}] (${allImageVariants.length - proposed.length} variant(s) would otherwise be dropped)`,
+          );
+          adSet.ads = [...allImageVariants];
         }
       }
     }
@@ -535,6 +566,32 @@ export class CampaignCreatorService {
     for (const adSet of config.adSets as any[]) {
       if (adSet.excludedAudiences && !adSet.excludeAudienceIds) {
         adSet.excludeAudienceIds = adSet.excludedAudiences;
+      }
+    }
+
+    // ── Bid-cap injection for cold prospecting ────────────────────────────────
+    // Broad cold audiences (advantage_plus, lookalike, interest) on
+    // LOWEST_COST_WITHOUT_CAP get delivered to the cheapest placements →
+    // ₹6 CPC junk traffic with sub-0.1% CVR (May 2026 agent campaign).
+    // Anchor to the product's historical CPA so Meta uses bid_strategy=COST_CAP
+    // and stops chasing junk clicks. Custom/retarget audiences keep
+    // LOWEST_COST_WITHOUT_CAP (the audience itself is the quality gate).
+    const briefProductForBid = (creativeBrief as any)?.product;
+    const productForBid = (company.products ?? []).find((p: any) => p.name === briefProductForBid)
+      ?? (company.products ?? []).find((p: any) => p.active)
+      ?? (company.products ?? [])[0];
+    const histCPA = productForBid?.performance?.avgCPA;
+    if (typeof histCPA === 'number' && histCPA > 0) {
+      const COLD_PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
+      let bidCapped = 0;
+      for (const adSet of config.adSets as any[]) {
+        if (!COLD_PROSPECTING_TYPES.has(adSet.audienceType)) continue;
+        if (typeof adSet.bidAmountInr === 'number' && adSet.bidAmountInr > 0) continue;
+        adSet.bidAmountInr = Math.round(histCPA);
+        bidCapped++;
+      }
+      if (bidCapped > 0) {
+        this.logger.log(`Applied COST_CAP bid_amount=₹${Math.round(histCPA)} (= product avgCPA) to ${bidCapped} cold prospecting ad set(s)`);
       }
     }
 

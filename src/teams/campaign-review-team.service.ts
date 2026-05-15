@@ -7,6 +7,7 @@ import { ClaudeService } from '../claude/claude.service';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
+import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
@@ -73,6 +74,8 @@ export class CampaignReviewTeamService {
     private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(UsageLog.name)
     private readonly usageLogModel: Model<UsageLog>,
+    @InjectModel(Campaign.name)
+    private readonly campaignModel: Model<CampaignDocument>,
   ) {}
 
   async review(
@@ -197,31 +200,34 @@ export class CampaignReviewTeamService {
     }
 
     // Conditionally include the budget-tier rule. For warm/hot briefs, the
-    // "≤₹5k → advantage_plus" rule conflicts with the audienceStage rule
-    // (warm/hot CANNOT use advantage_plus). The conflict caused the Performance
-    // Analyst to flip lookalike → advantage_plus citing the budget rule. For
-    // warm/hot, replace the budget rule with stage-aware ad-set sizing that
-    // doesn't mention advantage_plus.
+    // FUNNEL-STAGE TAXONOMY (industry-standard):
+    //   cold = lookalikes / interests / advantage_plus / broad — anyone who hasn't engaged
+    //   warm = custom-audience retargeting (site visitors / engagers / video viewers)
+    //   hot  = cart abandoners / initiate_checkout / 30d engaged
+    // Lookalikes are NEVER warm — being a lookalike of a buyer ≠ engaging with our brand.
     const briefStageForReview = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
     const isWarmOrHot = briefStageForReview === 'warm' || briefStageForReview === 'hot';
     const adSetCountRule = isWarmOrHot
-      ? `2. AD SET COUNT (warm/hot stage — DO NOT downgrade to advantage_plus regardless of budget):
-   - Budget ≤₹3,000/day → MUST be 1 ad set, audienceType MUST be lookalike or custom (NOT advantage_plus)
-   - Budget ₹3-15k → max 2 ad sets (lookalike + custom retarget). Each ad set needs ₹2,500+/day minimum.
-   - Budget >₹15k → max 3 ad sets. Stage-appropriate audiences only.
-   - The audienceStage rule WINS over any budget-based simplification — keep lookalike/custom even at small budgets.`
+      ? `2. AD SET COUNT (warm/hot stage — RETARGETING ONLY, no prospecting audiences):
+   - audienceType MUST be "custom" or "retarget" (NOT lookalike, NOT advantage_plus, NOT interest — those are cold-prospecting)
+   - Budget ≤₹3,000/day → MUST be 1 ad set, custom-audience retargeting
+   - Budget ₹3-15k → max 2 ad sets (e.g. 7d engagers + cart-abandoners). Each ad set needs ₹2,000+/day minimum.
+   - Budget >₹15k → max 3 ad sets, all retargeting custom audiences.
+   - If no custom/retarget audience is available in AVAILABLE META AUDIENCES, REJECT the campaign — do not silently downgrade to a cold audience type.`
       : `2. AD SET COUNT (cold stage):
-   - Budget ≤₹5,000/day → MUST be 1 ad set (advantage_plus is acceptable here for cold prospecting only).
+   - Budget ≤₹5,000/day → MUST be 1 ad set (advantage_plus or lookalike, both fine for cold prospecting).
    - Budget ₹5-15k → max 2 ad sets. Each ad set needs ₹3,000+/day minimum.
    - Budget >₹15k → max 3 ad sets.
    - If the Strategist proposed too many ad sets for the budget, consolidate them.`;
 
-    // Targeting-fix rule (#3 in original prompt): for warm/hot, do NOT auto-convert
-    // lookalike-without-id to advantage_plus. Keep as lookalike, flag the missing
-    // ID, let the launch-time audience guard pick a fallback lookalike.
+    // Targeting-fix rule: warm/hot must use retargeting custom audiences. If
+    // none exist for the product, REJECT — don't fall back to lookalike (which
+    // is cold) or advantage_plus (also cold). Cold can use any prospecting type.
     const targetingFixRule = isWarmOrHot
-      ? `3. TARGETING (warm/hot stage): If a "lookalike" ad set has no metaAudienceId, DO NOT convert to advantage_plus — instead pick a real lookalike audience ID from the AVAILABLE META AUDIENCES list above. If none exists, keep the audienceType as "lookalike" with metaAudienceId=null and let the launch-time guard pick a fallback. NEVER downgrade to advantage_plus for warm/hot.`
-      : `3. TARGETING: Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.`;
+      ? `3. TARGETING (warm/hot stage):
+   (a) audienceType MUST be "custom" or "retarget" pointing to a real custom-audience metaAudienceId. If a proposed ad set has audienceType "lookalike" / "advantage_plus" / "interest", that's a category error — REJECT the campaign with reason "warm/hot brief requires retargeting custom audience, got cold-prospecting type". Do NOT silently rewrite to a different type.
+   (b) HARD REQUIREMENT — every retarget/custom ad set MUST have a non-empty metaAudienceId pointing to a real custom audience from the AVAILABLE META AUDIENCES list above. Setting audienceType="retarget" without metaAudienceId is the worst possible failure mode: at launch, Meta sees no custom_audiences attached and silently delivers as Advantage+ broad — your warm-stage copy gets served to cold prospecting traffic. If no valid custom audience ID is available for this brief's audience description, REJECT the campaign with reason "no custom audience available for warm/hot retargeting". Never approve a retarget/custom ad set with metaAudienceId missing, null, or empty string.`
+      : `3. TARGETING (cold stage): Fix audience types — if a "lookalike" ad set has no metaAudienceId, convert it to "advantage_plus" (remove metaAudienceId field). Do NOT reject for this — just fix it.`;
 
     const call2UserMessage = `You are the Performance Analyst reviewing a Meta Ads campaign config for ${company.name}.
 
@@ -252,8 +258,9 @@ ${adSetCountRule}
 ${targetingFixRule}
 4. GUARDRAILS: Are scaleRules and pauseRules specific enough? (e.g. "ROAS > 2x AND CTR > 0.8% after 48h → scale 20%")
 5. RISK: What's the downside scenario? Does the config protect against it?
-6. Fix issues directly in the output config. Set approved: true unless there is a fundamental unfixable problem.
-7. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.${isWarmOrHot ? '\n8. NEVER compare advantage_plus CPA to lookalike CPA — they reach different audiences. Apples-to-oranges. CPA comparisons only meaningful WITHIN the same audienceStage.' : ''}
+6. AUDIENCE-CREATIVE COHERENCE: The brief's audienceStage is "${briefStageForReview ?? 'cold'}". Cold copy assumes the viewer has never heard of the brand (problem-first, brand-introduction); warm copy assumes prior engagement (offer-recall, objection-handling); hot copy assumes high intent (cart-recovery urgency). If the audienceStage label doesn't match what the audience is actually going to be on Meta (e.g. brief says "warm" but audience is a 1-5% lookalike of buyers — that's still cold prospecting because lookalikes have not engaged with the brand), DOWNGRADE the audienceStage to the truthful funnel position rather than approve a mismatched campaign. Lookalikes / advantage_plus / interest = cold; only custom audiences of past engagers = warm/hot.
+7. Fix issues directly in the output config. Set approved: true unless there is a fundamental unfixable problem.
+8. NEVER reject solely because metaAudienceId or excludeAudienceIds are missing — these are optional operational fields.${isWarmOrHot ? '\n9. NEVER compare advantage_plus CPA to lookalike CPA — they reach different audiences. Apples-to-oranges. CPA comparisons only meaningful WITHIN the same audienceStage.' : ''}
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -294,7 +301,104 @@ Return ONLY this JSON (no markdown, no explanation):
     return this.parseOutput(call2.content);
   }
 
-  private async fetchMetaAudiences(company: CompanyDocument): Promise<string> {
+  /**
+   * Compute per-audience historical performance from past launched campaigns.
+   * Joins on `campaignConfig.adSets[].metaAudienceId` and rolls up the
+   * matching `metaAdSets[].{spend,conversions}` from the same ad-set name.
+   * Returns Map<audienceId, perf>.
+   */
+  private async computeAudiencePerformance(
+    tenantId: string,
+  ): Promise<Map<string, { campaigns: number; spend: number; convs: number; cpa: number; lastUsed: Date | null }>> {
+    const out = new Map<string, { campaigns: number; spend: number; convs: number; cpa: number; lastUsed: Date | null }>();
+    try {
+      const launched = await this.campaignModel
+        .find({ tenantId, metaCampaignId: { $exists: true, $ne: '' } }, { campaignConfig: 1, metaAdSets: 1, launchedAt: 1, spend: 1, conversions: 1 })
+        .lean()
+        .exec();
+      for (const c of launched) {
+        const cfg = (c as any).campaignConfig;
+        const live = (c as any).metaAdSets ?? [];
+        const cfgAdSets = cfg?.adSets ?? [];
+        const launchedAt: Date | null = (c as any).launchedAt ?? null;
+
+        for (const cfgAs of cfgAdSets) {
+          const audId = cfgAs?.metaAudienceId;
+          if (!audId) continue;
+
+          // Prefer ad-set-level metrics from metaAdSets[]; fall back to top-level
+          // campaign metrics when metaAdSets is empty AND there's only one ad set
+          // (so top-level == ad-set level). Avoids dropping the May 4 MARRIAGE
+          // campaign's ₹5,989 spend / 1 conv from learning.
+          const liveMatch = live.find((l: any) => l.name === cfgAs.name);
+          let spend: number, convs: number;
+          if (liveMatch) {
+            spend = liveMatch.spend ?? 0;
+            convs = liveMatch.conversions ?? 0;
+          } else if (cfgAdSets.length === 1) {
+            spend = (c as any).spend ?? 0;
+            convs = (c as any).conversions ?? 0;
+          } else {
+            // Multi-ad-set campaign with no metaAdSets sync — can't attribute, skip
+            continue;
+          }
+
+          const prev = out.get(audId) ?? { campaigns: 0, spend: 0, convs: 0, cpa: 0, lastUsed: null };
+          prev.campaigns += 1;
+          prev.spend += spend;
+          prev.convs += convs;
+          if (launchedAt && (!prev.lastUsed || launchedAt > prev.lastUsed)) prev.lastUsed = launchedAt;
+          out.set(audId, prev);
+        }
+      }
+      // Compute CPA after rollup
+      for (const v of out.values()) v.cpa = v.convs > 0 ? Math.round(v.spend / v.convs) : 0;
+    } catch (err: any) {
+      this.logger.warn(`Audience performance rollup failed: ${err.message}`);
+    }
+    return out;
+  }
+
+  /**
+   * Score how well an audience matches the brief's stated audience description.
+   * Pure deterministic — no LLM. Returns HIGH | MEDIUM | LOW | NOT.
+   * The LLM still picks; this is just signal, not a hard rule.
+   */
+  private scoreBriefFit(audienceName: string, briefAudienceText: string): 'HIGH' | 'MEDIUM' | 'LOW' | 'NOT' {
+    const a = audienceName.toLowerCase();
+    const b = (briefAudienceText ?? '').toLowerCase();
+    const isLal = /lookalike|lal\b|\dpct|\d%/.test(a);
+    const isVisitor = /visitor|visit|traffic|landing/.test(a);
+    const isPurchaser = /purchaser|customer|buyer|purchase/.test(a);
+
+    // Brief intent signals
+    const briefVisitor = /visitor|tried|didn.?t buy|didn.?t purchase|abandon|cart|left|browsed|came to|landing/.test(b);
+    const briefPurchaser = /past buyer|past customer|repeat|upsell|already bought|previous buyer/.test(b);
+    const briefProspect = /lookalike|similar to|people like|prospecting|new audience|cold|first.?time|discovery/.test(b);
+
+    // Visitor retarget brief → custom visitor audience
+    if (briefVisitor && isVisitor) return 'HIGH';
+    if (briefVisitor && isPurchaser) return 'NOT';      // upselling buyers ≠ recovering visitors
+    // Upsell brief → past customer audience
+    if (briefPurchaser && isPurchaser) return 'HIGH';
+    if (briefPurchaser && isVisitor) return 'LOW';
+    // Cold prospecting brief → lookalike (tight first)
+    if (briefProspect && isLal) return 'HIGH';
+    if (briefProspect && isVisitor) return 'NOT';       // visitors aren't a prospecting pool
+    if (briefProspect && isPurchaser) return 'NOT';
+
+    // No clear signal — light token overlap as fallback
+    const tokens = a.split(/[_\s\d%-]+/).filter(t => t.length > 3);
+    const overlap = tokens.filter(t => b.includes(t)).length;
+    if (overlap >= 2) return 'MEDIUM';
+    if (overlap >= 1) return 'LOW';
+    return 'LOW';
+  }
+
+  private async fetchMetaAudiences(
+    company: CompanyDocument,
+    brief?: { audience?: string; audienceStage?: 'cold' | 'warm' | 'hot' },
+  ): Promise<string> {
     try {
       const accessToken = company.meta?.accessToken;
       if (!accessToken) return '';
@@ -331,22 +435,97 @@ Return ONLY this JSON (no markdown, no explanation):
 
       if (allAudiences.length === 0) return '';
 
-      const lines = allAudiences
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 30)
-        .map(a => `  - id: "${a.id}" | name: "${a.name}" | type: ${a.subtype} | size: ~${a.count.toLocaleString()}`);
+      // Sort lookalikes tightest-first; custom audiences by size (more reach for retargeting).
+      // Tighter lookalikes (1%) have ~3x the conversion-intent density of looser (2-3%).
+      const parseLookalikePercent = (name: string): number => {
+        const m = name.match(/(\d+)\s*[-–]\s*(\d+)\s*%|(\d+)\s*%|(\d+)\s*pct\b/i);
+        if (!m) return 99;
+        return parseInt(m[1] ?? m[3] ?? m[4], 10);
+      };
+      const isLookalike = (a: { subtype: string }) => /LOOKALIKE/i.test(a.subtype);
+      const lookalikes = allAudiences
+        .filter(isLookalike)
+        .sort((a, b) => parseLookalikePercent(a.name) - parseLookalikePercent(b.name));
+      const customs = allAudiences
+        .filter(a => !isLookalike(a))
+        .sort((a, b) => b.count - a.count);
+
+      // Performance rollup + brief-fit scoring (parts A + C of context enrichment)
+      const perfMap = await this.computeAudiencePerformance(company.tenantId);
+      const briefAudienceText = brief?.audience ?? '';
+      const stage = brief?.audienceStage ?? 'cold';
+      const todayMs = Date.now();
+      const fmtAge = (d: Date | null) => {
+        if (!d) return 'never used';
+        const days = Math.max(0, Math.round((todayMs - new Date(d).getTime()) / 86400000));
+        return days === 0 ? 'today' : `${days}d ago`;
+      };
+
+      const renderAudience = (a: { id: string; name: string; subtype: string; count: number }, pickedTop: boolean): string => {
+        const perf = perfMap.get(a.id);
+        const fit = briefAudienceText ? this.scoreBriefFit(a.name, briefAudienceText) : 'LOW';
+        const star = pickedTop ? '★ ' : '  ';
+        const histLine = perf
+          ? `History: ${perf.campaigns} campaign(s), ₹${Math.round(perf.spend).toLocaleString()} spent, ${perf.convs} conv${perf.convs > 0 ? `, CPA ₹${perf.cpa.toLocaleString()}` : ''}, last used ${fmtAge(perf.lastUsed)}`
+          : `History: 0 prior campaigns (untested — confidence: low)`;
+        const fitLine = `Brief-fit: ${fit}`;
+        return `${star}id: "${a.id}" | name: "${a.name}" | type: ${a.subtype} | size: ~${a.count.toLocaleString()}
+     ${histLine}
+     ${fitLine}`;
+      };
+
+      // Pick top-ranked candidate per stage to mark with ★. The "best" pick is:
+      // 1. highest brief-fit, then 2. lowest historical CPA (if convs ≥ 3 = enough signal),
+      // then 3. tightness for lookalikes / size for customs.
+      const fitRank = { HIGH: 3, MEDIUM: 2, LOW: 1, NOT: 0 } as const;
+      const pickStarFor = (pool: typeof allAudiences): string | null => {
+        if (pool.length === 0) return null;
+        const scored = pool.map(a => {
+          const perf = perfMap.get(a.id);
+          const fit = briefAudienceText ? this.scoreBriefFit(a.name, briefAudienceText) : 'LOW';
+          const fitScore = fitRank[fit];
+          const cpaScore = perf && perf.convs >= 3 ? -perf.cpa : 0; // lower CPA = better; 0 if untested
+          return { a, fitScore, cpaScore };
+        }).sort((x, y) => y.fitScore - x.fitScore || y.cpaScore - x.cpaScore);
+        return scored[0]?.a.id ?? null;
+      };
+
+      const lalStarId = stage === 'cold' ? pickStarFor(lookalikes) : null;
+      const customStarId = (stage === 'warm' || stage === 'hot') ? pickStarFor(customs) : null;
+
+      const coldBlock = lookalikes.length > 0
+        ? `┃ COLD prospecting candidates (use when audienceStage=cold; advantage_plus is also valid):\n┃\n${lookalikes.slice(0, 10).map(a => `┃ ${renderAudience(a, a.id === lalStarId)}`).join('\n┃\n')}`
+        : '┃ COLD: no lookalike audiences configured. Use audienceType=advantage_plus (no metaAudienceId).';
+
+      const warmBlock = customs.length > 0
+        ? `┃ WARM/HOT retargeting candidates (use when audienceStage=warm|hot):\n┃\n${customs.slice(0, 10).map(a => `┃ ${renderAudience(a, a.id === customStarId)}`).join('\n┃\n')}`
+        : '┃ WARM/HOT: no custom audiences configured. REJECT warm/hot briefs in this state.';
 
       return `═══════════════════════════════════════════════════════
-AVAILABLE META AUDIENCES (use these real IDs in adSets)
+AVAILABLE META AUDIENCES — performance + brief-fit (★ = top pick for THIS brief's stage)
 ═══════════════════════════════════════════════════════
-${lines.join('\n')}
+This brief's audienceStage = ${stage.toUpperCase()}. Audience description = "${briefAudienceText.slice(0, 200)}"
 
-Rules:
-- audienceType "lookalike" → pick a LOOKALIKE audience from above
-- audienceType "retarget" or "custom" → pick a CUSTOM audience from above
-- audienceType "advantage_plus" → no metaAudienceId needed
-- Only use IDs from this list — never invent audience IDs`;
-    } catch {
+${coldBlock}
+
+${warmBlock}
+
+DECISION RULE:
+- Pick the ★ audience for your stage unless you have a specific reason. If you skip ★, your selectionReason MUST cite either (a) historical performance data showing a different audience converts better, (b) saturation evidence on the ★ audience, or (c) a brief specific that the ★ audience can't satisfy. "I prefer X" without data is not a valid reason.
+- Brief-fit interpretation:
+    HIGH    = audience is a direct semantic match to brief intent
+    MEDIUM  = adjacent / partial match
+    LOW     = no specific match but structurally valid for the stage
+    NOT     = WRONG stage or wrong intent — never pick (e.g. past buyers for prospecting brief)
+- History interpretation:
+    convs ≥ 5 + CPA close to product avg = proven; trust the audience
+    convs < 3 OR no prior campaigns = untested; default to ★ unless you can justify otherwise
+    CPA > 2x product avg = audience underperforms; avoid even if it's the only option in stage
+- Lookalike tightness: 1% > 1-2% > 2-3%. Step up to looser only if daily budget > ₹10k AND tighter pool exhausted.
+- audienceType "advantage_plus" → no metaAudienceId needed (only valid for cold).
+- Only use IDs from above — never invent.`;
+    } catch (err: any) {
+      this.logger.warn(`fetchMetaAudiences failed: ${err.message}`);
       return '';
     }
   }
@@ -371,7 +550,7 @@ Rules:
 
     const product = (company.products ?? []).find(p => p.name === (brief as any).product);
 
-    const audienceContext = await this.fetchMetaAudiences(company);
+    const audienceContext = await this.fetchMetaAudiences(company, brief);
 
     return `${withoutSteps}
 

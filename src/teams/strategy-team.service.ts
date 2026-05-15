@@ -374,9 +374,22 @@ ${caseStudies.slice(0, 12).map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (
       const segments = (p.audienceSegments ?? []).map(s =>
         `    - ${s.name} (${s.confidence}${s.conversions ? `, ${s.conversions} conversions, CPA ₹${s.avgCPA}` : ''}): ${s.description}`
       ).join('\n');
-      const metaAud = (p.metaAudiences ?? []).map(a =>
-        `    - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name}`
-      ).join('\n');
+      // Sort lookalikes tightest-first (1% > 1-2% > 2-3%) so the briefer sees
+      // the highest-quality audience at the top of the list. Loose lookalikes
+      // delivered ₹6 junk-traffic CPC + 0.10% CVR in May 2026; tight lookalikes
+      // have ~3x the buyer signal density.
+      const metaAud = [...(p.metaAudiences ?? [])]
+        .sort((a, b) => {
+          const aIsLal = a.type === 'lookalike';
+          const bIsLal = b.type === 'lookalike';
+          if (aIsLal && bIsLal) return (a.lookalikePercent ?? 99) - (b.lookalikePercent ?? 99);
+          if (aIsLal) return -1;
+          if (bIsLal) return 1;
+          return 0;
+        })
+        .map(a =>
+          `    - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name}`
+        ).join('\n');
       const perf = p.performance;
       const perfLine = perf?.totalConversions
         ? `Performance: ${perf.totalConversions} conversions, CPA ₹${perf.avgCPA}, ROAS ${perf.avgROAS}x (${perf.confidenceLevel})`
@@ -576,7 +589,7 @@ STEP 8: Return ONLY this JSON (no markdown, no explanation):
       "platform": "instagram|facebook|youtube|reddit",
       "format": "reel|carousel|video|single_image|collection",
       "audience": "full audience description",
-      "audienceStage": "cold|warm|hot — cold for prospecting (default for fresh audiences); warm if audience description signals retargeting / past-visitors / lookalike-of-buyers; hot for cart-abandoners / 30d-engaged-no-purchase",
+      "audienceStage": "cold|warm|hot — STRICT funnel definition (industry-standard, no exceptions): cold = ANY audience that has NOT engaged with our brand (lookalikes, interests, broad/advantage_plus, 1%-10% lookalikes-of-buyers ALL count as cold — these are still NEW people who never visited our site). warm = retargeting custom audiences of people who DID engage (site visitors, IG/FB engagers, video viewers, page followers). hot = high-intent retargeting (cart abandoners, initiate-checkout, 30d engaged without purchase). Lookalikes are NEVER warm — being a lookalike of a buyer ≠ engaging with our brand. Default to cold unless brief explicitly references retargeting a custom audience.",
       "hook": "opening line or visual hook",
       "keyMessage": "what the audience should believe after seeing this",
       "conversionBridge": "how this leads to buying the specific product",
@@ -650,9 +663,22 @@ ${caseStudies.slice(0, 12).map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (
       const segments = (p.audienceSegments ?? []).map(s =>
         `    - ${s.name} (${s.confidence}${s.conversions ? `, ${s.conversions} conversions, CPA ₹${s.avgCPA}` : ''}): ${s.description}`
       ).join('\n');
-      const metaAud = (p.metaAudiences ?? []).map(a =>
-        `    - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name}`
-      ).join('\n');
+      // Sort lookalikes tightest-first (1% > 1-2% > 2-3%) so the briefer sees
+      // the highest-quality audience at the top of the list. Loose lookalikes
+      // delivered ₹6 junk-traffic CPC + 0.10% CVR in May 2026; tight lookalikes
+      // have ~3x the buyer signal density.
+      const metaAud = [...(p.metaAudiences ?? [])]
+        .sort((a, b) => {
+          const aIsLal = a.type === 'lookalike';
+          const bIsLal = b.type === 'lookalike';
+          if (aIsLal && bIsLal) return (a.lookalikePercent ?? 99) - (b.lookalikePercent ?? 99);
+          if (aIsLal) return -1;
+          if (bIsLal) return 1;
+          return 0;
+        })
+        .map(a =>
+          `    - [${a.type}${a.lookalikePercent ? ` ${a.lookalikePercent}%` : ''}] ${a.name}`
+        ).join('\n');
       const perf = p.performance;
       const perfLine = perf?.totalConversions
         ? `Performance: ${perf.totalConversions} conversions, CPA ₹${perf.avgCPA}, ROAS ${perf.avgROAS}x (${perf.confidenceLevel})`
@@ -777,7 +803,7 @@ Return ONLY a JSON array of exactly ${poolSize} brief objects (no markdown, no e
     "platform": "instagram|facebook|youtube|reddit",
     "format": "reel|carousel|video|single_image|collection",
     "audience": "full audience description",
-    "audienceStage": "cold|warm|hot — cold for prospecting (default); warm if retargeting / lookalike-of-buyers; hot for cart-abandoners",
+    "audienceStage": "cold|warm|hot — STRICT: cold = lookalikes/interests/broad/advantage_plus (anyone who hasn't engaged with our brand, INCLUDING lookalikes-of-buyers). warm = custom-audience retargeting (site visitors, IG/FB engagers, video viewers). hot = cart-abandoners / initiate-checkout / 30d engaged. Default cold unless brief explicitly retargets a custom audience.",
     "hook": "opening line or visual hook",
     "keyMessage": "what the audience should believe after seeing this",
     "conversionBridge": "how this leads to buying the specific product",

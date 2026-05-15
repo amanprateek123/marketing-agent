@@ -31,6 +31,7 @@ import { StrategyTeamService } from '../teams/strategy-team.service';
 import { CreativeTeamService } from '../teams/creative-team.service';
 import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
 import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
+import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
 
 @Module({
   imports: [
@@ -46,6 +47,11 @@ import { CreativePackage, CreativePackageSchema } from '../creative/schemas/crea
       { name: Digest.name, schema: DigestSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
       { name: CreativePackage.name, schema: CreativePackageSchema },
+      // Required by CampaignReviewTeamService.computeAudiencePerformance which
+      // queries past launched campaigns to surface per-audience CPA in the
+      // Review Team prompt. Schema is also registered in CampaignsModule —
+      // forFeature is module-scoped so duplicate registration is harmless.
+      { name: Campaign.name, schema: CampaignSchema },
     ]),
     ClaudeModule,
     forwardRef(() => CompaniesModule),

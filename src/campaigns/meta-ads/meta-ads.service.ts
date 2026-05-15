@@ -45,6 +45,13 @@ export interface MetaAdSetConfig {
   interests?: string[];      // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
   optimizationGoal: string;
   ads: number[];
+  // Optional cost-cap bid (in rupees, full not paise). When set, ad set ships
+  // with bid_strategy=COST_CAP + bid_amount=this. Used to anchor broad cold
+  // audiences (lookalike >1%, advantage_plus, interest) to the product's
+  // historical CPA so Meta stops delivering ₹6 junk traffic that doesn't
+  // convert. Leave undefined for warm/hot custom-audience retargeting where
+  // LOWEST_COST_WITHOUT_CAP is fine (the audience itself is the quality gate).
+  bidAmountInr?: number;
 }
 
 export interface MetaCampaignConfig {
@@ -578,6 +585,13 @@ export class MetaAdsService {
       targeting.publisher_platforms = (config as any).publisherPlatforms;
     }
 
+    // Bid strategy: prefer COST_CAP when bidAmountInr is supplied (anchors
+    // broad cold audiences to historical CPA, prevents ₹6 junk-traffic spiral
+    // that the May 2026 agent campaign hit — 0.10% CVR on ₹6 CPC because
+    // LOWEST_COST_WITHOUT_CAP delivered to lowest-quality placements).
+    // Fall back to LOWEST_COST_WITHOUT_CAP when no bid is set (custom-audience
+    // retargeting where the audience itself is the quality gate).
+    const useBidCap = typeof config.bidAmountInr === 'number' && config.bidAmountInr > 0;
     const adSetData: any = {
       name: config.name,
       campaign_id: campaignId,
@@ -585,12 +599,8 @@ export class MetaAdsService {
       billing_event: 'IMPRESSIONS',
       optimization_goal: config.optimizationGoal || 'OFFSITE_CONVERSIONS',
       destination_type: 'WEBSITE',
-      // Pin bid strategy at ad set level (we run ABO — campaign-level
-      // bid_strategy is rejected without CBO budget). LOWEST_COST_WITHOUT_CAP
-      // = Meta auto-bids to spend the full daily budget at the lowest CPA,
-      // no bid_amount required. Switch to COST_CAP (with bid_amount) once a
-      // CPA target is validated by data.
-      bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+      bid_strategy: useBidCap ? 'COST_CAP' : 'LOWEST_COST_WITHOUT_CAP',
+      ...(useBidCap ? { bid_amount: Math.round(config.bidAmountInr! * 100) } : {}),
       targeting,
       status: 'PAUSED',
       access_token: accessToken,
@@ -984,6 +994,43 @@ export class MetaAdsService {
     await this.updateAdStatus(result.adId, 'ACTIVE', accessToken);
 
     return result;
+  }
+
+  /**
+   * Attach a custom audience to a live ad set's targeting. Read-modify-write
+   * so we don't blow away geo / age / placements set at launch.
+   *
+   * Use case: agent campaigns launched before the warm/hot guard was deployed
+   * (May 14 KAAL_SARPA) shipped audienceType="retarget" with no metaAudienceId
+   * → Meta defaulted to Advantage+ broad. This method patches a real custom
+   * audience onto the live ad set so warm copy reaches the warm pool.
+   */
+  async patchAdSetAudience(
+    adSetId: string,
+    accessToken: string,
+    customAudienceId: string,
+  ): Promise<void> {
+    // Read current targeting so we don't lose geo/age/placements/excluded_audiences
+    const currentRes = await this.metaApiCall('GET', `${META_API_BASE}/${adSetId}`, {
+      fields: 'targeting',
+      access_token: accessToken,
+    });
+    const targeting = currentRes.data?.targeting ?? {};
+
+    // Merge: replace custom_audiences with the specified one. targeting_automation.advantage_audience
+    // = 0 disables Meta's "Advantage+ audience expansion" — required when attaching a specific
+    // custom audience or Meta will keep delivering broadly anyway.
+    const newTargeting = {
+      ...targeting,
+      custom_audiences: [{ id: customAudienceId }],
+      targeting_automation: { advantage_audience: 0 },
+    };
+
+    await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
+      targeting: newTargeting,
+      access_token: accessToken,
+    });
+    this.logger.log(`Ad set ${adSetId}: custom audience patched to ${customAudienceId}`);
   }
 
   /**

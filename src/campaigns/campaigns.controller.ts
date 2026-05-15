@@ -93,6 +93,201 @@ export class CampaignsController {
     }
   }
 
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/patch-audience
+   * Body: { customAudienceId: "120242..." }   — must exist in product.metaAudiences
+   *        OR { audienceName: "91Astrology_Visitors_30d" } — resolved by name
+   *
+   * Use case: agent campaigns launched before the warm/hot guard (pre 2026-05-15)
+   * shipped audienceType="retarget" with no metaAudienceId → Meta defaulted to
+   * Advantage+ broad delivery. This endpoint attaches a real custom audience to
+   * every live ad set on the campaign and disables Advantage+ audience expansion.
+   *
+   * Symptom in Meta UI:  "Audience: Advantage+ on" + "Custom audiences: None"
+   * After running:        "Custom audiences: <name>" with broad expansion off
+   */
+  @Post(':tenantId/:campaignId/patch-audience')
+  async patchAudience(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body('customAudienceId') customAudienceId: string,
+    @Body('audienceName') audienceName: string,
+  ) {
+    const campaign: any = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) throw new BadRequestException('Campaign was never launched on Meta');
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) throw new BadRequestException('No Meta access token configured');
+
+    // Resolve audience: prefer explicit ID, else look up by name in product config
+    const allAudiences = (company.products ?? []).flatMap((p: any) => p.metaAudiences ?? []);
+    let resolvedId = customAudienceId;
+    if (!resolvedId && audienceName) {
+      const match = allAudiences.find((a: any) => a.name === audienceName);
+      if (!match) {
+        throw new BadRequestException(
+          `Audience name "${audienceName}" not found on any product. Available: ${allAudiences.map((a: any) => a.name).join(', ') || 'none configured'}`,
+        );
+      }
+      resolvedId = match.id;
+    }
+    if (!resolvedId) {
+      throw new BadRequestException(
+        `Provide either customAudienceId or audienceName. Available custom audiences on this tenant: ${allAudiences.filter((a: any) => a.type === 'custom').map((a: any) => `${a.name} (${a.id})`).join(', ') || 'none'}`,
+      );
+    }
+
+    // Verify the audience exists in product config — guard against typo'd IDs
+    const auditMatch = allAudiences.find((a: any) => a.id === resolvedId);
+    if (!auditMatch) {
+      throw new BadRequestException(
+        `customAudienceId "${resolvedId}" not found in any product.metaAudiences. Cannot verify it's a valid audience for this tenant — refusing to patch.`,
+      );
+    }
+
+    const results: Array<{ adSetId: string; status: 'patched' | 'failed'; error?: string }> = [];
+    for (const liveAdSet of (campaign.metaAdSets ?? [])) {
+      try {
+        await this.metaAdsService.patchAdSetAudience(liveAdSet.id, company.meta.accessToken, resolvedId);
+        results.push({ adSetId: liveAdSet.id, status: 'patched' });
+      } catch (err: any) {
+        results.push({ adSetId: liveAdSet.id, status: 'failed', error: err.message });
+      }
+    }
+
+    // Persist the chosen audience back to campaignConfig so future syncs / audits see it
+    try {
+      const cfg = (campaign as any).campaignConfig;
+      if (cfg?.adSets) {
+        for (const as of cfg.adSets) {
+          if (['retarget', 'custom'].includes(as.audienceType)) {
+            as.metaAudienceId = resolvedId;
+          }
+        }
+        await this.campaignModel.updateOne({ _id: campaign._id }, { $set: { campaignConfig: cfg } });
+      }
+    } catch {
+      // best-effort persist
+    }
+
+    return {
+      campaignId,
+      patchedAudience: { id: resolvedId, name: auditMatch.name, type: auditMatch.type },
+      patched: results.filter(r => r.status === 'patched').length,
+      failed: results.filter(r => r.status === 'failed').length,
+      results,
+    };
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/backfill-variants
+   *
+   * Top up a launched campaign with copy/image variants that exist in the
+   * creative_package but never made it onto Meta. Use case: pre-2026-05-14
+   * campaigns where the Campaign Review Team narrowed image ad sets to one
+   * variant index, leaving 3/4 of generated creative on the floor. Adds the
+   * missing variants to each existing live ad set as PAUSED → ACTIVE ads.
+   *
+   * Idempotent: skips variants whose name already exists on the ad set.
+   */
+  @Post(':tenantId/:campaignId/backfill-variants')
+  async backfillVariants(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    const campaign: any = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) throw new BadRequestException('Campaign was never launched on Meta — backfill not applicable');
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) throw new BadRequestException('No Meta access token configured for tenant');
+    if (!company.meta.pageId) throw new BadRequestException('company.meta.pageId is required for ad creative creation');
+
+    const pkg: any = await this.campaignsService.findCreativePackage(campaign.creativePackageId);
+    if (!pkg) throw new BadRequestException(`creativePackage ${campaign.creativePackageId} not found`);
+
+    const copyVariants = pkg.copyVariants ?? [];
+    const images = pkg.images ?? [];
+    if (copyVariants.length === 0 || images.length === 0) {
+      throw new BadRequestException('Creative package has no variants or images');
+    }
+
+    // Resolve product → landing URL. Prefer brief.product if creativeBrief present;
+    // fall back to active product.
+    const briefId = campaign.briefId;
+    let product: any = null;
+    if (briefId) {
+      const brief = await this.creativeBriefModel.findOne({ tenantId, briefId }).lean().exec();
+      if (brief?.product) {
+        product = (company.products ?? []).find((p: any) => p.name === brief.product);
+      }
+    }
+    if (!product) {
+      product = (company.products ?? []).find((p: any) => p.active) ?? (company.products ?? [])[0];
+    }
+    const landingUrl = product?.landingUrl;
+    if (!landingUrl) throw new BadRequestException(`No landingUrl on product "${product?.name ?? 'unknown'}" — cannot create ads`);
+
+    const results: Array<{ adSetId: string; variantIndex: number; status: 'created' | 'skipped' | 'failed'; adId?: string; error?: string }> = [];
+
+    for (const liveAdSet of (campaign.metaAdSets ?? [])) {
+      const liveAds = liveAdSet.ads ?? [];
+      // Variants already on this ad set — keyed by hookStyle since the ad name
+      // includes "Variant N (hookStyle)" but variant index isn't directly stored
+      // on the live ad. Use hookStyle as the dedupe key (each variant has a
+      // distinct hookStyle in a single creative package).
+      const existingHookStyles = new Set(liveAds.map((ad: any) => (ad.hookStyle ?? '').toLowerCase()).filter(Boolean));
+
+      for (let variantIdx = 0; variantIdx < copyVariants.length; variantIdx++) {
+        const variant = copyVariants[variantIdx];
+        const image = images.find((img: any) => img.variantIndex === variantIdx);
+        if (!image?.imageUrl) {
+          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'failed', error: 'no image generated for this variant' });
+          continue;
+        }
+        const hs = (variant.hookStyle ?? '').toLowerCase();
+        if (hs && existingHookStyles.has(hs)) {
+          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'skipped' });
+          continue;
+        }
+
+        const adName = `${liveAdSet.name} — Variant ${variantIdx + 1} (${variant.hookStyle ?? 'unknown'})`;
+        try {
+          const r = await this.metaAdsService.createAdInAdSet(
+            liveAdSet.id,
+            company.meta.accessToken,
+            adName,
+            { primaryText: variant.primaryText, headline: variant.headline, cta: variant.cta },
+            image.imageUrl,
+            company.meta.pageId,
+            landingUrl,
+            company.meta.specialAdCategories,
+          );
+          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'created', adId: r.adId });
+        } catch (err: any) {
+          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'failed', error: err.message });
+        }
+      }
+    }
+
+    // Trigger a sync of all active campaigns so the new ads appear in
+    // metaAdSets[].ads on the next read. Don't fail the response on sync error.
+    try {
+      await this.campaignSyncService.syncActiveCampaigns(company);
+    } catch {
+      // best-effort
+    }
+
+    return {
+      campaignId,
+      created: results.filter(r => r.status === 'created').length,
+      skipped: results.filter(r => r.status === 'skipped').length,
+      failed: results.filter(r => r.status === 'failed').length,
+      results,
+    };
+  }
+
   @Post(':tenantId/:campaignId/pause')
   async pause(
     @Param('tenantId') tenantId: string,

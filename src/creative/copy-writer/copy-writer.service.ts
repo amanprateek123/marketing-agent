@@ -5,6 +5,7 @@ import { LiveContextBuilder } from '../../companies/prompt-generator/live-contex
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { CopyVariant } from '../schemas/creative-package.schema';
 import { HOOK_STYLES_DR } from '../../common/creative/hook-styles';
+import { skillsForAgent, buildSkillBlock } from '../../common/skills/agent-skill-map';
 
 export interface CopyPackage {
   variants: CopyVariant[];
@@ -77,13 +78,29 @@ LOSING PATTERNS (avoid these):
       return `\nAUDIENCE STAGE: cold (prospecting). Audience has NOT seen this brand before. Problem-first structure: agitate pain, introduce brand AS the solution, end with offer + CTA. Brand introduction is required. Hook must stop the scroll cold.`;
     })();
 
+    const briefFactsBlock = JSON.stringify({
+      topic: brief.topic,
+      angle: brief.angle,
+      hook: brief.hook,
+      keyMessage: brief.keyMessage,
+      conversionBridge: brief.conversionBridge,
+      audience: brief.audience,
+      product: activeProduct ? { name: activeProduct.name, price: activeProduct.price, currency: activeProduct.currency, differentiators: activeProduct.differentiators } : null,
+    }, null, 2);
+
+    const systemPrompt = company.prompts?.creativeTeamLead
+      ?? company.prompts?.campaignCreator
+      ?? `You are the Creative Director for ${company.name}. Produce on-brand, policy-compliant, scroll-stopping Meta ad copy. Tone: ${company.tone}. Audience: ${company.targetAudience} in ${company.geography}.`;
+
     const result = await this.claudeService.runAgent({
       tenantId: company.tenantId,
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt: '',
+      systemPrompt,
       liveContext: this.liveContextBuilder.build(company),
+      skills: skillsForAgent('CREATIVE_TEAM'),
       userMessage: `
+${buildSkillBlock('CREATIVE_TEAM')}
 Write 4 ad copy variants for ${company.name} for the following content brief.
 
 BRIEF:
@@ -99,6 +116,15 @@ ${audienceStageRule}
 
 ${learningsBlock}
 
+FACT-ANCHOR RULE (NON-NEGOTIABLE):
+Every named entity, number, date, statistic, news event, person, or quoted claim
+in your copy MUST come from BRIEF FACTS below. No inventing competitors, deadlines,
+prices other than the product price, testimonials, or news events. If you cannot
+cite the source from BRIEF FACTS, use a generic relatable pain instead.
+
+BRIEF FACTS (the ONLY facts you may cite):
+${briefFactsBlock}
+
 For each variant write:
 - primaryText: the main ad body copy (3-5 sentences, Hinglish where natural). MUST mention product name AND price (${priceTag}).
 - headline: short punchy headline (5-7 words max)
@@ -106,12 +132,13 @@ For each variant write:
 - hookStyle: ${hookStyleRule}${avoidBlock}
 
 COPY RULES:
-- Specific beats vague: numbers, names, concrete moments
+- Specific beats vague — BUT every specific must trace to BRIEF FACTS. If not cite-able, use a generic relatable pain.
 - No generic phrases ("best quality", "amazing", "don't miss out")
 - Price (${priceTag}) in EVERY variant — no exceptions
+- Hook → body → offer → CTA must form a logical chain. Headline's promise = what body delivers. No bait-and-switch.
 - ${brief.forcedHookStyle ? `All 4 variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.` : '4 variants must use 4 DIFFERENT hookStyles from the allowed list.'}
 
-Also pick which variant is best for this brief and why.
+Also pick which variant is best for this brief and why — pick the one with the strongest coherent hook→body→CTA chain, not just the loudest hook.
 
 Return ONLY valid JSON in this format:
 \`\`\`json

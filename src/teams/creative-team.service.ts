@@ -153,6 +153,16 @@ export class CreativeTeamService {
     const resolvedProduct = (company.products ?? []).find(p => p.name === brief.product)
       ?? (company.products ?? []).find(p => p.active) ?? null;
 
+    const briefFactsBlock = JSON.stringify({
+      topic: brief.topic,
+      angle: brief.angle,
+      hook: brief.hook,
+      keyMessage: brief.keyMessage,
+      conversionBridge: brief.conversionBridge,
+      audience: brief.audience,
+      product: resolvedProduct ? { name: resolvedProduct.name, price: resolvedProduct.price, differentiators: resolvedProduct.differentiators } : null,
+    }, null, 2);
+
     const call2UserMessage = `You are the Brand Compliance Reviewer for ${company.name}.
 
 Review the creative package below for:
@@ -162,6 +172,11 @@ Review the creative package below for:
 4. CULTURAL SENSITIVITY — content targets ${company.targetAudience} in ${company.geography}
 5. FORBIDDEN TOPICS: ${company.forbiddenTopics?.join(', ') || 'none specified'}
 6. PRODUCT ACCURACY — product name must be "${resolvedProduct?.name ?? brief.product ?? 'correct'}", price must be ₹${resolvedProduct?.price ?? 'correct'}
+7. FACT-ANCHOR VERIFICATION — every named entity (competitor name, person, news event, statistic, deadline, fabricated quote, specific price other than the product price) in primaryText/headline MUST appear in the BRIEF FACTS block below. If a variant cites something not in BRIEF FACTS — it is fabrication. Rewrite it using only sourced facts or replace with a generic relatable pain.
+8. LOGICAL COHERENCE — for each variant, the chain must hold: HEADLINE promises X → primaryText opening 90 chars deliver X (not unrelated story Y) → body's value proposition is what the CTA acts on. If headline and body are about different things, that is a bait-and-switch — rewrite the body to deliver the headline's promise (or rewrite the headline to match the body, whichever stays closer to the brief).
+
+BRIEF FACTS (the ONLY facts that may be cited — anything else is fabrication):
+${briefFactsBlock}
 
 CREATIVE PACKAGE TO REVIEW:
 ${JSON.stringify(call1Parsed, null, 2)}
@@ -169,8 +184,10 @@ ${JSON.stringify(call1Parsed, null, 2)}
 YOUR JOB:
 - For each element (copy variants, imagePrompts, video prompt): APPROVE it, or give a specific fix.
 - If a variant violates Meta policies in a way that can't be fixed, replace it with a compliant alternative.
+- If a variant cites a fact NOT in BRIEF FACTS, rewrite that line using only brief facts — do not approve fabrications.
+- If a variant's hook → body chain breaks (headline says X, body opens with unrelated Y), rewrite the body to deliver the headline's promise. Do not approve incoherent variants.
 - If an imagePrompts[i] won't stop the scroll for its matching variant hook, improve it.
-- Select the best variant (index 0, 1, 2, or 3) for the "selectedIndex" field.
+- Select the best variant (index 0, 1, 2, or 3) for the "selectedIndex" field — pick the one with the strongest coherent hook→body→CTA chain, not just the loudest hook.
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -449,6 +466,30 @@ ${(brief.audienceStage ?? 'cold') === 'cold'
   : '• HOT (cart abandoners / 30d engaged): Audience has shown high purchase intent recently. Cart-recovery urgency. Reference the specific abandoned action ("Aapki kundli reading 2 din se wait kar rahi hai"). Time-bound urgency ("Aaj raat tak ₹1 mein"). 1-2 line primaryText, ruthlessly short. Hook = the offer + a deadline.'}
 
 ═══════════════════════════════════════════════════════
+FACT-ANCHOR RULE (NON-NEGOTIABLE — VIOLATION = REJECT)
+═══════════════════════════════════════════════════════
+
+Every named entity, number, date, statistic, news event, person, or quoted claim
+in your copy MUST come from one of these five sources — and ONLY these five:
+
+  1. THE BRIEF above (topic, angle, hook, keyMessage, conversionBridge, audience)
+  2. THE PRODUCT block (name, price, differentiators, languages)
+  3. PAST CASE STUDIES section (verbatim case-study facts only)
+  4. PAST WINNING HOOK LINES section (verbatim winners only)
+  5. Generic, audience-universal pain points (no specific names/numbers/events)
+
+You MAY NOT invent any of the following — they fail compliance and waste budget:
+  ✗ Specific competitor incidents not in the brief ("a viral expose", "UPSC-aspirant astrologer")
+  ✗ Fabricated prices or discounts ("₹15,000 puja", "70% off") not in the product block
+  ✗ Made-up dates, deadlines, festivals, or astrological events not in the brief
+  ✗ Invented testimonial quotes or named customers
+  ✗ Statistics or social-proof numbers not from the case studies
+
+If a variant needs a specific to feel real and the brief doesn't supply one,
+use a generic relatable pain instead — never fabricate. Vague-but-true beats
+specific-but-invented every single time.
+
+═══════════════════════════════════════════════════════
 CREATIVE SPECS
 ═══════════════════════════════════════════════════════
 
@@ -497,10 +538,11 @@ HOOK STYLES${brief.forcedHookStyle ? ` (locked to "${brief.forcedHookStyle}" —
 
 COPY RULES:
 - Hinglish where natural for ${company.targetAudience}
-- Specific beats vague: "lost 4kg in 3 weeks" beats "see results fast"
+- Specific beats vague — BUT every specific must trace to the FACT-ANCHOR sources above. If you cannot cite the source, use a generic relatable pain instead.
 - Product name in EVERY variant's primaryText
 - Price (₹${resolvedProduct?.price ?? '[price]'}) in EVERY variant — no exceptions
 - No generic phrases: "best quality", "amazing product", "don't miss out"
+- Hook → body → offer → CTA must form a logical chain. The headline's promise must be what the body delivers, and the body's value must be what the CTA acts on. No bait-and-switch (headline says X, body opens with unrelated story Y).
 ${resolvedProduct ? `- Every variant MUST mention "${resolvedProduct.name}" and ₹${resolvedProduct.price}` : ''}`}
 
 ━━━ b) IMAGE PROMPTS — one per copy variant, for Nano Banana (Gemini Image) ━━━
