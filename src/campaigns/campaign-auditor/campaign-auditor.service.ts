@@ -306,6 +306,10 @@ export class CampaignAuditorService {
       !signals.safetyBreaches.campaignCapExceeded &&
       signals.trends.ctrTrend !== 'declining' &&
       signals.trends.roasTrend !== 'declining' &&
+      // Underspending Day-3+ means narrow targeting / losing auctions / creative
+      // rejected — none of which are caught by the anomaly set. No other gate
+      // catches it, so without this an underspending campaign goes silent.
+      signals.trends.spendPace !== 'underspending' &&
       !hasOpportunities;
 
     // Cooldown: if last Claude verdict was watch/no_action and < 6h ago, skip unless signals changed materially
