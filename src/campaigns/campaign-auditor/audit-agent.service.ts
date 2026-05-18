@@ -437,7 +437,10 @@ export class AuditAgentService {
     // would anchor the agent to "no_action" purely because the recent history was quiet.
     const isSyntheticVerdict = (s: AuditSnapshotDocument) => {
       const insight = s.verdict?.contextInsight ?? '';
-      return /\| Cooldown — | No anomalies — agent skipped$/.test(insight);
+      // Match every short-circuit phrasing — older "agent skipped" plus the newer
+      // "campaign healthy" / "INSUFFICIENT EVIDENCE" variants. All three are
+      // synthetic verdicts written without a Claude call.
+      return /\| Cooldown — |No anomalies — (agent skipped|campaign healthy|INSUFFICIENT EVIDENCE)/.test(insight);
     };
     const snapshotSummary = snapshots
       .filter(s => !isSyntheticVerdict(s))

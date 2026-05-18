@@ -283,6 +283,7 @@ export class CampaignAuditorService {
         }),
       ),
       verdict: null,
+      signals,
     };
 
     // ── Layer 3: Intelligent audit agent ──────────────────────────────────────
@@ -342,10 +343,20 @@ export class CampaignAuditorService {
     if (isAllGreen) {
       const age = signals.campaignAge;
       const conv = full.campaign.conversions;
+      // Distinguish "campaign genuinely healthy" from "we don't have enough data
+      // to fire any signal yet." Same all-green outcome, very different meaning —
+      // case (b) feels safe but is actually blind. Heuristic: ≥50 clicks OR ≥1
+      // conversion OR ≥3 snapshots = we have *some* basis to call this healthy.
+      const hasEvidence = full.campaign.clicks >= 50
+        || full.campaign.conversions >= 1
+        || snapshots.length >= 3;
+      const status = hasEvidence
+        ? 'No anomalies — campaign healthy'
+        : `No anomalies — INSUFFICIENT EVIDENCE (clicks=${full.campaign.clicks}, snapshots=${snapshots.length})`;
       const skipVerdict = {
         verdict: 'no_action' as const,
         urgency: null,
-        contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | CTR ${full.campaign.ctr.toFixed(2)}% | No anomalies — agent skipped`,
+        contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | CTR ${full.campaign.ctr.toFixed(2)}% | ${status}`,
         watchSignals: [] as string[],
         recommendedActions: [] as any[],
       };

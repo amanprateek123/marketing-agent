@@ -60,6 +60,15 @@ export class AuditSnapshot {
     cpc: number;
   }[];
 
+  // Full signals packet that drove this audit's decision. Persisted so that
+  // all-green and cooldown skips remain forensically diagnosable — without this,
+  // the only record of *why* an audit skipped was the contextInsight string.
+  // Shape matches AuditSignalPacket (anomalies, trends, opportunities, breakeven,
+  // evidence floors, hookSaturation, marketEnvironment). Typed as `any` because
+  // the snapshot collection predates the packet type.
+  @Prop({ type: Object, default: null })
+  signals: any | null;
+
   // Agent verdict at this audit
   @Prop({ type: Object, default: null })
   verdict: {
