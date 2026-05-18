@@ -105,6 +105,10 @@ export class MetaMetricsService {
         {
           fields: 'impressions,clicks,spend,ctr,cpc,actions,frequency',
           date_preset: 'maximum',
+          // Pin attribution windows so audit-time ROAS is reproducible regardless of
+          // the account's UI default. 7d-click + 1d-view = Meta's modern default for
+          // DR campaigns; matches what the auditor expects when judging Day-3 profitability.
+          action_attribution_windows: JSON.stringify(['7d_click', '1d_view']),
           access_token: accessToken,
         },
       ),
@@ -153,6 +157,7 @@ export class MetaMetricsService {
         fields: 'adset_id,adset_name,impressions,clicks,spend,ctr,cpc,actions,frequency,reach',
         level: 'adset',
         date_preset: 'maximum',
+        action_attribution_windows: JSON.stringify(['7d_click', '1d_view']),
         access_token: accessToken,
       },
     );
@@ -194,6 +199,7 @@ export class MetaMetricsService {
         fields: 'ad_id,ad_name,impressions,clicks,spend,ctr,cpc,actions',
         level: 'ad',
         date_preset: 'maximum',
+        action_attribution_windows: JSON.stringify(['7d_click', '1d_view']),
         access_token: accessToken,
       },
     );

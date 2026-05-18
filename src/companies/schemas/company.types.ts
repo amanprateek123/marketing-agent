@@ -44,6 +44,7 @@ export interface Product {
   // Conversion tracking
   conversionEvent?: string;          // Meta pixel event: "Purchase", "Lead", "CompleteRegistration", "Subscribe", or custom event name
   conversionValue?: number;          // revenue per conversion (e.g. 999 for ₹999 product) — used for ROAS calculation
+  contributionMargin?: number;       // decimal 0-1 (e.g. 0.3 = 30% margin after COGS/shipping/fees). Drives breakeven ROAS = 1/margin. Falls back to vertical default when unset.
   customEventName?: string;          // if conversionEvent is "CustomEvent", this is the event name (e.g. "NADI_REPORT_PURCHASE_COMPLETED")
   customConversionId?: string;       // Meta Custom Conversion ID — takes priority, sends pixel_id + custom_conversion_id to Meta
   pixelId?: string;                  // Meta Pixel ID if different from company.meta.pixelId

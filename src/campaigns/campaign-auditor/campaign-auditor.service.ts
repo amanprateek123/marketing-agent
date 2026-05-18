@@ -299,6 +299,8 @@ export class CampaignAuditorService {
       signals.anomalies.audienceFatigue.length === 0 &&
       !signals.anomalies.stuckInLearning &&
       !signals.anomalies.budgetExhaustionRisk &&
+      !signals.anomalies.unprofitableAfterDay3 &&
+      !signals.anomalies.conversionDataIntegrity &&
       !signals.safetyBreaches.weeklyCapExceeded &&
       !signals.safetyBreaches.campaignCapExceeded &&
       signals.trends.ctrTrend !== 'declining' &&

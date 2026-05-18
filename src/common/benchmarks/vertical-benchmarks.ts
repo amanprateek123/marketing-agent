@@ -18,6 +18,12 @@ export interface VerticalBenchmark {
   cpaByEventType: Record<ConversionEventType, { min: number; max: number }>;  // event-specific CPA bands
   frequencyCap: number;                            // pause-or-refresh threshold
   cvrPct: { typical: number };                     // expected click→conversion rate
+  // Typical contribution margin (decimal 0-1) after COGS, fulfilment, returns, fees.
+  // Used as a fallback breakeven-ROAS source when company.products[].contributionMargin
+  // is unset. Breakeven ROAS = 1 / contributionMargin. Optional — `getBreakevenROAS`
+  // falls back to a conservative 0.50 (breakeven ROAS 2.0) when the vertical hasn't
+  // been calibrated yet.
+  contributionMarginTypical?: number;
 }
 
 export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
@@ -33,6 +39,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   4.0,
     cvrPct:         { typical: 6.0 },
+    contributionMarginTypical: 0.70,  // info/consult product — mostly digital delivery; breakeven ROAS ~1.43
   },
   fintech: {
     ctrRangePct:    { min: 0.5, max: 1.8 },                                    // floor 0.5% — insurance/loan cold can do 0.4-0.7%
@@ -46,6 +53,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   3.5,
     cvrPct:         { typical: 3.0 },
+    contributionMarginTypical: 0.60,  // CAC-heavy; LTV-driven — breakeven ROAS ~1.67 on first-action attribution
   },
   edtech: {
     ctrRangePct:    { min: 1.0, max: 3.5 },                                    // ceiling 3.5% — JEE/NEET rank-result hooks punch high
@@ -59,6 +67,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   4.0,
     cvrPct:         { typical: 4.5 },
+    contributionMarginTypical: 0.65,  // digital content delivery — breakeven ROAS ~1.54
   },
   ecommerce_dtc: {
     ctrRangePct:    { min: 1.0, max: 3.0 },                                    // floor 1.0 — cold-prospecting fashion/beauty sits 1.0-1.5%
@@ -72,6 +81,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   4.0,                                                       // prospecting cap; retarget-aware logic in detector should allow 6-8 for retarget pods
     cvrPct:         { typical: 2.5 },
+    contributionMarginTypical: 0.30,  // physical-good DTC after COGS+shipping+returns+packaging — breakeven ROAS ~3.33
   },
   saas_b2b: {
     ctrRangePct:    { min: 0.6, max: 1.5 },
@@ -85,6 +95,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   3.0,
     cvrPct:         { typical: 2.0 },
+    contributionMarginTypical: 0.80,  // software gross margin — breakeven ROAS ~1.25 on first-action; LTV/payback dominates anyway
   },
   food_delivery: {
     ctrRangePct:    { min: 1.8, max: 4.0 },
@@ -98,6 +109,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   5.0,
     cvrPct:         { typical: 8.0 },
+    contributionMarginTypical: 0.20,  // razor-thin DTC food margin (discounts + commission + logistics) — breakeven ROAS ~5
   },
   health_wellness: {
     ctrRangePct:    { min: 1.0, max: 2.8 },
@@ -111,6 +123,7 @@ export const VERTICAL_BENCHMARKS_INDIA: Record<string, VerticalBenchmark> = {
     },
     frequencyCap:   4.0,
     cvrPct:         { typical: 4.0 },
+    contributionMarginTypical: 0.45,  // supplement/wellness DTC — breakeven ROAS ~2.22
   },
   real_estate: {
     ctrRangePct:    { min: 0.5, max: 1.2 },                                    // low CTR — high-consideration / high-intent only
@@ -248,4 +261,26 @@ export function getCPARange(
     return { ...benchmark.cpaByEventType[eventType], eventType };
   }
   return { ...benchmark.cpaRangeRupees, eventType: null };
+}
+
+/**
+ * Breakeven ROAS = 1 / contributionMargin. ROAS < breakeven means revenue doesn't
+ * cover COGS+fulfilment+fees, never mind ad spend. Resolution order:
+ *   1. Product-level override (`product.contributionMargin`) — tenant-set, most precise
+ *   2. Vertical typical margin from benchmarks — calibrated per industry
+ *   3. Conservative default 0.50 (breakeven ROAS 2.0) — used when vertical isn't calibrated
+ * Returns { margin, breakevenROAS, source } so callers can surface which one was used.
+ */
+export function getBreakevenROAS(
+  industry: string | undefined | null,
+  productMargin: number | undefined | null,
+): { margin: number; breakevenROAS: number; source: 'product' | 'vertical' | 'default' } {
+  if (productMargin != null && productMargin > 0 && productMargin <= 1) {
+    return { margin: productMargin, breakevenROAS: 1 / productMargin, source: 'product' };
+  }
+  const verticalMargin = getBenchmark(industry).contributionMarginTypical;
+  if (verticalMargin != null && verticalMargin > 0 && verticalMargin <= 1) {
+    return { margin: verticalMargin, breakevenROAS: 1 / verticalMargin, source: 'vertical' };
+  }
+  return { margin: 0.50, breakevenROAS: 2.0, source: 'default' };
 }

@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
-import { getBenchmark, getCPARange, resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
-import { adSetWinnerPosterior } from '../../common/statistics/bayesian-estimator.util';
+import { getBenchmark, getCPARange, resolveVertical, getBreakevenROAS } from '../../common/benchmarks/vertical-benchmarks';
+import { adSetWinnerPosterior, adSetLoserPosterior } from '../../common/statistics/bayesian-estimator.util';
 import { deriveFloorsFromVertical } from '../../common/statistics/power-calc.util';
 import { thompsonAllocate, ThompsonAllocationResult } from '../../common/statistics/bandit-allocator.util';
 
@@ -35,6 +35,32 @@ export interface AuditSignalPacket {
     audienceFatigue: { adSetId: string; adSetName: string; frequency: number }[];
     stuckInLearning: boolean;
     budgetExhaustionRisk: boolean;
+    // Margin-aware profitability floor. Fires when:
+    //   age >= minAgeDays (3 for low-AOV, 5 for considered-purchase >= ₹2k)
+    //   AND spend >= 2x dailyBudget
+    //   AND conversions >= MIN_FLOOR_CONVERSIONS_LOSER (3)
+    //   AND shrunken ROAS < breakeven (1/margin)
+    //   AND upper-95% ROAS < breakeven (confident loser, not noise).
+    // Breakeven comes from product.contributionMargin → vertical default → 0.50.
+    // Directional trends miss chronic loss-makers that don't get *worse* over time.
+    unprofitableAfterDay3: boolean;
+    // Data-integrity warning — fires when a campaign has spent past the gate but
+    // `conversionValue` is unset/zero on the active product, making ROAS uncomputable.
+    // Without this, misconfigured products silently bypass `unprofitableAfterDay3`
+    // forever. Surfaced separately so it gets fixed instead of hidden.
+    conversionDataIntegrity: {
+      missingConversionValue: boolean;
+      productName: string | null;
+      spend: number;
+    } | null;
+  };
+
+  // Breakeven ROAS used by this audit pass — surfaced so the agent and digest can
+  // explain *why* a campaign was flagged unprofitable (or not) for this tenant.
+  breakeven: {
+    margin: number;
+    breakevenROAS: number;
+    source: 'product' | 'vertical' | 'default';
   };
 
   // Opportunities — positive signals for scaling actions
@@ -319,6 +345,60 @@ export class SignalDetectorService {
     const budgetExhaustionRisk = dailyBudget > 0 && expectedSpendToDate > 0 &&
       current.campaign.spend / expectedSpendToDate > 1.15;
 
+    // ── Margin-aware profitability floor ─────────────────────────────────────
+    // Resolution chain: product.contributionMargin → vertical typical → 0.50 default.
+    // For 91astro (spirituality, margin 0.70), breakeven ROAS = 1.43.
+    // For DTC food/grocery (margin 0.20), breakeven = 5.0. Hardcoded 1.0 was wrong.
+    const activeProduct = (company.products ?? []).find(p => p.active);
+    const breakeven = getBreakevenROAS(company.industry, activeProduct?.contributionMargin);
+
+    // Considered-purchase verticals need an extra 2 days for the 7d-click conversion
+    // window to settle — at Day 3 a late-window conversion hasn't fired yet. Use AOV
+    // as the proxy: ≥₹2000 conversionValue → push the floor to Day 5.
+    const aovProxy = activeProduct?.conversionValue ?? activeProduct?.price ?? 0;
+    const MIN_FLOOR_CONVERSIONS_LOSER = 3;
+    const unprofitableMinAge = aovProxy >= 2000 ? 5 : 3;
+    const spendClearedGate = dailyBudget > 0 && current.campaign.spend >= dailyBudget * 2;
+
+    // Conversion-value data-integrity warning. Spend has cleared the gate but we
+    // can't compute ROAS because the active product has no conversionValue set.
+    // Without this, `unprofitableAfterDay3` silently never fires for misconfigured
+    // tenants and the chronic-loss case stays invisible.
+    const productConversionValue = activeProduct?.conversionValue ?? activeProduct?.price ?? 0;
+    const conversionDataIntegrity = (
+      ageDays >= unprofitableMinAge
+      && spendClearedGate
+      && productConversionValue <= 0
+    )
+      ? {
+          missingConversionValue: true,
+          productName: activeProduct?.name ?? null,
+          spend: current.campaign.spend,
+        }
+      : null;
+
+    // Confident loser: shrunken ROAS AND upper 95% ROAS both below breakeven, with
+    // at least MIN_FLOOR_CONVERSIONS_LOSER conversions of actual data. This mirrors
+    // the winner-side rigor (`MIN_FLOOR_CONVERSIONS=5` + shrunkenROAS + lowerROAS>1)
+    // — flipped for pessimism. Prevents 1-conversion noise from pausing campaigns.
+    const loserPriorCVR = (verticalBenchmark.cvrPct.typical || 3.5) / 100;
+    const loserPosterior = current.campaign.clicks > 0 && productConversionValue > 0
+      ? adSetLoserPosterior({
+          conversions: current.campaign.conversions,
+          clicks: current.campaign.clicks,
+          spend: current.campaign.spend,
+          conversionValue: productConversionValue,
+          priorCVR: loserPriorCVR,
+        })
+      : { shrunkenROAS: 0, upperROAS: 0 };
+
+    const unprofitableAfterDay3 = ageDays >= unprofitableMinAge
+      && spendClearedGate
+      && current.campaign.conversions >= MIN_FLOOR_CONVERSIONS_LOSER
+      && productConversionValue > 0
+      && loserPosterior.shrunkenROAS < breakeven.breakevenROAS
+      && loserPosterior.upperROAS < breakeven.breakevenROAS;
+
     // ── Opportunities ─────────────────────────────────────────────────────────
     const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
     const conversionValue = (company.products ?? []).find(p => p.active)?.conversionValue
@@ -443,7 +523,10 @@ export class SignalDetectorService {
         audienceFatigue,
         stuckInLearning,
         budgetExhaustionRisk,
+        unprofitableAfterDay3,
+        conversionDataIntegrity,
       },
+      breakeven,
       opportunities: {
         winningAdSets,
         highClicksLowConversions,

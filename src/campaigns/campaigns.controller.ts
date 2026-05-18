@@ -604,4 +604,19 @@ export class CampaignsController {
       throw new BadRequestException(err.message);
     }
   }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/audit
+   * Manually trigger a campaign audit pass for a tenant — runs the same logic
+   * as the 6h cron job (safety rails → signals → verdict → snapshot).
+   */
+  @Post(':tenantId/audit')
+  async triggerAudit(@Param('tenantId') tenantId: string) {
+    try {
+      const result = await this.campaignAuditorService.audit(tenantId);
+      return { success: true, ...result };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
 }

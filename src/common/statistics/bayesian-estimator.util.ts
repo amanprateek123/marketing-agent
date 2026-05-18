@@ -54,6 +54,47 @@ export function wilsonLowerBound(successes: number, n: number, z: number = 1.96)
 }
 
 /**
+ * Wilson score interval — closed-form 95% confidence UPPER bound on a proportion.
+ *
+ * Use for: "is the true conversion rate provably < X with 95% confidence?"
+ * Returns the upper edge of the 95% CI; compare to a target rate to decide if even
+ * the optimistic case is below threshold (i.e. confident loser).
+ */
+export function wilsonUpperBound(successes: number, n: number, z: number = 1.96): number {
+  if (n <= 0) return 1;
+  const p = successes / n;
+  const denom = 1 + (z * z) / n;
+  const center = (p + (z * z) / (2 * n)) / denom;
+  const margin = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / denom;
+  return Math.min(1, center + margin);
+}
+
+/**
+ * Convenience: posterior summary for a "loser" decision at the campaign or ad-set
+ * level. Mirrors `adSetWinnerPosterior` but exposes the upper 95% bound on ROAS
+ * so callers can require "even the optimistic estimate is below breakeven".
+ *
+ * Pause iff shrunkenROAS < breakeven AND upperROAS < breakeven AND conversions ≥ floor.
+ */
+export function adSetLoserPosterior(input: {
+  conversions: number;
+  clicks: number;
+  spend: number;
+  conversionValue: number;
+  priorCVR: number;
+  kappa?: number;
+}): { shrunkenROAS: number; upperROAS: number } {
+  const { conversions, clicks, spend, conversionValue, priorCVR, kappa = 10 } = input;
+  const observedCVR = clicks > 0 ? conversions / clicks : 0;
+  const shrunkenCVR = shrinkTowardPrior(observedCVR, clicks, priorCVR, kappa);
+  const upperCVR = wilsonUpperBound(conversions, clicks);
+  const impliedRevenue = (cvr: number) => cvr * clicks * conversionValue;
+  const shrunkenROAS = spend > 0 ? impliedRevenue(shrunkenCVR) / spend : 0;
+  const upperROAS = spend > 0 ? impliedRevenue(upperCVR) / spend : 0;
+  return { shrunkenROAS, upperROAS };
+}
+
+/**
  * Convenience: posterior summary for a "winner" decision on an ad set.
  *
  * Returns:

@@ -414,6 +414,22 @@ export class AuditAgentService {
     if (anomalies.campaignZeroConversions) anomalyLines.push(`ZERO CONVERSIONS: ₹${campaign.spend?.toFixed(0) ?? 0} spent (>1 day budget) with 0 conversions`);
     if (anomalies.stuckInLearning) anomalyLines.push('STUCK IN LEARNING: 0 conversions after learning phase');
     if (anomalies.budgetExhaustionRisk) anomalyLines.push('BUDGET EXHAUSTION: spending >15% above expected daily pace');
+    if (anomalies.unprofitableAfterDay3) {
+      const be = signals.breakeven;
+      anomalyLines.push(
+        `CHRONIC UNPROFITABLE: observed ROAS ${campaign.roas?.toFixed(2) ?? 0} on ₹${campaign.spend?.toFixed(0) ?? 0} spend; ` +
+        `breakeven ROAS for this product is ${be.breakevenROAS.toFixed(2)} (margin ${(be.margin * 100).toFixed(0)}%, source: ${be.source}). ` +
+        `Shrunken + upper 95% ROAS both below breakeven with ≥3 conversions of data — not noise. ` +
+        `Action: pause the worst-ROAS ad set first; if CTR is below benchmark, replace_creative instead of pausing the whole campaign.`,
+      );
+    }
+    if (anomalies.conversionDataIntegrity?.missingConversionValue) {
+      anomalyLines.push(
+        `DATA INTEGRITY (blocks profitability check): product "${anomalies.conversionDataIntegrity.productName ?? 'active'}" has no conversionValue set, ` +
+        `so ROAS is uncomputable on ₹${anomalies.conversionDataIntegrity.spend.toFixed(0)} of spend. ` +
+        `Verdict should be no_action with contextInsight flagging the config gap — do not pause until value is set.`,
+      );
+    }
 
     // ── Snapshot history (with prior verdicts so the agent isn't stateless) ──
     // Filter out synthetic verdicts written by the cooldown / all-green short-circuits.
@@ -694,6 +710,7 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
     const hasUrgent =
       signals.anomalies.highSpendZeroConversions.length > 0 ||
       signals.anomalies.stuckInLearning ||
+      signals.anomalies.unprofitableAfterDay3 ||
       signals.safetyBreaches.campaignCapExceeded;
 
     return {
