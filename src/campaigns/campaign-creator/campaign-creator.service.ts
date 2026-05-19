@@ -623,9 +623,10 @@ export class CampaignCreatorService {
         briefTargetSegment: briefForTargeting?.targetSegment,
         briefAudienceStage: briefForTargeting?.audienceStage,
         geography: company.geography,
+        productLanguages: productForTargeting?.languages,
       });
       this.logger.log(
-        `Targeting resolver: segment=${targetingResult.segmentUsed ?? 'none'}, patches=${targetingResult.patches}, matched=${targetingResult.segmentMatched}`,
+        `Targeting resolver: segment=${targetingResult.segmentUsed ?? 'none'}, patches=${targetingResult.patches}, matched=${targetingResult.segmentMatched}, locales=[${targetingResult.localesApplied.join(',')}]`,
       );
     }
 

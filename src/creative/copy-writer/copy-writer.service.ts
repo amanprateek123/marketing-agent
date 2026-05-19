@@ -4,7 +4,8 @@ import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { CopyVariant } from '../schemas/creative-package.schema';
-import { HOOK_STYLES_DR } from '../../common/creative/hook-styles';
+import { HOOK_STYLES_DR, HOOK_STYLE_DESCRIPTIONS } from '../../common/creative/hook-styles';
+import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 import { skillsForAgent, buildSkillBlock } from '../../common/skills/agent-skill-map';
 
 export interface CopyPackage {
@@ -58,22 +59,41 @@ LOSING PATTERNS (avoid these):
 
     // Canonical hookStyle taxonomy — single source of truth shared with creative-team
     // primary path and audit's pickReplacementHook. Drift here corrupts learning data.
+    // Each hookStyle now ships with a trigger+sensory+banned spec (HOOK_STYLE_DESCRIPTIONS)
+    // so the LLM writes copywriter-grade hooks instead of generic LLM slop.
+    const hookSpecBlock = HOOK_STYLES_DR.map(h => `  - ${h}: ${HOOK_STYLE_DESCRIPTIONS[h]}`).join('\n');
     const hookStyleRule = brief.forcedHookStyle
-      ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
-      : `one of [${HOOK_STYLES_DR.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle.`;
+      ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle). Follow this spec exactly:\n  ${HOOK_STYLE_DESCRIPTIONS[brief.forcedHookStyle as keyof typeof HOOK_STYLE_DESCRIPTIONS] ?? 'see allowed list above'}`
+      : `one of [${HOOK_STYLES_DR.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle. Specs:\n${hookSpecBlock}`;
     const avoidBlock = brief.avoidHookStyles && brief.avoidHookStyles.length > 0
       ? `\n⚠ AVOID THESE HOOK STYLES (saturated/fatigued — do NOT generate variants with these): ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}`
       : '';
 
+    // Vertical-aware CTA whitelist. Spirituality buyers don't "shop" their destiny —
+    // generic e-com CTAs ("Shop Now") hurt CVR. Info-product / consultation verticals
+    // get verbs that match the purchase intent ("Get My Reading").
+    const vertical = resolveVertical(company.industry);
+    const isSpiritOrInfo = vertical === 'spirituality' || vertical === 'edtech';
+    const ctaWhitelist = isSpiritOrInfo
+      ? '"Get My Reading" / "Reveal My Chart" / "Claim My Reading" / "Book Consultation" / "Get My Report" — match the verb to what the buyer receives. Do NOT use "Shop Now" or "Buy Today" — these are e-com verbs and feel wrong for ${vertical} purchases.'
+      : '"Shop Now" / "Order Now" / "Buy Today" (NOT "Learn More" unless considering purchase)';
+
     // Audience-stage rule — mirrors creative-team.service.ts:408-413. Without this the
     // fallback path silently generates cold-prospect copy for warm retarget pods.
+    // For high-AOV considered purchases (≥₹1500), warm needs 4-5 lines with
+    // objection-handling — 2-3 lines is impulse-grade and tanks CVR on premium tiers.
+    const activeProductForStage = (company.products ?? []).find(p => p.active);
+    const aov = activeProductForStage?.conversionValue ?? activeProductForStage?.price ?? 0;
+    const isHighAOV = aov >= 1500;
     const audienceStageRule = (() => {
       const stage = brief.audienceStage ?? 'cold';
       if (stage === 'warm') {
-        return `\nAUDIENCE STAGE: warm (retargeting site visitors). SKIP brand intro — they already know the brand. Lead with offer-recall ("Aapki ₹1 reading wait kar rahi hai"), objection-handling ("Pehli baat free — kuch lagega bhi nahi"), or specific reason-to-return. 2-3 line primaryText is enough. NEVER use cold-prospect hooks like "Kya aap bhi…" — they sound weird to someone who already engaged.`;
+        return isHighAOV
+          ? `\nAUDIENCE STAGE: warm retarget for HIGH-AOV product (₹${aov}). They've seen the brand, they bounced. They have specific objections — handle them. Structure REQUIRED (4-5 lines):\n  Line 1: offer-recall ("Aapki Nadi reading abhi tak nahi li?")\n  Line 2: kill ONE objection — authenticity OR price-justification OR delivery-mechanic ("Pandit ji ne 2000 saal purani parampara se padhi" / "₹1,799 = ek bar, lifetime ka analysis" / "48 ghante mein WhatsApp pe full report")\n  Line 3: specific reassurance (delivery method, format, what they actually receive)\n  Line 4: CTA line\n  Do NOT use 2-3 line impulse copy here — ₹1,500+ is a CONSIDERED purchase; brevity reads as cheap. NEVER use cold-prospect hooks like "Kya aap bhi…".`
+          : `\nAUDIENCE STAGE: warm (retargeting site visitors). SKIP brand intro — they already know the brand. Lead with offer-recall, objection-handling, or specific reason-to-return. 2-3 line primaryText is fine for impulse-AOV. NEVER use cold-prospect hooks like "Kya aap bhi…".`;
       }
       if (stage === 'hot') {
-        return `\nAUDIENCE STAGE: hot (cart abandoners / 30d engaged). Cart-recovery urgency. Reference the specific abandoned action. Time-bound urgency ("Aaj raat tak ₹1 mein"). 1-2 line primaryText, ruthlessly short. Hook = the offer + a deadline.`;
+        return `\nAUDIENCE STAGE: hot (cart abandoners / 30d engaged). Cart-recovery urgency. Reference the specific abandoned action. Time-bound urgency ("Aaj raat tak ₹1 mein"). 1-2 line primaryText, ruthlessly short. Hook = the offer + a deadline. Price already known — you can OMIT the price line if the urgency line is stronger without it.`;
       }
       return `\nAUDIENCE STAGE: cold (prospecting). Audience has NOT seen this brand before. Problem-first structure: agitate pain, introduce brand AS the solution, end with offer + CTA. Brand introduction is required. Hook must stop the scroll cold.`;
     })();
@@ -126,15 +146,15 @@ BRIEF FACTS (the ONLY facts you may cite):
 ${briefFactsBlock}
 
 For each variant write:
-- primaryText: the main ad body copy (3-5 sentences, Hinglish where natural). MUST mention product name AND price (${priceTag}).
+- primaryText: the main ad body copy (Hinglish where natural). Length: 3-5 sentences for cold, 4-5 sentences for warm-high-AOV, 1-2 sentences for hot. ${brief.audienceStage === 'hot' ? 'For hot stage, price line is OPTIONAL — omit if urgency reads stronger without it.' : `MUST mention product name AND price (${priceTag}).`}
 - headline: short punchy headline (5-7 words max)
-- cta: call to action button text — "Shop Now" / "Order Now" / "Buy Today" (NOT "Learn More" unless considering purchase)
+- cta: call to action button text — ${ctaWhitelist}
 - hookStyle: ${hookStyleRule}${avoidBlock}
 
 COPY RULES:
 - Specific beats vague — BUT every specific must trace to BRIEF FACTS. If not cite-able, use a generic relatable pain.
 - No generic phrases ("best quality", "amazing", "don't miss out")
-- Price (${priceTag}) in EVERY variant — no exceptions
+- ${brief.audienceStage === 'hot' ? 'Hot stage: price OPTIONAL per variant (buyer already knows it). Focus on urgency + deadline.' : `Price (${priceTag}) in EVERY variant — no exceptions`}
 - Hook → body → offer → CTA must form a logical chain. Headline's promise = what body delivers. No bait-and-switch.
 - ${brief.forcedHookStyle ? `All 4 variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.` : '4 variants must use 4 DIFFERENT hookStyles from the allowed list.'}
 

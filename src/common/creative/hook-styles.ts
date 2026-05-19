@@ -52,15 +52,46 @@ export function isValidHookStyle(s: string | undefined | null): s is HookStyle {
 }
 
 /**
- * One-line description of each DR hookStyle. Rendered in prompts so the LLM
- * has stable definitions instead of inventing them per call.
+ * Specs for each DR hookStyle. Rendered in prompts so the LLM writes
+ * copywriter-grade hooks, not generic LLM slop. Each spec has:
+ *   - trigger: the concrete moment/scene to open in (NOT an emotion label)
+ *   - sensory: the one specific image/word that anchors it
+ *   - banned: phrases the LLM defaults to that we forbid (so it can't fall back)
+ * Drift between this taxonomy and the generator silently corrupts learning data,
+ * so always import HOOK_STYLE_DESCRIPTIONS from here.
  */
 export const HOOK_STYLE_DESCRIPTIONS: Record<(typeof HOOK_STYLES_DR)[number], string> = {
-  pain_point:    "open with the audience's frustration",
-  bold_claim:    'specific, provable promise',
-  price_shock:   'lead with value proposition + price',
-  social_proof:  'open with result or testimonial',
-  curiosity_gap: 'make them need to know more',
-  before_after:  'transformation (frame as aspiration, not guarantee)',
-  urgency:       'time or stock scarcity',
+  pain_point:
+    "Open mid-scene at a concrete trigger moment of doubt — never the emotion label. " +
+    "Example: '3 baje raat, phone haath mein, Google pe likha — career kab badlega?' " +
+    "Sensory: time-of-day + physical action. BANNED phrases: 'pareshaan', 'tension', 'stress', " +
+    "'kya aap bhi…'. Use the situation, not the feeling-word.",
+  bold_claim:
+    "Specific, provable, NUMBER-anchored promise — never adjectives. " +
+    "Example: '27 nakshatra mein se sirf 4 aapke favour mein hain — main bata sakta hoon kaunse'. " +
+    "Sensory: a specific count, name, or position. BANNED: 'best', 'guaranteed', 'amazing', 'life-changing', '100%'.",
+  price_shock:
+    "Lead with the price as a stand-alone first line — value contrast in line 2. " +
+    "Example: '₹1,799. Ek baar. Lifetime ka kundli analysis.' " +
+    "Sensory: the price digit + a strikethrough mental anchor. BANNED: 'limited offer', 'huge discount', 'unbelievable deal'.",
+  social_proof:
+    "Open with a SPECIFIC outcome from a SPECIFIC person — name + city + result. " +
+    "Example: 'Anita, Indore — usne Sade Sati ke 7 saal ka pattern dekha. Ab usse pata hai kab shift hoga.' " +
+    "Sensory: real name + specific city + specific outcome (not 'happy', 'changed life'). " +
+    "BANNED if no real testimonial in BRIEF FACTS — switch to a generic relatable scene instead. NEVER invent a testimonial.",
+  curiosity_gap:
+    "Hide the answer behind a SPECIFIC unknown — make them need to know ONE concrete thing. " +
+    "Example: 'Aapki kundli mein ek yog hai jo aap nahi jaante. Naam hai…' " +
+    "Sensory: a partial reveal — a word, a position, a number — withheld. " +
+    "BANNED: 'click to learn more', 'read more', 'find out' (CTA-style — these are NOT hooks).",
+  before_after:
+    "Transformation framed as ASPIRATION, never a guarantee. Two states, same person, time gap implied. " +
+    "Example: 'Pichle saal Diwali — same situation. Is saal — first kundli reading ke baad — sab kuch clear.' " +
+    "Sensory: a date or seasonal anchor (Diwali, Saturn return, marriage) marking the gap. " +
+    "BANNED: 'will change your life', any health/wealth guarantee. Frame as personal story, not promise.",
+  urgency:
+    "Real, defensible scarcity — slots, audit window, planetary transit deadline. NEVER fake countdown. " +
+    "Example: 'Saturn 2 hafte mein move kar raha hai. Iss window mein reading lena ka asar 7 saal tak rehta hai.' " +
+    "Sensory: an astronomical event date OR a real capacity limit (consultations/week). " +
+    "BANNED: fake 'ends tonight', 'last 3 hours' if not actually true. Meta will flag it.",
 };

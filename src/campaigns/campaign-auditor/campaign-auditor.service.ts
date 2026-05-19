@@ -687,10 +687,17 @@ export class CampaignAuditorService {
   ): Promise<boolean> {
     const pendingActions = (campaign as any).pendingActions ?? [];
 
-    // Deduplicate: skip if same action already exists (pending OR executed)
+    // Deduplicate only against PENDING actions, not executed ones.
+    // Rationale: an executed action represents past state. A new audit producing the
+    // same action type on the same target (with potentially different params) means
+    // the system is proposing an updated version of the same intent — e.g. the first
+    // narrow_placement only dropped Audience Network and the second proposes
+    // position-level surgery. Blocking on prior executed actions traps the agent
+    // in the first decision forever. Pending-only dedup keeps the queue clean
+    // without silencing supersession.
     const existing = pendingActions.find(
       (a: any) => a.targetId === action.targetId && a.type === action.type &&
-        (a.status === 'pending' || a.status === 'executed'),
+        a.status === 'pending',
     );
     if (existing) return false;
 

@@ -5,6 +5,11 @@ export interface AudienceSegment {
   ageMax: number;
   gender: 'all' | 'male' | 'female';
   interests: string[];             // Meta interest targeting keywords
+  // Per-segment Meta locale targeting. Canonical language names (e.g. ['marathi'])
+  // OR Meta locale IDs (e.g. [84]). When unset, resolver falls back to
+  // product.languages, then to no locale filter. Lets one segment target Marathi
+  // speakers while another targets Hindi within the same product.
+  languages?: Array<string | number>;
   triggers: string[];              // what events make this audience search (seasonal, news)
   confidence: 'hypothesis' | 'low' | 'medium' | 'high';
   conversions: number;             // tracked over time

@@ -24,6 +24,7 @@ export interface AudienceSegmentConfig {
   ageMax?: number;
   gender?: 'all' | 'male' | 'female';
   interests?: Array<{ id: string; name: string }> | string[]; // accept legacy string[] for backward compat
+  languages?: Array<string | number>;   // canonical name or Meta locale ID; resolver normalises to IDs
 }
 
 export interface AdSetTargetingPatch {
@@ -33,6 +34,64 @@ export interface AdSetTargetingPatch {
   interests?: string[];     // Meta interest IDs (passed through as targeting.flexible_spec[].interests[].id)
   geoStates?: string[];     // Meta region keys (e.g. '480' for Maharashtra)
   geoCities?: string[];     // Meta city keys
+  locales?: number[];       // Meta locale IDs (e.g. [84] for Marathi). Sent as targeting.locales.
+}
+
+/**
+ * Canonical language name → Meta locale ID lookup. Indian-market focused.
+ * Each entry must be verified against Meta's live endpoint:
+ *   curl "https://graph.facebook.com/v21.0/search?type=adlocale&q=<name>&access_token=<TOKEN>"
+ * Format of response: `{ "data": [{ "key": 81, "name": "Marathi" }, ...] }`
+ *
+ * Verified entries are marked with their verification date. Unverified entries
+ * are listed below the line — DO NOT use them in production targeting until
+ * verified. Meta has reshuffled locale IDs in past API version bumps; never
+ * trust a memorised ID without a live check.
+ *
+ * Drift between this table and Meta's live IDs silently breaks targeting on
+ * the affected language (API rejects unknown IDs with code 100).
+ */
+export const META_LOCALE_IDS: Record<string, number> = {
+  // ─── VERIFIED (2026-05-19) ─────────────────────────────────────────────
+  marathi:    81,   // verified via /search?type=adlocale&q=Marathi
+
+  // ─── UNVERIFIED — DO NOT USE without running the search query above ────
+  // These were cited from memory and may be wrong (Marathi was wrong by 3).
+  // To activate: run the curl command, confirm the key, move the line above
+  // the verified divider with today's date in the comment.
+  // english:    24,
+  // hindi:      53,
+  // bengali:    89,
+  // tamil:      96,
+  // telugu:     95,
+  // gujarati:   116,
+  // punjabi:    122,
+  // malayalam:  138,
+  // kannada:    169,
+  // urdu:       54,
+  // odia:       139,
+  // assamese:   170,
+};
+
+/**
+ * Resolve a mixed array of language names/IDs to numeric Meta locale IDs.
+ * Drops unknown names with no error (we'd rather ship partial targeting than
+ * fail the whole launch); the caller logs `localesResolved` count for visibility.
+ */
+export function resolveLocaleIds(input: Array<string | number> | undefined): number[] {
+  if (!input?.length) return [];
+  const ids: number[] = [];
+  for (const item of input) {
+    if (typeof item === 'number' && Number.isFinite(item)) {
+      ids.push(item);
+      continue;
+    }
+    if (typeof item === 'string') {
+      const id = META_LOCALE_IDS[item.toLowerCase().trim()];
+      if (id) ids.push(id);
+    }
+  }
+  return Array.from(new Set(ids));
 }
 
 /**
@@ -80,14 +139,21 @@ export function applyAudienceTargeting(input: {
   briefTargetSegment: string | undefined;
   briefAudienceStage: 'cold' | 'warm' | 'hot' | undefined;
   geography?: string;
-}): { patches: number; segmentMatched: boolean; segmentUsed: string | undefined } {
-  const { adSets, productSegments, briefTargetSegment, briefAudienceStage, geography } = input;
+  // Product-level language fallback. Resolver fills locales from segment.languages
+  // first; if unset, falls back to this. Empty/unset means no locale filter.
+  productLanguages?: Array<string | number>;
+}): { patches: number; segmentMatched: boolean; segmentUsed: string | undefined; localesApplied: number[] } {
+  const { adSets, productSegments, briefTargetSegment, briefAudienceStage, geography, productLanguages } = input;
 
   const segment = findSegment(productSegments, briefTargetSegment);
   let totalPatches = 0;
 
   const isIndia = !geography || geography.toLowerCase().includes('india');
   const defaultGeoStates = isIndia ? INDIA_TOP_ASTROLOGY_STATES.map((s) => s.key) : [];
+
+  // Resolve locale IDs once: segment override → product fallback → empty.
+  // Empty means the ad set ships with no locales field (Meta-default = no filter).
+  const resolvedLocales = resolveLocaleIds(segment?.languages ?? productLanguages);
 
   for (const adSet of adSets) {
     // 1. Age — fill from segment if not set
@@ -125,11 +191,20 @@ export function applyAudienceTargeting(input: {
       adSet.geoStates = defaultGeoStates;
       totalPatches++;
     }
+
+    // 5. Locales — fill from resolved (segment.languages → product.languages).
+    // Only patches when the ad set has no locales of its own; explicit LLM-set
+    // locales (numeric IDs) win.
+    if (resolvedLocales.length > 0 && (!Array.isArray(adSet.locales) || adSet.locales.length === 0)) {
+      adSet.locales = resolvedLocales;
+      totalPatches++;
+    }
   }
 
   return {
     patches: totalPatches,
     segmentMatched: !!segment,
     segmentUsed: segment?.name,
+    localesApplied: resolvedLocales,
   };
 }

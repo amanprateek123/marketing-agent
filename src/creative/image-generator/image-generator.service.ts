@@ -6,6 +6,7 @@ import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { S3Service } from '../../common/storage/s3.service';
+import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 
 export interface ImageResult {
   imagePrompt: string;
@@ -49,40 +50,14 @@ export class ImageGeneratorService {
       agentType: AgentType.CREATIVE_PRODUCER,
       systemPrompt: '',
       liveContext: this.liveContextBuilder.build(company),
-      userMessage: `
-Write an image generation prompt for a Meta direct response ad. This image must make someone STOP scrolling and TAP the ad.
-
-BRIEF:
-Brand: ${company.name}
-Topic: ${brief.topic}
-Angle: ${brief.angle}
-Platform: ${brief.platform} | Format: ${brief.format}
-Audience: ${brief.audience}
-Hook style: ${copyVariant.hookStyle}
-Hook text: "${hookText}"
-Headline: "${headline}"
-CTA: "${copyVariant.cta}"
-Brand guidelines: ${company.brandGuidelines ?? 'Not specified'}
-
-STEP 1 — VISUAL CENTERPIECE: Read the hook "${hookText}" and topic "${brief.topic}". What is the ONE visual concept that makes THIS variant unique?
-- If the hook mentions a date/event → centerpiece is that date (calendar, countdown)
-- If the hook mentions a fear → centerpiece is that fear visualized dramatically
-- If the hook mentions social proof → centerpiece is the number, large and bold
-The centerpiece must DOMINATE the image (60% of the frame).
-
-STEP 2 — BUILD AROUND IT:
-- VISUAL CENTERPIECE (largest element): The concept from Step 1, unmissable
-- TEXT OVERLAY — TOP: "${hookText}" in bold Hinglish, high contrast, readable at phone size
-- TEXT OVERLAY — BOTTOM: "${headline}" + CTA, high contrast
-- PRODUCT VISIBLE — show what they're buying
-- INDIAN CONTEXT — real Indian faces, settings, skin tones
-
-Format: Vertical 9:16, photorealistic, 5-6 sentences.
-
-AVOID: generic images, muted colors, stock aesthetic, cluttered composition.
-
-Return ONLY the image prompt, nothing else.
-      `.trim(),
+      userMessage: this.buildImagePromptUserMessage({
+        company,
+        brief,
+        hookStyle: copyVariant.hookStyle,
+        hookText,
+        headline,
+        cta: copyVariant.cta,
+      }),
       maxTurns: 2,
     });
 
@@ -119,34 +94,14 @@ Return ONLY the image prompt, nothing else.
       agentType: AgentType.CREATIVE_PRODUCER,
       systemPrompt: '',
       liveContext: this.liveContextBuilder.build(company),
-      userMessage: `
-Write an image generation prompt for a Meta direct response ad. This image must make someone STOP scrolling and TAP the ad.
-
-BRIEF:
-Brand: ${company.name}
-Topic: ${brief.topic}
-Angle: ${brief.angle}
-Platform: ${brief.platform} | Format: ${brief.format}
-Audience: ${brief.audience}
-Hook: ${brief.hook}
-Key message: ${brief.keyMessage}
-Brand guidelines: ${company.brandGuidelines ?? 'Not specified'}
-
-STEP 1 — VISUAL CENTERPIECE: Read the hook "${brief.hook}" and the topic "${brief.topic}". What is the ONE visual concept that makes this ad unique? If the hook mentions a date/event, the centerpiece is that date (calendar, countdown). If it mentions a fear, the centerpiece is that fear visualized dramatically. If it mentions social proof, the centerpiece is the number, large and bold. The centerpiece must DOMINATE the image (60% of the frame) — not be a small detail.
-
-STEP 2 — BUILD AROUND IT:
-- VISUAL CENTERPIECE (largest element): The concept from Step 1, unmissable
-- TEXT OVERLAY — TOP: "${brief.hook}" in bold Hinglish, high contrast, readable at phone size
-- TEXT OVERLAY — BOTTOM: Product name + price, high contrast
-- PRODUCT VISIBLE — show what they're buying
-- INDIAN CONTEXT — real Indian faces, settings, skin tones
-
-Format: Vertical 9:16, photorealistic, 5-6 sentences.
-
-AVOID: generic images where the main concept is small/hidden, lifestyle photos with no focal point, muted colors, stock aesthetic, cluttered composition.
-
-Return ONLY the image prompt, nothing else.
-      `.trim(),
+      userMessage: this.buildImagePromptUserMessage({
+        company,
+        brief,
+        hookStyle: undefined,
+        hookText: brief.hook,
+        headline: brief.keyMessage,
+        cta: '',
+      }),
       maxTurns: 2,
     });
 
@@ -183,6 +138,101 @@ Return ONLY the image prompt, nothing else.
     }
 
     return { imagePrompt, imageUrl };
+  }
+
+  /**
+   * Build the user message that asks Claude to write a Nano-Banana-ready image
+   * prompt. Two callers (per-variant + legacy single) share this so the centerpiece
+   * mapping, face spec, and AVOID list stay in lockstep.
+   *
+   * Why each block exists:
+   *   - centerpiece mapping covers all 7 DR hooks (was 3) so the LLM doesn't improvise
+   *     half the time; matches HOOK_STYLES_DR.
+   *   - Indian face spec is required because Nano Banana defaults to Pinterest-Indian
+   *     (light skin, anglicized features) — explicit demographics force genuine output.
+   *   - AVOID list is failure-mode specific (extra fingers, garbled Devanagari,
+   *     Western yoga aesthetic) — generic art-school negatives don't bind.
+   *   - Sentence budget raised to 8-10 (was 5-6) so all the above can be packed
+   *     into the prompt without truncation.
+   *   - Composition rule (subject 50% / symbol 25% / product 15% / text ≤10%)
+   *     replaces "60% single element" which produced poster aesthetics.
+   */
+  private buildImagePromptUserMessage(args: {
+    company: CompanyDocument;
+    brief: { topic: string; angle: string; platform: string; format: string; audience: string };
+    hookStyle: string | undefined;
+    hookText: string;
+    headline: string;
+    cta: string;
+  }): string {
+    const { company, brief, hookStyle, hookText, headline, cta } = args;
+    const vertical = resolveVertical(company.industry);
+    const isSpiritual = vertical === 'spirituality';
+
+    const centerpieceTable = `
+HOOK → CENTERPIECE (use the row matching the selected hookStyle):
+  pain_point     → person mid-distress: phone in hand, distant stare, scattered papers — emotional reality, not just "fear visualized"
+  bold_claim     → split-screen "chaos / calm" OR a single dramatic subject framed by light rays + the claim text
+  price_shock    → ₹${'<price>'} in massive bold numerals, optional strikethrough on a higher anchor; product visible beside it
+  social_proof   → testimonial face (3/4 portrait) + name+city caption + 5-star row — NOT just a number floating
+  curiosity_gap  → covered/redacted element: blurred kundli chart, hand covering face, withheld word in headline
+  before_after   → literal vertical split: same person, identical pose, lighting shifts (dim → golden); time-gap label between
+  urgency        → planetary transit visual (chart wheel with planet glyph + date) — NEVER a generic countdown clock
+${isSpiritual ? '  (spirituality bonus: use astrology-specific iconography — Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — never generic "spiritual" Western aesthetic)' : ''}
+`.trim();
+
+    const facialSpec = isSpiritual
+      ? `Indian person — South Asian features, 32-48 yrs, wheat-to-brown skin tone (NOT light/Pinterest-Indian), natural skin with visible pores, traditional dress (saree/salwar/kurta — visible sindoor or bindi optional), tier-2/3 home or temple-courtyard setting (NOT luxury apartment).`
+      : `Indian person — South Asian features, real skin tones (wheat to dark, never light/anglicized), age-appropriate to the audience, real Indian setting (NOT generic "Asian" or NRI metro).`;
+
+    const compositionRule = `
+COMPOSITION (3-layer rule — not single-element domination):
+  Layer 1 (50% of frame): subject from the centerpiece row above
+  Layer 2 (25% of frame): one supporting symbol (deity glyph / chart / number / strikethrough / split-line)
+  Layer 3 (15% of frame): product visible (book, certificate, phone showing report — anchor what they buy)
+  Layer 4 (~10% of frame total): text overlays — TOP "${hookText}" (≤3 words bold Hinglish), BOTTOM "${headline}"${cta ? ` + CTA "${cta}"` : ''} — never exceed 25% of frame on text combined
+`.trim();
+
+    const avoidList = `
+AVOID (these are concrete Nano-Banana failure modes, not generic art-school negatives):
+  - Garbled Devanagari or Hindi text — Nano Banana fails Hindi script ~70% of the time; keep overlays in Latin-Hinglish if Hindi text would appear
+  - Extra/fused fingers, asymmetric eyes, AI-uncanny hands — explicitly call out "hands hidden or out of frame" if fingers risk appearing
+  - Light-skinned/anglicized Indian faces (force wheat-to-brown skin tone — see SUBJECT spec)
+  - Cluttered backgrounds that compete with the subject
+  - English-only text overlays (must be Hinglish or Hindi-Latin)
+  - Watermarks, brand logos other than ${company.name}, celebrity faces, fake testimonials
+${isSpiritual ? '  - Western "spiritual" aesthetic — NO Buddha statues, mandala patterns, dreamcatchers, crystals, sage smudging, lotus-with-chakra. Indian-astro iconography ONLY.' : ''}
+  - Stock-photo lifestyle aesthetic (Pexels/Unsplash look) — feed scrollers ignore these
+`.trim();
+
+    return `
+Write an image generation prompt for a Meta direct response ad in the ${vertical} vertical. This image must STOP scrolling and TAP-through within 1 second.
+
+BRIEF:
+Brand: ${company.name}
+Topic: ${brief.topic}
+Angle: ${brief.angle}
+Platform: ${brief.platform} | Format: ${brief.format}
+Audience: ${brief.audience}
+${hookStyle ? `Hook style: ${hookStyle}` : ''}
+Hook text: "${hookText}"
+Headline: "${headline}"
+${cta ? `CTA: "${cta}"` : ''}
+Brand guidelines: ${company.brandGuidelines ?? 'Not specified'}
+
+${centerpieceTable}
+
+SUBJECT SPEC (when a person appears in frame):
+${facialSpec}
+
+${compositionRule}
+
+${avoidList}
+
+Format: Vertical 9:16. Length: 8-10 sentences — enough to specify centerpiece, all 3 composition layers, text overlays, subject demographics, and 2-3 specific AVOIDs that apply to THIS hookStyle.
+
+Return ONLY the image prompt, nothing else.
+    `.trim();
   }
 
   private async generateAndUpload(prompt: string, tenantId: string, runId: string): Promise<string> {

@@ -647,6 +647,24 @@ Match the duration / opener / music to the SELECTED variant's hookStyle. Three b
 (B) BODY — middle 50-60% of duration. For story-driven hooks, this is the personal-story / transformation / proof beat. For punch hooks, this is the value proposition + product reveal. Voiceover speaks in conversational Hindi (or the brief's audience language) — NEVER textbook Hindi. Specific b-roll, hard cuts, no fades.
 (C) CTA — final ~20% of duration. Product name "${resolvedProduct?.name ?? 'Product'}" + ₹${resolvedProduct?.price} as bold text overlay. Voiceover delivers the urgency line ("Abhi karo" / "Aaj hi" / "Pehla kadam lo"). Final music beat → clean stop.
 
+═══ VOICEOVER SCRIPT — VERBATIM, NOT DESCRIBED ═══
+
+CRITICAL: Heygen's renderer auto-translates prose descriptions of voiceover into Google-translate Hindi, which produces awkward grammar (e.g. "aapka kundli analyze karenge" instead of natural "aapki kundli padhte hain"). To prevent this, your videoPrompt MUST include the EXACT voiceover script verbatim in the language the audience speaks (Devanagari for Hindi, or natural Hinglish in Latin script if the brief specifies Hinglish), with these markers:
+
+  • Inline the script directly in the relevant timing beat (e.g. "0-3s: <visual>. VO: \\"<exact Hindi script here>\\"")
+  • Use \\"...\\" inside the VO line for natural pauses
+  • Use *word* for emphasis the renderer should respect
+  • Length: ~2.5 spoken syllables per second of duration (~5-7 short Hindi words per 3-second beat)
+  • Use conversational Hindi (Indore/Lucknow register) — NEVER textbook Hindi, NEVER pure-Sanskrit terms when a colloquial word exists
+  • Pull the VO script from the SELECTED copy variant's headline + primaryText — do NOT rewrite it. The video is voicing the chosen ad copy.
+  • Do NOT describe the VO ("warm conversational tone") in place of providing the script. Tone is implied by the words; the renderer needs the WORDS.
+
+Example beat written correctly (pain_point):
+  3-15s: Hard cut to woman staring out a rainy window. Slow sitar joins. VO: "Kal raat phir wahi sapna... wahi sawaal — ki aage kya hoga. Kundli kholo, ya phir doosre se poochho? Dono mein ek hi farak hai — ek mein answer hai, doosre mein guess."
+
+Example beat written WRONG (DO NOT do this):
+  3-15s: Voiceover speaks in conversational Hindi about the audience's pain in a warm, knowing tone.
+
 ${resolveVertical(company.industry) === 'spirituality' ? `═══ ASTROLOGY-SPECIFIC B-ROLL VOCABULARY (use when topic fits) ═══
 
 Astro hooks demand astro visuals. Generic "spiritual aesthetic" loses to specific iconography:

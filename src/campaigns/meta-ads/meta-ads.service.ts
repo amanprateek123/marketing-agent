@@ -42,6 +42,10 @@ export interface MetaAdSetConfig {
   geoLocations?: string[];   // ISO country codes (e.g. ['IN'])
   geoStates?: string[];      // Meta region keys (e.g. ['480'] for Maharashtra)
   geoCities?: string[];      // Meta city keys (e.g. ['2295411'] for Mumbai)
+  // Meta locale IDs (e.g. [84] = Marathi, [53] = Hindi). Filters delivery to users
+  // whose platform language matches. Populated by audience-targeting-resolver from
+  // segment.languages or product.languages (canonical names → IDs via META_LOCALE_IDS).
+  locales?: number[];
   interests?: string[];      // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
   optimizationGoal: string;
   ads: number[];
@@ -562,6 +566,13 @@ export class MetaAdsService {
       targeting.flexible_spec = [{
         interests: config.interests.map((id) => ({ id, name: id })),
       }];
+    }
+
+    // Locale targeting — filters delivery by platform language (e.g. 84=Marathi).
+    // Empty array means no filter; resolver only populates when segment/product
+    // specifies languages. Compatible with all audienceTypes including advantage_plus.
+    if (Array.isArray(config.locales) && config.locales.length > 0) {
+      targeting.locales = config.locales;
     }
 
     // Exclude audiences (past buyers)
