@@ -53,6 +53,17 @@ export interface AuditSignalPacket {
       productName: string | null;
       spend: number;
     } | null;
+    // Hook over-saturation — a single hookStyle is taking ≥70% of an audience's
+    // impressions with audience volume past the fatigue floor. No statistical
+    // ambiguity: lack of creative diversity directly causes CTR/CVR decay even
+    // before audienceFatigue trips on frequency. Verdict: add_creative with a
+    // different hookStyle, don't pause.
+    hookOverSaturation: {
+      audienceType: string;
+      hookStyle: string;
+      saturationPct: number;
+      impressions: number;
+    }[];
   };
 
   // Breakeven ROAS used by this audit pass — surfaced so the agent and digest can
@@ -506,6 +517,26 @@ export class SignalDetectorService {
     }
     hookSaturation.sort((a, b) => b.saturationPct - a.saturationPct);
 
+    // Hook over-saturation anomaly: any (audience, hookStyle) bucket past the 70%
+    // saturation threshold *and* past the audience-impressions fatigue floor, with
+    // a resolved hookStyle. Unknown hookStyle is excluded — that's a data gap, not
+    // a creative-diversity problem. No statistical bound here because we're not
+    // estimating an unknown rate; we're measuring an observed share that the agent
+    // can act on immediately (add_creative with a different angle).
+    const HOOK_SATURATION_THRESHOLD_PCT = 70;
+    const hookOverSaturation = hookSaturation
+      .filter(h =>
+        h.saturationPct >= HOOK_SATURATION_THRESHOLD_PCT
+        && h.audienceTotalImpressions >= MIN_IMPRESSIONS_FOR_FATIGUE
+        && h.hookStyle !== 'unknown',
+      )
+      .map(h => ({
+        audienceType: h.audienceType,
+        hookStyle: h.hookStyle,
+        saturationPct: h.saturationPct,
+        impressions: h.impressions,
+      }));
+
     return {
       campaignAge: { hours: Math.round(ageHours), days: Math.round(ageDays * 10) / 10, inLearningPhase: ageDays < coldStartDays },
       trends: { ctrTrend, roasTrend, frequencyTrend: freqTrend, spendPace },
@@ -525,6 +556,7 @@ export class SignalDetectorService {
         budgetExhaustionRisk,
         unprofitableAfterDay3,
         conversionDataIntegrity,
+        hookOverSaturation,
       },
       breakeven,
       opportunities: {

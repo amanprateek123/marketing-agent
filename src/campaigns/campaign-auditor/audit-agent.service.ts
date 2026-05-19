@@ -430,6 +430,16 @@ export class AuditAgentService {
         `Verdict should be no_action with contextInsight flagging the config gap — do not pause until value is set.`,
       );
     }
+    if (anomalies.hookOverSaturation.length > 0) {
+      const buckets = anomalies.hookOverSaturation
+        .map(h => `audience "${h.audienceType}" / hook "${h.hookStyle}" at ${h.saturationPct}% (${h.impressions} impr)`)
+        .join('; ');
+      anomalyLines.push(
+        `HOOK OVER-SATURATION: ${buckets}. One creative angle is monopolising impressions on this audience — ` +
+        `CTR/CVR will decay even before frequency-fatigue trips. Action: add_creative with a different hookStyle ` +
+        `(not the saturated one) targeted at the affected audience. Do NOT pause; this is a diversity gap, not a loser.`,
+      );
+    }
 
     // ── Snapshot history (with prior verdicts so the agent isn't stateless) ──
     // Filter out synthetic verdicts written by the cooldown / all-green short-circuits.
