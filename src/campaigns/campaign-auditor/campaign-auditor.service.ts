@@ -303,6 +303,7 @@ export class CampaignAuditorService {
       !signals.anomalies.unprofitableAfterDay3 &&
       !signals.anomalies.conversionDataIntegrity &&
       signals.anomalies.hookOverSaturation.length === 0 &&
+      !signals.anomalies.cvrVsBenchmarkGap &&
       !signals.safetyBreaches.weeklyCapExceeded &&
       !signals.safetyBreaches.campaignCapExceeded &&
       signals.trends.ctrTrend !== 'declining' &&

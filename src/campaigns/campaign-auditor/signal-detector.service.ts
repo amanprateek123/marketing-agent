@@ -3,7 +3,7 @@ import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
 import { getBenchmark, getCPARange, resolveVertical, getBreakevenROAS } from '../../common/benchmarks/vertical-benchmarks';
-import { adSetWinnerPosterior, adSetLoserPosterior } from '../../common/statistics/bayesian-estimator.util';
+import { adSetWinnerPosterior, adSetLoserPosterior, shrinkTowardPrior } from '../../common/statistics/bayesian-estimator.util';
 import { deriveFloorsFromVertical } from '../../common/statistics/power-calc.util';
 import { thompsonAllocate, ThompsonAllocationResult } from '../../common/statistics/bandit-allocator.util';
 
@@ -64,6 +64,19 @@ export interface AuditSignalPacket {
       saturationPct: number;
       impressions: number;
     }[];
+    // CVR-vs-benchmark gap — CTR is healthy (within/above benchmark) but CVR is
+    // materially below vertical typical (<30%). Diagnoses an audience-quality or
+    // landing-page problem, not a creative problem. People click, then don't buy.
+    // Uses shrunken CVR (kappa=10 toward vertical prior) to avoid noise from lucky
+    // single conversions. Verdict: refresh_audience and/or investigate the
+    // landing page/offer — explicitly NOT replace_creative.
+    cvrVsBenchmarkGap: {
+      observedCVRPct: number;
+      shrunkenCVRPct: number;
+      typicalCVRPct: number;
+      clicks: number;
+      conversions: number;
+    } | null;
   };
 
   // Breakeven ROAS used by this audit pass — surfaced so the agent and digest can
@@ -410,6 +423,35 @@ export class SignalDetectorService {
       && loserPosterior.shrunkenROAS < breakeven.breakevenROAS
       && loserPosterior.upperROAS < breakeven.breakevenROAS;
 
+    // CVR-vs-benchmark gap — diagnoses "creative works but audience/LP doesn't."
+    // Conditions: CTR is at or above the lower vertical band (creative isn't the
+    // leak), shrunken CVR is below 30% of vertical typical (real underperformance,
+    // not noise), and we have past the zero-conv-pause click floor.
+    // The shrunken CVR (kappa=10 toward verticalBenchmark.cvrPct.typical) prevents
+    // single-conversion noise from masquerading as healthy CVR on small budgets.
+    const CVR_GAP_THRESHOLD_FRACTION = 0.30;
+    const observedCVR = current.campaign.clicks > 0
+      ? current.campaign.conversions / current.campaign.clicks
+      : 0;
+    const typicalCVR = (verticalBenchmark.cvrPct.typical || 3.5) / 100;
+    const shrunkenCVR = shrinkTowardPrior(observedCVR, current.campaign.clicks, typicalCVR, 10);
+    const cvrTooLow = shrunkenCVR < typicalCVR * CVR_GAP_THRESHOLD_FRACTION;
+    const ctrHealthy = currentCTRVsBenchmark === 'within' || currentCTRVsBenchmark === 'above';
+    const cvrVsBenchmarkGap = (
+      ctrHealthy
+      && cvrTooLow
+      && current.campaign.clicks >= MIN_CLICKS_FOR_ZERO_CONV_PAUSE
+      && ageDays >= 3
+    )
+      ? {
+          observedCVRPct: Math.round(observedCVR * 10000) / 100,
+          shrunkenCVRPct: Math.round(shrunkenCVR * 10000) / 100,
+          typicalCVRPct: Math.round(typicalCVR * 10000) / 100,
+          clicks: current.campaign.clicks,
+          conversions: current.campaign.conversions,
+        }
+      : null;
+
     // ── Opportunities ─────────────────────────────────────────────────────────
     const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
     const conversionValue = (company.products ?? []).find(p => p.active)?.conversionValue
@@ -557,6 +599,7 @@ export class SignalDetectorService {
         unprofitableAfterDay3,
         conversionDataIntegrity,
         hookOverSaturation,
+        cvrVsBenchmarkGap,
       },
       breakeven,
       opportunities: {

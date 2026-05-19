@@ -440,6 +440,17 @@ export class AuditAgentService {
         `(not the saturated one) targeted at the affected audience. Do NOT pause; this is a diversity gap, not a loser.`,
       );
     }
+    if (anomalies.cvrVsBenchmarkGap) {
+      const g = anomalies.cvrVsBenchmarkGap;
+      anomalyLines.push(
+        `CVR-VS-BENCHMARK GAP: CTR is healthy but CVR is broken. ` +
+        `Observed CVR ${g.observedCVRPct}% (shrunken ${g.shrunkenCVRPct}%) vs vertical typical ${g.typicalCVRPct}% ` +
+        `on ${g.clicks} clicks / ${g.conversions} conversions. People are clicking but not buying — ` +
+        `the leak is the audience or the landing page, NOT the creative. ` +
+        `Action: refresh_audience (try a different segment or narrower interest), and flag the landing-page funnel ` +
+        `in contextInsight for human review. Do NOT replace_creative — CTR proves it works.`,
+      );
+    }
 
     // ── Snapshot history (with prior verdicts so the agent isn't stateless) ──
     // Filter out synthetic verdicts written by the cooldown / all-green short-circuits.
