@@ -7,8 +7,8 @@ import { CompaniesService } from '../companies/companies.service';
 import { PipelineRun, PipelineRunDocument } from '../pipeline/schemas/pipeline-run.schema';
 import { QUEUES } from './queue.constants';
 
-const AUDIT_INTERVAL_MS = 6 * 60 * 60 * 1000;  // 6 hours — matches cooldown in campaign-auditor
-const SYNC_INTERVAL_MS  = 60 * 60 * 1000;  // 1 hour
+const AUDIT_INTERVAL_MS = 3 * 60 * 60 * 1000;  // 3 hours — matches cooldown in campaign-auditor
+const SYNC_INTERVAL_MS  = 30 * 60 * 1000;  // 30 minutes
 
 @Injectable()
 export class SchedulerService implements OnModuleInit {

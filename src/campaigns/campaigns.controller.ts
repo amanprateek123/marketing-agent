@@ -619,4 +619,23 @@ export class CampaignsController {
       throw new BadRequestException(err.message);
     }
   }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/audit
+   * Manually trigger an audit for a single campaign — same flow as the tenant-wide
+   * audit, scoped to one campaign. Useful for the dashboard "Run Audit" button and
+   * for re-evaluating one campaign after a config change without touching the rest.
+   */
+  @Post(':tenantId/:campaignId/audit')
+  async triggerAuditOne(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    try {
+      const result = await this.campaignAuditorService.auditOne(tenantId, campaignId);
+      return { success: true, campaignId, ...result };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
 }

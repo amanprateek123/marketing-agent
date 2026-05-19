@@ -124,6 +124,65 @@ export class CampaignAuditorService {
     return result;
   }
 
+  /**
+   * Audit a single campaign by tenant + campaign Mongo _id. Same flow as `audit()`
+   * but scoped to one campaign — fetches the market environment once, then runs
+   * the standard auditCampaign pass. Surfaced for the dashboard's "Run Audit Now"
+   * button and ad-hoc debugging via POST /:tenantId/:campaignId/audit.
+   * Throws if the campaign isn't found under this tenant.
+   */
+  async auditOne(tenantId: string, campaignId: string): Promise<AuditResult> {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    // Accept either the Mongo _id (24-char hex from the dashboard URL) or the
+    // numeric metaCampaignId (what shows up in Ads Manager and Slack alerts).
+    // Without this fallback, callers using the Meta ID get a Mongoose cast error
+    // instead of a useful "not found" response.
+    const isObjectId = /^[a-f0-9]{24}$/i.test(campaignId);
+    const campaign = isObjectId
+      ? await this.campaignModel.findOne({ tenantId, _id: campaignId }).exec()
+      : await this.campaignModel.findOne({ tenantId, metaCampaignId: campaignId }).exec();
+    if (!campaign) {
+      throw new Error(`Campaign ${campaignId} not found for tenantId=${tenantId}`);
+    }
+
+    this.logger.log(`Auditing single campaign ${campaign.metaCampaignId} for tenantId=${tenantId}`);
+
+    const result: AuditResult = {
+      tenantId,
+      campaignsAudited: 1,
+      paused: 0,
+      actionsCreated: 0,
+      performanceWritten: 0,
+    };
+
+    // Same market-environment fetch the batch audit does — needed for DiD
+    // adjustment on creativeFatigue and the auction_leak leak diagnosis.
+    let marketEnvironment: AuditSignalPacket['marketEnvironment'] = null;
+    if (company.meta?.accessToken && company.meta?.accountId) {
+      try {
+        marketEnvironment = await this.metaMetrics.fetchAccountEnvironment(
+          company.meta.accountId,
+          company.meta.accessToken,
+        );
+      } catch (err: any) {
+        this.logger.warn(`Account CPM env fetch failed: ${err.message} — proceeding without it`);
+      }
+    }
+
+    try {
+      await this.auditCampaign(campaign, company, result, marketEnvironment);
+    } catch (err: any) {
+      this.logger.error(`Audit failed for campaign ${campaign.metaCampaignId}: ${err.message}`);
+      throw err;
+    }
+
+    this.logger.log(
+      `Single-campaign audit complete: campaignId=${campaignId} paused=${result.paused} actions=${result.actionsCreated} written=${result.performanceWritten}`,
+    );
+
+    return result;
+  }
+
   private async auditCampaign(
     campaign: CampaignDocument,
     company: CompanyDocument,
@@ -314,38 +373,10 @@ export class CampaignAuditorService {
       signals.trends.spendPace !== 'underspending' &&
       !hasOpportunities;
 
-    // Cooldown: if last Claude verdict was watch/no_action and < 6h ago, skip unless signals changed materially
-    const lastSnapshot = snapshots[0];
-    const lastVerdict = lastSnapshot?.verdict?.verdict;
-    const lastAuditAge = lastSnapshot ? (Date.now() - new Date(lastSnapshot.auditedAt).getTime()) / (1000 * 60 * 60) : Infinity;
-    const lastConversions = lastSnapshot?.metrics?.conversions ?? 0;
-    const conversionsChanged = full.campaign.conversions !== lastConversions;
-    const hadSafetyBreach = signals.safetyBreaches.weeklyCapExceeded || signals.safetyBreaches.campaignCapExceeded;
-
-    if (!isAllGreen && !conversionsChanged && !hadSafetyBreach &&
-        (lastVerdict === 'watch' || lastVerdict === 'no_action') && lastAuditAge < 6) {
-      const age = signals.campaignAge;
-      const conv = full.campaign.conversions;
-      const cooldownVerdict = {
-        verdict: 'no_action' as const,
-        urgency: null,
-        contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | Cooldown — last verdict "${lastVerdict}" ${lastAuditAge.toFixed(1)}h ago, no material change`,
-        leakDiagnosis: null,   // synthetic — no LLM diagnosis on this audit
-        watchSignals: lastSnapshot?.verdict?.watchSignals ?? [] as string[],
-        recommendedActions: [] as any[],
-      };
-      snapshotData.verdict = cooldownVerdict as any;
-      await this.snapshotModel.create(snapshotData);
-      this.logger.debug(`Cooldown skip for campaign ${campaign.metaCampaignId} — last verdict ${lastAuditAge.toFixed(1)}h ago`);
-
-      if (campaign.launchedAt) {
-        const ageMs = Date.now() - new Date(campaign.launchedAt).getTime();
-        const ageDays = ageMs / (1000 * 60 * 60 * 24);
-        const written = await this.writePerformanceBack(campaign, full, ageDays);
-        if (written) result.performanceWritten++;
-      }
-      return;
-    }
+    // Cooldown removed — manual audits and the 6h cron always re-evaluate when
+    // signals are red. Trade-off: every audit cycle that fires an anomaly hits
+    // Claude (slightly more spend), in exchange for never silently skipping a
+    // material signal because the conversion count happened to be stable.
 
     if (isAllGreen) {
       const age = signals.campaignAge;

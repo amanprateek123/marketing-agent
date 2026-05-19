@@ -79,17 +79,38 @@ REBALANCE actions (no extra spend, redistribute within the same campaign):
 
 THROTTLE actions (less drastic than pause — prefer these BEFORE pausing):
 - "reduce_total_budget": Cut the campaign's daily budget by a percentage. Use when overall ROAS is degrading but the campaign isn't broken — throttle without killing. Set targetId = campaign metaCampaignId, params.reductionPercent = 20-50. Cap: TS clamps at 50% reduction.
-- "narrow_placement": Disable bleeding placements without pausing the whole ad set. Common patterns:
-    - Reels-only Instagram: publisherPlatforms=['instagram'], instagramPositions=['reels']
-    - Feed-only across both: publisherPlatforms=['facebook','instagram'], facebookPositions=['feed'], instagramPositions=['stream']
-    - Drop Audience Network (most common bleeder): publisherPlatforms=['facebook','instagram'] (omit audience_network)
-    - No Stories: publisherPlatforms=['facebook','instagram'], facebookPositions=['feed','video_feeds','marketplace'], instagramPositions=['stream','reels','explore']
+- "narrow_placement": Disable bleeding placements without pausing the whole ad set.
+
+  MANDATORY: Before choosing the params, inspect breakdowns.byPlacement in the data. For each placement (publisherPlatform + platformPosition), compute spend and conversions. A placement is a LOSER if conversions === 0 AND spend > 10% of campaign total, OR conversions > 0 AND CPA > 1.5× breakeven CPA. A placement is a WINNER if conversions ≥ 1 AND CPA < breakeven CPA. Your narrow_placement params MUST exclude every loser position individually — DO NOT settle for dropping a whole platform when only some of its positions are losing, AND DO NOT settle for dropping audience_network alone when the real bleeders are inside facebook or instagram.
+
+  How to read it:
+    - publisherPlatforms = list of platforms with AT LEAST ONE winning position. If instagram has 1 winning position (reels) and 2 losing (feed, stories), instagram still belongs in publisherPlatforms — but instagramPositions must list ONLY the winners.
+    - facebookPositions / instagramPositions = list of WINNERS to keep. Omit losers entirely. The list is an allow-list, not a block-list.
+    - If a platform has NO winning positions, omit it from publisherPlatforms.
+    - audience_network and messenger are almost always droppable unless conversions exist; omit them by default.
+
+  Concrete example for the data shape this auditor sees (Instagram: Reels 2 conv / Feed 0 conv / Stories 0 conv; Facebook: Feed 1 conv / Reels 0 conv; Audience Network 0 conv):
+    publisherPlatforms=['facebook','instagram'], facebookPositions=['feed'], instagramPositions=['stream']
+    (where 'stream' is Meta's API name for Instagram Reels). DROP Instagram Feed, Stories, FB Reels, Audience Network.
+
+  Position name reference (use these EXACT strings in params):
+    facebookPositions: 'feed','right_hand_column','marketplace','video_feeds','story','search','instream_video','facebook_reels','facebook_reels_overlay'
+    instagramPositions: 'stream' (= Reels), 'story','explore','reels','shop','profile_feed','ig_search'
+    audienceNetworkPositions: 'classic','rewarded_video','instream_video'
+
+  Common WRONG outcomes to avoid:
+    - Dropping ONLY audience_network when Instagram positions are the real bleeders → this is the cosmetic fix, not the surgery. REJECTED.
+    - Setting publisherPlatforms without setting facebookPositions/instagramPositions when one platform has mixed-performance positions → ineffective; the losers stay live. REJECTED.
+    - Including a position with conversions === 0 in the allow-list → defeats the entire action. REJECTED.
+
   Set targetId = ad set ID. Allowed publisherPlatforms values: 'facebook','instagram','audience_network','messenger'.
 - "dayparting": Restrict delivery to specific hours/days. Times are in IST (the agent only runs against Asia/Kolkata ad accounts; non-IST accounts will refuse the action). Use when off-peak hours (1am-6am IST) burn budget without converting, OR when a B2B/edtech audience converts only during work hours. Set targetId = ad set ID, params.schedule = array of {startMinute, endMinute, days}. Minutes are 0-1440 from midnight IST. Days are 0-6 (Sun-Sat). Useful patterns:
     - India consumer peak (9pm-12am IST): {startMinute: 1260, endMinute: 1440, days: [0,1,2,3,4,5,6]}
     - Morning commute (8-10am IST): {startMinute: 480, endMinute: 600, days: [0,1,2,3,4,5,6]}
     - B2B work hours (10am-7pm, Mon-Fri): {startMinute: 600, endMinute: 1140, days: [1,2,3,4,5]}
     - To span midnight, USE TWO SLOTS — Meta does not accept startMinute > endMinute. e.g. 10pm-2am = [{1320, 1440, days}, {0, 120, days}].
+
+  PRECONDITION — MUST READ: Meta REJECTS dayparting on campaigns that use a daily budget. The error you'll see is "Campaigns with day parting enabled do not support daily budgets" (code 100, subcode 1487682). The CAMPAIGN DATA block tells you the campaign's daily budget (if any). If the campaign has a daily budget (campaign.budget > 0 with no lifetime budget specified), DO NOT recommend dayparting. Use narrow_placement or reduce_total_budget instead. Dayparting is only valid when the campaign is configured with a lifetime budget.
 
 REFRESH actions (when audience is fatigued but creative is good):
 - "refresh_audience": Duplicate a fatigued ad set with a fresh audience, keeping the same creative. Use when frequency is high (>4.5) but CTR is NOT declining (meaning the creative is still performing — it's the audience that's saturated). Resets Meta's learning phase on the new audience while preserving the proven creative. Set targetId = source (fatigued) ad set ID, EITHER params.newAudienceId = numeric Meta custom/lookalike audience ID OR params.useAdvantagePlus = true (switch to Advantage+ targeting). TS will REFUSE the action if frequency < 4.5 OR CTR is declining (in those cases use replace_creative or pause_adset).
@@ -131,7 +152,11 @@ Priority — when multiple leaks apply at once, the higher-priority one wins:
    Forbidden: refresh_audience — CTR proves audience isn't the primary issue; you've broken the creative.
 
 5. audience_lp_leak — TRIGGER: anomalies.cvrVsBenchmarkGap is set, OR (benchmarks.currentCTRVsBenchmark in {'within','above'} AND shrunken CVR < 30% of typical AND conversions ≥ 0).
-   Required: refresh_audience as primary action; in contextInsight explicitly flag the landing-page funnel for human review.
+   Action selection — work through these in order, pick the first that applies:
+     (a) PLACEMENT-LEAK PATH (most common cause): inspect breakdowns.byPlacement. If any single placement (publisherPlatform + platformPosition combo) has spend > 10% of campaign total AND conversions === 0, that placement is the proximate cause of the audience-quality signal — Meta is delivering to a bad inventory bucket. Pick narrow_placement using the position-level rules in that action's description (omit losers, keep winners). This is the primary path for most audience_lp_leak cases.
+     (b) FATIGUE PATH: if no clear placement loser AND ad-set frequency ≥ 4.5 OR signals.trends.frequencyTrend === 'rising', pick refresh_audience. The TS guard REFUSES refresh_audience when frequency < 4.5 — do NOT pick it on low-frequency campaigns or the action drops on the floor.
+     (c) NO-CLEAN-FIX PATH: if neither (a) nor (b) applies (no placement leak AND frequency low), pick verdict = no_action and write contextInsight: "Audience-quality or landing-page issue with no clean automated remediation. Frequency below fatigue threshold — refresh_audience would be refused. Investigate LP funnel and conversion tracking manually." Do NOT force refresh_audience or dayparting on this path.
+   In contextInsight always flag the landing-page funnel for human review.
    Forbidden: replace_creative — CTR within benchmark proves the creative works. Replacing it discards the only thing that's pulling its weight.
 
 6. creative_diversity_leak — TRIGGER: anomalies.hookOverSaturation.length > 0.
