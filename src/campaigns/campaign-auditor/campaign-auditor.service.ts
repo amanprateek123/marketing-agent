@@ -330,6 +330,7 @@ export class CampaignAuditorService {
         verdict: 'no_action' as const,
         urgency: null,
         contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | Cooldown — last verdict "${lastVerdict}" ${lastAuditAge.toFixed(1)}h ago, no material change`,
+        leakDiagnosis: null,   // synthetic — no LLM diagnosis on this audit
         watchSignals: lastSnapshot?.verdict?.watchSignals ?? [] as string[],
         recommendedActions: [] as any[],
       };
@@ -363,6 +364,7 @@ export class CampaignAuditorService {
         verdict: 'no_action' as const,
         urgency: null,
         contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | CTR ${full.campaign.ctr.toFixed(2)}% | ${status}`,
+        leakDiagnosis: 'none' as const,  // all-green means no leak identified by the rule set
         watchSignals: [] as string[],
         recommendedActions: [] as any[],
       };

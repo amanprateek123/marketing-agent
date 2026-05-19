@@ -75,6 +75,10 @@ export class AuditSnapshot {
     verdict: 'watch' | 'act' | 'no_action';
     urgency: 'immediate' | '48h' | '7d' | null;
     contextInsight: string;
+    // Primary leak the agent diagnosed — one of the LEAK DIAGNOSIS FRAMEWORK
+    // enum values from audit-agent.service.ts, or null for synthetic skips
+    // (cooldown / parser failure). 'none' = healthy. See LeakDiagnosis type.
+    leakDiagnosis?: string | null;
     watchSignals: string[];
     recommendedActions: {
       type:

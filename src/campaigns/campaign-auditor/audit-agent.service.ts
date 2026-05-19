@@ -8,10 +8,25 @@ import { AuditSignalPacket } from './signal-detector.service';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { ShadowActionService } from '../../learning/shadow-action.service';
 
+export type LeakDiagnosis =
+  | 'creative_leak'         // CTR below benchmark / creativeFatigue
+  | 'audience_lp_leak'      // CTR fine but CVR collapsed — audience or landing page
+  | 'creative_diversity_leak'  // hookOverSaturation — one angle monopolising the audience
+  | 'auction_leak'          // market CPM spiking, your campaign stable
+  | 'chronic_unprofitable'  // unprofitableAfterDay3 with confident shrunken+upper ROAS below breakeven
+  | 'data_gap'              // conversionDataIntegrity — can't judge ROAS
+  | 'fragmentation'         // (reserved) too many overlapping ad sets, none past learning
+  | 'none';                 // healthy or insufficient evidence — no leak identified
+
 export interface AuditVerdict {
   verdict: 'watch' | 'act' | 'no_action';
   urgency: 'immediate' | '48h' | '7d' | null;
   contextInsight: string;       // Why this verdict — the "so what" in plain English
+  // Primary leak the verdict is addressing. Locks the action selection — the
+  // prompt's LEAK DIAGNOSIS FRAMEWORK pairs each leak with required and
+  // forbidden actions, so downstream auditing knows *why* an action was picked
+  // and can flag mismatches (e.g. replace_creative on an audience_lp_leak).
+  leakDiagnosis: LeakDiagnosis | null;
   watchSignals: string[];        // Signals to monitor next audit
   recommendedActions: {
     type:
@@ -93,6 +108,44 @@ Concrete triage when CTR is okay but CPA is creeping up:
   → If cause is genuinely unclear and CPA < 1.5× benchmark, reduce_total_budget at 30%.
   → Only pause_adset if CPA > 2× benchmark AND none of the above apply.
 
+═══ LEAK DIAGNOSIS FRAMEWORK ═══
+BEFORE choosing actions, identify the PRIMARY LEAK from the signals. Each leak type has a required action set and a forbidden action set — using the wrong action on a leak is worse than no action. Set "leakDiagnosis" in your output to the leak you identified.
+
+Priority — when multiple leaks apply at once, the higher-priority one wins:
+
+1. data_gap — TRIGGER: anomalies.conversionDataIntegrity is set.
+   Required: verdict = no_action, contextInsight must name the missing conversionValue field.
+   Forbidden: ANY pause/scale/budget action. ROAS is uncomputable; don't act on it.
+
+2. chronic_unprofitable — TRIGGER: anomalies.unprofitableAfterDay3 = true.
+   Required: pause_adset on the worst-ROAS ad set first. If every ad set is below breakeven AND no winners, pause_ad on the worst ads or pause the campaign.
+   Forbidden: scale_adset, add_creative, refresh_audience — those compound the loss.
+   This supersedes the diagnostic-only leaks below. Stop the bleeding before diagnosing it.
+
+3. auction_leak — TRIGGER: marketEnvironment.trend = 'spiking' AND your CTR is within/above benchmark AND ROAS not declining sharply.
+   Required: reduce_total_budget at 20-30%, OR dayparting if off-hours are the bleed, OR narrow_placement if one placement is over-indexed in the spike.
+   Forbidden: replace_creative, refresh_audience — the leak is exogenous (market), not your campaign.
+
+4. creative_leak — TRIGGER: anomalies.creativeFatigue.length > 0, OR benchmarks.currentCTRVsBenchmark = 'below'.
+   Required: replace_creative on the fatigued ad(s). If a winner with declining CTR, add_creative instead (keep the winner running).
+   Forbidden: refresh_audience — CTR proves audience isn't the primary issue; you've broken the creative.
+
+5. audience_lp_leak — TRIGGER: anomalies.cvrVsBenchmarkGap is set, OR (benchmarks.currentCTRVsBenchmark in {'within','above'} AND shrunken CVR < 30% of typical AND conversions ≥ 0).
+   Required: refresh_audience as primary action; in contextInsight explicitly flag the landing-page funnel for human review.
+   Forbidden: replace_creative — CTR within benchmark proves the creative works. Replacing it discards the only thing that's pulling its weight.
+
+6. creative_diversity_leak — TRIGGER: anomalies.hookOverSaturation.length > 0.
+   Required: add_creative with a DIFFERENT hookStyle than the saturated one, targeting the affected audience. params.hookStyle must NOT match the saturated hookStyle.
+   Forbidden: pause_adset, replace_creative. This is a delivery-diversity gap, not a loser.
+
+7. fragmentation — RESERVED for a future signal. Don't use yet.
+
+8. none — TRIGGER: no anomaly above fires.
+   Required: verdict = no_action OR scale_adset on a confirmed winner from opportunities.winningAdSets. contextInsight should state "campaign healthy" or "insufficient evidence (clicks=X, conversions=Y)".
+   Forbidden: any pause/refresh/replace action — nothing to fix.
+
+MULTIPLE LEAKS: pick the highest-priority one as primary leakDiagnosis. You may stack a secondary action (e.g. chronic_unprofitable primary → pause; if cvrVsBenchmarkGap also fires, note "audience/LP is the underlying cause" in contextInsight, but do NOT add refresh_audience to recommendedActions — pausing comes first, diagnose the next campaign).
+
 Guidelines:
 TIMING RULES — respect these strictly:
 - Day 0-3 (first 72h): WATCH ONLY. Do NOT recommend pause or act. Zero conversions is NORMAL — the campaign hasn't spent enough for a statistically meaningful result. Only exception: safety rail breaches (budget cap, weekly cap).
@@ -119,6 +172,7 @@ Output ONLY valid JSON in this exact format:
   "verdict": "watch" | "act" | "no_action",
   "urgency": "immediate" | "48h" | "7d" | null,
   "contextInsight": "one or two sentences explaining the key finding",
+  "leakDiagnosis": "creative_leak" | "audience_lp_leak" | "creative_diversity_leak" | "auction_leak" | "chronic_unprofitable" | "data_gap" | "fragmentation" | "none",
   "watchSignals": ["signal 1", "signal 2"],
   "recommendedActions": [
     {
@@ -642,10 +696,15 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
       if (!jsonText) throw new Error('No JSON object found in output');
       const parsed = JSON.parse(jsonText);
 
+      const validLeaks: LeakDiagnosis[] = [
+        'creative_leak', 'audience_lp_leak', 'creative_diversity_leak', 'auction_leak',
+        'chronic_unprofitable', 'data_gap', 'fragmentation', 'none',
+      ];
       return {
         verdict: ['watch', 'act', 'no_action'].includes(parsed.verdict) ? parsed.verdict : 'watch',
         urgency: ['immediate', '48h', '7d', null].includes(parsed.urgency) ? parsed.urgency : null,
         contextInsight: typeof parsed.contextInsight === 'string' ? parsed.contextInsight : '',
+        leakDiagnosis: validLeaks.includes(parsed.leakDiagnosis) ? parsed.leakDiagnosis : null,
         watchSignals: Array.isArray(parsed.watchSignals) ? parsed.watchSignals : [],
         recommendedActions: Array.isArray(parsed.recommendedActions)
           ? parsed.recommendedActions
@@ -726,7 +785,7 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
       };
     } catch (err: any) {
       this.logger.warn(`Failed to parse audit verdict: ${err.message}`);
-      return { verdict: 'watch', urgency: null, contextInsight: 'Verdict parsing failed — flagged for manual review', watchSignals: [], recommendedActions: [] };
+      return { verdict: 'watch', urgency: null, contextInsight: 'Verdict parsing failed — flagged for manual review', leakDiagnosis: null, watchSignals: [], recommendedActions: [] };
     }
   }
 
@@ -737,10 +796,27 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
       signals.anomalies.unprofitableAfterDay3 ||
       signals.safetyBreaches.campaignCapExceeded;
 
+    // Map signals → leak class so the safeDefault is at least diagnostically
+    // useful even when Claude is unavailable. Order matches the prompt's priority.
+    const leak: LeakDiagnosis | null = signals.anomalies.conversionDataIntegrity
+      ? 'data_gap'
+      : signals.anomalies.unprofitableAfterDay3
+        ? 'chronic_unprofitable'
+        : signals.marketEnvironment?.trend === 'spiking'
+          ? 'auction_leak'
+          : signals.anomalies.creativeFatigue.length > 0
+            ? 'creative_leak'
+            : signals.anomalies.cvrVsBenchmarkGap
+              ? 'audience_lp_leak'
+              : signals.anomalies.hookOverSaturation.length > 0
+                ? 'creative_diversity_leak'
+                : 'none';
+
     return {
       verdict: hasUrgent ? 'act' : 'watch',
       urgency: hasUrgent ? '48h' : null,
       contextInsight: 'Audit agent unavailable — flagged based on anomaly signals',
+      leakDiagnosis: leak,
       watchSignals: [],
       recommendedActions: [],
     };
