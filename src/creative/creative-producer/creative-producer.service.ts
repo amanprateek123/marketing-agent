@@ -8,6 +8,7 @@ import { VideoGeneratorService } from '../video-generator/video-generator.servic
 import { CreativeTeamService } from '../../teams/creative-team.service';
 import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../schemas/creative-package.schema';
 import { SlackService } from '../../delivery/slack.service';
+import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
 
 export interface BriefData {
   topic: string;
@@ -25,6 +26,10 @@ export interface BriefData {
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
   explorationArm?: boolean;                 // when true, Creative Team skips winningHooks/winningExemplars injection (closed-loop drift mitigation)
+  // Resolved language for all creative output. Caller may override; otherwise
+  // creative-producer resolves from segment.languages → product.languages → 'hinglish'.
+  // Drives copy text, image overlay text, and (when language video lands) VO script.
+  targetLanguage?: CanonicalLanguage;
 }
 
 @Injectable()
@@ -106,7 +111,27 @@ export class CreativeProducerService {
       approvedAt: new Date(),
     });
 
-    this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId}`);
+    // Resolve targetLanguage once at the boundary — every downstream creator
+    // (copy, image, eventually video) reads brief.targetLanguage and writes in
+    // that language. Resolution order: explicit brief.targetLanguage → matched
+    // audienceSegment.languages → product.languages → 'hinglish' default. This
+    // is what makes the Marathi brief actually produce Marathi creative instead
+    // of defaulting to Hinglish.
+    if (!brief.targetLanguage) {
+      const matchedProduct = (company.products ?? []).find(p =>
+        brief.product ? p.name === brief.product : p.active,
+      );
+      const matchedSegment = matchedProduct?.audienceSegments?.find(s =>
+        brief.targetSegment && s.name?.toLowerCase().trim() === brief.targetSegment.toLowerCase().trim(),
+      );
+      brief.targetLanguage = resolveTargetLanguage({
+        segmentLanguages: matchedSegment?.languages,
+        productLanguages: matchedProduct?.languages,
+      });
+      this.logger.log(`Creative language resolved: tenantId=${tenantId} briefId=${briefId} language=${brief.targetLanguage} (segment=${matchedSegment?.name ?? 'none'}, product=${matchedProduct?.name ?? 'none'})`);
+    }
+
+    this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId} targetLanguage=${brief.targetLanguage}`);
 
     try {
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;

@@ -7,6 +7,11 @@ import { CopyVariant } from '../schemas/creative-package.schema';
 import { HOOK_STYLES_DR, HOOK_STYLE_DESCRIPTIONS } from '../../common/creative/hook-styles';
 import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 import { skillsForAgent, buildSkillBlock } from '../../common/skills/agent-skill-map';
+import {
+  resolveTargetLanguage,
+  LANGUAGE_REGISTER_HINT,
+  CanonicalLanguage,
+} from '../../common/creative/language-utils';
 
 export interface CopyPackage {
   variants: CopyVariant[];
@@ -36,6 +41,7 @@ export class CopyWriterService {
       forcedHookStyle?: string;
       avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';   // cold = prospecting, warm = retarget, hot = cart-recovery
+      targetLanguage?: CanonicalLanguage;        // pre-resolved by creative-producer; we re-resolve if missing
     },
     company: CompanyDocument,
     runId: string,
@@ -43,6 +49,12 @@ export class CopyWriterService {
     const creative = company.learnings?.creative;
     const activeProduct = (company.products ?? []).find(p => p.active);
     const priceTag = activeProduct ? `${activeProduct.currency}${activeProduct.price}` : '[price]';
+    // Fall back to local resolution if caller didn't pass targetLanguage — keeps
+    // the fallback path self-contained (creative-team primary path resolves
+    // upstream; direct CopyWriter callers still get correct behaviour).
+    const targetLanguage: CanonicalLanguage = brief.targetLanguage
+      ?? resolveTargetLanguage({ productLanguages: activeProduct?.languages });
+    const languageRegister = LANGUAGE_REGISTER_HINT[targetLanguage];
 
     const learningsBlock = creative
       ? `
@@ -145,9 +157,18 @@ cite the source from BRIEF FACTS, use a generic relatable pain instead.
 BRIEF FACTS (the ONLY facts you may cite):
 ${briefFactsBlock}
 
+═══ TARGET LANGUAGE ═══
+This brief targets audiences who speak **${targetLanguage}**.
+Register: ${languageRegister}
+ALL primaryText and headline output MUST be in this language and register.
+- If the hook spec examples below are in Hindi but targetLanguage is different, translate the PATTERN (trigger + sensory + banned) to the target language with equivalent register — NOT a word-for-word translation.
+- CTA button text stays as-is from the CTA whitelist (Meta's button widgets are language-flexible).
+- Do NOT mix languages within a variant unless code-switching is natural to the register (e.g. Hinglish allows English connectors; pure Marathi/Tamil/Bengali should not casually mix in Hindi).
+═══
+
 For each variant write:
-- primaryText: the main ad body copy (Hinglish where natural). Length: 3-5 sentences for cold, 4-5 sentences for warm-high-AOV, 1-2 sentences for hot. ${brief.audienceStage === 'hot' ? 'For hot stage, price line is OPTIONAL — omit if urgency reads stronger without it.' : `MUST mention product name AND price (${priceTag}).`}
-- headline: short punchy headline (5-7 words max)
+- primaryText: the main ad body copy in ${targetLanguage}. Length: 3-5 sentences for cold, 4-5 sentences for warm-high-AOV, 1-2 sentences for hot. ${brief.audienceStage === 'hot' ? 'For hot stage, price line is OPTIONAL — omit if urgency reads stronger without it.' : `MUST mention product name AND price (${priceTag}).`}
+- headline: short punchy headline in ${targetLanguage} (5-7 words max)
 - cta: call to action button text — ${ctaWhitelist}
 - hookStyle: ${hookStyleRule}${avoidBlock}
 

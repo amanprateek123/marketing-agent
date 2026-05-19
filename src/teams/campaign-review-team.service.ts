@@ -91,6 +91,7 @@ export class CampaignReviewTeamService {
       suggestedBudget: number;
       product?: string;                       // product name — drives productBlock + landing URL + audience lookup
       audienceStage?: 'cold' | 'warm' | 'hot'; // cold prospecting / warm retarget / hot cart-recovery — branches ad-set targeting
+      targetLanguage?: string;                  // resolved by Strategy Team — Campaign Review must validate geo aligns with this language
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -114,6 +115,7 @@ export class CampaignReviewTeamService {
       suggestedBudget: number;
       product?: string;
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -145,6 +147,7 @@ export class CampaignReviewTeamService {
       suggestedBudget: number;
       product?: string;
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -537,6 +540,7 @@ DECISION RULE:
       suggestedBudget: number;
       product?: string;
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -610,6 +614,7 @@ Return ONLY this JSON (no markdown, no explanation):
       suggestedBudget: number;
       product?: string;
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     creativePackage: any,
     company: CompanyDocument,
@@ -770,6 +775,41 @@ Conversion Bridge: ${brief.conversionBridge}
 Proposed Daily Budget: ₹${brief.suggestedBudget}/day (total across all ad sets)
 Objective: ${company.primaryObjective}
 Geography: ${company.geography}
+Target language: ${brief.targetLanguage ?? 'hinglish (default)'}
+
+═══════════════════════════════════════════════════════
+AUDIENCE×LANGUAGE×GEO ALIGNMENT — VALIDATE BEFORE APPROVING
+═══════════════════════════════════════════════════════
+
+The creative is being produced in **${brief.targetLanguage ?? 'hinglish'}**. The ad sets' geo targeting MUST be linguistically aligned with this language — otherwise we burn budget reaching people who don't read/speak it.
+
+Recommended geo per language (state-level region keys, Meta India geo-targets):
+${brief.targetLanguage === 'marathi'
+  ? '  marathi → CORE: Maharashtra (1735), Goa (1733). DIASPORA (high-AOV reach): Karnataka (1738 — Belgaum/Bangalore), Madhya Pradesh (1739 — Indore/Bhopal), Gujarat (1729 — Surat). REJECT if geoStates spans Hindi-belt without explanation — those states have minimal Marathi audience.'
+  : brief.targetLanguage === 'tamil'
+  ? '  tamil → CORE: Tamil Nadu (1744). DIASPORA: Karnataka (1738 — Bangalore Tamil), Telangana (4100 — Hyderabad Tamil). REJECT if geoStates is Hindi-belt — Tamil-locale targeting outside South India is mostly waste.'
+  : brief.targetLanguage === 'telugu'
+  ? '  telugu → CORE: Telangana (4100), Andhra Pradesh (1724). DIASPORA: Karnataka (1738). REJECT if geoStates is Hindi-belt.'
+  : brief.targetLanguage === 'kannada'
+  ? '  kannada → CORE: Karnataka (1738). DIASPORA: minimal (border states). REJECT if geoStates is Hindi-belt or far-South.'
+  : brief.targetLanguage === 'bengali'
+  ? '  bengali → CORE: West Bengal (1755). DIASPORA: minimal. REJECT if geoStates is Hindi-belt or South India.'
+  : brief.targetLanguage === 'gujarati'
+  ? '  gujarati → CORE: Gujarat (1729). DIASPORA: Maharashtra (1735 — Mumbai Gujarati business community), Delhi (1728). REJECT if geoStates is Hindi-belt-only without Maharashtra/Delhi.'
+  : brief.targetLanguage === 'punjabi'
+  ? '  punjabi → CORE: Punjab (1742), Haryana (1730). DIASPORA: Delhi (1728). REJECT if geoStates is South or East India.'
+  : brief.targetLanguage === 'hindi'
+  ? '  hindi → CORE: Hindi belt (Delhi 1728, UP 1754, MP 1739, Rajasthan 1743, Haryana 1730, Bihar 1726, Jharkhand 1734, Uttarakhand 1745, HP 1737, Chhattisgarh 1727). DIASPORA: metro Hindi-speakers in Maharashtra (1735), Karnataka (1738), Gujarat (1729). REJECT if geoStates is South-only (Tamil Nadu/Kerala) — Hindi reach there is minimal.'
+  : brief.targetLanguage === 'english'
+  ? '  english → CORE: metro tier-1 only — Delhi (1728), Maharashtra (1735 = Mumbai), Karnataka (1738 = Bangalore). DIASPORA: Hyderabad (4100), Kerala (1736). REJECT if geoStates spans Tier-2/3 — pure English ads in those geos waste budget.'
+  : '  hinglish (default Indian DTC) → all 10 INDIA_TOP_ASTROLOGY_STATES are valid. Use top-by-purchase-intent.'}
+
+Validation directive:
+1. Read each ad set's geoStates (Meta region keys).
+2. Check if those states are in the CORE list above. If yes → approve geo.
+3. If states are in DIASPORA list → approve only if the brief explicitly mentions diaspora-reach.
+4. If states are OUTSIDE both lists → reject the ad set's geo with reason "Geo×language mismatch: targeting ${brief.targetLanguage ?? 'hinglish'} but geoStates include non-language-matched regions". Suggest replacement geoStates from CORE.
+5. For locale targeting: the targeting resolver will auto-populate locales from the brief's targetLanguage. Do NOT need to explicitly set locales on ad sets — they're filled at the resolver step.
 
 Copy Variants (use index when assigning ads[] in ad sets):
 ${((creativePackage as any)?.copyVariants ?? []).length > 0

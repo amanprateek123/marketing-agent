@@ -87,6 +87,12 @@ export class CreativeReplacementProcessor extends WorkerHost {
           conversionBridge: (brief as any).conversionBridge,
           product: (brief as any).product,
           targetSegment: (brief as any).targetSegment,
+          // Carry targetLanguage from the original brief so audit-fired creative
+          // replacements stay in the same language as the original launch. Without
+          // this the producer would re-resolve from segment.languages → product.languages
+          // → 'hinglish', which works in most cases but adds a layer of indirection.
+          // Explicit passthrough is more robust against segment-name lookup failures.
+          targetLanguage: (brief as any).targetLanguage || undefined,
           // Force the requested hookStyle on all variants — closes the loophole where
           // the auditor asked for replacementHook='social_proof' but the Creative Team
           // generated 4 different hookStyles and shipped one at random (~75% mismatch rate).

@@ -273,6 +273,12 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
         // (most first-pass briefs target prospecting). 'warm' / 'hot' only when the
         // audience description explicitly signals retargeting / cart-recovery.
         audienceStage: ['cold', 'warm', 'hot'].includes(b.audienceStage) ? b.audienceStage : 'cold',
+        // targetLanguage drives ALL downstream creative (copy, image overlay,
+        // VO). LLM picks based on audience description + geo. Empty/invalid →
+        // resolver falls back to geo-derived → product.languages → 'hinglish'.
+        // Without this field the audit-fired add_creative can't preserve language
+        // across re-launches.
+        targetLanguage: typeof b.targetLanguage === 'string' ? b.targetLanguage.toLowerCase().trim() : undefined,
         explorationArm: !!b._explorationArm,
         // targetSegment from LLM — should match a name in product.audienceSegments[].
         // The TS resolver in campaign-creator.launch() reads this and applies the
@@ -300,6 +306,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       // field is dropped at this boundary and the Campaign Review Team always
       // sees undefined → falls back to cold prospecting regardless of brief intent.
       audienceStage: ['cold', 'warm', 'hot'].includes(winner.audienceStage) ? winner.audienceStage : 'cold',
+      targetLanguage: typeof winner.targetLanguage === 'string' ? winner.targetLanguage.toLowerCase().trim() : undefined,
       explorationArm: !!winner._explorationArm,
       targetSegment: winner.targetSegment ?? '',
       suggestedBudget: winner.suggestedBudget ?? 0,
@@ -590,6 +597,7 @@ STEP 8: Return ONLY this JSON (no markdown, no explanation):
       "format": "reel|carousel|video|single_image|collection",
       "audience": "full audience description",
       "audienceStage": "cold|warm|hot — STRICT funnel definition (industry-standard, no exceptions): cold = ANY audience that has NOT engaged with our brand (lookalikes, interests, broad/advantage_plus, 1%-10% lookalikes-of-buyers ALL count as cold — these are still NEW people who never visited our site). warm = retargeting custom audiences of people who DID engage (site visitors, IG/FB engagers, video viewers, page followers). hot = high-intent retargeting (cart abandoners, initiate-checkout, 30d engaged without purchase). Lookalikes are NEVER warm — being a lookalike of a buyer ≠ engaging with our brand. Default to cold unless brief explicitly references retargeting a custom audience.",
+      "targetLanguage": "hinglish|hindi|marathi|tamil|telugu|bengali|gujarati|punjabi|kannada|malayalam|english — language ALL downstream creative is produced in (copy, image overlays, video VO). Pick based on the AUDIENCE description and any geo signals. If audience explicitly names a language (\"Marathi-speaking\", \"Tamil audience\", \"Hindi-belt\") use that. If audience targets a single state/region with a dominant language (Maharashtra → marathi, Tamil Nadu → tamil, West Bengal → bengali, Karnataka → kannada, Hindi belt: UP/MP/Delhi/Bihar/Rajasthan/Haryana → hindi), use that. Default 'hinglish' for all-India broad audiences. Do NOT default to a regional language without a clear audience or geo signal — Hinglish reaches the widest Indian DTC audience.",
       "hook": "opening line or visual hook",
       "keyMessage": "what the audience should believe after seeing this",
       "conversionBridge": "how this leads to buying the specific product",

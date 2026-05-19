@@ -7,6 +7,11 @@ import { LiveContextBuilder } from '../../companies/prompt-generator/live-contex
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { S3Service } from '../../common/storage/s3.service';
 import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
+import {
+  resolveTargetLanguage,
+  getScriptForLanguage,
+  CanonicalLanguage,
+} from '../../common/creative/language-utils';
 
 export interface ImageResult {
   imagePrompt: string;
@@ -35,6 +40,7 @@ export class ImageGeneratorService {
       platform: string;
       format: string;
       audience: string;
+      targetLanguage?: CanonicalLanguage;
     },
     copyVariant: { primaryText: string; headline: string; cta: string; hookStyle: string },
     variantIndex: number,
@@ -43,6 +49,9 @@ export class ImageGeneratorService {
   ): Promise<ImageResult> {
     const hookText = copyVariant.primaryText?.split('\n')[0] ?? '';
     const headline = copyVariant.headline ?? '';
+    const activeProduct = (company.products ?? []).find(p => p.active);
+    const targetLanguage: CanonicalLanguage = brief.targetLanguage
+      ?? resolveTargetLanguage({ productLanguages: activeProduct?.languages });
 
     const promptResult = await this.claudeService.runAgent({
       tenantId: company.tenantId,
@@ -57,6 +66,7 @@ export class ImageGeneratorService {
         hookText,
         headline,
         cta: copyVariant.cta,
+        targetLanguage,
       }),
       maxTurns: 2,
     });
@@ -83,10 +93,15 @@ export class ImageGeneratorService {
       audience: string;
       hook: string;
       keyMessage: string;
+      targetLanguage?: CanonicalLanguage;
     },
     company: CompanyDocument,
     runId: string,
   ): Promise<ImageResult> {
+    const activeProduct = (company.products ?? []).find(p => p.active);
+    const targetLanguage: CanonicalLanguage = brief.targetLanguage
+      ?? resolveTargetLanguage({ productLanguages: activeProduct?.languages });
+
     // Step 1 — Claude writes the image prompt
     const promptResult = await this.claudeService.runAgent({
       tenantId: company.tenantId,
@@ -101,6 +116,7 @@ export class ImageGeneratorService {
         hookText: brief.hook,
         headline: brief.keyMessage,
         cta: '',
+        targetLanguage,
       }),
       maxTurns: 2,
     });
@@ -164,10 +180,17 @@ export class ImageGeneratorService {
     hookText: string;
     headline: string;
     cta: string;
+    targetLanguage: CanonicalLanguage;
   }): string {
-    const { company, brief, hookStyle, hookText, headline, cta } = args;
+    const { company, brief, hookStyle, hookText, headline, cta, targetLanguage } = args;
     const vertical = resolveVertical(company.industry);
     const isSpiritual = vertical === 'spirituality';
+    // Image overlays use Manglish/Tanglish/Hinglish convention: target-language
+    // vocabulary rendered in Latin script. Nano Banana's non-Latin reliability
+    // is ~30%; Latin script is 99%+. Latin-script regional vocabulary is the
+    // natural register for digital Indian audiences anyway.
+    const targetScript = getScriptForLanguage(targetLanguage, { forImageOverlay: true });
+    const isManglishConvention = targetLanguage !== 'english' && targetLanguage !== 'hinglish';
 
     const centerpieceTable = `
 HOOK → CENTERPIECE (use the row matching the selected hookStyle):
@@ -185,28 +208,44 @@ ${isSpiritual ? '  (spirituality bonus: use astrology-specific iconography — S
       ? `Indian person — South Asian features, 32-48 yrs, wheat-to-brown skin tone (NOT light/Pinterest-Indian), natural skin with visible pores, traditional dress (saree/salwar/kurta — visible sindoor or bindi optional), tier-2/3 home or temple-courtyard setting (NOT luxury apartment).`
       : `Indian person — South Asian features, real skin tones (wheat to dark, never light/anglicized), age-appropriate to the audience, real Indian setting (NOT generic "Asian" or NRI metro).`;
 
+    // Manglish convention for image overlays: target-language VOCABULARY in
+    // LATIN SCRIPT for native-script Indian languages. Nano Banana fails non-
+    // Latin script ~70% of the time; Latin is 99%+. And digital-native Indian
+    // audiences read Manglish/Tanglish/Hinglish more naturally than native
+    // script on Instagram anyway. Win on both axes.
     const compositionRule = `
 COMPOSITION (3-layer rule — not single-element domination):
   Layer 1 (50% of frame): subject from the centerpiece row above
   Layer 2 (25% of frame): one supporting symbol (deity glyph / chart / number / strikethrough / split-line)
   Layer 3 (15% of frame): product visible (book, certificate, phone showing report — anchor what they buy)
-  Layer 4 (~10% of frame total): text overlays — TOP "${hookText}" (≤3 words bold Hinglish), BOTTOM "${headline}"${cta ? ` + CTA "${cta}"` : ''} — never exceed 25% of frame on text combined
+  Layer 4 (~10% of frame total): text overlays — TOP "${hookText}" (≤3 words bold ${isManglishConvention ? `Latin-script ${targetLanguage}` : targetLanguage}), BOTTOM "${headline}"${cta ? ` + CTA "${cta}"` : ''} — never exceed 25% of frame on text combined
 `.trim();
 
     const avoidList = `
 AVOID (these are concrete Nano-Banana failure modes, not generic art-school negatives):
-  - Garbled Devanagari or Hindi text — Nano Banana fails Hindi script ~70% of the time; keep overlays in Latin-Hinglish if Hindi text would appear
+${isManglishConvention
+  ? `  - Native script (${getScriptForLanguage(targetLanguage)}) on the image — Nano Banana renders it as garbled glyphs ~70% of the time. Use Latin-script ${targetLanguage} (Manglish convention) instead.
+  - Pure English overlays — signals you don't speak ${targetLanguage}. Vocabulary must be ${targetLanguage}, script must be Latin.`
+  : `  - Garbled Devanagari/Tamil/Bengali glyphs — keep all overlays in Latin script for this language target.`}
   - Extra/fused fingers, asymmetric eyes, AI-uncanny hands — explicitly call out "hands hidden or out of frame" if fingers risk appearing
   - Light-skinned/anglicized Indian faces (force wheat-to-brown skin tone — see SUBJECT spec)
   - Cluttered backgrounds that compete with the subject
-  - English-only text overlays (must be Hinglish or Hindi-Latin)
   - Watermarks, brand logos other than ${company.name}, celebrity faces, fake testimonials
 ${isSpiritual ? '  - Western "spiritual" aesthetic — NO Buddha statues, mandala patterns, dreamcatchers, crystals, sage smudging, lotus-with-chakra. Indian-astro iconography ONLY.' : ''}
   - Stock-photo lifestyle aesthetic (Pexels/Unsplash look) — feed scrollers ignore these
 `.trim();
 
     return `
-Write an image generation prompt for a Meta direct response ad in the ${vertical} vertical. This image must STOP scrolling and TAP-through within 1 second.
+Write an image generation prompt for a Meta direct response ad in the ${vertical} vertical, targeted at a **${targetLanguage}**-speaking audience. This image must STOP scrolling and TAP-through within 1 second.
+
+LANGUAGE CONSTRAINT — non-negotiable:
+- All on-image text overlays use **${targetLanguage} vocabulary** rendered in **${targetScript}**.
+${isManglishConvention
+  ? `- IMPORTANT: This is the Manglish/Tanglish/Hinglish convention — ${targetLanguage} WORDS written in Latin/Roman characters (e.g. "Guru Karkat raashit yetoy" not "गुरु कर्क राशीत येतोय"). Image-render reliability >> native-script authenticity on 9:16 mobile ads, AND this is how digital-native Indian audiences actually type on Instagram. Native script causes ~70% garbled-glyph failures and reads as fake to those audiences anyway when rendered wrong.
+- The "Hook text" and "Headline" strings below are ALREADY in Latin-script ${targetLanguage}. Pass them through as the exact overlay copy. If they appear to be in native script, transliterate them to Latin before placing on the image.
+- DO NOT default to pure English overlays — that signals you don't speak the audience's language. ${targetLanguage} vocabulary, Latin script.`
+  : `- The "Hook text" and "Headline" strings below are already in the right language and script. Pass them through to the image prompt as the exact overlay copy.
+- Overlays in Latin script — standard render reliability.`}
 
 BRIEF:
 Brand: ${company.name}
@@ -215,8 +254,8 @@ Angle: ${brief.angle}
 Platform: ${brief.platform} | Format: ${brief.format}
 Audience: ${brief.audience}
 ${hookStyle ? `Hook style: ${hookStyle}` : ''}
-Hook text: "${hookText}"
-Headline: "${headline}"
+Hook text (already in ${targetLanguage}): "${hookText}"
+Headline (already in ${targetLanguage}): "${headline}"
 ${cta ? `CTA: "${cta}"` : ''}
 Brand guidelines: ${company.brandGuidelines ?? 'Not specified'}
 

@@ -63,6 +63,7 @@ export class CreativeTeamService {
       forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
       avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
       audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting (problem-first); warm = retarget (offer-recall); hot = cart-recovery (urgency)
+      targetLanguage?: string;                 // resolved by creative-producer (canonical lowercase: 'marathi', 'hindi', 'hinglish', ...). Threaded into the system prompt so copy + image overlays render in this language.
     },
     company: CompanyDocument,
     runId: string,
@@ -85,6 +86,7 @@ export class CreativeTeamService {
       product?: string; targetSegment?: string;
       forcedHookStyle?: string; avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     company: CompanyDocument,
     runId: string,
@@ -115,6 +117,7 @@ export class CreativeTeamService {
       product?: string; targetSegment?: string;
       forcedHookStyle?: string; avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     company: CompanyDocument,
     runId: string,
@@ -237,6 +240,7 @@ Return ONLY this JSON (no markdown, no explanation):
       product?: string; targetSegment?: string;
       forcedHookStyle?: string; avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';
+      targetLanguage?: string;
     },
     company: CompanyDocument,
     runId: string,
@@ -302,6 +306,7 @@ Return ONLY this JSON (no markdown, no explanation):
       forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
       avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
       audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting (problem-first); warm = retarget (offer-recall); hot = cart-recovery (urgency)
+      targetLanguage?: string;                 // resolved by creative-producer (canonical lowercase: 'marathi', 'hindi', 'hinglish', ...). Threaded into the system prompt so copy + image overlays render in this language.
     },
     company: CompanyDocument,
     runId: string,
@@ -439,6 +444,44 @@ Audience: ${brief.audience}
 Hook: ${brief.hook}
 Key Message: ${brief.keyMessage}
 Conversion Bridge: ${brief.conversionBridge}
+
+═══════════════════════════════════════════════════════
+TARGET LANGUAGE — APPLIES TO ALL CREATIVE OUTPUT
+═══════════════════════════════════════════════════════
+
+This brief targets a **${brief.targetLanguage ?? 'hinglish'}**-speaking audience.
+
+Script rules per surface:
+  • copyVariants[].primaryText — ${brief.targetLanguage ?? 'hinglish'} VOCABULARY in **Latin script (Manglish/Tanglish/Hinglish convention)** for the natural digital register. Pune-Mumbai-Indore-Chennai audiences type this way on social — pure native-script reads stiff on a phone. Conversational household register, NOT textbook.
+  • copyVariants[].headline — same: ${brief.targetLanguage ?? 'hinglish'} vocabulary in Latin script.
+  • imagePrompts[] — text-overlay strings inside each imagePrompt MUST be Latin-script ${brief.targetLanguage ?? 'hinglish'}. Nano Banana fails native scripts (Devanagari/Tamil/etc) ~70% of the time. Latin is 99%+. Use Manglish convention.
+  • videoPrompt — see VIDEO LANGUAGE DEFERRAL below.
+
+These CAN stay in English (they're metadata, not user-facing):
+  • hookStyle labels (e.g. "pain_point") — taxonomy keys, NOT shown to the audience
+  • cta button text — Meta button widget; the CTA whitelist is intentionally English/Roman for compatibility
+  • imagePrompts[] scene descriptions (the part directing Nano Banana on subject/lighting/composition) — only the overlay text strings inside need to be ${brief.targetLanguage ?? 'hinglish'}
+  • complianceNotes, debateLog — internal QA only
+
+═══ VIDEO LANGUAGE DEFERRAL ═══
+${brief.targetLanguage === 'hinglish' || brief.targetLanguage === 'hindi' || !brief.targetLanguage
+  ? `  Target is Hindi/Hinglish — HeyGen Hindi VO is verified. Write the VO script and on-screen text in conversational Hindi (Devanagari for VO script, Latin/Hinglish OK for overlay text).`
+  : `  Target language is ${brief.targetLanguage} — HeyGen ${brief.targetLanguage} VO support is NOT yet verified for production use. UNTIL VERIFIED:
+    1. Write the videoPrompt VO script in Hindi as a fallback (NOT ${brief.targetLanguage})
+    2. On-screen text overlays in the video STILL use Latin-script ${brief.targetLanguage} (Manglish convention)
+    3. Add this exact string to complianceNotes: "Video VO defaulted to Hindi fallback — confirm HeyGen ${brief.targetLanguage} TTS quality before this video runs as primary creative."
+  This mismatch (Hindi VO + ${brief.targetLanguage} text overlay) is intentional for ${brief.targetLanguage} test runs. Long-term we'll ship language-aware VO after HeyGen verification.`}
+
+Register guidance for ${brief.targetLanguage ?? 'hinglish'}:
+${brief.targetLanguage === 'marathi' ? '  Conversational Marathi vocabulary in Latin script (Manglish) — Pune/Mumbai tier-1/2 register. Example: "Tumchya kundalit dhan yog aahe ka? Guru Karkat raashit yetoy — 12 varshe nantar." NOT pure-English, NOT formal Marathi.'
+  : brief.targetLanguage === 'hindi' ? '  Conversational Hindi vocabulary — Devanagari for VO/long-form copy, Latin (Hinglish) for image overlays. Indore/Lucknow household register, NOT sanskritised.'
+  : brief.targetLanguage === 'tamil' ? '  Conversational Tamil vocabulary in Latin script (Tanglish) for image overlays — Chennai/Coimbatore tier-1/2 register. Example: "Unga kundli la dhana yogam irukka?" NOT pure-English.'
+  : brief.targetLanguage === 'telugu' ? '  Conversational Telugu vocabulary in Latin script — Hyderabad/Vijayawada household register.'
+  : brief.targetLanguage === 'bengali' ? '  Conversational Bengali vocabulary in Latin script — Kolkata household register.'
+  : brief.targetLanguage === 'english' ? '  Conversational Indian English — natural Indian idiom OK, NOT textbook or American-business register.'
+  : '  Conversational Hinglish — Hindi words in Latin script with English connectors where natural. Tier-1/2 Indian metro register.'}
+
+If the user-provided hook above is in native script and the surface is an image overlay, transliterate to Latin (Manglish). If the surface is video VO (Hindi/Hinglish only — see deferral), Devanagari is fine.
 
 ${productBlock}
 
@@ -682,7 +725,7 @@ DO NOT default to generic "moody puja room with diya" for every video. Match ico
 
 - 9:16 vertical format for Reels/Stories
 - All text overlays: bold sans-serif, large for mobile, white/gold/saffron on dark or warm grounds
-- All text in Hindi or Hinglish — zero English-only lines
+- All on-image text in **${brief.targetLanguage ?? 'hinglish'} vocabulary in LATIN script** (Manglish convention, see TARGET LANGUAGE block) — zero pure-English overlay lines, zero native-script overlays
 - Hard cuts only between scenes — no fade transitions
 - Hyper-specific visuals — match the brief's topic with concrete, named props/lighting
 - Product name "${resolvedProduct?.name ?? 'Product'}" and price ₹${resolvedProduct?.price} must appear as exact text — never placeholders

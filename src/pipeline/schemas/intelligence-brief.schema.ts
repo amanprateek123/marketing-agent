@@ -74,6 +74,17 @@ export class IntelligenceBrief {
   @Prop({ required: false, default: '' })
   targetSegment?: string;
 
+  /**
+   * Language for ALL downstream creative output (copy, image overlay, VO).
+   * Strategy Team picks this autonomously based on audience description and
+   * geo signals. When unset (older briefs), creative-producer falls back to
+   * geo-derived → product.languages → 'hinglish'.
+   * Canonical lowercase: hinglish | hindi | marathi | tamil | telugu | bengali
+   *   | gujarati | punjabi | kannada | malayalam | english.
+   */
+  @Prop({ required: false, default: '' })
+  targetLanguage?: string;
+
   @Prop({ required: true, default: 0 })
   confidenceScore: number;
 

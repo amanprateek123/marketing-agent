@@ -67,6 +67,14 @@ export class CreativeBrief {
   @Prop({ required: false, default: '' })
   targetSegment?: string;
 
+  /**
+   * Language all downstream creative renders in. Carried from IntelligenceBrief
+   * so the audit-fired add_creative path can preserve language continuity
+   * across the original launch + every subsequent creative refresh.
+   */
+  @Prop({ required: false, default: '' })
+  targetLanguage?: string;
+
   @Prop({ required: true, default: 0 })
   suggestedBudget: number;
 
