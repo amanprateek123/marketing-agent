@@ -1118,6 +1118,30 @@ export class MetaAdsService {
    * subfields, and POST the merged object. Otherwise age/geo/audience/excluded
    * audiences/etc. get wiped, leaving the ad set delivering to a global pool.
    */
+
+  /**
+   * Read-only fetch of an ad set's current targeting. Returns the raw Meta
+   * targeting object (publisher_platforms, *_positions, age_min/max, locales,
+   * geo_locations, custom_audiences — all the fields Meta tracks).
+   *
+   * Used by the audit's byPlacement filter to determine which placements are
+   * currently active vs already-excluded. Null/undefined returns mean the ad
+   * set has no restriction in that field (Meta's "all" default).
+   */
+  async getAdSetTargeting(adSetId: string, accessToken: string): Promise<Record<string, any> | null> {
+    try {
+      const response = await this.metaApiCall(
+        'GET',
+        `${META_API_BASE}/${adSetId}`,
+        { fields: 'targeting', access_token: accessToken },
+      );
+      return (response?.data?.targeting ?? response?.targeting ?? null) as Record<string, any> | null;
+    } catch (err: any) {
+      this.logger.warn(`getAdSetTargeting failed for ${adSetId}: ${err.message}`);
+      return null;
+    }
+  }
+
   async updateAdSetPlacements(
     adSetId: string,
     placements: {

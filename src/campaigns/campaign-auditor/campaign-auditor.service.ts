@@ -33,6 +33,53 @@ export interface AuditResult {
   performanceWritten: number;
 }
 
+/**
+ * Name normalisation between Meta's two APIs:
+ *   - INSIGHTS API returns position labels: 'feed', 'instagram_reels', 'instagram_stories', 'facebook_reels', 'facebook_stories', 'instream_video', etc.
+ *   - TARGETING API uses different labels: facebook_positions=['feed','facebook_reels','story',...], instagram_positions=['stream','reels','story',...]
+ *
+ * The maps below let the byPlacement filter cross-check: given a targeting
+ * position (e.g. instagram_positions=['reels']), which insights position labels
+ * mean "currently active"? Without this, an ad set restricted to 'reels' in
+ * targeting wouldn't match the 'instagram_reels' insights label and we'd
+ * incorrectly tag IG Reels spend as "excluded from targeting".
+ */
+const TARGETING_POSITION_TO_INSIGHTS: Record<string, string> = {
+  // facebook
+  'facebook|feed': 'feed',
+  'facebook|right_hand_column': 'right_hand_column',
+  'facebook|marketplace': 'marketplace',
+  'facebook|video_feeds': 'video_feeds',
+  'facebook|story': 'facebook_stories',
+  'facebook|search': 'search',
+  'facebook|instream_video': 'instream_video',
+  'facebook|facebook_reels': 'facebook_reels',
+  // instagram — 'stream' = IG Feed (NOT Reels — this is the bug that cost us 18h on 91astro)
+  'instagram|stream': 'feed',
+  'instagram|story': 'instagram_stories',
+  'instagram|explore': 'explore',
+  'instagram|reels': 'instagram_reels',
+  'instagram|shop': 'shop',
+  'instagram|profile_feed': 'profile_feed',
+  'instagram|ig_search': 'ig_search',
+  // audience_network
+  'audience_network|classic': 'classic',
+  'audience_network|rewarded_video': 'rewarded_video',
+  'audience_network|instream_video': 'instream_video',
+};
+
+/**
+ * Reverse map: when an ad set has null positions for a platform (= all positions
+ * active), we mark ALL of these insights position labels as currently-active so
+ * the byPlacement filter doesn't incorrectly exclude any.
+ */
+const TARGETING_TO_INSIGHTS_POSITIONS: Record<string, string[]> = {
+  facebook: ['feed', 'right_hand_column', 'marketplace', 'video_feeds', 'facebook_stories', 'search', 'instream_video', 'facebook_reels'],
+  instagram: ['feed', 'instagram_stories', 'explore', 'instagram_reels', 'shop', 'profile_feed', 'ig_search'],
+  audience_network: ['classic', 'rewarded_video', 'instream_video'],
+  messenger: ['messenger_home', 'sponsored_messages', 'story'],
+};
+
 @Injectable()
 export class CampaignAuditorService {
   private readonly logger = new Logger(CampaignAuditorService.name);
@@ -287,9 +334,18 @@ export class CampaignAuditorService {
       .lean()
       .exec() as AuditSnapshotDocument[];
 
+    // Filter byPlacement to tag rows whose placement is ALREADY EXCLUDED from
+    // the ad set's current Meta targeting. Without this, the audit reads cumulative
+    // lifetime placement spend and re-fires the same narrow_placement recommendation
+    // for already-restricted placements every cycle (the 6-consecutive-recommendations
+    // loop on 91astro). Stale lifetime data lies; this filter tells the LLM the truth.
+    const taggedByPlacement = await this.tagByPlacementWithActiveTargeting(
+      campaign, full, byPlacement, company.meta.accessToken,
+    );
+
     const signals = this.signalDetector.detect(
       campaign, full, snapshots, company, weeklySpend, marketEnvironment,
-      { byPlacement, byHour, byDayOfWeek },
+      { byPlacement: taggedByPlacement, byHour, byDayOfWeek },
     );
 
     // ── Save audit snapshot ───────────────────────────────────────────────────
@@ -541,6 +597,16 @@ export class CampaignAuditorService {
         if (created) result.actionsCreated++;
       }
 
+      // Layer 3 — fire executePendingActions a second time to apply any actions
+      // just marked status='executed' by the auto-apply path in createPendingAction.
+      // The earlier executePendingActions() call (line ~266) ran BEFORE the verdict
+      // produced new actions, so without this second pass auto-applied actions sit
+      // in queue until the next 6h audit cycle — defeats the autonomy.
+      if (campaign.source === 'agent') {
+        const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).exec();
+        if (freshCampaign) await this.executePendingActions(freshCampaign, company);
+      }
+
       // Send Slack digest for "act" verdict
       try {
         await this.sendAuditDigest(campaign, company, verdict, signals);
@@ -572,6 +638,81 @@ export class CampaignAuditorService {
       outcome: `Verdict: ${verdict.verdict} | urgency: ${verdict.urgency ?? 'none'} | actions: ${verdict.recommendedActions.length}`,
       metadata: { campaignId: campaign._id.toString(), metaCampaignId: campaign.metaCampaignId },
     });
+  }
+
+  /**
+   * Tag byPlacement breakdown rows with whether the placement is currently
+   * active in the ad sets' Meta targeting. Without this tag, the audit reads
+   * cumulative lifetime placement spend and re-fires narrow_placement on
+   * placements that have already been excluded — Groundhog Day on actions.
+   *
+   * For each ad set in the campaign, GET targeting and extract:
+   *   - publisher_platforms (null = all platforms; else allow-list)
+   *   - facebook_positions / instagram_positions / audience_network_positions
+   *     / messenger_positions (null = all positions within platform; else allow-list)
+   *
+   * Then for each byPlacement row, check if its (publisherPlatform, platformPosition)
+   * is in the union of active placements across all ad sets. If NOT, tag it
+   * `excludedFromTargeting: true` so the audit-agent prompt knows to skip it
+   * when recommending narrow_placement.
+   *
+   * Naming note: insights returns 'feed','instagram_reels','instagram_stories'
+   * etc. while targeting uses 'feed','reels','story' — we normalize via a map.
+   */
+  private async tagByPlacementWithActiveTargeting(
+    campaign: CampaignDocument,
+    full: FullCampaignMetrics,
+    byPlacement: any[],
+    accessToken: string,
+  ): Promise<any[]> {
+    if (!byPlacement?.length) return byPlacement;
+
+    // Build the set of (platform, insights-position) combos currently active across
+    // all ad sets in this campaign. Union — if ANY ad set delivers a placement,
+    // it's "active" at the campaign level.
+    const activeKeys = new Set<string>();
+    let allOpen = false;   // any ad set with null targeting = all-placements-active
+
+    try {
+      for (const adSet of (full.adSets ?? [])) {
+        const targeting = await this.metaAds.getAdSetTargeting(adSet.adSetId, accessToken);
+        if (!targeting) continue;
+        const platforms: string[] | null = targeting.publisher_platforms ?? null;
+        if (!platforms || platforms.length === 0) {
+          // null publisher_platforms = Meta Advantage+ Placements = all active
+          allOpen = true;
+          break;
+        }
+        for (const p of platforms) {
+          const positions: string[] | null =
+            p === 'facebook' ? targeting.facebook_positions
+            : p === 'instagram' ? targeting.instagram_positions
+            : p === 'audience_network' ? targeting.audience_network_positions
+            : p === 'messenger' ? targeting.messenger_positions
+            : null;
+          if (!positions || positions.length === 0) {
+            // null positions for a platform = all positions within that platform
+            // Mark every insights-position for that platform as active.
+            for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) {
+              activeKeys.add(`${p}|${ip}`);
+            }
+          } else {
+            for (const pos of positions) {
+              const insightsPos = TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
+              activeKeys.add(`${p}|${insightsPos}`);
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`Active-targeting fetch failed: ${err.message} — proceeding without byPlacement filter`);
+      return byPlacement;
+    }
+
+    return byPlacement.map(row => ({
+      ...row,
+      excludedFromTargeting: allOpen ? false : !activeKeys.has(`${row.publisherPlatform}|${row.platformPosition}`),
+    }));
   }
 
   // ── Layer 1: Safety Rails ───────────────────────────────────────────────────
@@ -705,6 +846,26 @@ export class CampaignAuditorService {
     const now = new Date();
     const executeAt = new Date(now.getTime() + action.gracePeriodHours * 60 * 60 * 1000);
 
+    // Layer 3 — auto-apply for low-risk, reversible actions. Skips the human
+    // approval gate so the autonomous loop closes end-to-end. Non-reversible
+    // actions (pause, audience refresh, big budget cuts) still require approval.
+    //
+    // Reversibility criteria:
+    //   - narrow_placement: placements can be re-broadened by another narrow_placement
+    //   - add_creative: additive, doesn't pause winners
+    //   - dayparting: schedule can be cleared anytime
+    //   - shift_budget_between_adsets: small (≤30%) intra-campaign reallocation
+    //
+    // Safety nets that make auto-apply safe:
+    //   - TS-side parser validates params (e.g. position constants, schedule shape)
+    //   - Optimizer-side guards refuse actions that violate Meta business rules
+    //   - Frequency/CTR/breakeven gates inside the optimizer prevent extreme moves
+    //   - The verdict was produced by Sonnet against the LEAK DIAGNOSIS FRAMEWORK
+    const AUTO_APPLY_TYPES = new Set(['narrow_placement', 'add_creative', 'dayparting']);
+    const shiftPercent = Number(action.metrics?.shiftPercent ?? 0);
+    const isSmallShift = action.type === 'shift_budget_between_adsets' && Number.isFinite(shiftPercent) && shiftPercent > 0 && shiftPercent <= 30;
+    const autoApply = AUTO_APPLY_TYPES.has(action.type) || isSmallShift;
+
     pendingActions.push({
       actionId,
       type: action.type,
@@ -713,11 +874,18 @@ export class CampaignAuditorService {
       reason: action.reason,
       metrics: action.metrics,
       recommendedAt: now,
-      executeAt,
-      status: 'pending',
+      // Auto-apply actions get executeAt=now so the next executePendingActions pass
+      // picks them up immediately. Approval-gated actions retain the grace period
+      // (gives operators time to review in Slack/dashboard).
+      executeAt: autoApply ? now : executeAt,
+      status: autoApply ? 'executed' : 'pending',
+      autoApplied: autoApply || undefined,
     });
 
     await this.campaignModel.updateOne({ _id: campaign._id }, { pendingActions });
+    if (autoApply) {
+      this.logger.log(`Auto-applied ${action.type} on "${action.targetName}" (Layer 3 low-risk auto-apply)`);
+    }
     return true;
   }
 

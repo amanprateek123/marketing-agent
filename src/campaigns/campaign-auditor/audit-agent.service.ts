@@ -649,19 +649,22 @@ ${signals.banditAllocation.allocations.map(a => `  ${a.adSetName} (${a.adSetId})
 ${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
 ${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
 
-${signals.breakdowns.byPlacement.length > 0 ? `━━━ PLACEMENT BREAKDOWN (top 5 by spend) ━━━
+${signals.breakdowns.byPlacement.length > 0 ? `━━━ PLACEMENT BREAKDOWN (top 5 by spend; excluded placements marked) ━━━
 ${signals.breakdowns.byPlacement
   .slice()
   .sort((a, b) => b.spend - a.spend)
   .slice(0, 5)
   .map(p => {
-    const verdict = p.conversions > 0 && p.cpa > 0 && p.cpa < (signals.benchmarks.expectedCPARange?.max ?? Infinity) ? '🟢'
+    const excluded = (p as any).excludedFromTargeting === true;
+    const verdict = excluded ? '⛔'
+      : p.conversions > 0 && p.cpa > 0 && p.cpa < (signals.benchmarks.expectedCPARange?.max ?? Infinity) ? '🟢'
       : p.conversions === 0 && p.spend > 300 ? '🔴'
       : '⚪';
-    return `  ${verdict} ${p.publisherPlatform}/${p.platformPosition}: ₹${p.spend.toFixed(0)} | ${p.clicks} clicks | ${p.conversions} conv | CTR ${p.ctr.toFixed(2)}% | CPA ${p.cpa > 0 ? `₹${p.cpa.toFixed(0)}` : '∞'}`;
+    const tag = excluded ? ' [ALREADY EXCLUDED — historical spend, NOT delivering now]' : '';
+    return `  ${verdict} ${p.publisherPlatform}/${p.platformPosition}: ₹${p.spend.toFixed(0)} | ${p.clicks} clicks | ${p.conversions} conv | CTR ${p.ctr.toFixed(2)}% | CPA ${p.cpa > 0 ? `₹${p.cpa.toFixed(0)}` : '∞'}${tag}`;
   })
   .join('\n')}
-  RULE: When proposing narrow_placement, base it on this data. If a 🔴 placement has spent >₹500 with 0 conv, exclude it. If one 🟢 placement is dominating conversions, narrow to it.
+  RULE: When proposing narrow_placement, BASE THE DECISION ONLY ON PLACEMENTS WITHOUT ⛔. The ⛔ placements have already been excluded from the ad set's current Meta targeting — their lifetime spend is historical residue from before the exclusion landed, NOT live bleed. Do NOT propose narrow_placement when all loser placements are already ⛔. If one 🟢 placement is dominating conversions and no fresh 🔴 placement exists, the placement-leak is already resolved — move on to other leak types (creative_diversity, audience fatigue, LP).
 ` : ''}
 ${signals.breakdowns.byHour.length > 0 ? `━━━ HOURLY BREAKDOWN (last 14d, top 6 by spend; ad-account TZ) ━━━
 ${signals.breakdowns.byHour
