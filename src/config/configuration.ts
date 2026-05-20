@@ -28,6 +28,11 @@ export default () => ({
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY ?? '',
+    imageModel: process.env.OPENAI_IMAGE_MODEL ?? 'gpt-image-2',
+  },
+  imageGen: {
+    // 'nano_banana' (Gemini Image) | 'gpt_image' (OpenAI gpt-image-*)
+    provider: process.env.IMAGE_PROVIDER ?? 'nano_banana',
   },
   fal: {
     apiKey: process.env.FAL_API_KEY ?? '',

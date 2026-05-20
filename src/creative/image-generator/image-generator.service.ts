@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import axios from 'axios';
 import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
@@ -275,14 +276,56 @@ Return ONLY the image prompt, nothing else.
   }
 
   private async generateAndUpload(prompt: string, tenantId: string, runId: string): Promise<string> {
-    const imageBuffer = await this.callNanoBanana(prompt, tenantId);
+    const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
+    const imageBuffer = provider === 'gpt_image'
+      ? await this.callGptImage(prompt, tenantId)
+      : await this.callNanoBanana(prompt, tenantId);
 
     // Upload to S3 — permanent URL
     const key = `${tenantId}/images/${runId}-${Date.now()}.png`;
     const s3Url = await this.uploadBufferToS3(imageBuffer, key);
 
-    this.logger.log(`Image uploaded to S3: tenantId=${tenantId} url=${s3Url}`);
+    this.logger.log(`Image uploaded to S3: tenantId=${tenantId} provider=${provider} url=${s3Url}`);
     return s3Url;
+  }
+
+  private async callGptImage(prompt: string, tenantId: string): Promise<Buffer> {
+    const apiKey = this.configService.get<string>('openai.apiKey');
+    const model = this.configService.get<string>('openai.imageModel') ?? 'gpt-image-2';
+
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY not configured');
+    }
+
+    this.logger.log(`Calling OpenAI image API: tenantId=${tenantId} model=${model}`);
+
+    // gpt-image-* expects the same photoreal prefix Nano Banana gets — keeps style parity across providers.
+    const styledPrompt = `Photorealistic photograph. Real human faces, real skin textures, natural lighting. NOT illustration, NOT cartoon, NOT animated, NOT 3D render, NOT digital art. Shot on a professional camera.\n\n${prompt}`;
+
+    const response = await axios.post(
+      'https://api.openai.com/v1/images/generations',
+      {
+        model,
+        prompt: styledPrompt,
+        size: '1024x1536', // closest supported 9:16 ratio
+        n: 1,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 120000,
+      },
+    );
+
+    const b64 = response.data?.data?.[0]?.b64_json;
+    if (!b64) {
+      throw new Error(`No image data in OpenAI response: ${JSON.stringify(response.data).slice(0, 300)}`);
+    }
+
+    this.logger.log(`OpenAI image generated: tenantId=${tenantId}`);
+    return Buffer.from(b64, 'base64');
   }
 
   private async callNanoBanana(prompt: string, tenantId: string): Promise<Buffer> {
