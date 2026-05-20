@@ -90,13 +90,30 @@ THROTTLE actions (less drastic than pause — prefer these BEFORE pausing):
     - audience_network and messenger are almost always droppable unless conversions exist; omit them by default.
 
   Concrete example for the data shape this auditor sees (Instagram: Reels 2 conv / Feed 0 conv / Stories 0 conv; Facebook: Feed 1 conv / Reels 0 conv; Audience Network 0 conv):
-    publisherPlatforms=['facebook','instagram'], facebookPositions=['feed'], instagramPositions=['stream']
-    (where 'stream' is Meta's API name for Instagram Reels). DROP Instagram Feed, Stories, FB Reels, Audience Network.
+    publisherPlatforms=['facebook','instagram'], facebookPositions=['feed'], instagramPositions=['reels']
+    (where 'reels' is Meta's API name for Instagram Reels). DROP Instagram Feed, Stories, FB Reels, Audience Network.
 
-  Position name reference (use these EXACT strings in params):
-    facebookPositions: 'feed','right_hand_column','marketplace','video_feeds','story','search','instream_video','facebook_reels','facebook_reels_overlay'
-    instagramPositions: 'stream' (= Reels), 'story','explore','reels','shop','profile_feed','ig_search'
+  Position name reference (use these EXACT strings in params — VERIFIED against Meta API 2026-05-20):
+    facebookPositions:
+      'feed'              = Facebook News Feed
+      'right_hand_column' = Right column desktop
+      'marketplace'       = Facebook Marketplace
+      'video_feeds'       = (DEPRECATED v21.0 — do not use)
+      'story'             = Facebook Stories
+      'search'            = Facebook Search
+      'instream_video'    = In-stream ads on FB Watch
+      'facebook_reels'    = Facebook Reels
+    instagramPositions:
+      'stream'            = Instagram FEED (the main scroll) — NOT Reels. Use 'feed' is rejected; the legacy name 'stream' is the feed.
+      'story'             = Instagram Stories
+      'explore'           = Instagram Explore tab
+      'reels'             = Instagram REELS — THIS is the IG Reels position
+      'shop'              = Instagram Shopping
+      'profile_feed'      = Profile feed scroll
+      'ig_search'         = Instagram Search results
     audienceNetworkPositions: 'classic','rewarded_video','instream_video'
+
+  CRITICAL: 'stream' and 'reels' are DIFFERENT placements. 'stream' is Instagram FEED. 'reels' is Instagram REELS. Mixing them up locks delivery to the wrong inventory.
 
   Common WRONG outcomes to avoid:
     - Dropping ONLY audience_network when Instagram positions are the real bleeders → this is the cosmetic fix, not the surgery. REJECTED.
@@ -772,6 +789,42 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
                 if (!platforms.every((p: any) => typeof p === 'string' && allowed.includes(p))) {
                   this.logger.warn(`Dropping narrow_placement — invalid platform in ${JSON.stringify(platforms)}`);
                   return false;
+                }
+                // Validate position values against Meta API constants. Catches the
+                // `stream` vs `reels` confusion that locked 91astro to IG Feed for
+                // 18 hours in May 2026. CRITICAL: 'stream' = Instagram FEED (NOT Reels);
+                // 'reels' = Instagram REELS. They are different placements.
+                const VALID_FB_POSITIONS = new Set(['feed', 'right_hand_column', 'marketplace', 'video_feeds', 'story', 'search', 'instream_video', 'facebook_reels', 'facebook_reels_overlay']);
+                const VALID_IG_POSITIONS = new Set(['stream', 'story', 'explore', 'reels', 'shop', 'profile_feed', 'ig_search']);
+                const VALID_AN_POSITIONS = new Set(['classic', 'rewarded_video', 'instream_video']);
+                const fbPos = a.params?.facebookPositions;
+                const igPos = a.params?.instagramPositions;
+                const anPos = a.params?.audienceNetworkPositions;
+                if (Array.isArray(fbPos) && !fbPos.every((p: any) => VALID_FB_POSITIONS.has(p))) {
+                  this.logger.warn(`Dropping narrow_placement — invalid facebookPositions ${JSON.stringify(fbPos)}. Valid: ${[...VALID_FB_POSITIONS].join(',')}`);
+                  return false;
+                }
+                if (Array.isArray(igPos) && !igPos.every((p: any) => VALID_IG_POSITIONS.has(p))) {
+                  this.logger.warn(`Dropping narrow_placement — invalid instagramPositions ${JSON.stringify(igPos)}. Valid: ${[...VALID_IG_POSITIONS].join(',')}`);
+                  return false;
+                }
+                if (Array.isArray(anPos) && !anPos.every((p: any) => VALID_AN_POSITIONS.has(p))) {
+                  this.logger.warn(`Dropping narrow_placement — invalid audienceNetworkPositions ${JSON.stringify(anPos)}. Valid: ${[...VALID_AN_POSITIONS].join(',')}`);
+                  return false;
+                }
+                // Sanity check: the verdict's REASON text often names placements in human terms
+                // ("Instagram Reels", "IG Feed"). Cross-check: if reason mentions "Reels" but params
+                // only have 'stream' (which is Feed), warn loudly — likely an LLM naming confusion.
+                const reason = String(a.reason ?? '').toLowerCase();
+                if (Array.isArray(igPos)) {
+                  if (reason.includes('reels') && !reason.includes('feed') && igPos.includes('stream') && !igPos.includes('reels')) {
+                    this.logger.warn(`narrow_placement reason mentions Reels but instagramPositions has 'stream' (=Feed) without 'reels'. This is the stream/reels confusion bug. Reason: "${a.reason}". Params: ${JSON.stringify(a.params)}`);
+                    return false;
+                  }
+                  if (reason.includes('feed') && !reason.includes('reels') && igPos.includes('reels') && !igPos.includes('stream')) {
+                    this.logger.warn(`narrow_placement reason mentions Feed but instagramPositions has 'reels' without 'stream'. Likely naming confusion. Reason: "${a.reason}". Params: ${JSON.stringify(a.params)}`);
+                    return false;
+                  }
                 }
               }
               if (a.type === 'dayparting') {
