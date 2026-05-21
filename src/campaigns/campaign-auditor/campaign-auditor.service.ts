@@ -842,6 +842,31 @@ export class CampaignAuditorService {
     );
     if (existing) return false;
 
+    // Special case for add_creative: also block when a recent (last 24h) action
+    // with the SAME hookStyle was already auto-applied. Without this, the audit
+    // re-fires add_creative every cycle until Meta delivery shifts share to the
+    // new ad — producing 2-3 identical hookStyle ads in rapid succession instead
+    // of one. Other hooks within 24h are still allowed (e.g. pain_point at 9am
+    // + social_proof at 6pm is legitimate diversification). Different targetIds
+    // (different ad sets) also bypass — each ad set tracks independently.
+    if (action.type === 'add_creative') {
+      const HOOK_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+      const recentSameHook = pendingActions.find(
+        (a: any) => a.targetId === action.targetId
+          && a.type === 'add_creative'
+          && a.metrics?.hookStyle === action.metrics?.hookStyle
+          && (a.status === 'pending' || a.status === 'executed')
+          && a.recommendedAt
+          && (Date.now() - new Date(a.recommendedAt).getTime()) < HOOK_DEDUP_WINDOW_MS,
+      );
+      if (recentSameHook) {
+        this.logger.log(
+          `Skipping add_creative on "${action.targetName}" — hookStyle "${action.metrics?.hookStyle}" already added/queued within 24h (existing action ${recentSameHook.actionId})`,
+        );
+        return false;
+      }
+    }
+
     const actionId = uuidv4();
     const now = new Date();
     const executeAt = new Date(now.getTime() + action.gracePeriodHours * 60 * 60 * 1000);
@@ -879,6 +904,14 @@ export class CampaignAuditorService {
       // (gives operators time to review in Slack/dashboard).
       executeAt: autoApply ? now : executeAt,
       status: autoApply ? 'executed' : 'pending',
+      // CRITICAL: set executedAt for auto-applied actions so the inner-handler
+      // `manuallyApproved` checks (e.g. add_creative line ~1045) treat them as
+      // approved-to-run. Without this, action sits at status='executed' but each
+      // handler's `if (!manuallyApproved) continue;` skips it forever. The "already
+      // ran" guard at line 904 still works because on first executePendingActions
+      // pass executedAt is < 60s old (not skipped); on subsequent audits it's
+      // hours old → skipped. Same semantics as a human-approved action.
+      executedAt: autoApply ? now : undefined,
       autoApplied: autoApply || undefined,
     });
 
