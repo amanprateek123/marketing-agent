@@ -81,6 +81,11 @@ export class CampaignCreatorService {
             // landing-URL lookup all fell through to defaults on every campaign.
             product: brief.product ?? '',
             audienceStage: (brief as any).audienceStage ?? 'cold',
+            // Exploit-winner marker — when set, Campaign Review skips the
+            // cold-start 50-60% cut and defaults to the source winner's
+            // budgetTier. Additionally TS-enforces a floor below (cannot be
+            // overridden by LLM).
+            winnerCloneOf: (brief as any).winnerCloneOf,
           },
           creativePackage,
           company,
@@ -128,6 +133,21 @@ export class CampaignCreatorService {
       // Use campaign config budget if available
       if (review?.campaign?.budget) {
         finalBudget = review.campaign.budget;
+      }
+
+      // ── Winner-clone floor (TS-enforced — LLM cannot override) ──────────────
+      // When this brief was tagged as a clone of a proven winner, the Review
+      // Team prompt is told to default to the source winner's budgetTier.
+      // If the LLM still cuts the budget below that floor (e.g. via the
+      // generic "be conservative" prior), restore it here. The whole point
+      // of the exploit-winner arm is that the budget tier was already proven —
+      // cutting it back to cold-start sizes defeats the propagation loop.
+      const winnerCloneOf = (brief as any).winnerCloneOf;
+      if (winnerCloneOf?.budgetTier && finalBudget < winnerCloneOf.budgetTier) {
+        this.logger.warn(
+          `Winner-clone budget floor: review cut ₹${finalBudget} below source winner tier ₹${winnerCloneOf.budgetTier} — restoring to source tier`,
+        );
+        finalBudget = winnerCloneOf.budgetTier;
       }
 
       // Re-validate adjusted budget against safety caps — review team cannot override TypeScript limits

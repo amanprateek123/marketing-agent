@@ -90,20 +90,132 @@ ${company.learnings
     const campaign = learnings.campaign;
     if (campaign) {
       if (campaign.audienceScores && Object.keys(campaign.audienceScores).length > 0) {
-        const top = Object.entries(campaign.audienceScores)
-          .sort(([, a]: any, [, b]: any) => b - a)
+        // Back-compat: entries may be flat numbers (legacy) or { roas, n, updatedAt }.
+        // Render with N so Campaign Review can tell "lookalike 2.7 (N=2)" from
+        // "lookalike 2.7 (N=30)" — the former is barely a signal, the latter is.
+        const LOW_N_THRESHOLD = 5;
+        const normalized = Object.entries(campaign.audienceScores).map(([k, v]: [string, any]) => {
+          if (typeof v === 'number') return { audience: k, roas: v, n: 0 as number, low: true };
+          const roas = Number(v?.roas) || 0;
+          const n = Number(v?.n) || 0;
+          return { audience: k, roas, n, low: n < LOW_N_THRESHOLD };
+        });
+        const top = normalized
+          .sort((a, b) => b.roas - a.roas)
           .slice(0, 5)
-          .map(([k, v]) => `${k}: ${v}`)
+          .map((e) => {
+            const nLabel = e.n > 0 ? `N=${e.n}` : 'N=?';
+            const confLabel = e.low ? ' low_confidence' : '';
+            return `${e.audience}: ${e.roas.toFixed(2)} (${nLabel}${confLabel})`;
+          })
           .join(', ');
         lines.push(`- Top audiences: ${top}`);
+        lines.push(
+          `  NOTE: Entries marked low_confidence have N<${LOW_N_THRESHOLD} campaigns. Campaign Review must not override the strategist's audience choice citing a low_confidence entry alone — pair with at least one other signal (offerAudienceFitIssues, recent causal insight, or hookSaturation).`,
+        );
       }
       if (campaign.budgetInsights?.length) lines.push(`- Budget insights: ${campaign.budgetInsights.join('; ')}`);
       if (campaign.timingInsights?.length) lines.push(`- Timing insights: ${campaign.timingInsights.join('; ')}`);
+
+      // Offer × audience fit issues — surfaced separately from audienceScores
+      // so a post-click friction problem on retargeting doesn't read as
+      // "the audience is bad." The fix is offer/lander/price, not exiling
+      // the audience. See OfferAudienceFitIssue.
+      if (campaign.offerAudienceFitIssues?.length) {
+        const FIT_FRESHNESS_DAYS = 60;
+        const cutoff = Date.now() - FIT_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+        const fresh = (campaign.offerAudienceFitIssues as any[]).filter((f) => {
+          const t = f?.lastUpdated ? new Date(f.lastUpdated).getTime() : 0;
+          return t >= cutoff;
+        });
+        if (fresh.length > 0) {
+          const formatted = fresh
+            .sort((a, b) => (b.dataPoints ?? 0) - (a.dataPoints ?? 0))
+            .slice(0, 6)
+            .map((f) => `  ${f.audienceType} × ${f.productName} (N=${f.dataPoints ?? 1}): ${f.issue}`)
+            .join('\n');
+          lines.push(
+            `- Offer × audience fit issues (post-click friction, NOT audience-quality problems — solve at offer/lander, do not exile the audience):\n${formatted}`,
+          );
+        }
+      }
+    }
+
+    // Recent live within-campaign hook arbitration that contradicted historical
+    // winningHooks. Recency-weighted flag; does not move the winning/losing lists.
+    const COUNTER_SIGNAL_FRESHNESS_DAYS = 21;
+    const liveCounter = (creative as any)?.liveCounterSignals as any[] | undefined;
+    if (liveCounter?.length) {
+      const cutoff = Date.now() - COUNTER_SIGNAL_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+      const fresh = liveCounter.filter((c) => {
+        const t = c?.observedAt ? new Date(c.observedAt).getTime() : 0;
+        return t >= cutoff;
+      });
+      if (fresh.length > 0) {
+        const formatted = fresh
+          .sort((a, b) => (b.deltaCPA ?? 0) - (a.deltaCPA ?? 0))
+          .slice(0, 5)
+          .map((c) => {
+            const aud = c.audienceType ? ` on ${c.audienceType}` : '';
+            const prod = c.productName ? ` (${c.productName})` : '';
+            return `  ${c.winningHookStyle} beat ${c.losingHookStyle}${aud}${prod}: CPA ₹${Math.round(c.winnerCPA)} vs ₹${Math.round(c.loserCPA)} (Δ₹${Math.round(c.deltaCPA)})`;
+          })
+          .join('\n');
+        lines.push(
+          `- RECENT LIVE COUNTER-SIGNAL (last ${COUNTER_SIGNAL_FRESHNESS_DAYS}d — head-to-head variant results that contradict historical winningHooks; weight these ≥ historical aggregates when picking hooks):\n${formatted}`,
+        );
+      }
+    }
+
+    // Hot winners — fresh winning ads from the last 60 days that the
+    // Strategy Team's exploit-winner arm clones. Surfaced here so the Creative
+    // Team can also anchor on the winning hookLine pattern (NOT copy verbatim),
+    // and the Campaign Review Team sees that a brief tagged winnerCloneOf
+    // should NOT get the 60% cold-start budget cut.
+    const HOT_WINNER_FRESHNESS_DAYS = 60;
+    const hotWinners = (learnings.hotWinners ?? []) as any[];
+    if (hotWinners.length > 0) {
+      const cutoff = Date.now() - HOT_WINNER_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+      const fresh = hotWinners.filter((w) => {
+        const t = w?.observedAt ? new Date(w.observedAt).getTime() : 0;
+        return t >= cutoff;
+      });
+      if (fresh.length > 0) {
+        const formatted = fresh
+          .slice()
+          .sort((a, b) => (a.cpa ?? Infinity) - (b.cpa ?? Infinity))
+          .slice(0, 5)
+          .map((w) => {
+            const topic = w.topic ? ` [topic: ${w.topic}]` : '';
+            const fmt = w.format ? `/${w.format}` : '';
+            return `  ${w.hookStyle}/${w.audienceType}${fmt} @ ₹${w.budgetTier ?? '?'}/day → CPA ₹${Math.round(w.cpa)} ROAS ${(w.roas ?? 0).toFixed(2)}x (${w.conversions} conv)${topic}`;
+          })
+          .join('\n');
+        lines.push(
+          `- HOT WINNERS (last ${HOT_WINNER_FRESHNESS_DAYS}d — recent ads that crossed ROAS ≥ 2× breakeven AND ≥10 conv; the exploit-winner arm clones #1 each run):\n${formatted}`,
+        );
+      }
     }
 
     const causal = learnings.causalInsights;
     if (causal?.length) {
-      const top3 = causal.slice(-3).map((c: any) => c.finding).join('; ');
+      // Prefer high-dataPoints insights — the consolidator merges N=1 dupes,
+      // so an entry with dataPoints=5 is a real pattern. Show top 3 by dataPoints,
+      // then fill with most-recent if there's room.
+      const ranked = (causal as any[])
+        .slice()
+        .sort((a, b) => {
+          const dpA = a.dataPoints ?? 1;
+          const dpB = b.dataPoints ?? 1;
+          if (dpB !== dpA) return dpB - dpA;
+          const tA = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
+          const tB = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0;
+          return tB - tA;
+        })
+        .slice(0, 3);
+      const top3 = ranked
+        .map((c: any) => `[N=${c.dataPoints ?? 1}, conf=${(c.confidence ?? 0).toFixed(2)}] ${c.finding}`)
+        .join('; ');
       lines.push(`- Recent causal insights: ${top3}`);
     }
 

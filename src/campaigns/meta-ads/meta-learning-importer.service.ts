@@ -368,9 +368,13 @@ export class MetaLearningImporterService {
         winningFormats,
         losingFormats,
       }, { incrementVersion: true });
+      const importedAt = new Date();
       await this.companiesService.setCampaignLearningSlice(tenantId, {
         audienceScores: Object.fromEntries(
-          bestPattern.audiencePerformance.map(a => [a.audienceType, a.avgROAS]),
+          bestPattern.audiencePerformance.map(a => [
+            a.audienceType,
+            { roas: a.avgROAS, n: a.adSetCount, updatedAt: importedAt },
+          ]),
         ),
         budgetInsights: bestPattern.budgetInsights,
         timingInsights: bestPattern.seasonalPeaks.length > 0

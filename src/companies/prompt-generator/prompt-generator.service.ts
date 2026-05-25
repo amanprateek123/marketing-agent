@@ -441,9 +441,14 @@ export class PromptGeneratorService {
         winningFormats: company.learnings.creative?.winningFormats,
         topAudiences: company.learnings.campaign?.audienceScores
           ? Object.entries(company.learnings.campaign.audienceScores)
-              .sort(([, a], [, b]) => b - a)
+              .map(([k, v]: [string, any]) => {
+                const roas = typeof v === 'number' ? v : (Number(v?.roas) || 0);
+                const n = typeof v === 'number' ? 0 : (Number(v?.n) || 0);
+                return { k, roas, n };
+              })
+              .sort((a, b) => b.roas - a.roas)
               .slice(0, 5)
-              .map(([k, v]) => `${k}: ${v}`)
+              .map(({ k, roas, n }) => `${k}: ${roas.toFixed(2)}${n > 0 ? ` (N=${n})` : ''}`)
           : [],
       } : null,
     };

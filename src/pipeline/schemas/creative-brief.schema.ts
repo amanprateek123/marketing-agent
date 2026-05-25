@@ -60,6 +60,25 @@ export class CreativeBrief {
   explorationArm?: boolean;
 
   /**
+   * Mirror of IntelligenceBrief.winnerCloneOf. Read by Creative Team (anchor
+   * on winner pattern) and Campaign Review (skip cold-start 60% cut, use
+   * sourceCPA × budgetTier as the launched-budget baseline).
+   */
+  @Prop({ type: Object, required: false })
+  winnerCloneOf?: {
+    sourceCampaignId: string;
+    sourceBriefId: string;
+    metaAdId: string;
+    hookStyle: string;
+    audienceType: string;
+    format?: 'video' | 'image';
+    budgetTier: number;
+    sourceCPA: number;
+    sourceROAS: number;
+    clonedAt: Date;
+  };
+
+  /**
    * Audience segment NAME from product.audienceSegments[]. Carried from
    * IntelligenceBrief so campaign-creator's TS resolver can translate it
    * into ad-set targeting (age/gender/interests) at launch time.

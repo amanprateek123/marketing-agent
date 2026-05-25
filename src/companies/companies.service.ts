@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Company, CompanyDocument } from './schemas/company.schema';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
-import { CompanyPrompts, CompanyLearnings, CreativeLearnings, CampaignLearnings, CausalInsight } from './schemas/company.types';
+import { CompanyPrompts, CompanyLearnings, CreativeLearnings, CampaignLearnings, CausalInsight, OfferAudienceFitIssue, HotWinner } from './schemas/company.types';
 
 // Fields that require prompt regeneration when changed
 const PROMPT_RELEVANT_FIELDS: (keyof UpdateCompanyDto)[] = [
@@ -182,6 +182,10 @@ export class CompaniesService {
    * Append a causal insight with $push + $slice cap. Race-safe — two concurrent
    * appenders both succeed; oldest is dropped past the cap. Was: read the array,
    * concat, write — concurrent appenders lost each other's insights.
+   *
+   * Prefer appendOrConsolidateCausalInsight() — it dedupes near-identical
+   * findings into one growing-confidence entry instead of accumulating
+   * 6 N=1 lookalikes that say the same thing.
    */
   async appendCausalInsight(
     tenantId: string,
@@ -199,6 +203,184 @@ export class CompaniesService {
       },
     );
     this.logger.log(`Causal insight appended for: ${tenantId} (${insight.rootCause}, conf=${insight.confidence})`);
+  }
+
+  /**
+   * Append OR consolidate a causal insight into an existing cluster.
+   *
+   * Why this exists: runRootCauseAnalysis produces one N=1 insight per paused
+   * campaign. For brands running 5+ campaigns/week on the same product, the
+   * causalInsights array filled up with 6+ near-identical findings (rootCause=
+   * audience_mismatch, isolatedVariable=post_click_conversion_rate, product=
+   * Nadi Report, confidence=0.45 each). The agent reading these as inputs
+   * couldn't distinguish "one shaky observation" from "six convergent ones."
+   *
+   * Cluster key: (rootCause × normalized(isolatedVariable) × productName).
+   * Recency window: 90 days. If an existing entry in the same cluster is
+   * found, this method REPLACES it with a merged entry that:
+   *   - sums dataPoints
+   *   - boosts confidence as min(0.85, 0.5 + 0.05 * N)
+   *   - keeps the newest `finding` text (most recent observation wins narration)
+   *   - tracks firstSeenAt / lastSeenAt
+   * Otherwise it appends a fresh entry (read-replace pattern; we accept the
+   * small race window because dedup is more valuable than strict append-only
+   * race-safety for this writer — concurrent root-cause runs on the SAME
+   * tenant are rare and re-merging is idempotent).
+   */
+  async appendOrConsolidateCausalInsight(
+    tenantId: string,
+    insight: CausalInsight,
+    cap: number = 25,
+  ): Promise<void> {
+    const company = await this.companyModel.findOne({ tenantId }, { 'learnings.causalInsights': 1 }).lean().exec();
+    const existing: CausalInsight[] = (company?.learnings?.causalInsights ?? []) as any;
+    const RECENCY_DAYS = 90;
+    const cutoff = Date.now() - RECENCY_DAYS * 24 * 60 * 60 * 1000;
+
+    const normVar = (s: string | undefined) =>
+      (s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const incomingKey = `${insight.rootCause}|${normVar(insight.isolatedVariable)}|${insight.productName ?? ''}`;
+
+    const now = new Date();
+    let merged: CausalInsight[] = [];
+    let consolidated = false;
+
+    for (const e of existing) {
+      const eKey = `${e.rootCause}|${normVar(e.isolatedVariable)}|${e.productName ?? ''}`;
+      const eTime = e.lastSeenAt ? new Date(e.lastSeenAt).getTime() : (e.firstSeenAt ? new Date(e.firstSeenAt).getTime() : Date.now());
+      const inWindow = eTime >= cutoff;
+      if (eKey === incomingKey && inWindow && !consolidated) {
+        const totalN = (e.dataPoints ?? 1) + (insight.dataPoints ?? 1);
+        const confidenceFromN = Math.min(0.85, 0.5 + 0.05 * totalN);
+        merged.push({
+          ...insight,
+          dataPoints: totalN,
+          confidence: Math.max(insight.confidence ?? 0, confidenceFromN),
+          firstSeenAt: e.firstSeenAt ?? now,
+          lastSeenAt: now,
+        });
+        consolidated = true;
+      } else {
+        merged.push(e);
+      }
+    }
+
+    if (!consolidated) {
+      merged.push({ ...insight, firstSeenAt: now, lastSeenAt: now });
+    }
+
+    // Cap newest-N (oldest dropped first). Mongo's $slice -N is positional —
+    // we're rewriting wholesale so do it here.
+    if (merged.length > cap) merged = merged.slice(merged.length - cap);
+
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.causalInsights': merged,
+          'learnings.updatedAt': now,
+        },
+        $inc: { 'learnings.version': 1 },
+      },
+    );
+    this.logger.log(
+      `Causal insight ${consolidated ? 'consolidated' : 'appended'} for: ${tenantId} (${insight.rootCause}/${normVar(insight.isolatedVariable)}, total=${merged.length})`,
+    );
+  }
+
+  /**
+   * Upsert a HotWinner keyed by metaAdId. Caps the array at MAX_HOT_WINNERS
+   * (evicting the entry with the highest CPA — i.e. the weakest winner).
+   * Decay (60d) is enforced at READ time by LiveContextBuilder so we never
+   * have to scan/rewrite the array just to age out an entry.
+   *
+   * Why metaAdId is the cluster key: each ad is the unit of winning. An ad
+   * set can contain a winner + 3 losers (see Kundli Clarity), and we want
+   * to keep the winner without flagging the whole ad set.
+   */
+  async upsertHotWinner(tenantId: string, winner: HotWinner): Promise<void> {
+    const MAX_HOT_WINNERS = 10;
+    const company = await this.companyModel.findOne(
+      { tenantId },
+      { 'learnings.hotWinners': 1 },
+    ).lean().exec();
+    const existing: HotWinner[] = ((company?.learnings as any)?.hotWinners ?? []) as HotWinner[];
+
+    let merged = false;
+    let next: HotWinner[] = existing.map((e) => {
+      if (e.metaAdId === winner.metaAdId) {
+        merged = true;
+        // Replace with the latest snapshot — same ad, fresher metrics.
+        return { ...e, ...winner };
+      }
+      return e;
+    });
+    if (!merged) next.push(winner);
+
+    // Cap by evicting the highest-CPA entry (weakest winner first).
+    if (next.length > MAX_HOT_WINNERS) {
+      next = next
+        .slice()
+        .sort((a, b) => a.cpa - b.cpa)
+        .slice(0, MAX_HOT_WINNERS);
+    }
+
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.hotWinners': next,
+          'learnings.updatedAt': new Date(),
+        },
+      },
+    );
+    this.logger.log(
+      `HotWinner ${merged ? 'updated' : 'added'} for: ${tenantId} (adId=${winner.metaAdId} hook=${winner.hookStyle}/${winner.audienceType} CPA=₹${Math.round(winner.cpa)} ROAS=${winner.roas.toFixed(2)})`,
+    );
+  }
+
+  /**
+   * Upsert an OfferAudienceFitIssue keyed by (audienceType × productName).
+   * Used by the campaign learning loop when a causal insight points to
+   * post-click friction rather than a true audience-quality problem. Keeps
+   * the audienceScores table clean from offer-fit contamination.
+   */
+  async upsertOfferAudienceFitIssue(
+    tenantId: string,
+    entry: OfferAudienceFitIssue,
+  ): Promise<void> {
+    const company = await this.companyModel.findOne(
+      { tenantId },
+      { 'learnings.campaign.offerAudienceFitIssues': 1 },
+    ).lean().exec();
+    const existing: OfferAudienceFitIssue[] = ((company?.learnings as any)?.campaign?.offerAudienceFitIssues ?? []);
+    let merged = false;
+    const next = existing.map((e) => {
+      if (e.audienceType === entry.audienceType && e.productName === entry.productName) {
+        merged = true;
+        return {
+          ...e,
+          issue: entry.issue,                         // latest narration wins
+          dataPoints: (e.dataPoints ?? 0) + (entry.dataPoints ?? 1),
+          lastUpdated: entry.lastUpdated,
+        };
+      }
+      return e;
+    });
+    if (!merged) next.push(entry);
+
+    await this.companyModel.updateOne(
+      { tenantId },
+      {
+        $set: {
+          'learnings.campaign.offerAudienceFitIssues': next,
+          'learnings.updatedAt': new Date(),
+        },
+      },
+    );
+    this.logger.log(
+      `OfferAudienceFitIssue ${merged ? 'updated' : 'added'} for: ${tenantId} (${entry.audienceType}/${entry.productName})`,
+    );
   }
 
   /**

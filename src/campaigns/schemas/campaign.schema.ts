@@ -228,6 +228,19 @@ export class Campaign {
     }[];
   }[];
 
+  /**
+   * Set to true by the audit loop the first time any ad on this campaign
+   * crosses the strict winner gate (ROAS ≥ 2× breakeven AND ≥10 conv on the ad).
+   * Once set, the winning ad is upserted into company.learnings.hotWinners
+   * and the Strategy Team's exploit-winner arm becomes eligible to clone it
+   * in subsequent pipeline runs. Idempotent — never unset once true.
+   */
+  @Prop({ type: Boolean, default: false })
+  winnerCandidate?: boolean;
+
+  @Prop({ type: Date })
+  winnerCandidateAt?: Date;
+
   // Pending optimization actions (auditor recommends, human approves or grace period expires)
   @Prop({ type: [Object], default: [] })
   pendingActions: {

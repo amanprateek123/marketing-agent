@@ -123,6 +123,25 @@ Return ONLY the JSON object.`,
       `extractWinningExemplars: ${perAdRows.length} ad-rows → ${winningExemplars.length} exemplars (audienceTypes: ${[...new Set(winningExemplars.map(e => e.audienceSegment))].join(',') || 'none'})`,
     );
 
+    // Live within-campaign hook arbitration. Recent head-to-head variant tests
+    // that CONTRADICT historical winningHooks/losingHooks claims are surfaced
+    // as a recency-weighted counter-signal — they don't overwrite the lists,
+    // they flag the contradiction so the Creative Team and Campaign Review
+    // Team see fresh disconfirming evidence in LiveContext.
+    //
+    // Bar lower than winningExemplars: this is a *flag*, not a permanent
+    // promotion. Designed to catch cases like Kundli Clarity (2026-05-21)
+    // where the historical "winning hook" (pain_point) lost head-to-head
+    // to a historical "third-ranked" hook (curiosity_gap) inside one ad set.
+    const existingHistorical = {
+      winningHooks: company.learnings?.creative?.winningHooks ?? [],
+      losingHooks: company.learnings?.creative?.losingHooks ?? [],
+    };
+    const liveCounterSignals = this.extractLiveCounterSignals(perAdRows, existingHistorical, packages);
+    this.logger.log(
+      `extractLiveCounterSignals: ${liveCounterSignals.length} counter-signals (${liveCounterSignals.map(s => `${s.winningHookStyle}>${s.losingHookStyle}`).join(', ') || 'none'})`,
+    );
+
     // Race-safe: per-leaf dot-path slice instead of whole-tree replace. Was:
     // read learnings + splice + write whole tree → concurrent writers (Day 30
     // deep run + Meta importer) clobbered each other and version went backwards.
@@ -132,6 +151,7 @@ Return ONLY the JSON object.`,
     await this.companiesService.setCreativeLearningSlice(tenantId, {
       ...creativeLearnings,
       winningExemplars,
+      liveCounterSignals,
     }, { incrementVersion: true });
 
     await this.actionLogger.log({
@@ -408,5 +428,127 @@ Return ONLY the JSON object.`,
       timingInsights: [],
       objectiveInsights: [],
     };
+  }
+
+  /**
+   * Extract live within-campaign head-to-head hook arbitrations that contradict
+   * historical winningHooks/losingHooks claims.
+   *
+   * Why this exists: the historical aggregator scores hookStyle by raw CTR across
+   * 100+ ads with no audience/topic control. When the same hookStyles run side-by-
+   * side INSIDE one ad set on the same day, the resulting CPA ranking is the
+   * cleanest controlled comparison in the dataset — and frequently inverts the
+   * historical claim. See the Kundli Clarity campaign (2026-05-21): pain_point
+   * was the documented "winner" with confidence 0.95 but ran CPA ₹1,745 while
+   * curiosity_gap (documented "third-ranked") ran CPA ₹862.
+   *
+   * Gating (conservative — this is a flag, not a permanent demotion):
+   *  - both variants ≥₹1,500 spend (avoids cold-start noise)
+   *  - winner ≥3 conversions (avoids zero-conv lucky-CPC variants)
+   *  - winner CPA ≤ 0.75 × loser CPA (≥25% CPA gap, not noise)
+   *  - winner.hookStyle is currently in losingHooks OR ranks below loser.hookStyle in winningHooks
+   *
+   * Emits up to MAX_SIGNALS entries, dedup'd by (winner × loser × audience).
+   */
+  private extractLiveCounterSignals(
+    perAdRows: Awaited<ReturnType<typeof this.enrichPerAd>>,
+    historical: { winningHooks: string[]; losingHooks: string[] },
+    packages: CreativePackageDocument[],
+  ): NonNullable<CreativeLearnings['liveCounterSignals']> {
+    const MIN_SPEND_PER_VARIANT = 1500;
+    const MIN_WINNER_CONVERSIONS = 3;
+    const MIN_CPA_GAP_RATIO = 0.75;        // winner CPA must be ≤ 75% of loser CPA
+    const MAX_SIGNALS = 8;
+
+    // Parse hookStyle label from each historical entry. Entries look like
+    // "pain_point: LB 7.18% / mean 7.26% CTR across 116 historical ads..."
+    // The hookStyle is the leading [a-z_]+ token before the first colon.
+    const parseHookStyle = (entry: string): string | null => {
+      const m = String(entry ?? '').toLowerCase().match(/^([a-z_]+)/);
+      return m ? m[1] : null;
+    };
+    const winningStyles = historical.winningHooks
+      .map(parseHookStyle)
+      .filter((s): s is string => !!s);
+    const losingStyles = new Set(
+      historical.losingHooks.map(parseHookStyle).filter((s): s is string => !!s),
+    );
+    // Lower index = higher rank. Use Infinity for missing.
+    const winningRank = (style: string) => {
+      const i = winningStyles.indexOf(style);
+      return i === -1 ? Infinity : i;
+    };
+
+    // Map briefId -> productName for tagging (where available on the package)
+    const productByBrief = new Map<string, string | undefined>();
+    for (const pkg of packages) {
+      productByBrief.set(pkg.briefId, (pkg as any)?.productName);
+    }
+
+    // Group ad-rows by (briefId × audienceType) — only ads inside the same
+    // ad set are a controlled head-to-head.
+    const groups = new Map<string, typeof perAdRows>();
+    for (const row of perAdRows) {
+      if (!row.hookStyle || row.hookStyle === 'unknown') continue;
+      if (row.spend < MIN_SPEND_PER_VARIANT) continue;
+      const key = `${row.briefId}::${row.audienceType}`;
+      const list = groups.get(key) ?? [];
+      list.push(row);
+      groups.set(key, list);
+    }
+
+    const signals: NonNullable<CreativeLearnings['liveCounterSignals']> = [];
+    const seen = new Set<string>();
+
+    for (const [key, rows] of groups.entries()) {
+      if (rows.length < 2) continue;
+
+      // Within-group head-to-head: each (winner, loser) pair where winner has
+      // a finite CPA and CPA gap clears the gate.
+      for (let i = 0; i < rows.length; i++) {
+        for (let j = 0; j < rows.length; j++) {
+          if (i === j) continue;
+          const winner = rows[i];
+          const loser = rows[j];
+          if (winner.hookStyle === loser.hookStyle) continue;
+          if (winner.cpa == null || loser.cpa == null) continue;
+          if (winner.conversions < MIN_WINNER_CONVERSIONS) continue;
+          if (winner.cpa > loser.cpa * MIN_CPA_GAP_RATIO) continue;
+
+          // Contradiction filter:
+          //  - winner is in losingHooks (historical loser beat someone), OR
+          //  - winner ranks BELOW loser in winningHooks (i.e. winner index > loser index, both finite OR loser ranks while winner doesn't)
+          const loserRank = winningRank(loser.hookStyle);
+          const winnerRank = winningRank(winner.hookStyle);
+          const winnerIsHistoricalLoser = losingStyles.has(winner.hookStyle);
+          const winnerRanksLowerInWinning =
+            Number.isFinite(loserRank) && winnerRank > loserRank;
+
+          if (!winnerIsHistoricalLoser && !winnerRanksLowerInWinning) continue;
+
+          const dedupeKey = `${winner.hookStyle}|${loser.hookStyle}|${winner.audienceType}|${winner.briefId}`;
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+
+          signals.push({
+            winningHookStyle: winner.hookStyle,
+            losingHookStyle: loser.hookStyle,
+            audienceType: winner.audienceType,
+            productName: productByBrief.get(winner.briefId),
+            campaignId: winner.briefId,
+            winnerCPA: winner.cpa,
+            loserCPA: loser.cpa,
+            deltaCPA: loser.cpa - winner.cpa,
+            winnerSpend: winner.spend,
+            observedAt: new Date(),
+          });
+        }
+      }
+    }
+
+    // Rank by CPA delta (largest gap first), cap to MAX_SIGNALS.
+    return signals
+      .sort((a, b) => b.deltaCPA - a.deltaCPA)
+      .slice(0, MAX_SIGNALS);
   }
 }

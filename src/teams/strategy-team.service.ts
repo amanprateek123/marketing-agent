@@ -260,6 +260,74 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       }
     }
 
+    // ── Exploit-winner arm assignment (mirrors exploration) ──────────────────
+    // When the company has at least one fresh hotWinner (audited campaign that
+    // produced an ad with ROAS ≥ 2× breakeven AND ≥10 conv), force 1 brief in
+    // this run to be a CLONE of the top winner — same hookStyle × audienceType
+    // × format × budgetTier, varying only the topic. This is the "compound
+    // winners" side of the bandit; without it, every successful campaign
+    // dissipates back into the idea pool and we relearn from scratch.
+    //
+    // Saturation guard: if the winner's hookStyle is already >60% saturated on
+    // the same audienceType (in audienceHookSaturation, fresh ≤14d), DO NOT
+    // clone — burning out the winner's own hook accelerates fatigue.
+    //
+    // Order: clone arm is assigned AFTER exploration arm. If the same brief
+    // would be both, exploration wins (we always need disconfirming data).
+    if (validBriefs.length >= 2) {
+      const hotWinners = ((company.learnings as any)?.hotWinners ?? []) as Array<any>;
+      const HOT_WINNER_FRESHNESS_DAYS = 60;
+      const SATURATION_THRESHOLD = 60;
+      const SATURATION_FRESHNESS_DAYS = 14;
+      const freshWinners = hotWinners.filter((w) => {
+        const t = w?.observedAt ? new Date(w.observedAt).getTime() : 0;
+        return Date.now() - t < HOT_WINNER_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+      });
+      // Rank fresh winners by CPA ascending (lowest CPA = strongest exploit candidate).
+      const ranked = freshWinners.slice().sort((a, b) => (a.cpa ?? Infinity) - (b.cpa ?? Infinity));
+      const satMap = (company.learnings?.creative?.audienceHookSaturation ?? {}) as Record<string, Record<string, { pct: number; updatedAt: Date }>>;
+      const isSaturated = (audienceType: string, hookStyle: string) => {
+        const entry = satMap[audienceType]?.[hookStyle];
+        if (!entry) return false;
+        const fresh = Date.now() - new Date(entry.updatedAt).getTime() < SATURATION_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+        return fresh && (entry.pct ?? 0) >= SATURATION_THRESHOLD;
+      };
+
+      const winnerToClone = ranked.find(w => !isSaturated(w.audienceType, w.hookStyle));
+      if (winnerToClone) {
+        // Pick a brief whose topic is DIFFERENT from the winner's source topic
+        // (avoid re-running the same campaign). Skip the explorationArm brief
+        // and the strategist-selected winner.
+        const cloneCandidate = validBriefs.find((b: any) =>
+          !b._explorationArm
+          && b.briefId !== winnerId
+          && (winnerToClone.topic ? (String(b.topic ?? '').toLowerCase() !== String(winnerToClone.topic).toLowerCase()) : true),
+        ) ?? validBriefs.find((b: any) => !b._explorationArm && b.briefId !== winnerId);
+
+        if (cloneCandidate) {
+          cloneCandidate._winnerCloneOf = {
+            sourceCampaignId: winnerToClone.campaignId,
+            sourceBriefId: winnerToClone.briefId,
+            metaAdId: winnerToClone.metaAdId,
+            hookStyle: winnerToClone.hookStyle,
+            audienceType: winnerToClone.audienceType,
+            format: winnerToClone.format,
+            budgetTier: winnerToClone.budgetTier,
+            sourceCPA: winnerToClone.cpa,
+            sourceROAS: winnerToClone.roas,
+            clonedAt: new Date(),
+          };
+          this.logger.log(
+            `Strategy Team: exploit-winner arm assigned to brief "${cloneCandidate.topic}" (cloning ${winnerToClone.hookStyle}/${winnerToClone.audienceType} @ ₹${winnerToClone.budgetTier}/day, source CPA ₹${Math.round(winnerToClone.cpa)})`,
+          );
+        }
+      } else if (freshWinners.length > 0) {
+        this.logger.log(
+          `Strategy Team: exploit-winner arm SKIPPED — all ${freshWinners.length} fresh winners are on saturated audience×hook combos`,
+        );
+      }
+    }
+
     await this.intelligenceBriefModel.deleteMany({ tenantId, runId });
     await this.intelligenceBriefModel.insertMany(
       validBriefs.map((b: any) => ({
@@ -280,6 +348,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
         // across re-launches.
         targetLanguage: typeof b.targetLanguage === 'string' ? b.targetLanguage.toLowerCase().trim() : undefined,
         explorationArm: !!b._explorationArm,
+        winnerCloneOf: b._winnerCloneOf,
         // targetSegment from LLM — should match a name in product.audienceSegments[].
         // The TS resolver in campaign-creator.launch() reads this and applies the
         // segment's age/gender/interests to ad sets. Empty string = no specific
@@ -308,6 +377,7 @@ Mark exactly 1 brief as "selected": true. All others "selected": false.`;
       audienceStage: ['cold', 'warm', 'hot'].includes(winner.audienceStage) ? winner.audienceStage : 'cold',
       targetLanguage: typeof winner.targetLanguage === 'string' ? winner.targetLanguage.toLowerCase().trim() : undefined,
       explorationArm: !!winner._explorationArm,
+      winnerCloneOf: winner._winnerCloneOf,
       targetSegment: winner.targetSegment ?? '',
       suggestedBudget: winner.suggestedBudget ?? 0,
       finalScore: winner.priorityScore ?? 0,

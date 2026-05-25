@@ -501,6 +501,61 @@ export class CampaignAuditorService {
       }
     }
 
+    // ── Persist hot winners (drives the Strategy Team's exploit-winner arm) ──
+    // Every winnerCandidate is upserted into company.learnings.hotWinners and
+    // the campaign is flagged winnerCandidate=true. The next pipeline run's
+    // Strategy Team reads hotWinners + clones the top one (varying topic).
+    // Idempotent — upsertHotWinner keys on metaAdId and replaces with fresh metrics.
+    if ((signals.opportunities.winnerCandidates ?? []).length > 0) {
+      try {
+        const launchedBudget = (campaign as any)?.campaignConfig?.budget
+          ?? (campaign as any)?.budget
+          ?? 0;
+        const briefTopic = (() => {
+          // Best-effort topic surface; brief lookup is async and we don't want
+          // to slow the audit path. Topic is decorative for clone diversification.
+          const config = (campaign as any)?.campaignConfig;
+          return (campaign as any)?.topic ?? config?.topic ?? undefined;
+        })();
+        const productName = (campaign as any)?.productName
+          ?? (company.products ?? []).find(p => p.active)?.name;
+
+        for (const winner of signals.opportunities.winnerCandidates) {
+          await this.companiesService.upsertHotWinner(company.tenantId, {
+            campaignId: campaign._id.toString(),
+            briefId: (campaign as any).briefId ?? '',
+            metaAdId: winner.metaAdId,
+            productName,
+            hookStyle: winner.hookStyle,
+            audienceType: winner.audienceType,
+            format: winner.format,
+            topic: briefTopic,
+            spend: winner.spend,
+            conversions: winner.conversions,
+            cpa: winner.cpa,
+            roas: winner.roas,
+            ctr: winner.ctr,
+            budgetTier: launchedBudget,
+            observedAt: new Date(),
+          });
+        }
+
+        // Flip winnerCandidate=true once. Avoid bumping winnerCandidateAt on
+        // every audit — first-time-only timestamp.
+        if (!(campaign as any).winnerCandidate) {
+          await this.campaignModel.updateOne(
+            { _id: campaign._id },
+            { $set: { winnerCandidate: true, winnerCandidateAt: new Date() } },
+          );
+          this.logger.log(
+            `Campaign ${campaign._id} flagged winnerCandidate=true (${signals.opportunities.winnerCandidates.length} winning ads)`,
+          );
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to persist hotWinners: ${err.message}`);
+      }
+    }
+
     // ── Layer 4: Actions only for agent-created campaigns ────────────────────
     // Manual/imported campaigns: audit runs but no actions are created or executed
     if (campaign.source === 'agent' && verdict.verdict === 'act') {

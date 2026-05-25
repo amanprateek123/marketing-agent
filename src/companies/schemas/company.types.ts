@@ -188,14 +188,78 @@ export interface CreativeLearnings {
     sampleSize: number;          // total impressions when measured
     extractedAt: Date;
   }>;
+
+  /**
+   * Recent live within-campaign variant comparisons that CONTRADICT historical
+   * winningHooks/losingHooks claims. Populated by the live arbitrator inside
+   * the Day-7 quick scan when a campaign with 3+ variants and ≥₹3K spend on
+   * its leader produces a CPA ranking where the live winner's hookStyle is
+   * currently in `losingHooks` OR strictly outranks another hookStyle that
+   * is itself listed earlier in `winningHooks`.
+   *
+   * The bar is intentionally lower than `winningExemplars` (which requires
+   * ≥10 conversions per ad). Counter-signals are recency-weighted *flags* —
+   * they don't move the historical lists; they surface fresh disconfirming
+   * evidence into LiveContext so the Creative Team and Campaign Review Team
+   * see "your historical pain_point claim was beaten head-to-head by
+   * curiosity_gap last week."
+   *
+   * Decay in LiveContext: only entries from the last 21 days are rendered.
+   */
+  liveCounterSignals?: Array<{
+    winningHookStyle: string;     // the hookStyle that won live
+    losingHookStyle: string;      // the historical "winner" (or higher-ranked) hookStyle that lost
+    audienceType: string;         // which audience the head-to-head ran on
+    productName?: string;
+    campaignId: string;           // for traceability
+    winnerCPA: number;
+    loserCPA: number;
+    deltaCPA: number;             // loserCPA - winnerCPA (positive = loser was worse)
+    winnerSpend: number;
+    observedAt: Date;
+  }>;
+}
+
+/**
+ * Per-audience ROAS entry. Old data may have stored a bare `number` here —
+ * readers MUST handle the union (see normalizeAudienceScore() in live-context.builder.ts).
+ *
+ * `n` is the campaign count that produced this ROAS. Anything < 5 is low-confidence
+ * and Campaign Review may not override the strategist's audience pick citing it alone.
+ */
+export interface AudienceScoreEntry {
+  roas: number;
+  n: number;            // sample size — campaigns aggregated into this score
+  updatedAt: Date;
+}
+
+/**
+ * Distinguishes "audience underperforms" from "offer-audience fit issue."
+ * Written when a causal insight is audience_mismatch BUT CTR was healthy and
+ * conversions collapsed — i.e. the audience clicked, the offer/lander didn't close.
+ * Without this, the same finding tanks `audienceScores[audienceType]` and the
+ * audience gets permanently exiled even though the real fix is offer/lander/price.
+ */
+export interface OfferAudienceFitIssue {
+  audienceType: string;     // e.g. "retarget", "lookalike", "advantage_plus"
+  productName: string;      // which product hit the friction
+  issue: string;            // human-readable description of the fit gap
+  dataPoints: number;       // # of campaigns observed with the same pattern
+  lastUpdated: Date;
 }
 
 export interface CampaignLearnings {
-  audienceScores: Record<string, number>;  // audience segment → avg ROAS
+  audienceScores: Record<string, AudienceScoreEntry | number>;  // audience segment → avg ROAS (entry preferred; number is legacy)
   platformROAS: Record<string, number>;    // platform → avg ROAS
   budgetInsights: string[];                // budget size/structure patterns
   timingInsights: string[];                // day of week, season, time of day patterns
   objectiveInsights: string[];             // which objectives work for this brand
+  /**
+   * Offer-audience fit issues — see OfferAudienceFitIssue. Separate from
+   * audienceScores so an offer-fit problem on retargeting at one price point
+   * doesn't permanently brand the audience as bad.
+   */
+  offerAudienceFitIssues?: OfferAudienceFitIssue[];
 }
 
 export interface CausalInsight {
@@ -205,6 +269,51 @@ export interface CausalInsight {
   rootCause: 'creative_issue' | 'audience_mismatch' | 'format_mismatch' | 'topic_exhaustion' | 'timing_issue' | 'budget_issue';
   confidence: number;        // 0.0–1.0
   dataPoints: number;        // how many campaigns this is based on
+  /**
+   * Product the insight applies to (when known). Used as part of the cluster
+   * key in appendOrConsolidateCausalInsight to merge near-duplicate N=1 entries
+   * into a single high-confidence finding instead of accumulating 6 lookalikes.
+   */
+  productName?: string;
+  /**
+   * Optional product/audience tags written by the consolidator so future
+   * merges can preserve and increment metadata across rebuilds.
+   */
+  audienceType?: string;
+  firstSeenAt?: Date;
+  lastSeenAt?: Date;
+}
+
+/**
+ * A live or recently-paused winning ad — used to drive the "exploit" arm in
+ * the Strategy Team and inspire next-week briefs that clone the winner's
+ * hookStyle × audienceType × format × budget tier while varying topic/angle.
+ *
+ * Written by the audit loop at Day ≥ 3 when an AD (not just ad set) crosses
+ * a strict winner gate: ROAS ≥ 2× breakeven AND ≥10 conversions on that ad.
+ * Read by Strategy Team (clone arm), Creative Team (anchor pattern), and
+ * Campaign Review (skip cold-start budget cut for clones).
+ *
+ * Recency-decayed in LiveContext (60d window) so an old winner doesn't
+ * permanently override exploration.
+ */
+export interface HotWinner {
+  campaignId: string;          // source campaign Mongo _id
+  briefId: string;
+  metaAdId: string;            // the specific winning ad
+  productName?: string;
+  hookStyle: string;
+  audienceType: string;        // e.g. 'advantage_plus', 'lookalike', 'retarget'
+  format?: 'video' | 'image';
+  topic?: string;              // for diversifying clones (avoid repeating the exact topic)
+  hookLine?: string;           // verbatim primaryText opening line (anchor pattern, NOT for copy-paste)
+  spend: number;
+  conversions: number;
+  cpa: number;
+  roas: number;
+  ctr: number;
+  budgetTier: number;          // the daily budget the winner was launched at — clones default to this
+  observedAt: Date;
 }
 
 export interface CompanyLearnings {
@@ -214,4 +323,9 @@ export interface CompanyLearnings {
   creative: CreativeLearnings;
   campaign: CampaignLearnings;
   causalInsights: CausalInsight[];
+  /**
+   * Top recent winning ads, capped at MAX_HOT_WINNERS, recency-decayed to 60d
+   * by readers. Drives the Strategy Team's exploit-winner arm.
+   */
+  hotWinners?: HotWinner[];
 }

@@ -64,6 +64,31 @@ export class IntelligenceBrief {
   explorationArm?: boolean;
 
   /**
+   * Exploit-winner arm — mirror of explorationArm. Set to true on 1-of-N briefs
+   * per run when company.learnings.hotWinners is non-empty and the Strategy
+   * Team forces a clone of the top winner (varying topic/angle, keeping
+   * hookStyle × audienceType × format × budgetTier constant).
+   *
+   * Downstream: Creative Team anchors on the winner's hookLine pattern, and
+   * Campaign Review skips the cold-start 60% budget cut because the budget
+   * tier already proved out on the source winner. Tagged so we can later
+   * measure clone-vs-original CPA drift.
+   */
+  @Prop({ type: Object, required: false })
+  winnerCloneOf?: {
+    sourceCampaignId: string;
+    sourceBriefId: string;
+    metaAdId: string;
+    hookStyle: string;
+    audienceType: string;
+    format?: 'video' | 'image';
+    budgetTier: number;
+    sourceCPA: number;
+    sourceROAS: number;
+    clonedAt: Date;
+  };
+
+  /**
    * Audience segment NAME from product.audienceSegments[] that this brief
    * targets. Strategy Team picks one per brief (e.g. "career_anxious" or
    * "dosha_worried"). Campaign-creator's TS resolver translates this name

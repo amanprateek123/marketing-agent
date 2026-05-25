@@ -11,7 +11,7 @@ import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schema
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { CreativePackage, CreativePackageDocument } from '../creative/schemas/creative-package.schema';
 import { LearningRun, LearningRunDocument } from './schemas/learning-run.schema';
-import { CampaignLearnings, CausalInsight } from '../companies/schemas/company.types';
+import { CampaignLearnings, CausalInsight, OfferAudienceFitIssue } from '../companies/schemas/company.types';
 
 const MIN_CAMPAIGNS = 3;
 
@@ -169,12 +169,40 @@ Return ONLY the JSON object described in your instructions.`,
     const { campaign, topicScores, causalInsights } = this.parseCampaignLearnings(result.content);
     const newVersion = (company.learnings?.version ?? 0) + 1;
 
+    // Enrich audienceScores with sample size (N) computed from the campaignData
+    // that fed the agent. The agent emits a bare ROAS per audience; the wrapper
+    // wraps it in { roas, n, updatedAt } so readers know whether to trust it.
+    // N < 5 entries are rendered as "low confidence" in LiveContext and the
+    // Campaign Review Team is forbidden from overriding the strategist's
+    // audience choice citing a low-N entry alone.
+    const audienceCounts = campaignData.reduce<Record<string, number>>((acc, row) => {
+      const aud = row?.audience ?? row?.campaign?.audienceType ?? null;
+      if (!aud) return acc;
+      const key = String(aud);
+      acc[key] = (acc[key] ?? 0) + 1;
+      return acc;
+    }, {});
+    const now = new Date();
+    const enrichedAudienceScores: Record<string, { roas: number; n: number; updatedAt: Date }> = {};
+    for (const [aud, roasRaw] of Object.entries(campaign.audienceScores)) {
+      const roas = typeof roasRaw === 'number' ? roasRaw : (roasRaw as any)?.roas ?? 0;
+      enrichedAudienceScores[aud] = {
+        roas,
+        n: audienceCounts[aud] ?? 0,
+        updatedAt: now,
+      };
+    }
+    const enrichedCampaign: CampaignLearnings = {
+      ...campaign,
+      audienceScores: enrichedAudienceScores,
+    };
+
     // Race-safe: per-slice dot-path writes. Was: whole-tree replace → clobbered
     // concurrent creative-learning writes from a parallel Day-7 quick scan or
     // Meta importer pass. Now each writer owns its leaf fields.
     // causalInsights is replaced wholesale here (deep run rebuilds the list);
     // for incremental appends use companiesService.appendCausalInsight.
-    await this.companiesService.setCampaignLearningSlice(tenantId, campaign);
+    await this.companiesService.setCampaignLearningSlice(tenantId, enrichedCampaign);
     await this.companiesService.setTopicScores(tenantId, topicScores);
     await this.companiesService.replaceCausalInsights(tenantId, causalInsights);
 
@@ -226,6 +254,30 @@ Return ONLY the JSON object described in your instructions.`,
     const ageMs = Date.now() - new Date(campaign.launchedAt!).getTime();
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
 
+    // Anti-rut guard: if the agent has been emitting the same rootCause N times
+    // in a row at low confidence, force it to argue against that default first.
+    // Without this, runRootCauseAnalysis converged on "audience_mismatch / post_click_
+    // conversion_rate / confidence 0.45" six campaigns in a row, hiding offer-fit
+    // and lander-friction causes under the same label.
+    const recentInsights: CausalInsight[] = (company.learnings?.causalInsights ?? []) as any;
+    const lastSix = recentInsights.slice(-6);
+    const counts = lastSix.reduce<Record<string, number>>((acc, i) => {
+      acc[i.rootCause] = (acc[i.rootCause] ?? 0) + 1;
+      return acc;
+    }, {});
+    const dominant = Object.entries(counts).sort(([, a], [, b]) => b - a)[0];
+    const ruttedRootCause = dominant && dominant[1] >= 5 ? dominant[0] : null;
+
+    const antiRutPrefix = ruttedRootCause
+      ? `\n\nANTI-RUT GUARD — IMPORTANT:
+The system has diagnosed "${ruttedRootCause}" in ${dominant![1]} of the last ${lastSix.length} insights.
+That is statistically suspicious for a single-campaign diagnostic. Before defaulting to "${ruttedRootCause}":
+  1. Argue AGAINST that diagnosis given the specific metrics of THIS campaign — what evidence contradicts it?
+  2. Consider at least two alternative root causes (especially lander/offer friction, attribution lag, learning-phase starvation, or topic_exhaustion).
+  3. Only return "${ruttedRootCause}" if the contradictory evidence is genuinely weaker than the supporting evidence.
+The goal is to break the loop, not to avoid the diagnosis if it really fits.\n`
+      : '';
+
     const ROOT_CAUSE_PROMPT = `You are a performance marketing analyst diagnosing why a single campaign was paused.
 
 Unlike multi-campaign analysis, you have only ONE data point. You CANNOT isolate variables across campaigns.
@@ -244,7 +296,7 @@ CONFIDENCE RULES for single-campaign diagnosis:
 - If metrics clearly point to one cause: 0.40-0.50
 - If ambiguous between two causes: 0.20-0.30
 
-Output ONLY a single JSON object.`;
+Output ONLY a single JSON object.${antiRutPrefix}`;
 
     let result;
     try {
@@ -302,13 +354,54 @@ Return as a single causal insight JSON:
       const raw = result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1);
       const insight: CausalInsight = JSON.parse(raw);
 
-      // Race-safe: single $push with cap. Was: read array + concat + write
-      // whole tree → concurrent root-cause analyses could lose each other's
-      // insights via clobber.
-      await this.companiesService.appendCausalInsight(tenantId, insight, 25);
+      // Decorate with product + audience for cluster keying. The single-campaign
+      // diagnostic prompt doesn't know to emit productName, so we attach it here.
+      const productName = (brief as any)?.productName ?? (campaign as any)?.productName ?? undefined;
+      const dominantAudience = (() => {
+        const adSets = ((campaign as any)?.adSets ?? []) as any[];
+        if (!adSets.length) return undefined;
+        const sorted = adSets.slice().sort((a, b) => (Number(b.spend) || 0) - (Number(a.spend) || 0));
+        return sorted[0]?.audienceType ?? undefined;
+      })();
+      const enriched: CausalInsight = {
+        ...insight,
+        productName,
+        audienceType: dominantAudience,
+        dataPoints: insight.dataPoints ?? 1,
+      };
+
+      // Disambiguate offer × audience fit from raw audience quality.
+      // Without this fork, every "high CTR, collapsed conv" finding tanks
+      // audienceScores[audienceType] and the audience gets permanently exiled
+      // even when the real fix is offer/lander/price. See OfferAudienceFitIssue.
+      const ctrPct = Number((campaign as any).ctr) || 0;
+      const ctrPauseFloor = Number(company.pauseIfCTRBelow ?? 0.5);
+      const ctrHealthy = ctrPct >= ctrPauseFloor * 1.5;
+      const convCollapsed = (Number((campaign as any).conversions) || 0) <= 2;
+      const isOfferFitMiss =
+        enriched.rootCause === 'audience_mismatch' &&
+        ctrHealthy &&
+        convCollapsed &&
+        !!dominantAudience &&
+        !!productName;
+
+      if (isOfferFitMiss) {
+        const fit: OfferAudienceFitIssue = {
+          audienceType: dominantAudience!,
+          productName: productName!,
+          issue: enriched.finding,
+          dataPoints: 1,
+          lastUpdated: new Date(),
+        };
+        await this.companiesService.upsertOfferAudienceFitIssue(tenantId, fit);
+      }
+
+      // Consolidate near-duplicate findings into one growing-confidence entry
+      // instead of accumulating N=1 lookalikes. Cap at 25 entries.
+      await this.companiesService.appendOrConsolidateCausalInsight(tenantId, enriched, 25);
 
       this.logger.log(
-        `Root cause identified: tenantId=${tenantId} cause=${insight.rootCause} confidence=${insight.confidence}`,
+        `Root cause identified: tenantId=${tenantId} cause=${enriched.rootCause} confidence=${enriched.confidence}${isOfferFitMiss ? ' [offer-fit reroute applied]' : ''}`,
       );
     } catch (err: any) {
       this.logger.error(`Failed to parse root cause insight: ${err.message}`);

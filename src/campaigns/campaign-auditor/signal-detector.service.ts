@@ -102,6 +102,25 @@ export interface AuditSignalPacket {
     totalClicks: number;
     readyForRetarget: boolean;           // age >7d + highClicksLowConversions
     earlyFatigue: { adSetName: string; adSetId: string; ctrDrop: number }[];  // winning ad set with declining CTR → add_creative
+    /**
+     * Per-AD winner candidates — STRICTER gate than winningAdSets (which uses
+     * shrunkenROAS > scaleThreshold ≈ 1.5x). winnerCandidates fires only at
+     * ROAS ≥ 2× breakeven AND ≥10 conversions on the AD itself. This is the
+     * input to the "exploit winner" arm: campaigns with at least one
+     * winnerCandidate get cloned into the next pipeline run.
+     */
+    winnerCandidates: {
+      metaAdId: string;
+      adSetId: string;
+      hookStyle: string;
+      audienceType: string;
+      format?: 'video' | 'image';
+      spend: number;
+      conversions: number;
+      ctr: number;
+      cpa: number;
+      roas: number;
+    }[];
   };
 
   // Safety rail breaches — TypeScript only, never overridden
@@ -231,8 +250,11 @@ export class SignalDetectorService {
     // ── Benchmarks from learnings ─────────────────────────────────────────────
     const learnings = company.learnings;
     const audienceScores = learnings?.campaign?.audienceScores ?? {};
+    // Back-compat: entries may be flat numbers or { roas, n, updatedAt }.
     const bestAudienceType = Object.keys(audienceScores).length > 0
-      ? Object.entries(audienceScores).sort(([, a], [, b]) => (b as number) - (a as number))[0][0]
+      ? Object.entries(audienceScores)
+          .map(([k, v]: [string, any]) => [k, typeof v === 'number' ? v : (Number(v?.roas) || 0)] as [string, number])
+          .sort(([, a], [, b]) => b - a)[0][0]
       : null;
 
     // Benchmark resolution order: this campaign's history → vertical prior → null.
@@ -501,6 +523,43 @@ export class SignalDetectorService {
       && current.campaign.conversions < 3;
     const readyForRetarget = ageDays >= 7 && highClicksLowConversions;
 
+    // ── Per-AD winner candidates ──────────────────────────────────────────────
+    // Stricter than winningAdSets — fires per AD (not per ad set) and uses
+    // ROAS ≥ 2× breakeven AND ≥10 conv as the gate. Input to the exploit-winner
+    // arm in Strategy Team. Per-AD lets us capture the specific hookStyle/format
+    // that won, not just "the ad set."
+    const WINNER_AD_MIN_CONVERSIONS = 10;
+    const winnerRoasThreshold = breakeven.breakevenROAS * 2;
+    const winnerCandidates: AuditSignalPacket['opportunities']['winnerCandidates'] = [];
+    for (const adSet of campaign.adSets ?? []) {
+      const liveAdSet = current.adSets.find(as => as.adSetId === adSet.metaAdSetId);
+      if (!liveAdSet) continue;
+      for (const persistedAd of adSet.ads ?? []) {
+        const liveAd = liveAdSet.ads.find(a => a.adId === persistedAd.metaAdId);
+        if (!liveAd) continue;
+        const conv = liveAd.conversions ?? 0;
+        const spend = liveAd.spend ?? 0;
+        if (conv < WINNER_AD_MIN_CONVERSIONS) continue;
+        if (spend <= 0 || conversionValue <= 0) continue;
+        const adRoas = (conv * conversionValue) / spend;
+        if (adRoas < winnerRoasThreshold) continue;
+        winnerCandidates.push({
+          metaAdId: persistedAd.metaAdId,
+          adSetId: adSet.metaAdSetId,
+          hookStyle: persistedAd.hookStyle ?? 'unknown',
+          audienceType: adSet.audienceType ?? 'unknown',
+          format: persistedAd.format,
+          spend,
+          conversions: conv,
+          ctr: liveAd.ctr ?? 0,
+          cpa: spend / conv,
+          roas: adRoas,
+        });
+      }
+    }
+    // Highest-ROAS first so consumers can take the top N.
+    winnerCandidates.sort((a, b) => b.roas - a.roas);
+
     // Early fatigue: winning ad set with CTR starting to decline (add fresh creative before it tanks).
     // Require winner to have current impressions ≥ MIN_IMPRESSIONS_FOR_CTR_SIGNAL so the trend is real.
     const earlyFatigue: { adSetName: string; adSetId: string; ctrDrop: number }[] = [];
@@ -608,6 +667,7 @@ export class SignalDetectorService {
         totalClicks,
         readyForRetarget,
         earlyFatigue,
+        winnerCandidates,
       },
       safetyBreaches,
       marketEnvironment: marketEnvironment ?? null,

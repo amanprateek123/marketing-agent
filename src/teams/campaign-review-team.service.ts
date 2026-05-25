@@ -41,6 +41,39 @@ export interface StructuredCampaignConfig {
   pauseRules: string;
 }
 
+/**
+ * Brief input to the Campaign Review Team. Mirrors the IntelligenceBrief
+ * fields the review team actually reads. winnerCloneOf is the exploit-winner
+ * marker — when set, Campaign Review skips the 50-60% cold-start budget cut
+ * and defaults to the source winner's budgetTier (still subject to TS safety caps).
+ */
+export interface CampaignReviewBriefInput {
+  topic: string;
+  angle: string;
+  platform: string;
+  format: string;
+  audience: string;
+  hook: string;
+  keyMessage: string;
+  conversionBridge: string;
+  suggestedBudget: number;
+  product?: string;
+  audienceStage?: 'cold' | 'warm' | 'hot';
+  targetLanguage?: string;
+  winnerCloneOf?: {
+    sourceCampaignId: string;
+    sourceBriefId: string;
+    metaAdId: string;
+    hookStyle: string;
+    audienceType: string;
+    format?: 'video' | 'image';
+    budgetTier: number;
+    sourceCPA: number;
+    sourceROAS: number;
+    clonedAt: Date;
+  };
+}
+
 export interface CampaignReviewOutput {
   approved: boolean;
   campaign: StructuredCampaignConfig;
@@ -79,20 +112,7 @@ export class CampaignReviewTeamService {
   ) {}
 
   async review(
-    brief: {
-      topic: string;
-      angle: string;
-      platform: string;
-      format: string;
-      audience: string;
-      hook: string;
-      keyMessage: string;
-      conversionBridge: string;
-      suggestedBudget: number;
-      product?: string;                       // product name — drives productBlock + landing URL + audience lookup
-      audienceStage?: 'cold' | 'warm' | 'hot'; // cold prospecting / warm retarget / hot cart-recovery — branches ad-set targeting
-      targetLanguage?: string;                  // resolved by Strategy Team — Campaign Review must validate geo aligns with this language
-    },
+    brief: CampaignReviewBriefInput,
     creativePackage: any,
     company: CompanyDocument,
     runId: string,
@@ -109,14 +129,7 @@ export class CampaignReviewTeamService {
 
   // ── CLI path ────────────────────────────────────────────────────────────────
   private async reviewViaCli(
-    brief: {
-      topic: string; angle: string; platform: string; format: string;
-      audience: string; hook: string; keyMessage: string; conversionBridge: string;
-      suggestedBudget: number;
-      product?: string;
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CampaignReviewBriefInput,
     creativePackage: any,
     company: CompanyDocument,
     runId: string,
@@ -141,14 +154,7 @@ export class CampaignReviewTeamService {
 
   // ── Sequential path (2 runAgent() calls) ───────────────────────────────────
   private async reviewSequential(
-    brief: {
-      topic: string; angle: string; platform: string; format: string;
-      audience: string; hook: string; keyMessage: string; conversionBridge: string;
-      suggestedBudget: number;
-      product?: string;
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CampaignReviewBriefInput,
     creativePackage: any,
     company: CompanyDocument,
     runId: string,
@@ -534,14 +540,7 @@ DECISION RULE:
   }
 
   private async buildCall1Prompt(
-    brief: {
-      topic: string; angle: string; platform: string; format: string;
-      audience: string; hook: string; keyMessage: string; conversionBridge: string;
-      suggestedBudget: number;
-      product?: string;
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CampaignReviewBriefInput,
     creativePackage: any,
     company: CompanyDocument,
     runId: string,
@@ -602,20 +601,7 @@ Return ONLY this JSON (no markdown, no explanation):
   }
 
   private async buildPrompt(
-    brief: {
-      topic: string;
-      angle: string;
-      platform: string;
-      format: string;
-      audience: string;
-      hook: string;
-      keyMessage: string;
-      conversionBridge: string;
-      suggestedBudget: number;
-      product?: string;
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CampaignReviewBriefInput,
     creativePackage: any,
     company: CompanyDocument,
     runId: string,
@@ -851,7 +837,9 @@ BUDGET:
 - Max scale: ${company.maxBudgetScalePercent}%
 - Pause if ROAS < ${company.pauseIfROASBelow ?? 'not set'} | CTR < ${company.pauseIfCTRBelow ?? 'not set'} | Frequency > ${company.pauseIfFrequencyAbove ?? 'not set'}
 - The debate adjusts UP or DOWN from the anchor — does NOT invent from scratch
-- No past data → be conservative, start at 50-60% of proposed budget
+${brief.winnerCloneOf
+  ? `- WINNER-CLONE OVERRIDE: This brief is a clone of a proven winner (source campaign ${brief.winnerCloneOf.sourceCampaignId}, ad ${brief.winnerCloneOf.metaAdId} → ${brief.winnerCloneOf.hookStyle}/${brief.winnerCloneOf.audienceType} produced CPA ₹${Math.round(brief.winnerCloneOf.sourceCPA)} / ROAS ${brief.winnerCloneOf.sourceROAS.toFixed(2)}x at ₹${brief.winnerCloneOf.budgetTier}/day). DO NOT apply the cold-start 50-60% cut. Default daily budget = ₹${brief.winnerCloneOf.budgetTier} (the source winner's tier — already proven). If you cut below this, you MUST cite a specific failure-mode risk that's NEW vs the source winner (e.g. saturation, market shift) — generic conservatism is not enough.`
+  : `- No past data → be conservative, start at 50-60% of proposed budget`}
 
 AD SETS:
 - Number of ad sets depends on budget (see AD SET COUNT below). Each ad set MUST have a different audience.
