@@ -456,6 +456,10 @@ export class PipelineController {
           keyMessage: (brief as any).keyMessage ?? '',
           conversionBridge: (brief as any).conversionBridge ?? '',
           audienceStage: (brief as any).audienceStage,
+          explorationArm: (brief as any).explorationArm,
+          // Forward exploit-winner marker — Creative Team reads it and anchors
+          // on the source winner's hookLine pattern.
+          winnerCloneOf: (brief as any).winnerCloneOf,
         },
       );
 

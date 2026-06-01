@@ -12,6 +12,7 @@ import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema
 import { CreativePackage, CreativePackageDocument } from '../creative/schemas/creative-package.schema';
 import { LearningRun, LearningRunDocument } from './schemas/learning-run.schema';
 import { CampaignLearnings, CausalInsight, OfferAudienceFitIssue } from '../companies/schemas/company.types';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 
 const MIN_CAMPAIGNS = 3;
 
@@ -351,8 +352,7 @@ Return as a single causal insight JSON:
     }
 
     try {
-      const raw = result.content.slice(result.content.indexOf('{'), result.content.lastIndexOf('}') + 1);
-      const insight: CausalInsight = JSON.parse(raw);
+      const insight: CausalInsight = parseRobustJson<CausalInsight>(result.content);
 
       // Decorate with product + audience for cluster keying. The single-campaign
       // diagnostic prompt doesn't know to emit productName, so we attach it here.
@@ -550,10 +550,7 @@ Return as a single causal insight JSON:
     causalInsights: CausalInsight[];
   } {
     try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      const raw = fenceMatch
-        ? JSON.parse(fenceMatch[1].trim())
-        : JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+      const raw: any = parseRobustJson(content);
 
       return {
         campaign: {

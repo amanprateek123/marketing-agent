@@ -11,6 +11,7 @@ import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
+import { parseRobustJson, RobustJsonParseError } from '../common/llm/robust-json-parser.util';
 
 const META_API_BASE = 'https://graph.facebook.com/v21.0';
 
@@ -178,12 +179,23 @@ export class CampaignReviewTeamService {
 
     this.logger.log(`Campaign Review Team sequential — Call 1 done (${call1.content.length} chars)`);
 
-    // ── Validate Call 1 before passing to the Analyst ───────────────────────
+    // ── Validate Call 1 with retry-on-parse-failure ─────────────────────────
+    // The FAILED_ASTROTALK_TRUST_FLIGHT campaign (91astrology, 2026-05-23) died
+    // because Call 1 produced unparseable JSON twice in a row — the campaign was
+    // killed before the analyst could even see it. Retry-with-feedback gives the
+    // LLM one explicit chance to fix its own output.
     let call1Parsed: CampaignReviewOutput;
     try {
       call1Parsed = this.parseOutput(call1.content);
     } catch (parseErr: any) {
-      throw new Error(`Campaign Review Team Call 1 returned unparseable output — cannot proceed to analyst review: ${parseErr.message}`);
+      this.logger.warn(`Campaign Review Call 1 parse failed — retrying with feedback: ${parseErr.message}`);
+      call1Parsed = await this.retryParseWithFeedback(
+        tenantId, runId,
+        call1Prompt,
+        parseErr.message,
+        company.prompts?.campaignCreator ?? '',
+        'Call 1 (strategist)',
+      );
     }
 
     // ── Call 2: Performance Analyst challenges and finalises ────────────────
@@ -307,7 +319,65 @@ Return ONLY this JSON (no markdown, no explanation):
     });
 
     this.logger.log(`Campaign Review Team sequential — Call 2 done | tenant: ${tenantId} | run: ${runId}`);
-    return this.parseOutput(call2.content);
+    try {
+      return this.parseOutput(call2.content);
+    } catch (parseErr: any) {
+      this.logger.warn(`Campaign Review Call 2 parse failed — retrying with feedback: ${parseErr.message}`);
+      return await this.retryParseWithFeedback(
+        tenantId, runId,
+        call2UserMessage,
+        parseErr.message,
+        `You are a Performance Marketing Analyst specializing in Meta Ads for Indian brands.`,
+        'Call 2 (analyst)',
+      );
+    }
+  }
+
+  /**
+   * Run ONE retry with explicit parse-failure feedback. The LLM gets the error
+   * message + a reminder to return ONLY the JSON. If the retry also fails, this
+   * throws — the caller is responsible for handling that as a deterministic-
+   * fallback trigger (see campaign-creator).
+   *
+   * Cost: one extra Sonnet call (~$0.05) per parse failure. Saves a campaign
+   * that would otherwise be killed entirely (lost angle, wasted creative spend).
+   */
+  private async retryParseWithFeedback(
+    tenantId: string,
+    runId: string,
+    originalPrompt: string,
+    originalError: string,
+    systemPrompt: string,
+    label: string,
+  ): Promise<CampaignReviewOutput> {
+    const retryPrompt = `Your previous output failed JSON parsing with error: "${originalError}"
+
+Common causes:
+- Trailing commas before } or ]
+- Unescaped newlines or quotes inside string values
+- Mixing markdown commentary outside the JSON block
+- Forgetting a closing } or ]
+
+Return ONLY the JSON object specified in the original prompt — no preamble, no markdown fences, no trailing commentary. Start with { and end with }.
+
+Original request (last 3000 chars):
+${originalPrompt.slice(-3000)}`;
+    const retry = await this.claudeService.runAgent({
+      tenantId, runId,
+      agentType: AgentType.CAMPAIGN_REVIEW_LEAD,
+      systemPrompt,
+      liveContext: '',
+      userMessage: retryPrompt,
+      maxTurns: 2,
+      skills: skillsForAgent('CAMPAIGN_REVIEW'),
+    });
+    try {
+      const parsed = this.parseOutput(retry.content);
+      this.logger.log(`Campaign Review ${label} retry succeeded`);
+      return parsed;
+    } catch (retryErr: any) {
+      throw new Error(`Campaign Review Team ${label} unparseable after retry — original: ${originalError} | retry: ${retryErr.message}`);
+    }
   }
 
   /**
@@ -958,13 +1028,8 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   }
 
   private parseOutput(content: string): CampaignReviewOutput {
-    let jsonStr = '';
     try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      jsonStr = fenceMatch
-        ? fenceMatch[1].trim()
-        : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
-      const parsed: CampaignReviewOutput = JSON.parse(jsonStr);
+      const parsed = parseRobustJson<CampaignReviewOutput>(content, { includeInput: true });
 
       // Validate budgetPercent sums to 100 — fix by normalising if off
       const adSets = parsed.campaign?.adSets ?? [];
@@ -981,7 +1046,8 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
 
       return parsed;
     } catch (err: any) {
-      this.logger.error(`Campaign Review Team output parse failed: ${err.message} | content snippet: ${content.slice(0, 300)}`);
+      const preview = err instanceof RobustJsonParseError ? err.inputPreview : content.slice(0, 300);
+      this.logger.error(`Campaign Review Team output parse failed: ${err.message} | content snippet: ${preview}`);
       throw new Error(`Campaign Review Team returned invalid JSON: ${err.message}`);
     }
   }

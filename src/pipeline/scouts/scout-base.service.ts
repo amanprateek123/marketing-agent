@@ -5,6 +5,7 @@ import { createHash } from 'crypto';
 import { ClaudeService } from '../../claude/claude.service';
 import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
+import { parseRobustJson } from '../../common/llm/robust-json-parser.util';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import {
   ScoutOutput,
@@ -211,19 +212,7 @@ ${lines}
     let parsed: Partial<ScoutOutputData>;
 
     try {
-      // 1. Try to extract a ```json ... ``` block anywhere in the response
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      if (fenceMatch) {
-        parsed = JSON.parse(fenceMatch[1].trim());
-      } else {
-        // 2. Find the outermost { ... } object in the response
-        const start = content.indexOf('{');
-        const end = content.lastIndexOf('}');
-        if (start === -1 || end === -1 || end <= start) {
-          throw new Error('No JSON object found in response');
-        }
-        parsed = JSON.parse(content.slice(start, end + 1));
-      }
+      parsed = parseRobustJson<Partial<ScoutOutputData>>(content);
     } catch (err) {
       throw new Error(
         `Invalid JSON response from ${this.platform} scout: ${err instanceof Error ? err.message : String(err)}`,

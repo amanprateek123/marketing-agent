@@ -7,6 +7,7 @@ import { CopyVariant } from '../schemas/creative-package.schema';
 import { HOOK_STYLES_DR, HOOK_STYLE_DESCRIPTIONS } from '../../common/creative/hook-styles';
 import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 import { skillsForAgent, buildSkillBlock } from '../../common/skills/agent-skill-map';
+import { parseRobustJson } from '../../common/llm/robust-json-parser.util';
 import {
   resolveTargetLanguage,
   LANGUAGE_REGISTER_HINT,
@@ -199,11 +200,8 @@ Return ONLY valid JSON in this format:
   }
 
   private parse(content: string): CopyPackage {
-    const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-    const raw = fenceMatch ? fenceMatch[1].trim() : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
-
     try {
-      const parsed = JSON.parse(raw);
+      const parsed: any = parseRobustJson(content);
       if (!Array.isArray(parsed.variants) || parsed.variants.length === 0) {
         throw new Error('No variants in response');
       }

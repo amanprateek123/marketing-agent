@@ -4,6 +4,7 @@ import { Model } from 'mongoose';
 import { ClaudeService } from '../claude/claude.service';
 import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { ScoutSignal, ScoutSignalDocument } from './schemas/scout-signal.schema';
 import { ScoutOutput, ScoutOutputDocument } from './schemas/scout-output.schema';
@@ -300,9 +301,7 @@ Rules:
 
   private parseStructuredResearch(content: string, type: string): StructuredResearch {
     try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      const jsonStr = fenceMatch ? fenceMatch[1].trim() : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
-      const parsed = JSON.parse(jsonStr);
+      const parsed: any = parseRobustJson(content);
 
       const insights: ResearchInsight[] = (parsed.insights ?? [])
         .filter((i: any) => i.insight && i.implication && typeof i.score === 'number')

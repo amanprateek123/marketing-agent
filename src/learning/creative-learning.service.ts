@@ -10,6 +10,7 @@ import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema
 import { LearningRun, LearningRunDocument } from './schemas/learning-run.schema';
 import { CreativeLearnings } from '../companies/schemas/company.types';
 import { wilsonLowerBound, inverseNormalCdf } from '../common/statistics/bayesian-estimator.util';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 
 const MIN_PACKAGES = 3;
 const MIN_CONFIDENCE = 0.50;
@@ -232,10 +233,7 @@ Return ONLY the JSON object.`,
 
   private parseCreativeLearnings(content: string): CreativeLearnings {
     try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      const raw = fenceMatch
-        ? JSON.parse(fenceMatch[1].trim())
-        : JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+      const raw: any = parseRobustJson(content);
 
       return {
         winningHooks: raw.winningHooks ?? [],

@@ -4,6 +4,7 @@ import { Model } from 'mongoose';
 import { ClaudeService } from '../claude/claude.service';
 import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import {
   MetaAdsLibraryOutput,
@@ -192,11 +193,7 @@ RULES (non-negotiable):
 
   private parseInsights(content: string): MetaAdsLibraryInsights {
     try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      const jsonStr = fenceMatch
-        ? fenceMatch[1].trim()
-        : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
-      const parsed = JSON.parse(jsonStr);
+      const parsed: any = parseRobustJson(content);
 
       const competitorAds: CompetitorAdInsight[] = (parsed.competitorAds ?? [])
         .filter((a: any) => a.competitor && a.hook && typeof a.score === 'number')

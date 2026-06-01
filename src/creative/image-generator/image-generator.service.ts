@@ -302,30 +302,44 @@ Return ONLY the image prompt, nothing else.
     // gpt-image-* expects the same photoreal prefix Nano Banana gets — keeps style parity across providers.
     const styledPrompt = `Photorealistic photograph. Real human faces, real skin textures, natural lighting. NOT illustration, NOT cartoon, NOT animated, NOT 3D render, NOT digital art. Shot on a professional camera.\n\n${prompt}`;
 
-    const response = await axios.post(
-      'https://api.openai.com/v1/images/generations',
-      {
-        model,
-        prompt: styledPrompt,
-        size: '1024x1536', // closest supported 9:16 ratio
-        n: 1,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 120000,
-      },
-    );
+    const maxAttempts = 2;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.post(
+          'https://api.openai.com/v1/images/generations',
+          {
+            model,
+            prompt: styledPrompt,
+            size: '1024x1536', // closest supported 9:16 ratio
+            n: 1,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 240000,
+          },
+        );
 
-    const b64 = response.data?.data?.[0]?.b64_json;
-    if (!b64) {
-      throw new Error(`No image data in OpenAI response: ${JSON.stringify(response.data).slice(0, 300)}`);
+        const b64 = response.data?.data?.[0]?.b64_json;
+        if (!b64) {
+          throw new Error(`No image data in OpenAI response: ${JSON.stringify(response.data).slice(0, 300)}`);
+        }
+
+        this.logger.log(`OpenAI image generated: tenantId=${tenantId} attempt=${attempt}`);
+        return Buffer.from(b64, 'base64');
+      } catch (err) {
+        lastError = err;
+        const status = (err as any)?.response?.status;
+        const code = (err as any)?.code;
+        const retriable = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || (typeof status === 'number' && status >= 500);
+        if (!retriable || attempt === maxAttempts) throw err;
+        this.logger.warn(`OpenAI image attempt ${attempt} failed (code=${code} status=${status}); retrying`);
+      }
     }
-
-    this.logger.log(`OpenAI image generated: tenantId=${tenantId}`);
-    return Buffer.from(b64, 'base64');
+    throw lastError;
   }
 
   private async callNanoBanana(prompt: string, tenantId: string): Promise<Buffer> {

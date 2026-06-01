@@ -26,6 +26,25 @@ export interface BriefData {
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
   explorationArm?: boolean;                 // when true, Creative Team skips winningHooks/winningExemplars injection (closed-loop drift mitigation)
+  /**
+   * Exploit-winner marker — when set, Creative Team looks up the matching
+   * HotWinner (via metaAdId) on company.learnings.hotWinners and injects a
+   * "anchor on this verbatim pattern (don't copy)" block. Strategy Team
+   * writes this onto the CreativeBrief; creative-producer reads it from
+   * the brief doc and forwards here.
+   */
+  winnerCloneOf?: {
+    sourceCampaignId: string;
+    sourceBriefId: string;
+    metaAdId: string;
+    hookStyle: string;
+    audienceType: string;
+    format?: 'video' | 'image';
+    budgetTier: number;
+    sourceCPA: number;
+    sourceROAS: number;
+    clonedAt: Date;
+  };
   // Resolved language for all creative output. Caller may override; otherwise
   // creative-producer resolves from segment.languages → product.languages → 'hinglish'.
   // Drives copy text, image overlay text, and (when language video lands) VO script.

@@ -198,22 +198,22 @@ export class CampaignCreatorService {
 
       this.logger.log(`Campaign Review Team approved | rounds: ${review.debateRounds} | adSets: ${review.campaign?.adSets?.length ?? 0}`);
     } else {
-      this.logger.error(`Campaign Review Team failed after 2 attempts — saving campaign as failed`);
-      await this.campaignModel.create({
-        tenantId: company.tenantId,
-        runId,
-        briefId: brief.briefId,
-        name: `FAILED_${brief.topic.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30)}`,
-        topic: brief.topic ?? '',
-        angle: brief.angle ?? '',
-        creativePackageId: creativePackage?._id?.toString() ?? '',
-        metaCampaignId: '',
-        status: 'failed',
-        budget: 0,
-        objective: company.primaryObjective,
-        reviewNotes: 'Campaign Review Team failed after 2 attempts — no valid config produced',
-      });
-      throw new Error(`Campaign Review Team failed after 2 attempts for brief ${brief.briefId} — campaign saved as failed`);
+      // ── Deterministic fallback ─────────────────────────────────────────────
+      // Was: throw + save FAILED_* row → the brief's angle was lost entirely
+      // (see FAILED_ASTROTALK_TRUST_FLIGHT, 91astrology 2026-05-23 — strong
+      // competitor-displacement angle killed because Campaign Review's two
+      // attempts both returned unparseable JSON).
+      //
+      // Now: when the Review Team fails, build a conservative TypeScript-only
+      // config from the brief + product defaults, mark it pending_approval
+      // with a clear `used_deterministic_fallback` note in reviewNotes so the
+      // operator can sanity-check before approving. Strong-angle briefs no
+      // longer die from formatting bugs.
+      this.logger.warn(
+        `Campaign Review Team failed after 2 attempts — falling back to deterministic config for brief ${brief.briefId}`,
+      );
+      review = this.buildFallbackReview(brief, company);
+      finalBudget = review.campaign.budget;
     }
 
     // ── Idempotency: don't create duplicate campaigns for same brief ──────────
@@ -960,6 +960,100 @@ To launch this campaign, call:
 \`POST /api/v1/campaigns/${tenantId}/${campaignId}/approve\`
 
 Or reply here to discuss changes.`;
+  }
+
+  /**
+   * Build a deterministic, conservative campaign config when the Review Team
+   * fails to produce parseable output (after retry-with-feedback already
+   * burned). Goal: preserve the brief's angle and let the operator approve
+   * a safe-default config rather than discarding the work entirely.
+   *
+   * Conservatism choices:
+   *  - One advantage_plus ad set (no audience splitting — Meta optimizes)
+   *  - Daily budget = min(brief.suggestedBudget, weeklyCap/7, maxBudget × 0.4)
+   *  - All available variants assigned (Meta picks the winner)
+   *  - Pause rules anchored to product price (CPA > price → pause)
+   *  - Scale rules anchored to scaleIfROASAbove
+   *
+   * The campaign is marked pending_approval with reviewNotes:'used_deterministic_fallback'
+   * so the operator sees clearly that no LLM review happened on this one.
+   */
+  private buildFallbackReview(
+    brief: CreativeBriefDocument,
+    company: CompanyDocument,
+  ): CampaignReviewOutput {
+    const product = (company.products ?? []).find(p => p.name === brief.product)
+      ?? (company.products ?? []).find(p => p.active);
+    const weeklyCap = company.weeklyBudgetCap ?? 50000;
+    const maxBudget = company.maxBudgetPerCampaign ?? 20000;
+    const proposed = brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round(weeklyCap * 0.2);
+    const fallbackBudget = Math.max(
+      500,
+      Math.min(proposed, Math.floor(weeklyCap / 7), Math.floor(maxBudget * 0.4)),
+    );
+    const breakevenCPA = product?.price ?? 1799;
+    const pauseROAS = company.pauseIfROASBelow ?? 0.8;
+    const pauseCTR = company.pauseIfCTRBelow ?? 0.5;
+    const scaleROAS = company.scaleIfROASAbove ?? 1.5;
+    const conversionEvent = product?.conversionEvent ?? 'Purchase';
+    const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+
+    // Funnel-stage-aware fallback: warm/hot briefs need a custom/retarget
+    // audience — advantage_plus would be rejected by the downstream
+    // audienceStage guard. If a custom audience is available on the product,
+    // use it; otherwise the audienceStage guard correctly throws later.
+    const briefStage = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
+    const isWarmOrHot = briefStage === 'warm' || briefStage === 'hot';
+    const customAudience = isWarmOrHot
+      ? (product?.metaAudiences ?? []).find(a => a.type === 'custom')
+      : undefined;
+    const fallbackAdSet = isWarmOrHot && customAudience
+      ? {
+          name: `META_CONVERSIONS_${customAudience.name.toUpperCase().slice(0, 20)}_FALLBACK_${new Date().toISOString().split('T')[0]}`,
+          budgetPercent: 100,
+          audienceType: 'custom' as const,
+          metaAudienceId: customAudience.id,
+          geoLocations: [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()],
+          optimizationGoal: 'OFFSITE_CONVERSIONS',
+          ads: [0, 1, 2, 3],
+          creativeFormat: 'mixed' as const,
+          excludedAudienceIds: [],
+        }
+      : {
+          name: `META_CONVERSIONS_ADV-PLUS_FALLBACK_${new Date().toISOString().split('T')[0]}`,
+          budgetPercent: 100,
+          audienceType: 'advantage_plus' as const,
+          geoLocations: [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()],
+          optimizationGoal: 'OFFSITE_CONVERSIONS',
+          ads: [0, 1, 2, 3],
+          creativeFormat: 'mixed' as const,
+          excludedAudienceIds: (product?.metaAudiences ?? [])
+            .filter(a => a.type === 'custom' && /buyer|customer|purchase/i.test(a.name))
+            .map(a => a.id),
+        };
+
+    return {
+      approved: true,
+      campaign: {
+        budget: fallbackBudget,
+        objective: 'OUTCOME_SALES',
+        conversionEvent,
+        conversionValue,
+        adSets: [fallbackAdSet],
+        scaleRules: `After 7 days: if ROAS > ${scaleROAS}x AND conversions >= 10 → scale 20% (single step, max 40% cumulative). Manual approval required for scale.`,
+        pauseRules: `Per ad: CTR < ${pauseCTR}% after ₹${Math.round(breakevenCPA * 2)} spent → pause ad. Per ad set: ROAS < ${pauseROAS} after 7 days → pause. CPA > ₹${breakevenCPA} (product price) after ₹${Math.round(breakevenCPA * 3)} spend → pause and flag.`,
+      },
+      adjustments: {
+        budgetAdjusted: fallbackBudget !== brief.suggestedBudget,
+        originalBudget: brief.suggestedBudget,
+        recommendedBudget: fallbackBudget,
+      },
+      debateRounds: 0,
+      debateLog: [
+        { round: 0, from: 'system', summary: 'Campaign Review Team failed to produce parseable output after retry — deterministic fallback config used (1 advantage_plus ad set, conservative budget, all variants).' },
+      ],
+      debateRationale: `DETERMINISTIC FALLBACK: Review Team unparseable after retry. Built safe-default config: ₹${fallbackBudget}/day on a single advantage_plus ad set with all available variants, pause at CPA > ₹${breakevenCPA}, scale at ROAS > ${scaleROAS}x with ≥10 conv. Operator should review before approving.`,
+    };
   }
 
 }

@@ -12,6 +12,42 @@ import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputDocument } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { resolveVertical } from '../common/benchmarks/vertical-benchmarks';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
+
+/**
+ * Brief input to the Creative Team. winnerCloneOf is the exploit-winner
+ * marker — when set, the Creative Team looks up the matching HotWinner
+ * (via metaAdId) on company.learnings and anchors on its verbatim hookLine.
+ */
+export interface CreativeTeamBriefInput {
+  topic: string;
+  angle: string;
+  platform: string;
+  format: string;
+  audience: string;
+  hook: string;
+  keyMessage: string;
+  conversionBridge: string;
+  product?: string;
+  targetSegment?: string;
+  forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
+  avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
+  audienceStage?: 'cold' | 'warm' | 'hot';
+  targetLanguage?: string;
+  explorationArm?: boolean;
+  winnerCloneOf?: {
+    sourceCampaignId: string;
+    sourceBriefId: string;
+    metaAdId: string;
+    hookStyle: string;
+    audienceType: string;
+    format?: 'video' | 'image';
+    budgetTier: number;
+    sourceCPA: number;
+    sourceROAS: number;
+    clonedAt: Date;
+  };
+}
 
 export interface CreativeTeamOutput {
   variants: CopyVariant[];
@@ -49,22 +85,7 @@ export class CreativeTeamService {
   ) {}
 
   async run(
-    brief: {
-      topic: string;
-      angle: string;
-      platform: string;
-      format: string;
-      audience: string;
-      hook: string;
-      keyMessage: string;
-      conversionBridge: string;
-      product?: string;
-      targetSegment?: string;
-      forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
-      avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
-      audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting (problem-first); warm = retarget (offer-recall); hot = cart-recovery (urgency)
-      targetLanguage?: string;                 // resolved by creative-producer (canonical lowercase: 'marathi', 'hindi', 'hinglish', ...). Threaded into the system prompt so copy + image overlays render in this language.
-    },
+    brief: CreativeTeamBriefInput,
     company: CompanyDocument,
     runId: string,
   ): Promise<CreativeTeamOutput> {
@@ -80,14 +101,7 @@ export class CreativeTeamService {
 
   // ── CLI path ────────────────────────────────────────────────────────────────
   private async runViaCli(
-    brief: {
-      topic: string; angle: string; platform: string; format: string;
-      audience: string; hook: string; keyMessage: string; conversionBridge: string;
-      product?: string; targetSegment?: string;
-      forcedHookStyle?: string; avoidHookStyles?: string[];
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CreativeTeamBriefInput,
     company: CompanyDocument,
     runId: string,
   ): Promise<CreativeTeamOutput> {
@@ -111,14 +125,7 @@ export class CreativeTeamService {
 
   // ── Sequential path (2 runAgent() calls) ───────────────────────────────────
   private async runSequential(
-    brief: {
-      topic: string; angle: string; platform: string; format: string;
-      audience: string; hook: string; keyMessage: string; conversionBridge: string;
-      product?: string; targetSegment?: string;
-      forcedHookStyle?: string; avoidHookStyles?: string[];
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CreativeTeamBriefInput,
     company: CompanyDocument,
     runId: string,
   ): Promise<CreativeTeamOutput> {
@@ -234,14 +241,7 @@ Return ONLY this JSON (no markdown, no explanation):
   }
 
   private async buildCall1Prompt(
-    brief: {
-      topic: string; angle: string; platform: string; format: string;
-      audience: string; hook: string; keyMessage: string; conversionBridge: string;
-      product?: string; targetSegment?: string;
-      forcedHookStyle?: string; avoidHookStyles?: string[];
-      audienceStage?: 'cold' | 'warm' | 'hot';
-      targetLanguage?: string;
-    },
+    brief: CreativeTeamBriefInput,
     company: CompanyDocument,
     runId: string,
   ): Promise<string> {
@@ -292,22 +292,7 @@ Return ONLY this JSON (no markdown, no explanation):
   }
 
   private async buildPrompt(
-    brief: {
-      topic: string;
-      angle: string;
-      platform: string;
-      format: string;
-      audience: string;
-      hook: string;
-      keyMessage: string;
-      conversionBridge: string;
-      product?: string;
-      targetSegment?: string;
-      forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
-      avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
-      audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting (problem-first); warm = retarget (offer-recall); hot = cart-recovery (urgency)
-      targetLanguage?: string;                 // resolved by creative-producer (canonical lowercase: 'marathi', 'hindi', 'hinglish', ...). Threaded into the system prompt so copy + image overlays render in this language.
-    },
+    brief: CreativeTeamBriefInput,
     company: CompanyDocument,
     runId: string,
   ): Promise<string> {
@@ -416,6 +401,43 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
         ? ` (mixed stages — pool was thin for ${brief.audienceStage})`
         : '';
       return `\nPAST WINNING HOOK LINES${stageBanner} (verbatim — use as inspiration for structure/tone/specificity, NOT to copy):\n${formatted}\n`;
+    })();
+
+    // Winner-clone anchor — when this brief was tagged as a clone of a specific
+    // hotWinner by the Strategy Team's exploit-winner arm, look up the source
+    // winner's verbatim hookLine and inject it as a strong anchor pattern. The
+    // Creative Team prompt then has BOTH the hookStyle label (already carried
+    // by the brief.winnerCloneOf) AND the actual phrasing that converted,
+    // closing the gap where clones share the hookStyle but lose the pattern.
+    //
+    // Lookup is via metaAdId on company.learnings.hotWinners (cached by audit).
+    // If the hotWinner has aged out of the cache (>10 entries + this one evicted,
+    // or 60d decay), we degrade gracefully and only render the hookStyle params.
+    const cloneAnchorBlock = (() => {
+      const clone = brief.winnerCloneOf;
+      if (!clone) return '';
+      const hotWinners = ((company.learnings as any)?.hotWinners ?? []) as Array<any>;
+      const source = hotWinners.find(w => w?.metaAdId === clone.metaAdId);
+      const sourceLine = source?.hookLine ? `\nSOURCE WINNING HOOK LINE (verbatim — anchor on this structure/tone/specificity, DO NOT copy line-for-line):\n  "${source.hookLine}"` : '';
+      const sourceCpaRoas = `Source: campaign ${clone.sourceCampaignId} | CPA ₹${Math.round(clone.sourceCPA)} | ROAS ${clone.sourceROAS.toFixed(2)}x`;
+      const params = `Hook style: ${clone.hookStyle} | Audience: ${clone.audienceType}${clone.format ? ` | Format: ${clone.format}` : ''} | Proven budget tier: ₹${clone.budgetTier}/day`;
+      return `
+
+═══════════════════════════════════════════════════════
+🏆 WINNER-CLONE BRIEF — REPLICATE THE WINNING PATTERN
+═══════════════════════════════════════════════════════
+
+This brief is a deliberate clone of a recently-validated winner. The Strategy Team picked it because the topic in THIS brief is new but the underlying winning combination (hook × audience × format × budget) is proven.
+
+${sourceCpaRoas}
+${params}${sourceLine}
+
+YOUR JOB ON A CLONE BRIEF:
+- The SELECTED variant MUST use hookStyle = "${clone.hookStyle}" (mandatory — this is what's proven).
+- The selected variant's primaryText opening line should ECHO the structural pattern of the source line above (rhythm, specificity, emotional register) WITHOUT copying it verbatim. New topic, same architecture.
+- The other 3 variants are FREE to test adjacent hookStyles for diversity (but the selected one is locked).
+- Do NOT default to fresh creative direction here — this is exploit, not explore. Anchor hard on what's working.
+`;
     })();
 
     // Strategy mode
@@ -627,7 +649,7 @@ FORMAT: Vertical 9:16, photorealistic, 5-6 sentences.
 
 PAST VISUAL LEARNINGS:
 ${visualLearnings}
-${winningExemplarsBlock}
+${cloneAnchorBlock}${winningExemplarsBlock}
 AVOID:
 - Generic images where the main concept is small/hidden — if the ad is about a specific date, that date must DOMINATE
 - Lifestyle photos with no clear focal point
@@ -855,13 +877,8 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   }
 
   private parseOutput(content: string): CreativeTeamOutput {
-    let jsonStr = '';
     try {
-      const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-      jsonStr = fenceMatch
-        ? fenceMatch[1].trim()
-        : content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1);
-      const parsed = JSON.parse(jsonStr);
+      const parsed: any = parseRobustJson(content);
       // Validate imagePrompts is an array — LLM may return old singular imagePrompt format
       if (!Array.isArray(parsed.imagePrompts)) {
         if (typeof parsed.imagePrompt === 'string' && parsed.imagePrompt) {

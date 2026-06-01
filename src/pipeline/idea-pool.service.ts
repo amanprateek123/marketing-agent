@@ -7,6 +7,7 @@ import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 import { IntelligenceBrief, IntelligenceBriefDocument } from './schemas/intelligence-brief.schema';
 import { CreativeBrief, CreativeBriefDocument } from './schemas/creative-brief.schema';
 import { CoordinatorResult } from './coordinator.service';
@@ -381,23 +382,9 @@ Rules:
   }
 
   private parseBriefs(content: string): any[] {
-    const fenceMatch = content.match(/```json\s*([\s\S]*?)```/i);
-    if (fenceMatch) {
-      try {
-        const parsed = JSON.parse(fenceMatch[1].trim());
-        return Array.isArray(parsed.briefs) ? parsed.briefs.map((b: any) => ({ ...b, briefId: '' })) : [];
-      } catch {
-        return [];
-      }
-    }
-
-    // Fallback: find outermost { }
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start === -1 || end === -1) return [];
     try {
-      const parsed = JSON.parse(content.slice(start, end + 1));
-      return Array.isArray(parsed.briefs) ? parsed.briefs.map((b: any) => ({ ...b, briefId: '' })) : [];
+      const parsed: any = parseRobustJson(content);
+      return Array.isArray(parsed?.briefs) ? parsed.briefs.map((b: any) => ({ ...b, briefId: '' })) : [];
     } catch {
       return [];
     }
