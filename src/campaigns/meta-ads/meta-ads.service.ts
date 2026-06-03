@@ -602,13 +602,26 @@ export class MetaAdsService {
     // LOWEST_COST_WITHOUT_CAP delivered to lowest-quality placements).
     // Fall back to LOWEST_COST_WITHOUT_CAP when no bid is set (custom-audience
     // retargeting where the audience itself is the quality gate).
-    const useBidCap = typeof config.bidAmountInr === 'number' && config.bidAmountInr > 0;
+    //
+    // Guard: Meta rejects COST_CAP + optimization_goal=VALUE (Value-Based Bidding
+    // is only compatible with LOWEST_COST_WITHOUT_CAP or LOWEST_COST_WITH_MIN_ROAS).
+    // When VALUE is set, suppress COST_CAP regardless of bidAmountInr.
+    const optimizationGoal = config.optimizationGoal || 'OFFSITE_CONVERSIONS';
+    const isValueOptimization = optimizationGoal === 'VALUE';
+    const useBidCap = !isValueOptimization
+      && typeof config.bidAmountInr === 'number'
+      && config.bidAmountInr > 0;
+    if (isValueOptimization && typeof config.bidAmountInr === 'number' && config.bidAmountInr > 0) {
+      this.logger.warn(
+        `bidAmountInr=${config.bidAmountInr} supplied but suppressed — COST_CAP is incompatible with optimization_goal=VALUE. Ad set will ship with LOWEST_COST_WITHOUT_CAP (Highest Value).`,
+      );
+    }
     const adSetData: any = {
       name: config.name,
       campaign_id: campaignId,
       daily_budget: dailyBudgetPaise,
       billing_event: 'IMPRESSIONS',
-      optimization_goal: config.optimizationGoal || 'OFFSITE_CONVERSIONS',
+      optimization_goal: optimizationGoal,
       destination_type: 'WEBSITE',
       bid_strategy: useBidCap ? 'COST_CAP' : 'LOWEST_COST_WITHOUT_CAP',
       ...(useBidCap ? { bid_amount: Math.round(config.bidAmountInr! * 100) } : {}),

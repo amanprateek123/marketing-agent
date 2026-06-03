@@ -1215,6 +1215,12 @@ export class CampaignAuditorService {
             this.logger.log(`Redistributed budget: existing ad sets scaled to ${Math.round(scaleFactor * 100)}% to make room for ${newAdSetPercent}%`);
           }
 
+          // Inherit the existing campaign's optimization goal — adding a VALUE
+          // ad set to an OFFSITE_CONVERSIONS campaign (or vice versa) splits
+          // the learning signal and confuses ROAS comparison across ad sets.
+          const inheritedOptimizationGoal =
+            (campaign as any).campaignConfig?.adSets?.[0]?.optimizationGoal ?? 'OFFSITE_CONVERSIONS';
+
           // Create new ad set via Meta API
           const newAdSetId = await this.metaAds.createAdSetInCampaign(
             campaign.metaCampaignId,
@@ -1223,7 +1229,7 @@ export class CampaignAuditorService {
               name: adSetName,
               budgetPercent: newAdSetPercent,
               audienceType,
-              optimizationGoal: 'OFFSITE_CONVERSIONS',
+              optimizationGoal: inheritedOptimizationGoal,
               ads: [bestVariantIndex],
               ...(retargetAudienceId ? { metaAudienceId: retargetAudienceId } : {}),
               ...(audienceType !== 'retarget' ? targeting : {}),

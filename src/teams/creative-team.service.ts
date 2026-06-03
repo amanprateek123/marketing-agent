@@ -181,8 +181,8 @@ Review the creative package below for:
 3. PLATFORM SPECS — ${brief.platform} requirements
 4. CULTURAL SENSITIVITY — content targets ${company.targetAudience} in ${company.geography}
 5. FORBIDDEN TOPICS: ${company.forbiddenTopics?.join(', ') || 'none specified'}
-6. PRODUCT ACCURACY — product name must be "${resolvedProduct?.name ?? brief.product ?? 'correct'}", price must be ₹${resolvedProduct?.price ?? 'correct'}
-7. FACT-ANCHOR VERIFICATION — every named entity (competitor name, person, news event, statistic, deadline, fabricated quote, specific price other than the product price) in primaryText/headline MUST appear in the BRIEF FACTS block below. If a variant cites something not in BRIEF FACTS — it is fabrication. Rewrite it using only sourced facts or replace with a generic relatable pain.
+6. PRODUCT ACCURACY — product name must be "${resolvedProduct?.name ?? brief.product ?? 'correct'}"${resolvedProduct?.hidePriceInCreative ? `. PRICE SUPPRESSION ACTIVE: copy must NOT mention any price (no ₹, no rupees, no numbers like ${resolvedProduct?.price}, no "booking fee" amounts). If any variant includes a price, REJECT it and rewrite without price.` : `, price must be ₹${resolvedProduct?.price ?? 'correct'}`}
+7. FACT-ANCHOR VERIFICATION — every named entity (competitor name, person, news event, statistic, deadline, fabricated quote${resolvedProduct?.hidePriceInCreative ? '' : ', specific price other than the product price'}) in primaryText/headline MUST appear in the BRIEF FACTS block below. If a variant cites something not in BRIEF FACTS — it is fabrication. Rewrite it using only sourced facts or replace with a generic relatable pain.
 8. LOGICAL COHERENCE — for each variant, the chain must hold: HEADLINE promises X → primaryText opening 90 chars deliver X (not unrelated story Y) → body's value proposition is what the CTA acts on. If headline and body are about different things, that is a bait-and-switch — rewrite the body to deliver the headline's promise (or rewrite the headline to match the body, whichever stays closer to the brief).
 
 BRIEF FACTS (the ONLY facts that may be cited — anything else is fabrication):
@@ -270,7 +270,7 @@ Return ONLY this JSON (no markdown, no explanation):
 {
   "variants": [
     {
-      "primaryText": "Hook line.\\n\\nValue + product line.\\n\\n₹price | proof.\\n\\nUrgency + CTA.",
+      "primaryText": "${resolvedProduct?.hidePriceInCreative ? 'Hook line.\\\\n\\\\nValue + product line.\\\\n\\\\nProof / social signal.\\\\n\\\\nUrgency + CTA.' : 'Hook line.\\\\n\\\\nValue + product line.\\\\n\\\\n₹price | proof.\\\\n\\\\nUrgency + CTA.'}",
       "headline": "Benefit-led headline",
       "cta": "Order Now",
       "hookStyle": "pain_point"
@@ -284,7 +284,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its specific hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its specific hook..."
   ],
-  "videoPrompt": "Pick duration + opener + music based on the SELECTED variant's hookStyle. Example below for hookStyle='pain_point' (30-40s, story-arc):\\n\\nDuration: 35 seconds, 9:16 vertical for Reels/Stories. Cinematic b-roll only — no avatars, no talking-head. Off-screen Hindi voiceover, Indian instrumental music.\\n\\nFIRST FRAME (controls thumbnail): Close-up of stressed hands gripping a phone, late-night room lighting, blurred kundli paper visible on the table beside the phone. Bold Hindi/Hinglish text overlay = the hook line.\\n\\n0-3s: Hold on the first frame, hook text fully visible. Single tanpura drone, no other sound. Establishes pain instantly.\\n\\n3-15s: PERSONAL STORY beat. Hard cut to a different relatable scene — woman staring out a rainy window, pages of a kundli rifling on a table, a circled date on a wall calendar. Hindi voiceover begins in conversational tone (warm, knowing — never preachy): names the specific astrology pain (Sade Sati / Mangal dosh / Mercury Retrograde — match to the brief's topic). Slow sitar/bansuri solo joins, minor key.\\n\\n15-25s: SHIFT to a brighter beat. Visual transitions to a lit puja desk with the relevant deity iconography (Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — match to topic), open kundli with planetary lines highlighted, hands tracing transit positions. Voiceover delivers the resolution / what becomes possible. Tabla layers in.\\n\\n25-35s: CTA beat. Bold text overlay: \\\"${resolvedProduct?.name ?? 'Product'} — ₹${resolvedProduct?.price}\\\" with a specific CTA line below (\\\"Aaj hi consultation book karo\\\" / \\\"Pehli baat ₹1 mein\\\"). Final voiceover urgency line. Music hits one final tabla beat → clean stop. Black frame for 0.5s.\\n\\nNEGATIVE: no English-only text, no watermarks, no celebrity faces, no Western spiritual aesthetic (crystals/mandalas/Buddha statues), no fade transitions, no slow zooms.",
+  "videoPrompt": "Pick duration + opener + music based on the SELECTED variant's hookStyle. Example below for hookStyle='pain_point' (30-40s, story-arc):\\n\\nDuration: 35 seconds, 9:16 vertical for Reels/Stories. Cinematic b-roll only — no avatars, no talking-head. Off-screen Hindi voiceover, Indian instrumental music.\\n\\nFIRST FRAME (controls thumbnail): Close-up of stressed hands gripping a phone, late-night room lighting, blurred kundli paper visible on the table beside the phone. Bold Hindi/Hinglish text overlay = the hook line.\\n\\n0-3s: Hold on the first frame, hook text fully visible. Single tanpura drone, no other sound. Establishes pain instantly.\\n\\n3-15s: PERSONAL STORY beat. Hard cut to a different relatable scene — woman staring out a rainy window, pages of a kundli rifling on a table, a circled date on a wall calendar. Hindi voiceover begins in conversational tone (warm, knowing — never preachy): names the specific astrology pain (Sade Sati / Mangal dosh / Mercury Retrograde — match to the brief's topic). Slow sitar/bansuri solo joins, minor key.\\n\\n15-25s: SHIFT to a brighter beat. Visual transitions to a lit puja desk with the relevant deity iconography (Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — match to topic), open kundli with planetary lines highlighted, hands tracing transit positions. Voiceover delivers the resolution / what becomes possible. Tabla layers in.\\n\\n25-35s: CTA beat. Bold text overlay: \\\"${resolvedProduct?.name ?? 'Product'}${resolvedProduct?.hidePriceInCreative ? '' : ` — ₹${resolvedProduct?.price}`}\\\" with a specific CTA line below (\\\"Aaj hi consultation book karo\\\"${resolvedProduct?.hidePriceInCreative ? '' : ' / \\\"Pehli baat ₹1 mein\\\"'}). Final voiceover urgency line. Music hits one final tabla beat → clean stop. Black frame for 0.5s.\\n\\nNEGATIVE: no English-only text, no watermarks, no celebrity faces, no Western spiritual aesthetic (crystals/mandalas/Buddha statues), no fade transitions, no slow zooms.",
   "complianceNotes": "",
   "debateRounds": 1,
   "debateLog": [{"round": 1, "from": "creative-director", "summary": "drafted creative package"}]
@@ -333,9 +333,12 @@ ${caseStudies.slice(0, 7).map((cs, i) => `  ${i + 1}. ${cs.campaignName}: ${cs.w
     const productBlock = (() => {
       const product = resolvedProduct;
       if (!product) return 'PRODUCT: not specified — use company info for CTA';
+      const priceLine = product.hidePriceInCreative
+        ? `  PRICE SUPPRESSION ACTIVE: do NOT mention any price (no ₹, no rupees) in copy, headlines, image overlays, or video CTA frames. Price discovery happens on the landing page. Lead with discovery, social proof, lineage, and brand authority instead of price.`
+        : `  Price: ₹${product.price}`;
       return `PRODUCT BEING SOLD:
   Name: ${product.name}
-  Price: ₹${product.price}
+${priceLine}
   Landing URL: ${product.landingUrl ?? 'not set'}
   Languages: ${(product.languages ?? []).join(', ') || 'Hindi, English'}
   Differentiators: ${(product.differentiators ?? []).join(' | ') || 'not set'}
@@ -582,9 +585,11 @@ MEME COPY RULES:
 - primaryText: full ad body (3-5 lines). Structure:
   LINE 1 — THE HOOK: Scroll-stopper. First 90 chars shown before "See more".
   LINE 2-3 — THE VALUE: Agitate pain OR amplify desire. Introduce product as solution. MUST mention product name.
-  LINE 4 — PRICE + PROOF: State price (₹${resolvedProduct?.price ?? '[price]'}). Add social proof if available.
+  ${resolvedProduct?.hidePriceInCreative
+    ? `LINE 4 — PROOF / AUTHORITY: Add social proof, lineage, or trust signal. DO NOT mention any price (no ₹, no rupees, no booking-fee amounts). Price suppression is active for this product.`
+    : `LINE 4 — PRICE + PROOF: State price (₹${resolvedProduct?.price ?? '[price]'}). Add social proof if available.`}
   LINE 5 — CTA LINE: Create urgency. Push action TODAY.
-- headline: 5-7 words below the image/video. Lead with benefit or price.
+- headline: 5-7 words below the image/video. Lead with benefit${resolvedProduct?.hidePriceInCreative ? ' or authority' : ' or price'}.
 - cta: button text — "Shop Now", "Order Now", "Buy Today" (NOT "Learn More" unless considered purchase)
 - hookStyle: ${brief.forcedHookStyle
     ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (this is a forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
@@ -605,10 +610,16 @@ COPY RULES:
 - Hinglish where natural for ${company.targetAudience}
 - Specific beats vague — BUT every specific must trace to the FACT-ANCHOR sources above. If you cannot cite the source, use a generic relatable pain instead.
 - Product name in EVERY variant's primaryText
-- Price (₹${resolvedProduct?.price ?? '[price]'}) in EVERY variant — no exceptions
+${resolvedProduct?.hidePriceInCreative
+  ? `- PRICE SUPPRESSION: NO price (₹, rupees, booking fee amounts) in ANY variant — copy, headline, image overlay, or video CTA. Lead with discovery, lineage, social proof, or brand authority instead.`
+  : `- Price (₹${resolvedProduct?.price ?? '[price]'}) in EVERY variant — no exceptions`}
 - No generic phrases: "best quality", "amazing product", "don't miss out"
 - Hook → body → offer → CTA must form a logical chain. The headline's promise must be what the body delivers, and the body's value must be what the CTA acts on. No bait-and-switch (headline says X, body opens with unrelated story Y).
-${resolvedProduct ? `- Every variant MUST mention "${resolvedProduct.name}" and ₹${resolvedProduct.price}` : ''}`}
+${resolvedProduct
+  ? (resolvedProduct.hidePriceInCreative
+    ? `- Every variant MUST mention "${resolvedProduct.name}" — but NEVER its price.`
+    : `- Every variant MUST mention "${resolvedProduct.name}" and ₹${resolvedProduct.price}`)
+  : ''}`}
 
 ━━━ b) IMAGE PROMPTS — one per copy variant, for Nano Banana (Gemini Image) ━━━
 
@@ -634,7 +645,7 @@ STEP 2 — BUILD THE IMAGE AROUND THE CENTERPIECE:
 IMAGE STRUCTURE (describe ALL of these):
 - VISUAL CENTERPIECE (60% of the frame): The one concept from Step 1. Make it LARGE, BOLD, unmissable. This is what the viewer sees first.
 - TEXT OVERLAY — TOP: The hook line in bold, high-contrast Hinglish text. Exact words from the copy. Must be READABLE at phone size.
-- TEXT OVERLAY — BOTTOM: Product name + "₹${resolvedProduct?.price ?? '[price]'}" + CTA. High contrast.
+- TEXT OVERLAY — BOTTOM: ${resolvedProduct?.hidePriceInCreative ? `Product name "${resolvedProduct.name}" + CTA. NO price (no ₹, no rupees, no booking-fee amount). High contrast.` : `Product name + "₹${resolvedProduct?.price ?? '[price]'}" + CTA. High contrast.`}
 - PRODUCT PLACEMENT: Where the product appears — can be integrated with the centerpiece or alongside it.
 - SUPPORTING ELEMENTS: Background, people, colors that reinforce the centerpiece's emotion — but don't compete with it.
 
@@ -688,7 +699,7 @@ The first 0-3s decides thumb-stop ratio. The first frame becomes the Reel/Story 
 | before_after   | Split or transition visual — "before" on left/top (struggle) vs "after" on right/bottom (calm). Hook text bridges both. |
 | social_proof   | Number / testimonial visual — "10,000+ logon ne X kiya" with crowd b-roll, OR a real-feeling testimonial frame (no avatar — abstracted close-ups). |
 | curiosity_gap  | Object-question — single mysterious object centered (open kundli, planetary chart, glowing diya), text overlay = the unanswered question. |
-| price_shock    | The price as the first frame — large ₹{price} number on warm gradient, instantly recognizable as cheap. Optional small visual element above. |
+| price_shock    | ${resolvedProduct?.hidePriceInCreative ? 'NOT AVAILABLE for this product (price suppression active) — pick a different hookStyle.' : 'The price as the first frame — large ₹{price} number on warm gradient, instantly recognizable as cheap. Optional small visual element above.'} |
 | urgency        | Countdown/clock/calendar visual — circled date, ticking clock close-up, "[N] din baaki" text. Ticking percussive sound. |
 | bold_claim     | The claim itself as the first frame — large bold Hindi/Hinglish text on a context-relevant b-roll background. |
 
@@ -710,7 +721,7 @@ Match the duration / opener / music to the SELECTED variant's hookStyle. Three b
 
 (A) HOOK — 0 to ~20% of duration. Use the opener pattern. Hook text overlay = the hook line. First frame must visualize the hook concept (controls thumbnail).
 (B) BODY — middle 50-60% of duration. For story-driven hooks, this is the personal-story / transformation / proof beat. For punch hooks, this is the value proposition + product reveal. Voiceover speaks in conversational Hindi (or the brief's audience language) — NEVER textbook Hindi. Specific b-roll, hard cuts, no fades.
-(C) CTA — final ~20% of duration. Product name "${resolvedProduct?.name ?? 'Product'}" + ₹${resolvedProduct?.price} as bold text overlay. Voiceover delivers the urgency line ("Abhi karo" / "Aaj hi" / "Pehla kadam lo"). Final music beat → clean stop.
+(C) CTA — final ~20% of duration. ${resolvedProduct?.hidePriceInCreative ? `Product name "${resolvedProduct?.name ?? 'Product'}" as bold text overlay — NO price (price suppression active for this product).` : `Product name "${resolvedProduct?.name ?? 'Product'}" + ₹${resolvedProduct?.price} as bold text overlay.`} Voiceover delivers the urgency line ("Abhi karo" / "Aaj hi" / "Pehla kadam lo"). Final music beat → clean stop.
 
 ═══ VOICEOVER SCRIPT — VERBATIM, NOT DESCRIBED ═══
 
@@ -750,7 +761,7 @@ DO NOT default to generic "moody puja room with diya" for every video. Match ico
 - All on-image text in **${brief.targetLanguage ?? 'hinglish'} vocabulary in LATIN script** (Manglish convention, see TARGET LANGUAGE block) — zero pure-English overlay lines, zero native-script overlays
 - Hard cuts only between scenes — no fade transitions
 - Hyper-specific visuals — match the brief's topic with concrete, named props/lighting
-- Product name "${resolvedProduct?.name ?? 'Product'}" and price ₹${resolvedProduct?.price} must appear as exact text — never placeholders
+- Product name "${resolvedProduct?.name ?? 'Product'}" must appear as exact text — never placeholders${resolvedProduct?.hidePriceInCreative ? `\n- DO NOT include any price (no ₹, no rupees, no booking-fee amount) in text overlays, voiceover, or imagery — price suppression is active for this product.` : `; price ₹${resolvedProduct?.price} must also appear as exact text`}
 - NO talking-head, NO avatar, NO face-to-camera — cinematic b-roll only with off-screen voiceover (in the audience's language — Hindi/Hinglish for India)
 - NO stock footage look, NO watermarks, NO celebrity faces${resolveVertical(company.industry) === 'spirituality' ? `
 - NO Western "spiritual wellness" aesthetic (crystals, mandalas, Buddha statues, sage smudging) — Indian-astro only` : ''}

@@ -39,6 +39,7 @@ export class CopyWriterService {
       hook: string;
       keyMessage: string;
       conversionBridge: string;
+      product?: string;                          // resolved to product entry below
       forcedHookStyle?: string;
       avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';   // cold = prospecting, warm = retarget, hot = cart-recovery
@@ -48,8 +49,19 @@ export class CopyWriterService {
     runId: string,
   ): Promise<CopyPackage> {
     const creative = company.learnings?.creative;
-    const activeProduct = (company.products ?? []).find(p => p.active);
-    const priceTag = activeProduct ? `${activeProduct.currency}${activeProduct.price}` : '[price]';
+    // Resolve product from brief first, fall back to first-active. Without this
+    // a Nadi-Leaf brief would pick Nadi Report (first in array) and inject the
+    // wrong price.
+    const activeProduct = (brief.product
+      ? (company.products ?? []).find(p => p.name === brief.product)
+      : undefined)
+      ?? (company.products ?? []).find(p => p.active);
+    const hidePriceInCopy = !!activeProduct?.hidePriceInCreative;
+    const priceTag = !activeProduct
+      ? '[price]'
+      : hidePriceInCopy
+        ? '[PRICE SUPPRESSED — omit price entirely]'
+        : `${activeProduct.currency}${activeProduct.price}`;
     // Fall back to local resolution if caller didn't pass targetLanguage — keeps
     // the fallback path self-contained (creative-team primary path resolves
     // upstream; direct CopyWriter callers still get correct behaviour).
@@ -111,6 +123,10 @@ LOSING PATTERNS (avoid these):
       return `\nAUDIENCE STAGE: cold (prospecting). Audience has NOT seen this brand before. Problem-first structure: agitate pain, introduce brand AS the solution, end with offer + CTA. Brand introduction is required. Hook must stop the scroll cold.`;
     })();
 
+    // Strip price from briefFacts product block when suppression is active.
+    // The LLM treats briefFacts as authoritative — leaving price in here while
+    // also adding "do not mention price" is contradictory and the LLM tends to
+    // leak it. Remove it from the fact pool entirely instead.
     const briefFactsBlock = JSON.stringify({
       topic: brief.topic,
       angle: brief.angle,
@@ -118,7 +134,11 @@ LOSING PATTERNS (avoid these):
       keyMessage: brief.keyMessage,
       conversionBridge: brief.conversionBridge,
       audience: brief.audience,
-      product: activeProduct ? { name: activeProduct.name, price: activeProduct.price, currency: activeProduct.currency, differentiators: activeProduct.differentiators } : null,
+      product: activeProduct
+        ? (hidePriceInCopy
+          ? { name: activeProduct.name, currency: activeProduct.currency, differentiators: activeProduct.differentiators, priceSuppressed: true }
+          : { name: activeProduct.name, price: activeProduct.price, currency: activeProduct.currency, differentiators: activeProduct.differentiators })
+        : null,
     }, null, 2);
 
     const systemPrompt = company.prompts?.creativeTeamLead
@@ -144,7 +164,7 @@ Target audience: ${brief.audience}
 Hook: ${brief.hook}
 Key message: ${brief.keyMessage}
 Conversion bridge: ${brief.conversionBridge}
-${activeProduct ? `Product: ${activeProduct.name} @ ${priceTag}` : ''}
+${activeProduct ? (hidePriceInCopy ? `Product: ${activeProduct.name} (PRICE SUPPRESSED — do NOT mention any price, no ₹, no rupees, no booking-fee amounts; lead with trust signals, lineage, and discovery framing instead)` : `Product: ${activeProduct.name} @ ${priceTag}`) : ''}
 ${audienceStageRule}
 
 ${learningsBlock}
@@ -152,8 +172,8 @@ ${learningsBlock}
 FACT-ANCHOR RULE (NON-NEGOTIABLE):
 Every named entity, number, date, statistic, news event, person, or quoted claim
 in your copy MUST come from BRIEF FACTS below. No inventing competitors, deadlines,
-prices other than the product price, testimonials, or news events. If you cannot
-cite the source from BRIEF FACTS, use a generic relatable pain instead.
+${hidePriceInCopy ? 'or' : 'prices other than the product price,'} testimonials, or news events. If you cannot
+cite the source from BRIEF FACTS, use a generic relatable pain instead.${hidePriceInCopy ? '\nPRICE SUPPRESSION ACTIVE for this product — do NOT mention any price (no ₹, no rupees, no booking-fee amounts) in ANY variant.' : ''}
 
 BRIEF FACTS (the ONLY facts you may cite):
 ${briefFactsBlock}

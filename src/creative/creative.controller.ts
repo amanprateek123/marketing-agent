@@ -133,6 +133,13 @@ export class CreativeController {
 
     // Fire and forget — rewrite prompt then generate video
     (async () => {
+      const hidePrice = !!product?.hidePriceInCreative;
+      const productLine = hidePrice
+        ? `Product: ${product?.name ?? 'unknown'} (PRICE SUPPRESSED — do NOT mention any price, no ₹, no rupees, no booking-fee amounts)`
+        : `Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}`;
+      const ctaOverlayLine = hidePrice
+        ? `   - 12-15s CTA: [product name + CTA action] — urgent and bold. DO NOT include any price (no ₹, no rupees).`
+        : `   - 12-15s CTA: ₹${product?.price ?? '???'} | [CTA action] — make it urgent and bold`;
       const result = await this.claudeService.runAgent({
         tenantId,
         runId: (pkg as any).runId,
@@ -149,14 +156,14 @@ Brand: ${company.name}
 Topic: ${brief.topic}
 Angle: ${brief.angle}
 Audience: ${brief.audience}
-Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}
+${productLine}
 Winning hook: "${hookText}"
 Headline: "${headline}"
 CTA: "${cta}"
 
 ${visualInsights}
 ${ctaInsights}
-
+${hidePrice ? '\nPRICE SUPPRESSION ACTIVE: Do NOT include any price (no ₹, no rupees, no booking-fee amounts) in the script, text overlays, or voiceover. Lead with trust signals, lineage, and discovery framing instead.\n' : ''}
 Write the Heygen prompt (180-220 words) covering ALL of these elements:
 
 1. VIDEO CONCEPT: 15-second 9:16 vertical Meta ad for ${company.name}, cinematic b-roll with text overlays and off-screen Hindi voiceover narration. No visible person speaking.
@@ -165,7 +172,7 @@ Write the Heygen prompt (180-220 words) covering ALL of these elements:
    - 0-3s HOOK: [exact words from the winning hook — make the viewer say "yeh toh mere baare mein hai"]
    - 3-7s PAIN/DESIRE: [specific fear or desire, 1 short sentence]
    - 7-12s PRODUCT: [product name + one-line benefit]
-   - 12-15s CTA: ₹${product?.price ?? '???'} | [CTA action] — make it urgent and bold
+${ctaOverlayLine}
 
 3. BACKGROUND VISUAL: Culturally relevant Indian scene that matches the hook's emotion. Be specific — not generic. Warm, high-contrast, not stock-photo.
 
@@ -258,6 +265,13 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
 
     this.logger.log(`Regenerating image prompt for variant(s) [${targetIndices.join(',')}]: tenantId=${tenantId} packageId=${creativePackageId}`);
 
+    const hidePrice = !!product?.hidePriceInCreative;
+    const productLine = hidePrice
+      ? `Product: ${product?.name ?? 'unknown'} (PRICE SUPPRESSED — do NOT mention any price, no ₹, no rupees)`
+      : `Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}`;
+    const bottomOverlayLine = hidePrice
+      ? `- TEXT OVERLAY — BOTTOM: "${product?.name ?? 'Product'}" + CTA in large text. DO NOT include any price (no ₹, no rupees).`
+      : `- TEXT OVERLAY — BOTTOM: "${product?.name ?? 'Product'} — ₹${product?.price ?? '???'}" + CTA in large text`;
     const buildImagePrompt = (hook: string) => `
 Write an image generation prompt for a Meta direct response ad. This image must make someone STOP scrolling and TAP the ad.
 
@@ -267,9 +281,9 @@ Topic: ${brief.topic}
 Angle: ${brief.angle}
 Platform: ${brief.platform} | Format: ${brief.format}
 Audience: ${brief.audience}
-Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}
+${productLine}
 Hook (winning copy): "${hook}"
-
+${hidePrice ? '\nPRICE SUPPRESSION ACTIVE: Do NOT include any price (no ₹, no rupees, no booking-fee amounts) anywhere in the image — text overlays, captions, product labels. Lead with the hook and a trust signal (lineage, ratings, social proof) instead.\n' : ''}
 STEP 1 — VISUAL CENTERPIECE: Read the hook and topic above. What is the ONE visual concept that makes THIS ad unique?
 If the hook mentions a DATE/EVENT → centerpiece is that date (calendar, countdown, highlighted date — LARGE, dominating the frame)
 If the hook mentions a FEAR/PROBLEM → centerpiece is that fear visualized dramatically (filling the frame)
@@ -280,7 +294,7 @@ The centerpiece must be the LARGEST element (60% of the frame) — NOT a small d
 STEP 2 — BUILD AROUND THE CENTERPIECE:
 - VISUAL CENTERPIECE (dominant): The concept from Step 1, unmissable at phone size
 - TEXT OVERLAY — TOP: "${hook.slice(0, 80)}" in bold Hinglish, high contrast, readable
-- TEXT OVERLAY — BOTTOM: "${product?.name ?? 'Product'} — ₹${product?.price ?? '???'}" + CTA in large text
+${bottomOverlayLine}
 - PRODUCT VISIBLE — show ${product?.name ?? 'the product'} clearly
 - INDIAN CONTEXT — real Indian faces, settings, skin tones
 - HIGH CONTRAST — thumb-stopping colors, no muted/pastel
@@ -445,7 +459,12 @@ Return ONLY the image prompt, nothing else.
       throw new NotFoundException(`Brief ${briefId} not found for tenant ${tenantId}`);
     }
 
+    // product/targetSegment/targetLanguage MUST be forwarded — otherwise the
+    // creative producer falls back to the first active product and the resulting
+    // copy/price/imagery match the wrong product. See pipeline.controller.ts
+    // produceIdea for the same pattern.
     const briefData: BriefData = {
+      product: (brief as any).product ?? '',
       topic: brief.topic,
       angle: brief.angle,
       platform: brief.platform,
@@ -454,6 +473,11 @@ Return ONLY the image prompt, nothing else.
       hook: (brief as any).hook ?? '',
       keyMessage: (brief as any).keyMessage ?? '',
       conversionBridge: (brief as any).conversionBridge ?? '',
+      audienceStage: (brief as any).audienceStage,
+      explorationArm: (brief as any).explorationArm,
+      targetSegment: (brief as any).targetSegment,
+      targetLanguage: (brief as any).targetLanguage,
+      winnerCloneOf: (brief as any).winnerCloneOf,
     };
 
     // Fire and forget — returns immediately, production runs in background

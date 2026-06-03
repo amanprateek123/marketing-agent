@@ -651,7 +651,7 @@ Return ONLY this JSON (no markdown, no explanation):
         "budgetPercent": 100,
         "audienceType": "advantage_plus",
         "geoLocations": ["IN"],
-        "optimizationGoal": "OFFSITE_CONVERSIONS",
+        "optimizationGoal": "${product?.metaOptimizationGoal ?? 'OFFSITE_CONVERSIONS'}",
         "ads": [0, 1, 2, 3],
         "creativeFormat": "mixed"
       }
@@ -1002,12 +1002,12 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
         "budgetPercent": 100,
         "audienceType": "advantage_plus",
         "geoLocations": ["IN"],
-        "optimizationGoal": "OFFSITE_CONVERSIONS",
+        "optimizationGoal": "${product?.metaOptimizationGoal ?? 'OFFSITE_CONVERSIONS'}",
         "ads": [0, 1, 2, 3],
         "creativeFormat": "mixed"
       }
     ],
-    "scaleRules": "ROAS > 1.5x AND conversions >= 2 after 7d �� scale 20%",
+    "scaleRules": "ROAS > 1.5x AND conversions >= 2 after 7d → scale 20%",
     "pauseRules": "CTR < 0.5% after ₹${Math.round((product?.performance?.avgCPA ?? 2000) * 3)} spent → pause ad"
   },
   "adjustments": {

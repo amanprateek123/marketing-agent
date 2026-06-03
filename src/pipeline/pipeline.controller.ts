@@ -422,11 +422,15 @@ export class PipelineController {
 
       const produceRunId = `produce-${briefId.slice(0, 8)}-${Date.now()}`;
 
-      // Save as creative brief first (so campaign creator can find it)
+      // Save as creative brief first (so campaign creator can find it).
+      // product/targetSegment/targetLanguage MUST be forwarded — otherwise the
+      // creative producer falls back to the first active product (e.g. Nadi
+      // Report ₹1,799) and copy/price come out wrong for the actual idea.
       await this.creativeBriefModel.create({
         tenantId,
         runId: produceRunId,
         briefId,
+        product: (brief as any).product ?? '',
         topic: brief.topic,
         angle: brief.angle,
         platform: brief.platform,
@@ -435,6 +439,11 @@ export class PipelineController {
         hook: (brief as any).hook ?? '',
         keyMessage: (brief as any).keyMessage ?? '',
         conversionBridge: (brief as any).conversionBridge ?? '',
+        audienceStage: (brief as any).audienceStage,
+        explorationArm: (brief as any).explorationArm,
+        targetSegment: (brief as any).targetSegment ?? '',
+        targetLanguage: (brief as any).targetLanguage ?? '',
+        winnerCloneOf: (brief as any).winnerCloneOf,
         suggestedBudget: brief.suggestedBudget,
         finalScore: brief.finalScore,
         selected: true,
@@ -447,6 +456,7 @@ export class PipelineController {
         briefId,
         produceRunId,
         {
+          product: (brief as any).product ?? '',
           topic: brief.topic,
           angle: brief.angle,
           platform: brief.platform,
@@ -457,6 +467,8 @@ export class PipelineController {
           conversionBridge: (brief as any).conversionBridge ?? '',
           audienceStage: (brief as any).audienceStage,
           explorationArm: (brief as any).explorationArm,
+          targetSegment: (brief as any).targetSegment,
+          targetLanguage: (brief as any).targetLanguage,
           // Forward exploit-winner marker — Creative Team reads it and anchors
           // on the source winner's hookLine pattern.
           winnerCloneOf: (brief as any).winnerCloneOf,

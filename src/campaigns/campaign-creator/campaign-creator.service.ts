@@ -387,6 +387,51 @@ export class CampaignCreatorService {
     const launchProduct = creativeBrief
       ? (company.products ?? []).find(p => p.name === ((creativeBrief as any).product ?? ''))
       : null;
+
+    // ── optimization_goal normalization ──────────────────────────────────────
+    // The Campaign Review LLM occasionally outputs invalid Meta enum values
+    // (e.g. "CONVERSIONS" instead of "OFFSITE_CONVERSIONS") or overrides the
+    // operator's explicit per-product choice. Two-layer normalization:
+    //   1. If product.metaOptimizationGoal is set, operator wins — force-use it.
+    //      Rationale: operator opted into VBB after pre-launch verification gate;
+    //      LLM's "wait for 50 conversions before VBB" judgment is general-case
+    //      advice that doesn't override a specific operator decision.
+    //   2. Else: validate against Meta's valid-goal whitelist for OUTCOME_SALES
+    //      campaigns. Invalid → default to OFFSITE_CONVERSIONS with warn.
+    // Normalized value is persisted back to campaignConfig so audit/UI see truth.
+    const VALID_OPTIMIZATION_GOALS = new Set([
+      'OFFSITE_CONVERSIONS', 'VALUE', 'LANDING_PAGE_VIEWS', 'LINK_CLICKS',
+      'IMPRESSIONS', 'REACH', 'THRUPLAY', 'POST_ENGAGEMENT', 'PAGE_LIKES',
+      'AD_RECALL_LIFT', 'LEAD_GENERATION', 'QUALITY_LEAD', 'QUALITY_CALL',
+    ]);
+    const productOptGoal = launchProduct?.metaOptimizationGoal;
+    let optGoalNormalized = false;
+    for (const adSet of config.adSets as any[]) {
+      const llmValue = adSet.optimizationGoal;
+      let resolved: string;
+      if (productOptGoal) {
+        resolved = productOptGoal;
+        if (llmValue !== productOptGoal) {
+          this.logger.warn(`Ad set "${adSet.name}": LLM output optimizationGoal="${llmValue}" overridden by product.metaOptimizationGoal="${productOptGoal}" (operator choice wins).`);
+          optGoalNormalized = true;
+        }
+      } else if (llmValue && VALID_OPTIMIZATION_GOALS.has(llmValue)) {
+        resolved = llmValue;
+      } else {
+        this.logger.warn(`Ad set "${adSet.name}": invalid optimizationGoal="${llmValue}" from LLM — defaulting to OFFSITE_CONVERSIONS.`);
+        resolved = 'OFFSITE_CONVERSIONS';
+        optGoalNormalized = true;
+      }
+      adSet.optimizationGoal = resolved;
+    }
+    if (optGoalNormalized) {
+      // Persist normalized config so the audit / dashboard / re-launch path
+      // all see the value Meta actually receives — not the LLM's broken output.
+      await this.campaignModel.updateOne(
+        { _id: campaignId },
+        { $set: { 'campaignConfig.adSets': config.adSets } },
+      );
+    }
     const liveLookalikes = (launchProduct?.metaAudiences ?? [])
       .filter((a: any) => a.type === 'lookalike' && validAudienceIds.has(a.id));
     const briefStageForLaunch = (creativeBrief as any)?.audienceStage as 'cold' | 'warm' | 'hot' | undefined;
@@ -997,6 +1042,7 @@ Or reply here to discuss changes.`;
     const scaleROAS = company.scaleIfROASAbove ?? 1.5;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+    const optimizationGoal = product?.metaOptimizationGoal ?? 'OFFSITE_CONVERSIONS';
 
     // Funnel-stage-aware fallback: warm/hot briefs need a custom/retarget
     // audience — advantage_plus would be rejected by the downstream
@@ -1014,7 +1060,7 @@ Or reply here to discuss changes.`;
           audienceType: 'custom' as const,
           metaAudienceId: customAudience.id,
           geoLocations: [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()],
-          optimizationGoal: 'OFFSITE_CONVERSIONS',
+          optimizationGoal,
           ads: [0, 1, 2, 3],
           creativeFormat: 'mixed' as const,
           excludedAudienceIds: [],
@@ -1024,7 +1070,7 @@ Or reply here to discuss changes.`;
           budgetPercent: 100,
           audienceType: 'advantage_plus' as const,
           geoLocations: [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()],
-          optimizationGoal: 'OFFSITE_CONVERSIONS',
+          optimizationGoal,
           ads: [0, 1, 2, 3],
           creativeFormat: 'mixed' as const,
           excludedAudienceIds: (product?.metaAudiences ?? [])

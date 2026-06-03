@@ -29,9 +29,18 @@ class ProductDto {
   // Conversion tracking
   @IsOptional() @IsString() conversionEvent?: string;
   @IsOptional() @IsNumber() @Min(0) conversionValue?: number;
+  @IsOptional() @IsNumber() @Min(0) contributionMargin?: number;
   @IsOptional() @IsString() customEventName?: string;
   @IsOptional() @IsString() customConversionId?: string;
   @IsOptional() @IsString() pixelId?: string;
+  @IsOptional() @IsString() metaOptimizationGoal?: string;
+  @IsOptional() @IsBoolean() hidePriceInCreative?: boolean;
+
+  // Audience + performance — passthrough; nested validation deferred to the
+  // Mongoose schema. Without these, whitelist:true silently wipes them on PUT.
+  @IsOptional() @IsArray() audienceSegments?: any[];
+  @IsOptional() @IsArray() metaAudiences?: any[];
+  @IsOptional() @IsObject() performance?: Record<string, any>;
 }
 
 class ServiceDto {

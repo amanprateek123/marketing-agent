@@ -53,6 +53,25 @@ export interface Product {
   customEventName?: string;          // if conversionEvent is "CustomEvent", this is the event name (e.g. "NADI_REPORT_PURCHASE_COMPLETED")
   customConversionId?: string;       // Meta Custom Conversion ID — takes priority, sends pixel_id + custom_conversion_id to Meta
   pixelId?: string;                  // Meta Pixel ID if different from company.meta.pixelId
+  /**
+   * Meta ad-set optimization goal. Defaults to 'OFFSITE_CONVERSIONS' when unset.
+   * Set to 'VALUE' for Value-Based Bidding on funnels where revenue per conversion
+   * varies meaningfully (refundable bookings, tiered pricing). VBB requires the
+   * Custom Conversion to be configured to use dynamic value from the pixel event,
+   * and the frontend must fire correct `value` params. Setting 'VALUE' here also
+   * suppresses COST_CAP bid strategy in meta-ads.service (incompatible combo).
+   */
+  metaOptimizationGoal?: string;
+  /**
+   * When true, all ad creative for this product OMITS price (₹X) from copy,
+   * headlines, image overlays, and video CTA frames. Use for premium/spiritual
+   * products where price-anchoring in cold ads kills exploration intent — the
+   * landing page handles pricing after the curiosity hook has landed. Affects
+   * creative-team prompts (skip "price in every variant" rule) and copy-writer
+   * (strip price line from briefFacts product block). Default false = price
+   * required in every variant (current behavior for proven mass-tier products).
+   */
+  hidePriceInCreative?: boolean;
 
   // Audience data
   audienceSegments?: AudienceSegment[];
