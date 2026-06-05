@@ -193,9 +193,44 @@ Return ONLY the JSON object described in your instructions.`,
         updatedAt: now,
       };
     }
+
+    // Per-product audience ROAS — computed deterministically from raw rows so
+    // a fresh product never inherits another product's lookalike/advantage_plus
+    // numbers. The LLM-derived audienceScores above stays tenant-aggregate (used
+    // as fallback in LiveContext when no per-product entry exists). Per-product
+    // breakdown groups by (product, audienceType) and averages campaign-level
+    // ROAS. Loses ad-set-level precision but gains correct attribution. Single-
+    // ad-set campaigns (the common case after the floor-consolidation logic)
+    // are perfectly attributed.
+    const perProductAccumulator = new Map<string, Map<string, { roasSum: number; n: number }>>();
+    for (const row of campaignData) {
+      const product = row?.product;
+      const audType = row?.audienceType;
+      const roas = row?.campaign?.roas ?? row?.performance?.day30?.roas ?? row?.performance?.day14?.roas ?? null;
+      if (!product || !audType || audType === 'unknown' || roas == null || !Number.isFinite(roas)) continue;
+      if (!perProductAccumulator.has(product)) perProductAccumulator.set(product, new Map());
+      const audMap = perProductAccumulator.get(product)!;
+      const entry = audMap.get(audType) ?? { roasSum: 0, n: 0 };
+      entry.roasSum += Number(roas);
+      entry.n += 1;
+      audMap.set(audType, entry);
+    }
+    const audienceScoresByProduct: Record<string, Record<string, { roas: number; n: number; updatedAt: Date }>> = {};
+    for (const [product, audMap] of perProductAccumulator) {
+      audienceScoresByProduct[product] = {};
+      for (const [audType, agg] of audMap) {
+        audienceScoresByProduct[product][audType] = {
+          roas: agg.n > 0 ? agg.roasSum / agg.n : 0,
+          n: agg.n,
+          updatedAt: now,
+        };
+      }
+    }
+
     const enrichedCampaign: CampaignLearnings = {
       ...campaign,
       audienceScores: enrichedAudienceScores,
+      audienceScoresByProduct,
     };
 
     // Race-safe: per-slice dot-path writes. Was: whole-tree replace → clobbered
@@ -428,14 +463,20 @@ Return as a single causal insight JSON:
       const campaign = campaignMap.get(brief.briefId);
       const creative = creativeMap.get(brief.briefId);
       const selectedVariant = creative?.copyVariants?.[creative?.selectedCopyIndex ?? 0];
+      // Capture audienceType from the campaign config's first ad set (most common
+      // case after the floor-consolidation logic). Used for per-product audience
+      // ROAS aggregation downstream. Fall back to 'unknown' if absent.
+      const audienceType = (campaign as any)?.campaignConfig?.adSets?.[0]?.audienceType ?? 'unknown';
 
       return {
         briefId: brief.briefId,
+        product: (brief as any).product ?? null,
         topic: brief.topic,
         angle: brief.angle,
         platform: brief.platform,
         format: brief.format,
         audience: brief.audience,
+        audienceType,
         hook: brief.hook,
         creative: selectedVariant
           ? {

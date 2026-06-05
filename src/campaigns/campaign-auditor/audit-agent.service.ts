@@ -318,7 +318,13 @@ export class AuditAgentService {
     // Tenant context goes in the user message (prepended under "## TENANT CONTEXT"), not the
     // system prompt. Keeps instructions vs data separated and prevents prompt-injection-style
     // bleed-through from tenant fields like calendarContext.
-    const userContext = this.liveContextBuilder.build(company);
+    // Pass the campaign's product so learnings render scoped to it — without
+    // this, a fresh-product campaign's audit sees tenant-aggregate audience
+    // ROAS as if it applied (the lookalike-drop misattribution pattern).
+    const auditedProduct = (campaign as any)?.product
+      ?? (campaign as any)?.campaignConfig?.product
+      ?? undefined;
+    const userContext = this.liveContextBuilder.build(company, auditedProduct);
 
     try {
       const result = await this.claudeService.runAgent({

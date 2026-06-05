@@ -150,7 +150,7 @@ LOSING PATTERNS (avoid these):
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
       systemPrompt,
-      liveContext: this.liveContextBuilder.build(company),
+      liveContext: this.liveContextBuilder.build(company, brief.product),
       skills: skillsForAgent('CREATIVE_TEAM'),
       userMessage: `
 ${buildSkillBlock('CREATIVE_TEAM')}

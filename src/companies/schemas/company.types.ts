@@ -268,7 +268,7 @@ export interface OfferAudienceFitIssue {
 }
 
 export interface CampaignLearnings {
-  audienceScores: Record<string, AudienceScoreEntry | number>;  // audience segment → avg ROAS (entry preferred; number is legacy)
+  audienceScores: Record<string, AudienceScoreEntry | number>;  // audience segment → avg ROAS (entry preferred; number is legacy) — TENANT-AGGREGATE (no product attribution)
   platformROAS: Record<string, number>;    // platform → avg ROAS
   budgetInsights: string[];                // budget size/structure patterns
   timingInsights: string[];                // day of week, season, time of day patterns
@@ -279,6 +279,20 @@ export interface CampaignLearnings {
    * doesn't permanently brand the audience as bad.
    */
   offerAudienceFitIssues?: OfferAudienceFitIssue[];
+  /**
+   * Per-product audience-ROAS breakdown. audienceScores above is tenant-aggregate
+   * and conflates economics across products with very different price tiers
+   * (e.g. lookalike ROAS on ₹1,799 Nadi Report ≠ on ₹10K Nadi Leaf). This field
+   * keeps the breakdown so LiveContext can render the right scope per brief:
+   *
+   *   audienceScoresByProduct["Nadi Report"]["lookalike"] = { roas: 2.8, n: 12 }
+   *   audienceScoresByProduct["Nadi Leaf Reading"]["lookalike"] = { roas: ?, n: 0 }
+   *
+   * Readers should prefer this for per-brief context. Fall back to tenant-aggregate
+   * audienceScores ONLY with explicit "may not transfer" framing. Writer populates
+   * both fields in parallel so existing readers keep working during migration.
+   */
+  audienceScoresByProduct?: Record<string, Record<string, AudienceScoreEntry>>;
 }
 
 export interface CausalInsight {

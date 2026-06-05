@@ -145,7 +145,7 @@ export class CreativeController {
         runId: (pkg as any).runId,
         agentType: AgentType.CREATIVE_PRODUCER,
         systemPrompt: '',
-        liveContext: this.liveContextBuilder.build(company),
+        liveContext: this.liveContextBuilder.build(company, product?.name),
         userMessage: `
 Write a detailed Heygen Video Agent prompt that will be submitted directly to Heygen's API to generate a 15-second 9:16 vertical Meta conversion ad video.
 
@@ -324,7 +324,7 @@ Return ONLY the image prompt, nothing else.
               runId: (pkg as any).runId,
               agentType: AgentType.CREATIVE_PRODUCER,
               systemPrompt: '',
-              liveContext: this.liveContextBuilder.build(company),
+              liveContext: this.liveContextBuilder.build(company, product?.name),
               userMessage: buildImagePrompt(hook),
               maxTurns: 2,
             });

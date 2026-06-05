@@ -59,7 +59,7 @@ export class ImageGeneratorService {
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
       systemPrompt: '',
-      liveContext: this.liveContextBuilder.build(company),
+      liveContext: this.liveContextBuilder.build(company, (brief as any)?.product),
       userMessage: this.buildImagePromptUserMessage({
         company,
         brief,
@@ -109,7 +109,7 @@ export class ImageGeneratorService {
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
       systemPrompt: '',
-      liveContext: this.liveContextBuilder.build(company),
+      liveContext: this.liveContextBuilder.build(company, (brief as any)?.product),
       userMessage: this.buildImagePromptUserMessage({
         company,
         brief,

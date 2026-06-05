@@ -676,7 +676,7 @@ Return ONLY this JSON (no markdown, no explanation):
     company: CompanyDocument,
     runId: string,
   ): Promise<string> {
-    const liveContext = this.liveContextBuilder.build(company);
+    const liveContext = this.liveContextBuilder.build(company, (brief as any).product);
     const learnings = company.learnings;
 
     // ── Case studies + audience performance ───────────────────────────────────

@@ -6,7 +6,17 @@ import { EventCalendarService } from '../../common/calendar/event-calendar.servi
 export class LiveContextBuilder {
   constructor(private readonly eventCalendar: EventCalendarService) {}
 
-  build(company: CompanyDocument): string {
+  /**
+   * Build the LiveContext block injected into every agent's prompt.
+   *
+   * @param briefProduct  Optional. When set, learnings are rendered scoped to this
+   *   product (per-product audienceScores; fresh-product framing when the product
+   *   has no own-data). When omitted, learnings render tenant-aggregate — used by
+   *   cross-product agents (Scouts, Coordinator) that legitimately need the wider
+   *   view. Per-brief agents (Strategy, Creative, Campaign Review, Audit) should
+   *   always pass this.
+   */
+  build(company: CompanyDocument, briefProduct?: string): string {
     const products = company.products.filter((p) => p.active);
     const now = new Date();
     const promotions = (company.activePromotions ?? []).filter(
@@ -18,6 +28,11 @@ export class LiveContextBuilder {
       now,
     );
     const tenantCalendar = (company.calendarContext || '').trim();
+    // Resolve the brief's product entry — needed to decide cold-start framing
+    // (hypothesis-stage products get explicit "these are hypotheses, not patterns" guidance).
+    const briefProductEntry = briefProduct
+      ? (company.products ?? []).find((p) => p.name === briefProduct)
+      : undefined;
 
     return `
 ## CURRENT PRODUCTS & PRICING (LIVE DATA — always use these, never cached values)
@@ -35,13 +50,40 @@ ${upcomingEvents}
 ${tenantCalendar ? `\n## TENANT-SPECIFIC CALENDAR\n${tenantCalendar}` : ''}
 
 ## CURRENT LEARNINGS (v${company.learnings?.version ?? 0})
+${this.buildLearningsScopeInstruction(briefProduct, briefProductEntry)}
 ${company.learnings
-  ? this.summarizeLearnings(company.learnings)
+  ? this.summarizeLearnings(company.learnings, briefProduct)
   : 'No learnings yet — this is the first run.'}
     `.trim();
   }
 
-  private summarizeLearnings(learnings: any): string {
+  /**
+   * Instruction block teaching the LLM how to weight learnings by scope.
+   * Critical for fresh products: prior cross-product data is HYPOTHESES not
+   * validated patterns. Without this, the agent treats tenant-aggregate
+   * audienceScores as if they applied to the new product (see the Nadi Leaf
+   * 2026-06-03 lookalike-drop incident: analyst cited Nadi Report's ad-set
+   * counts as if they applied to a different price tier).
+   */
+  private buildLearningsScopeInstruction(briefProduct?: string, briefProductEntry?: any): string {
+    if (!briefProduct) {
+      return '> Tenant-wide learnings rendered (no specific brief product set). Treat as aggregate signal across all products.';
+    }
+    const isFreshProduct = !briefProductEntry?.performance
+      || briefProductEntry.performance.confidenceLevel === 'hypothesis'
+      || (briefProductEntry.performance.totalConversions ?? 0) === 0;
+    if (isFreshProduct) {
+      return `> SCOPE — applying learnings to "${briefProduct}" (FRESH PRODUCT, hypothesis-stage, zero own-campaign data):
+> • TENANT-WIDE wisdom (brand tone, visual aesthetic, format winners, timing patterns) → applies to this product, use directly.
+> • PRODUCT-SPECIFIC atomic facts (audience ROAS, CPA numbers, audienceType winners from other products) → these are HYPOTHESES not validated patterns. Different price tiers / product classes attract different buyers; cross-product CPA and ROAS do NOT transfer. Treat them as starting priors only.
+> • DO NOT cite other-product numbers as if they applied here. Prefer exploration over exploiting another product's winners. This is a measurement run — pick targeting/creative that surfaces who actually buys this product.`;
+    }
+    return `> SCOPE — applying learnings to "${briefProduct}" (has own-campaign data):
+> • Prefer product-specific entries below (marked "[for ${briefProduct}]") over tenant-aggregate.
+> • Tenant-aggregate entries (marked "[tenant-wide]") apply when brand-level (tone, format, timing). Treat them as soft priors for product-specific economics (audience ROAS, CPA), not hard truths.`;
+  }
+
+  private summarizeLearnings(learnings: any, briefProduct?: string): string {
     const lines: string[] = [];
 
     const creative = learnings.creative;
@@ -89,12 +131,17 @@ ${company.learnings
 
     const campaign = learnings.campaign;
     if (campaign) {
-      if (campaign.audienceScores && Object.keys(campaign.audienceScores).length > 0) {
-        // Back-compat: entries may be flat numbers (legacy) or { roas, n, updatedAt }.
-        // Render with N so Campaign Review can tell "lookalike 2.7 (N=2)" from
-        // "lookalike 2.7 (N=30)" — the former is barely a signal, the latter is.
-        const LOW_N_THRESHOLD = 5;
-        const normalized = Object.entries(campaign.audienceScores).map(([k, v]: [string, any]) => {
+      // Prefer per-product audienceScores when the brief specifies a product AND
+      // the writer has populated this product's entry. Falls back to tenant-
+      // aggregate (legacy `audienceScores`) with explicit scope tagging so the
+      // LLM knows the numbers come from MULTIPLE products and may not apply.
+      const LOW_N_THRESHOLD = 5;
+      const renderAudienceMap = (
+        map: Record<string, any>,
+        scopeLabel: string,
+      ): string | null => {
+        if (!map || Object.keys(map).length === 0) return null;
+        const normalized = Object.entries(map).map(([k, v]: [string, any]) => {
           if (typeof v === 'number') return { audience: k, roas: v, n: 0 as number, low: true };
           const roas = Number(v?.roas) || 0;
           const n = Number(v?.n) || 0;
@@ -109,9 +156,40 @@ ${company.learnings
             return `${e.audience}: ${e.roas.toFixed(2)} (${nLabel}${confLabel})`;
           })
           .join(', ');
-        lines.push(`- Top audiences: ${top}`);
+        return `- Top audiences ${scopeLabel}: ${top}`;
+      };
+
+      const byProduct = campaign.audienceScoresByProduct as
+        | Record<string, Record<string, any>>
+        | undefined;
+      const productSpecificMap = briefProduct && byProduct?.[briefProduct];
+      let audienceLineRendered = false;
+
+      if (briefProduct && productSpecificMap && Object.keys(productSpecificMap).length > 0) {
+        // We have per-product data for this brief's product — use it as the
+        // authoritative source. This is the path that yesterday's failure mode
+        // didn't have access to.
+        const line = renderAudienceMap(productSpecificMap, `[for ${briefProduct}]`);
+        if (line) {
+          lines.push(line);
+          audienceLineRendered = true;
+        }
+      }
+
+      if (!audienceLineRendered && campaign.audienceScores && Object.keys(campaign.audienceScores).length > 0) {
+        // Either no brief product set, or per-product data not yet populated.
+        // Render tenant-aggregate WITH explicit scope tagging so the LLM doesn't
+        // treat these numbers as validated for the brief's product.
+        const scopeLabel = briefProduct
+          ? `[⚠ TENANT-AGGREGATE — across MULTIPLE products, may NOT transfer to "${briefProduct}", especially if price tiers differ; treat as soft hypothesis]`
+          : `[tenant-aggregate]`;
+        const line = renderAudienceMap(campaign.audienceScores, scopeLabel);
+        if (line) lines.push(line);
+      }
+
+      if (audienceLineRendered || (campaign.audienceScores && Object.keys(campaign.audienceScores).length > 0)) {
         lines.push(
-          `  NOTE: Entries marked low_confidence have N<${LOW_N_THRESHOLD} campaigns. Campaign Review must not override the strategist's audience choice citing a low_confidence entry alone — pair with at least one other signal (offerAudienceFitIssues, recent causal insight, or hookSaturation).`,
+          `  NOTE: Entries marked low_confidence have N<${LOW_N_THRESHOLD} campaigns. Campaign Review must not override the strategist's audience choice citing a low_confidence entry alone — pair with at least one other signal (offerAudienceFitIssues, recent causal insight, or hookSaturation). When tenant-aggregate is shown for a fresh product, treat ALL entries as hypothesis-grade regardless of N.`,
         );
       }
       if (campaign.budgetInsights?.length) lines.push(`- Budget insights: ${campaign.budgetInsights.join('; ')}`);
