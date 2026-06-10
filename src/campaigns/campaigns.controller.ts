@@ -17,6 +17,7 @@ import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.serv
 import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
+import { AudienceOrchestrationService } from './audience-orchestration/audience-orchestration.service';
 import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
 import { Campaign, CampaignDocument } from './schemas/campaign.schema';
 import { ShadowAction, ShadowActionDocument } from '../learning/schemas/shadow-action.schema';
@@ -33,6 +34,7 @@ export class CampaignsController {
     private readonly companiesService: CompaniesService,
     private readonly metaAdsService: MetaAdsService,
     private readonly campaignSyncService: CampaignSyncService,
+    private readonly audienceOrchestration: AudienceOrchestrationService,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
     @InjectModel(Campaign.name)
@@ -637,5 +639,47 @@ export class CampaignsController {
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/audiences/setup
+   * Body: { productName?: string }
+   *
+   * Provision the standard retargeting cohort stack on Meta for this tenant
+   * (page visitors at 30/90d, booking-initiated, purchasers, 1% / 2% lookalikes
+   * of purchasers). Idempotent — cohorts that already exist by name are skipped.
+   * Returns per-cohort status (created / exists / failed / skipped).
+   *
+   * Today: manual trigger. Future: scheduled weekly refresh in scheduler module.
+   */
+  @Post(':tenantId/audiences/setup')
+  async setupStandardAudiences(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { productName?: string } = {},
+  ) {
+    try {
+      const results = await this.audienceOrchestration.createStandardStack(tenantId, body.productName);
+      const summary = {
+        created: results.filter((r) => r.status === 'created').length,
+        exists: results.filter((r) => r.status === 'exists').length,
+        failed: results.filter((r) => r.status === 'failed').length,
+        skipped: results.filter((r) => r.status === 'skipped').length,
+      };
+      return { tenantId, summary, cohorts: results };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/audiences/status?productName=X
+   * Read-only view of which standard cohorts exist for this tenant.
+   */
+  @Get(':tenantId/audiences/status')
+  async getAudienceStatus(
+    @Param('tenantId') tenantId: string,
+    @Query('productName') productName?: string,
+  ) {
+    return this.audienceOrchestration.listCohortStatus(tenantId, productName);
   }
 }

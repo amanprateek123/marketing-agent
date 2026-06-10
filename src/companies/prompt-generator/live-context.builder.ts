@@ -52,7 +52,7 @@ ${tenantCalendar ? `\n## TENANT-SPECIFIC CALENDAR\n${tenantCalendar}` : ''}
 ## CURRENT LEARNINGS (v${company.learnings?.version ?? 0})
 ${this.buildLearningsScopeInstruction(briefProduct, briefProductEntry)}
 ${company.learnings
-  ? this.summarizeLearnings(company.learnings, briefProduct)
+  ? this.summarizeLearnings(company.learnings, briefProduct, briefProductEntry)
   : 'No learnings yet — this is the first run.'}
     `.trim();
   }
@@ -83,22 +83,64 @@ ${company.learnings
 > • Tenant-aggregate entries (marked "[tenant-wide]") apply when brand-level (tone, format, timing). Treat them as soft priors for product-specific economics (audience ROAS, CPA), not hard truths.`;
   }
 
-  private summarizeLearnings(learnings: any, briefProduct?: string): string {
+  private summarizeLearnings(learnings: any, briefProduct?: string, briefProductEntry?: any): string {
     const lines: string[] = [];
+    // Hypothesis-stage product = zero own-product data. Historical
+    // cross-product learnings should be SUPPRESSED (not just warned about) for
+    // these products — the LLM has been observed weighting Nadi Report's
+    // historical saturation pct as authoritative for Nadi Leaf's audit, even
+    // with scope warnings. Cleaner to hide the data entirely.
+    const isHypothesisStage = briefProduct && (
+      !briefProductEntry?.performance
+      || briefProductEntry.performance.confidenceLevel === 'hypothesis'
+      || briefProductEntry.performance.confidenceLevel === 'none'
+      || (briefProductEntry.performance.totalConversions ?? 0) === 0
+    );
 
     const creative = learnings.creative;
     if (creative) {
-      if (creative.winningHooks?.length) lines.push(`- Winning hooks: ${creative.winningHooks.join(', ')}`);
-      if (creative.losingHooks?.length) lines.push(`- Losing hooks (avoid): ${creative.losingHooks.join(', ')}`);
-      if (creative.winningFormats?.length) lines.push(`- Winning formats: ${creative.winningFormats.join(', ')}`);
-      if (creative.losingFormats?.length) lines.push(`- Losing formats (avoid): ${creative.losingFormats.join(', ')}`);
-      if (creative.ctaInsights?.length) lines.push(`- CTA insights: ${creative.ctaInsights.join('; ')}`);
+      // Hook patterns are tenant-aggregate today (no per-product attribution
+      // at the writer layer — see project_learnings_scope.md Tier 2 deferred).
+      //
+      // Hypothesis-stage products: SUPPRESS hook patterns + winningFormats
+      // + losingFormats + ctaInsights entirely. These are all aggregated
+      // from past campaigns which (for any tenant with one dominant existing
+      // product) means the data is overwhelmingly from that other product.
+      // Empirical: Nadi Leaf's audit kept citing Nadi Report's 103-ad
+      // curiosity_gap pool as basis for action even with a scope warning.
+      // Hiding the data is more reliable than warning about it.
+      //
+      // Non-hypothesis-stage products: render with scope warning (was the
+      // approach before today's hypothesis-stage suppression). For tenants
+      // where multiple products have own data, this preserves brand-level
+      // hook intuition while flagging the price-tier sensitivity.
+      if (isHypothesisStage) {
+        lines.push(`- ⚠ Hook patterns / formats / CTAs from learnings SUPPRESSED for "${briefProduct}" (hypothesis-stage, zero own-product data). Tenant-wide aggregates come from other products and don't transfer to new SKUs reliably. Reason from THIS campaign's intra-campaign hookSaturation + audience signals only. Treat hookStyle choice as exploration.`);
+      } else {
+        const hooksScopeWarning = briefProduct
+          ? `⚠ TENANT-WIDE HOOK PATTERNS (sourced from across all products — the ad-count and impression totals below are NOT specific to "${briefProduct}"). Hook performance is PRICE-TIER AND INTENT SENSITIVE: what wins for impulse mass-market products often does not transfer to premium considered-purchase products, and vice versa. Treat as STARTING HYPOTHESES not validated patterns. Justify hookStyle choice from THIS campaign's saturation + audience profile, not another product's evidence base.\n`
+          : '';
+        if (creative.winningHooks?.length) {
+          lines.push(`${hooksScopeWarning}- Winning hooks: ${creative.winningHooks.join(', ')}`);
+        }
+        if (creative.losingHooks?.length) lines.push(`- Losing hooks (avoid): ${creative.losingHooks.join(', ')}`);
+        if (creative.winningFormats?.length) lines.push(`- Winning formats: ${creative.winningFormats.join(', ')}`);
+        if (creative.losingFormats?.length) lines.push(`- Losing formats (avoid): ${creative.losingFormats.join(', ')}`);
+        if (creative.ctaInsights?.length) lines.push(`- CTA insights: ${creative.ctaInsights.join('; ')}`);
+      }
 
       // Hook saturation per audience — Strategy Team and Creative Team must AVOID
       // hookStyles flagged saturated for the target audience. Decay filter: drop
       // entries older than 14 days so the generator isn't permanently locked out
       // of a hookStyle after one over-exposure event.
-      if (creative.audienceHookSaturation && Object.keys(creative.audienceHookSaturation).length > 0) {
+      //
+      // For hypothesis-stage products: SUPPRESS this block entirely. The
+      // saturation percentages are accumulated from past campaigns across all
+      // products and don't apply to a fresh product. The audit prompt already
+      // includes intra-campaign hookSaturation from signals.hookSaturation
+      // (correct, real Nadi-Leaf data) — that's the only saturation signal
+      // a fresh product should reason from.
+      if (!isHypothesisStage && creative.audienceHookSaturation && Object.keys(creative.audienceHookSaturation).length > 0) {
         const SATURATION_FRESHNESS_DAYS = 14;
         const SATURATION_THRESHOLD_PCT = 60;
         const cutoff = Date.now() - SATURATION_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;

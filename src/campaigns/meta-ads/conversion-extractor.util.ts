@@ -66,3 +66,49 @@ export function extractConversions(
 
   return 0;
 }
+
+/**
+ * Extract the total conversion VALUE (sum of pixel event `value` params) from
+ * Meta's `action_values` insights field. Mirrors extractConversions logic so
+ * the same conversionTypes Set drives both count and value. Used to compute
+ * real ROAS: actionValue / spend.
+ *
+ * When the pixel doesn't fire with a `value` param, Meta returns no
+ * action_values for that conversion type — returns 0 here. Caller should
+ * fall back to (count × product.conversionValue) for legacy setups.
+ */
+export function extractActionValue(
+  actionValues: any[] | undefined,
+  conversionTypes?: Set<string>,
+): number {
+  if (!actionValues || actionValues.length === 0) return 0;
+
+  if (conversionTypes && conversionTypes.size > 0) {
+    // Path A — purchase-type Meta custom conversions
+    const customConvTotal = actionValues
+      .filter(a => a.action_type.startsWith('offsite_conversion.custom.') && conversionTypes.has(a.action_type))
+      .reduce((sum, a) => sum + parseFloat(a.value ?? '0'), 0);
+    if (customConvTotal > 0) return customConvTotal;
+
+    // Path B — Custom pixel event names
+    const customPixelTotal = actionValues
+      .filter(
+        a =>
+          !a.action_type.startsWith('offsite_conversion.custom.') &&
+          !STANDARD_EVENTS.has(a.action_type) &&
+          conversionTypes.has(a.action_type),
+      )
+      .reduce((sum, a) => sum + parseFloat(a.value ?? '0'), 0);
+    if (customPixelTotal > 0) return customPixelTotal;
+
+    // Path C — Standard events fallback
+    for (const type of STANDARD_PRIORITY) {
+      if (!conversionTypes.has(type)) continue;
+      const action = actionValues.find(a => a.action_type === type);
+      const val = parseFloat(action?.value ?? '0');
+      if (val > 0) return val;
+    }
+  }
+
+  return 0;
+}

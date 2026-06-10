@@ -303,11 +303,18 @@ export class AuditAgentService {
     snapshots: AuditSnapshotDocument[],
     company: CompanyDocument,
     liveSnapshot?: any,  // snapshotData with per-ad-set and per-ad metrics
+    /**
+     * Product this campaign is selling — resolved by the caller from
+     * brief.product. Same fix pattern as SignalDetectorService.detect.
+     * When omitted, falls back to first-active product (legacy behavior)
+     * with the cross-product CPA leak risk.
+     */
+    auditedProduct?: any,
   ): Promise<AuditVerdict> {
     const learnings = company.learnings;
     const caseStudies = (company as any).caseStudies ?? [];
 
-    const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot);
+    const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot, auditedProduct);
     // Skill directive prepended so the LLM applies paid-ads + ab-test-setup
     // frameworks when reasoning about pause/scale/replace verdicts. Otherwise
     // the auditor defaults to generic CTR/ROAS thresholds and ignores
@@ -318,13 +325,10 @@ export class AuditAgentService {
     // Tenant context goes in the user message (prepended under "## TENANT CONTEXT"), not the
     // system prompt. Keeps instructions vs data separated and prevents prompt-injection-style
     // bleed-through from tenant fields like calendarContext.
-    // Pass the campaign's product so learnings render scoped to it — without
-    // this, a fresh-product campaign's audit sees tenant-aggregate audience
-    // ROAS as if it applied (the lookalike-drop misattribution pattern).
-    const auditedProduct = (campaign as any)?.product
-      ?? (campaign as any)?.campaignConfig?.product
-      ?? undefined;
-    const userContext = this.liveContextBuilder.build(company, auditedProduct);
+    // LiveContext gets scoped to the audited product's NAME so learnings render
+    // per-product — caller-provided auditedProduct param is the authoritative
+    // source (resolved from brief.product upstream).
+    const userContext = this.liveContextBuilder.build(company, auditedProduct?.name);
 
     try {
       const result = await this.claudeService.runAgent({
@@ -454,9 +458,14 @@ export class AuditAgentService {
     learnings: any,
     caseStudies: any[],
     liveSnapshot?: any,
+    auditedProduct?: any,
   ): string {
     const age = signals.campaignAge;
     const curr = campaign;
+    // Resolve product for prompt context: prefer caller-provided (campaign's
+    // actual brief.product) over first-active fallback. Without this the
+    // historical CPA line in the prompt leaks across products.
+    const resolvedProduct = auditedProduct ?? (company.products ?? []).find((p: any) => p.active);
 
     // ── Per-ad-set breakdown (like Ads Manager view) ──────────────────────────
     const adSetLines = (liveSnapshot?.adSets ?? []).map((as: any) => {
@@ -605,7 +614,8 @@ Meta Campaign ID: ${campaign.metaCampaignId}
 Objective: ${campaign.objective}
 Age: ${age.hours}h (${age.days} days) | ${age.inLearningPhase ? 'IN LEARNING PHASE' : 'POST LEARNING PHASE'}
 Daily Budget: ₹${campaign.budget}/day | Spend pace: ${signals.trends.spendPace}
-Historical CPA: ₹${(company.products ?? []).find((p: any) => p.active)?.performance?.avgCPA ?? 'unknown'}
+Product being sold: ${resolvedProduct?.name ?? 'unknown'} (price ₹${resolvedProduct?.price ?? '?'}, confidence: ${resolvedProduct?.performance?.confidenceLevel ?? 'none'})
+Historical CPA for this product: ${resolvedProduct?.performance?.avgCPA ? `₹${resolvedProduct.performance.avgCPA}` : 'no own-product data (hypothesis-stage — do NOT cite CPA numbers from other products as a floor for this one)'}
 
 ━━━ CAMPAIGN METRICS (live) ━━━
   Spend: ₹${curr.spend?.toFixed(0) ?? 0} | Impressions: ${curr.impressions ?? 0} | Clicks: ${totalClicks}

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
+import { extractConversions, extractActionValue } from './conversion-extractor.util';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -71,16 +72,24 @@ export class MetaMetricsService {
     accessToken: string,
     conversionValue: number,
     conversionEvent?: string,
+    /**
+     * Custom Conversion ID — when provided, `offsite_conversion.custom.<id>`
+     * is added to the conversionTypes Set so events tracked via the custom
+     * conversion get counted. Without this, products using only custom
+     * conversions (e.g. Nadi Leaf with 1534101314938858) report 0 conversions
+     * across the entire audit + metrics chain.
+     */
+    customConversionId?: string,
   ): Promise<FullCampaignMetrics> {
     const [campaign, adSets] = await Promise.all([
-      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent),
-      this.fetchAdSetMetrics(campaignId, accessToken, conversionEvent),
+      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent, customConversionId),
+      this.fetchAdSetMetrics(campaignId, accessToken, conversionEvent, customConversionId),
     ]);
 
     // Fetch per-ad metrics for each ad set in parallel
     const adSetsWithAds = await Promise.all(
       adSets.map(async (adSet) => {
-        const ads = await this.fetchAdMetrics(adSet.adSetId, accessToken, conversionEvent);
+        const ads = await this.fetchAdMetrics(adSet.adSetId, accessToken, conversionEvent, customConversionId);
         return { ...adSet, ads };
       }),
     );
@@ -96,6 +105,7 @@ export class MetaMetricsService {
     accessToken: string,
     conversionValue: number,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<CampaignMetrics> {
     this.logger.log(`Fetching campaign metrics: ${campaignId}`);
 
@@ -103,7 +113,7 @@ export class MetaMetricsService {
       this.metaApiGet(
         `${META_API_BASE}/${campaignId}/insights`,
         {
-          fields: 'impressions,clicks,spend,ctr,cpc,actions,frequency',
+          fields: 'impressions,clicks,spend,ctr,cpc,actions,action_values,frequency',
           date_preset: 'maximum',
           // Pin attribution windows so audit-time ROAS is reproducible regardless of
           // the account's UI default. 7d-click + 1d-view = Meta's modern default for
@@ -122,8 +132,26 @@ export class MetaMetricsService {
     ]);
 
     const data = insightsRes.data?.data?.[0] ?? {};
-    const conversions = this.extractConversions(data.actions, conversionEvent);
+    // extractConversions accepts an optional Set<string>. The old code passed
+    // `conversionEvent` (a bare string like "CustomEvent" or "Purchase") which
+    // failed the `.size > 0` check inside extractConversions and silently
+    // returned 0 conversions for every campaign using a Custom Conversion.
+    // Hit on 2026-06-10: Nadi Leaf had 5 conversions, audit reported 0.
+    const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+    if (customConversionId) {
+      conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
+    }
+    const conversions = extractConversions(data.actions, conversionTypes);
     const spend = parseFloat(data.spend ?? '0');
+    // Real ROAS from Meta's action_values (sum of pixel event `value` params).
+    // Fall back to (conversions × conversionValue) when action_values is empty
+    // — which happens for products where the pixel doesn't fire with a value.
+    const actionValue = extractActionValue(data.action_values, conversionTypes);
+    const roas = spend > 0
+      ? (actionValue > 0
+          ? actionValue / spend
+          : (conversions > 0 && conversionValue > 0 ? (conversions * conversionValue) / spend : 0))
+      : 0;
 
     return {
       campaignId,
@@ -136,25 +164,56 @@ export class MetaMetricsService {
       ctr: parseFloat(data.ctr ?? '0'),
       cpc: parseFloat(data.cpc ?? '0'),
       cpa: conversions > 0 ? spend / conversions : 0,
-      roas: conversions > 0 ? (conversions * conversionValue) / spend : 0,
+      roas,
       frequency: parseFloat(data.frequency ?? '0'),
     };
   }
 
   /**
+   * Translate a single conversionEvent string (the per-product config field)
+   * into the Set<string> shape that extractConversions / extractActionValue
+   * expect. Handles: standard events (Purchase, Lead, etc), CustomEvent flag,
+   * and bare custom conversion IDs.
+   *
+   * This is a temporary bridge until all callers pass the resolved product
+   * directly. For now it accepts the same loose strings the existing API uses.
+   */
+  private buildConversionTypesSet(conversionEvent?: string): Set<string> {
+    const set = new Set<string>([
+      'purchase', 'offsite_conversion.fb_pixel_purchase',
+      'lead', 'offsite_conversion.fb_pixel_lead',
+      'complete_registration',
+    ]);
+    if (!conversionEvent) return set;
+    const lower = conversionEvent.toLowerCase();
+    // Standard event → already covered by base set above.
+    if (['purchase', 'lead', 'completeregistration', 'subscribe'].includes(lower)) return set;
+    // Custom event name (e.g. NADI_REPORT_PURCHASE_COMPLETED) — add as-is.
+    if (conversionEvent !== 'CustomEvent') set.add(conversionEvent);
+    // The Custom Conversion ID path is handled by passing the resolved Set in
+    // from the caller (audit-side wrapper builds it from product.customConversionId).
+    return set;
+  }
+
+  /**
    * Ad set level metrics for a campaign.
+   *
+   * customConversionId threading mirrors fetchCampaignMetrics — without it,
+   * products using only a Custom Conversion (Nadi Leaf) report 0 conversions
+   * per ad set, so the auditor can't tell which audience is converting.
    */
   async fetchAdSetMetrics(
     campaignId: string,
     accessToken: string,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<AdSetMetrics[]> {
     this.logger.log(`Fetching ad set metrics: campaign=${campaignId}`);
 
     const response = await this.metaApiGet(
       `${META_API_BASE}/${campaignId}/insights`,
       {
-        fields: 'adset_id,adset_name,impressions,clicks,spend,ctr,cpc,actions,frequency,reach',
+        fields: 'adset_id,adset_name,impressions,clicks,spend,ctr,cpc,actions,action_values,frequency,reach',
         level: 'adset',
         date_preset: 'maximum',
         action_attribution_windows: JSON.stringify(['7d_click', '1d_view']),
@@ -162,9 +221,14 @@ export class MetaMetricsService {
       },
     );
 
+    const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+    if (customConversionId) {
+      conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
+    }
+
     const adSets: AdSetMetrics[] = (response.data?.data ?? []).map((d: any) => {
       const spend = parseFloat(d.spend ?? '0');
-      const conversions = this.extractConversions(d.actions, conversionEvent);
+      const conversions = extractConversions(d.actions, conversionTypes);
       return {
         adSetId: d.adset_id,
         adSetName: d.adset_name ?? '',
@@ -187,16 +251,18 @@ export class MetaMetricsService {
 
   /**
    * Ad level metrics for an ad set.
+   * customConversionId threading mirrors fetchCampaignMetrics.
    */
   async fetchAdMetrics(
     adSetId: string,
     accessToken: string,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<AdMetrics[]> {
     const response = await this.metaApiGet(
       `${META_API_BASE}/${adSetId}/insights`,
       {
-        fields: 'ad_id,ad_name,impressions,clicks,spend,ctr,cpc,actions',
+        fields: 'ad_id,ad_name,impressions,clicks,spend,ctr,cpc,actions,action_values',
         level: 'ad',
         date_preset: 'maximum',
         action_attribution_windows: JSON.stringify(['7d_click', '1d_view']),
@@ -204,8 +270,13 @@ export class MetaMetricsService {
       },
     );
 
+    const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+    if (customConversionId) {
+      conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
+    }
+
     return (response.data?.data ?? []).map((d: any) => {
-      const conversions = this.extractConversions(d.actions, conversionEvent);
+      const conversions = extractConversions(d.actions, conversionTypes);
       return {
         adId: d.ad_id,
         adName: d.ad_name ?? '',
@@ -345,6 +416,70 @@ export class MetaMetricsService {
       });
     } catch (err: any) {
       this.logger.warn(`Placement breakdown fetch failed for ${campaignId}: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Demographic + placement combined breakdown — age × gender × publisher_platform
+   * × platform_position. This is the highest-resolution view Meta exposes on a
+   * single insights call. Used by the demographic analyzer to surface insights
+   * like "Nadi Leaf converts best for women 35-44 on Reels at ₹820 CPA vs men
+   * 45-54 on Feed at ₹2,200 CPA" — the kind of granularity that the agent's
+   * current aggregate audienceScores hides.
+   *
+   * Meta caps breakdown combinations; if the call fails with "too many
+   * dimensions" the analyzer should fall back to splitting into two calls
+   * (age+gender separately from publisher_platform+platform_position) and joining.
+   *
+   * MVP: just the fetcher. Analyzer in learning pipeline (not yet wired) will
+   * consume this and write structured insights to company.learnings.
+   */
+  async fetchDemographicBreakdown(
+    campaignId: string,
+    accessToken: string,
+    conversionEvent?: string,
+  ): Promise<Array<{
+    age: string;
+    gender: string;
+    publisherPlatform: string;
+    platformPosition: string;
+    spend: number;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    ctr: number;
+    cpa: number;
+  }>> {
+    try {
+      const response = await this.metaApiGet(
+        `${META_API_BASE}/${campaignId}/insights`,
+        {
+          fields: 'impressions,clicks,spend,ctr,actions',
+          breakdowns: 'age,gender,publisher_platform,platform_position',
+          date_preset: 'maximum',
+          access_token: accessToken,
+        },
+      );
+      const rows: any[] = response.data?.data ?? [];
+      return rows.map((r: any) => {
+        const spend = parseFloat(r.spend ?? '0');
+        const conversions = this.extractConversions(r.actions, conversionEvent);
+        return {
+          age: r.age ?? 'unknown',
+          gender: r.gender ?? 'unknown',
+          publisherPlatform: r.publisher_platform ?? 'unknown',
+          platformPosition: r.platform_position ?? 'unknown',
+          spend,
+          impressions: parseInt(r.impressions ?? '0', 10),
+          clicks: parseInt(r.clicks ?? '0', 10),
+          conversions,
+          ctr: parseFloat(r.ctr ?? '0'),
+          cpa: conversions > 0 ? spend / conversions : 0,
+        };
+      });
+    } catch (err: any) {
+      this.logger.warn(`Demographic breakdown fetch failed for ${campaignId}: ${err.message} — falling back to split calls not yet implemented`);
       return [];
     }
   }

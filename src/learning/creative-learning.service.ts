@@ -271,7 +271,7 @@ Return ONLY the JSON object.`,
     headline: string;
     cta: string;
     hookStyle: string;
-    format: 'video' | 'image' | undefined;
+    format: 'video' | 'image' | 'carousel' | undefined;
     audienceType: string;
     spend: number;
     impressions: number;

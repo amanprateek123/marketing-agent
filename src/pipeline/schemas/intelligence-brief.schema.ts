@@ -81,7 +81,7 @@ export class IntelligenceBrief {
     metaAdId: string;
     hookStyle: string;
     audienceType: string;
-    format?: 'video' | 'image';
+    format?: 'video' | 'image' | 'carousel';
     budgetTier: number;
     sourceCPA: number;
     sourceROAS: number;
@@ -159,7 +159,7 @@ export class IntelligenceBrief {
     name: string;
     audienceType: string;
     hookStyles: string[];     // distinct hookStyles in this ad set's ads
-    formats: string[];        // distinct formats ('video' | 'image') in this ad set
+    formats: string[];        // distinct formats ('video' | 'image' | 'carousel') in this ad set
     spend: number;
     impressions: number;
     clicks: number;

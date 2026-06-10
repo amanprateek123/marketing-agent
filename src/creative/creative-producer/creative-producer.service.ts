@@ -39,7 +39,7 @@ export interface BriefData {
     metaAdId: string;
     hookStyle: string;
     audienceType: string;
-    format?: 'video' | 'image';
+    format?: 'video' | 'image' | 'carousel';
     budgetTier: number;
     sourceCPA: number;
     sourceROAS: number;
@@ -155,6 +155,7 @@ export class CreativeProducerService {
     try {
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
       let images: ImageCreative[] = [];
+      let carouselCards: any[] = [];
       let video: VideoCreative | null = null;
 
       try {
@@ -168,34 +169,75 @@ export class CreativeProducerService {
           selectionReason: teamResult.selectionReason,
         };
 
-        // Generate one image per copy variant using the creative team's per-variant prompts
-        this.logger.log(`Generating ${teamResult.variants.length} images (one per variant): tenantId=${tenantId}`);
-        const imageResults = await Promise.allSettled(
-          teamResult.variants.map((variant: any, i: number) => {
-            const teamImagePrompt = teamResult.imagePrompts?.[i];
-            if (teamImagePrompt) {
-              // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
-              return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId);
-            }
-            // Fallback: generate image prompt from scratch for this variant
-            return this.imageGenerator.generateForVariant(
-              { topic: brief.topic, angle: brief.angle, platform: brief.platform, format: brief.format, audience: brief.audience },
-              variant,
-              i,
-              company,
-              runId,
-            );
-          }),
-        );
+        const isCarousel = brief.format === 'carousel'
+          && Array.isArray(teamResult.carouselCards)
+          && teamResult.carouselCards.length >= 2;
 
-        images = teamResult.variants.map((_: any, i: number) => {
-          const result = imageResults[i];
-          if (result.status === 'fulfilled') {
-            return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
-          }
-          this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
-          return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '' };
-        });
+        if (isCarousel) {
+          // Carousel — generate N per-card images instead of per-variant images.
+          // Per-card prompts include explicit shared-visual-language directives
+          // (palette / setting / composition) so the slides cohere.
+          this.logger.log(`Generating ${teamResult.carouselCards!.length} carousel card images: tenantId=${tenantId} briefId=${briefId}`);
+          const cardResults = await Promise.allSettled(
+            teamResult.carouselCards!.map((card) =>
+              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId),
+            ),
+          );
+          carouselCards = teamResult.carouselCards!.map((card, i) => {
+            const result = cardResults[i];
+            if (result.status === 'fulfilled') {
+              return {
+                slotIndex: card.slotIndex,
+                headline: card.headline,
+                description: card.description,
+                imagePrompt: card.imagePrompt,
+                imageUrl: result.value.imageUrl,
+                cardLink: card.cardLink,
+              };
+            }
+            this.logger.error(`Carousel card ${card.slotIndex} image generation failed: ${(result as any).reason?.message}`);
+            return {
+              slotIndex: card.slotIndex,
+              headline: card.headline,
+              description: card.description,
+              imagePrompt: card.imagePrompt,
+              imageUrl: '',
+              cardLink: card.cardLink,
+            };
+          });
+          // images[] stays empty for carousel format — launch path looks at
+          // creativePackage.carouselCards when adSet.creativeFormat === 'carousel'.
+          images = [];
+        } else {
+          // Standard path — one image per copy variant
+          this.logger.log(`Generating ${teamResult.variants.length} images (one per variant): tenantId=${tenantId}`);
+          const imageResults = await Promise.allSettled(
+            teamResult.variants.map((variant: any, i: number) => {
+              const teamImagePrompt = teamResult.imagePrompts?.[i];
+              if (teamImagePrompt) {
+                // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
+                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId);
+              }
+              // Fallback: generate image prompt from scratch for this variant
+              return this.imageGenerator.generateForVariant(
+                { topic: brief.topic, angle: brief.angle, platform: brief.platform, format: brief.format, audience: brief.audience },
+                variant,
+                i,
+                company,
+                runId,
+              );
+            }),
+          );
+
+          images = teamResult.variants.map((_: any, i: number) => {
+            const result = imageResults[i];
+            if (result.status === 'fulfilled') {
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+            }
+            this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
+            return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '' };
+          });
+        }
 
         // Generate one video for the selected copy variant — skip for meme format (static image ad)
         const selectedIndex = teamResult.selectedIndex ?? 0;
@@ -280,7 +322,7 @@ export class CreativeProducerService {
         video = null;
       }
 
-      const allFailed = !copyPackage && images.length === 0 && !video;
+      const allFailed = !copyPackage && images.length === 0 && carouselCards.length === 0 && !video;
       const status = allFailed ? 'failed' : 'completed';
 
       await this.creativePackageModel.updateOne(
@@ -293,6 +335,7 @@ export class CreativeProducerService {
             copySelectionReason: copyPackage.selectionReason,
           }),
           images,
+          carouselCards,
           video,
           completedAt: new Date(),
         },

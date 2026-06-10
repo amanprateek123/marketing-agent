@@ -267,8 +267,12 @@ export class CampaignAuditorService {
     const briefProduct = brief ? (brief as any).product : '';
     const product = (company.products ?? []).find(p => briefProduct ? p.name === briefProduct : p.active)
       ?? (company.products ?? []).find(p => p.active);
+    // conversionValue serves as the FALLBACK when Meta's action_values return
+    // empty (pixel without value param). For VBB-style dynamic-value setups we
+    // prefer the actual event values; the static price is just the safety net.
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
+    const customConversionId = product?.customConversionId;
 
     const [full, byPlacement, byHour, byDayOfWeek] = await Promise.all([
       this.metaMetrics.fetchFullMetrics(
@@ -276,6 +280,7 @@ export class CampaignAuditorService {
         company.meta.accessToken,
         conversionValue,
         conversionEvent,
+        customConversionId,
       ),
       this.metaMetrics.fetchPlacementBreakdown(
         campaign.metaCampaignId,
@@ -346,6 +351,7 @@ export class CampaignAuditorService {
     const signals = this.signalDetector.detect(
       campaign, full, snapshots, company, weeklySpend, marketEnvironment,
       { byPlacement: taggedByPlacement, byHour, byDayOfWeek },
+      product,  // resolved from brief.product at line ~268 — prevents the cross-product CPA leak that caused Nadi Leaf to be audited against Nadi Report's ₹1,400 floor on 2026-06-10
     );
 
     // ── Save audit snapshot ───────────────────────────────────────────────────
@@ -470,7 +476,7 @@ export class CampaignAuditorService {
     }
 
     const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).lean().exec();
-    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company, snapshotData);
+    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company, snapshotData, product);
 
     // Save verdict to snapshot
     snapshotData.verdict = verdict as any;
@@ -589,7 +595,17 @@ export class CampaignAuditorService {
 
       const allowedActions = verdict.recommendedActions.filter(action => {
         const isPause = action.type === 'pause_ad' || action.type === 'pause_adset';
-        const isGrowth = action.type === 'scale_adset' || action.type === 'add_creative' || action.type === 'add_adset';
+        // 'add_creative' is ADDITIVE — adds a variant for Meta to consider,
+        // doesn't pause/redirect anything, doesn't change targeting. It's the
+        // least disruptive action in the auditor's repertoire and is the
+        // standard fix for hook-saturation issues that show up DURING the
+        // learning phase. Treating it as a growth action created a 4-audit
+        // loop where every audit re-diagnosed the same saturation and got
+        // blocked by the timing guard (campaign 6a2691ae, 2026-06-10/11).
+        // Split allocation-changing growth (scale, add_adset) from purely
+        // additive growth (add_creative) — only the former needs the timing guard.
+        const isAdditive = action.type === 'add_creative';
+        const isAllocationGrowth = action.type === 'scale_adset' || action.type === 'add_adset';
         const isCreativeFix = action.type === 'replace_creative';
         // Throttle = less destructive than pause. The auditor prompt explicitly tells the LLM
         // to use these for safety-rail breaches in day 0-3 (e.g. budget cap creep). If a
@@ -599,19 +615,23 @@ export class CampaignAuditorService {
         const isSafetyThrottle = action.type === 'reduce_total_budget';
 
         if (ageDays < 3) {
-          // Day 0-3: only allow pauses or safety throttles if priority=high (overspending,
-          // frequency breach). LLM is responsible for setting priority=high on safety cases.
+          // Day 0-3: high-priority pause/throttle (safety), or additive add_creative
+          // (creative-diversity correction). Allocation growth + replace blocked.
           if ((isPause || isSafetyThrottle) && action.priority === 'high') {
             this.logger.log(`Timing guard: allowing high-priority ${action.type} on "${action.targetName}" in day 0-3 (safety exception)`);
+            return true;
+          }
+          if (isAdditive && action.priority === 'high') {
+            this.logger.log(`Timing guard: allowing additive ${action.type} on "${action.targetName}" in day 0-3 (creative diversity correction — non-disruptive)`);
             return true;
           }
           this.logger.warn(`Timing guard: blocking ${action.type} on "${action.targetName}" — campaign is ${ageDays.toFixed(1)}d old (< 3d)`);
           recordTimingShadow(action, 'timing_guard_day_0_3');
           return false;
         }
-        if (ageDays < 7 && isGrowth) {
-          // Day 3-7: pause + replace allowed, NO growth actions
-          this.logger.warn(`Timing guard: blocking growth action ${action.type} — campaign is ${ageDays.toFixed(1)}d old (< 7d)`);
+        if (ageDays < 7 && isAllocationGrowth) {
+          // Day 3-7: pause + replace + additive allowed, NO allocation growth (scale/add_adset).
+          this.logger.warn(`Timing guard: blocking allocation-growth action ${action.type} — campaign is ${ageDays.toFixed(1)}d old (< 7d)`);
           recordTimingShadow(action, 'timing_guard_day_3_7_growth');
           return false;
         }
@@ -646,6 +666,7 @@ export class CampaignAuditorService {
           targetId: action.targetId,
           targetName: action.targetName,
           reason: action.reason,
+          priority: action.priority,
           metrics,
           gracePeriodHours: action.priority === 'high' ? gracePeriodHours : gracePeriodHours * 2,
         });
@@ -877,6 +898,12 @@ export class CampaignAuditorService {
       targetId: string;
       targetName: string;
       reason: string;
+      /**
+       * Verdict-supplied priority — drives timing guard, grace period, and
+       * Slack notification urgency. Plumbing this through to pendingActions
+       * persistence (was being silently dropped during the push() write).
+       */
+      priority?: 'low' | 'medium' | 'high';
       metrics: Record<string, any>;
       gracePeriodHours: number;
     },
@@ -952,6 +979,10 @@ export class CampaignAuditorService {
       targetId: action.targetId,
       targetName: action.targetName,
       reason: action.reason,
+      // priority is what the timing guard reads upstream — persist it so
+      // downstream observers (history, dashboard, Slack) see the same value.
+      // Previously dropped silently → priority showed as undefined everywhere.
+      priority: action.priority,
       metrics: action.metrics,
       recommendedAt: now,
       // Auto-apply actions get executeAt=now so the next executePendingActions pass
@@ -1189,6 +1220,19 @@ export class CampaignAuditorService {
             : null;
           const bestVariant = (creativePackage as any)?.copyVariants?.[bestVariantIndex];
           const bestImage = ((creativePackage as any)?.images ?? []).find((img: any) => img.variantIndex === bestVariantIndex);
+
+          // Carousel campaigns store creative in `carouselCards`, not `images[]`.
+          // The current add_adset path is designed for single-image / video ads
+          // that ship one creative per variant. Auto-cloning a carousel to a new
+          // audience needs different launch logic (re-uploading N card images,
+          // building child_attachments). Defer that to a follow-up — for now
+          // skip the action and surface it for the operator to handle manually.
+          const sourceWasCarousel = ((creativePackage as any)?.carouselCards ?? []).length > 0
+            || (campaign as any).campaignConfig?.adSets?.[0]?.creativeFormat === 'carousel';
+          if (sourceWasCarousel) {
+            this.logger.warn(`Skipping add_adset on carousel campaign ${campaign._id} — auto-clone of carousel ad sets not yet supported. Operator should clone manually if desired.`);
+            continue;
+          }
 
           if (!bestVariant) {
             this.logger.warn(`No copy variant ${bestVariantIndex} found for add_adset — skipping`);

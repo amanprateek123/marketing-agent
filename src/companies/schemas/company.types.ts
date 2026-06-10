@@ -337,7 +337,7 @@ export interface HotWinner {
   productName?: string;
   hookStyle: string;
   audienceType: string;        // e.g. 'advantage_plus', 'lookalike', 'retarget'
-  format?: 'video' | 'image';
+  format?: 'video' | 'image' | 'carousel';
   topic?: string;              // for diversifying clones (avoid repeating the exact topic)
   hookLine?: string;           // verbatim primaryText opening line (anchor pattern, NOT for copy-paste)
   spend: number;

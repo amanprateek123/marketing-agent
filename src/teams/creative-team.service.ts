@@ -41,7 +41,7 @@ export interface CreativeTeamBriefInput {
     metaAdId: string;
     hookStyle: string;
     audienceType: string;
-    format?: 'video' | 'image';
+    format?: 'video' | 'image' | 'carousel';
     budgetTier: number;
     sourceCPA: number;
     sourceROAS: number;
@@ -53,8 +53,21 @@ export interface CreativeTeamOutput {
   variants: CopyVariant[];
   selectedIndex: number;
   selectionReason: string;
-  imagePrompts: string[];     // one per copy variant — matched to each variant's hook/headline
+  imagePrompts: string[];     // one per copy variant — matched to each variant's hook/headline. EMPTY for carousel format (uses per-card prompts inside carouselCards).
   videoPrompt: string;        // complete prompt: visuals + voiceover + captions + music
+  /**
+   * Carousel cards — populated only when brief.format === 'carousel'. Each card
+   * has its own headline, optional description, and imagePrompt. Order is the
+   * narrative order shown to the viewer (preserved through launch, not re-
+   * sequenced by Meta).
+   */
+  carouselCards?: Array<{
+    slotIndex: number;
+    headline: string;
+    description?: string;
+    imagePrompt: string;
+    cardLink?: string;
+  }>;
   complianceNotes: string;
   debateRounds: number;
   debateLog: { round: number; from: string; summary: string }[];
@@ -265,7 +278,49 @@ OUTPUT
 
 This is Phase 1 of a 2-phase review. A Brand Compliance Reviewer will review your output separately.
 Do NOT approve your own work. Do NOT add compliance notes. Just produce the best creative package you can.
+${brief.format === 'carousel' ? `
+═══════════════════════════════════════════════════════
+CAROUSEL FORMAT — DIFFERENT SHAPE FROM SINGLE IMAGE / VIDEO
+═══════════════════════════════════════════════════════
+This brief is CAROUSEL format: ONE Meta ad with 3-5 linked cards (slides) the viewer swipes through. NOT four independent variants competing in one ad set.
 
+You must produce:
+  1. variants[0] — ONE copy block containing the carousel-level message (primaryText shown ABOVE the cards), the overall headline, cta, and dominant hookStyle. Keep variants array length = 1.
+  2. carouselCards[] — 3-5 cards forming a COHERENT NARRATIVE. Each card has slotIndex, headline (≤25 char shown bold under the image), description (≤30 char fine print, optional), imagePrompt (visual brief for the card's image).
+  3. imagePrompts[] — leave EMPTY ([]). Carousel uses per-card imagePrompts inside carouselCards, not the top-level array.
+
+CAROUSEL NARRATIVE PATTERNS (pick ONE that fits the brief's angle):
+  - Sequential process: "Step 1 → Step 2 → Step 3 → Step 4" (e.g. the 5-step booking flow)
+  - Tier reveal: "Starter → Standard → Complete" (multi-tier offer)
+  - Story arc: "Confusion → Discovery → Reading → Clarity" (transformation narrative)
+  - Differentiator stack: 4 unique selling points one per card
+  - Question → answer → answer → answer (curiosity opens, slides resolve)
+
+Card cohesion rules:
+  - Each card's headline must complete the narrative of the previous card's headline. Read end-to-end, the headlines tell a clear story.
+  - Visual language MUST be consistent across cards — same color palette, same person/setting if applicable, same composition style. Each imagePrompt must specify this.
+  - The first card carries the hook (stop the scroll). The last card carries the close (drives the swipe to CTA).
+  - Card images are 1:1 square (not 9:16) — Meta carousel renders square. Tell the image generator this in each imagePrompt.
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "variants": [
+    {
+      "primaryText": "${resolvedProduct?.hidePriceInCreative ? 'One-line hook above the carousel. Make the viewer want to swipe.' : 'One-line hook above the carousel (price OK here if it adds urgency). Make the viewer want to swipe.'}",
+      "headline": "Benefit-led overall headline",
+      "cta": "Learn More",
+      "hookStyle": "curiosity_gap"
+    }
+  ],
+  "selectedIndex": 0,
+  "selectionReason": "Single-narrative carousel; primary variant carries the carousel-level copy",
+  "carouselCards": [
+    { "slotIndex": 0, "headline": "Card 1 hook (≤25 char)", "description": "Optional ≤30 char", "imagePrompt": "1:1 square photorealistic image — visual centerpiece matching this card's headline. Shared visual language for consistent carousel: <describe palette + setting + composition style that ALL cards will share>" },
+    { "slotIndex": 1, "headline": "Card 2 (continues narrative)", "description": "Optional", "imagePrompt": "1:1 square — same palette/setting as card 0, new beat in the story" },
+    { "slotIndex": 2, "headline": "Card 3 (continues)", "description": "Optional", "imagePrompt": "1:1 square — same visual language, third beat" },
+    { "slotIndex": 3, "headline": "Card 4 (close / CTA)", "description": "Optional", "imagePrompt": "1:1 square — closing visual, brand-strong, drives the swipe to CTA" }
+  ],
+  "imagePrompts": [],` : `
 Return ONLY this JSON (no markdown, no explanation):
 {
   "variants": [
@@ -283,7 +338,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "Vertical 9:16 image for variant 1 — visual centerpiece matched to its specific hook...",
     "Vertical 9:16 image for variant 2 — visual centerpiece matched to its specific hook...",
     "Vertical 9:16 image for variant 3 — visual centerpiece matched to its specific hook..."
-  ],
+  ],`}
   "videoPrompt": "Pick duration + opener + music based on the SELECTED variant's hookStyle. Example below for hookStyle='pain_point' (30-40s, story-arc):\\n\\nDuration: 35 seconds, 9:16 vertical for Reels/Stories. Cinematic b-roll only — no avatars, no talking-head. Off-screen Hindi voiceover, Indian instrumental music.\\n\\nFIRST FRAME (controls thumbnail): Close-up of stressed hands gripping a phone, late-night room lighting, blurred kundli paper visible on the table beside the phone. Bold Hindi/Hinglish text overlay = the hook line.\\n\\n0-3s: Hold on the first frame, hook text fully visible. Single tanpura drone, no other sound. Establishes pain instantly.\\n\\n3-15s: PERSONAL STORY beat. Hard cut to a different relatable scene — woman staring out a rainy window, pages of a kundli rifling on a table, a circled date on a wall calendar. Hindi voiceover begins in conversational tone (warm, knowing — never preachy): names the specific astrology pain (Sade Sati / Mangal dosh / Mercury Retrograde — match to the brief's topic). Slow sitar/bansuri solo joins, minor key.\\n\\n15-25s: SHIFT to a brighter beat. Visual transitions to a lit puja desk with the relevant deity iconography (Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — match to topic), open kundli with planetary lines highlighted, hands tracing transit positions. Voiceover delivers the resolution / what becomes possible. Tabla layers in.\\n\\n25-35s: CTA beat. Bold text overlay: \\\"${resolvedProduct?.name ?? 'Product'}${resolvedProduct?.hidePriceInCreative ? '' : ` — ₹${resolvedProduct?.price}`}\\\" with a specific CTA line below (\\\"Aaj hi consultation book karo\\\"${resolvedProduct?.hidePriceInCreative ? '' : ' / \\\"Pehli baat ₹1 mein\\\"'}). Final voiceover urgency line. Music hits one final tabla beat → clean stop. Black frame for 0.5s.\\n\\nNEGATIVE: no English-only text, no watermarks, no celebrity faces, no Western spiritual aesthetic (crystals/mandalas/Buddha statues), no fade transitions, no slow zooms.",
   "complianceNotes": "",
   "debateRounds": 1,
@@ -890,8 +945,32 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
   private parseOutput(content: string): CreativeTeamOutput {
     try {
       const parsed: any = parseRobustJson(content);
-      // Validate imagePrompts is an array — LLM may return old singular imagePrompt format
-      if (!Array.isArray(parsed.imagePrompts)) {
+      // Normalize carouselCards if present — validate shape, sort by slotIndex,
+      // and don't enforce the imagePrompts-array rule below when this exists
+      // (carousel uses per-card imagePrompts inside the cards, not top-level).
+      const hasCarousel = Array.isArray(parsed.carouselCards) && parsed.carouselCards.length > 0;
+      if (hasCarousel) {
+        parsed.carouselCards = (parsed.carouselCards as any[])
+          .filter((c) => c && typeof c.headline === 'string' && typeof c.imagePrompt === 'string')
+          .map((c: any, i: number) => ({
+            slotIndex: typeof c.slotIndex === 'number' ? c.slotIndex : i,
+            headline: String(c.headline),
+            description: c.description ? String(c.description) : undefined,
+            imagePrompt: String(c.imagePrompt),
+            cardLink: c.cardLink ? String(c.cardLink) : undefined,
+          }))
+          .sort((a, b) => a.slotIndex - b.slotIndex);
+        if (parsed.carouselCards.length < 2) {
+          this.logger.warn(`Carousel output had ${parsed.carouselCards.length} valid card(s) after filter; need ≥2. Downstream will degrade to image format.`);
+        }
+        // Force imagePrompts to [] for carousel — the per-card prompts are the
+        // source of truth. If LLM accidentally also filled top-level imagePrompts,
+        // drop it to avoid downstream confusion.
+        parsed.imagePrompts = [];
+      }
+      // Validate imagePrompts is an array — LLM may return old singular imagePrompt format.
+      // Skipped for carousel (already normalized to []).
+      if (!hasCarousel && !Array.isArray(parsed.imagePrompts)) {
         if (typeof parsed.imagePrompt === 'string' && parsed.imagePrompt) {
           // Backward-compat: wrap singular into array and log a warning
           this.logger.warn('Creative Team returned imagePrompt (singular) — wrapping into imagePrompts array');

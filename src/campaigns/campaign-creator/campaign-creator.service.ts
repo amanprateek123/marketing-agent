@@ -358,27 +358,59 @@ export class CampaignCreatorService {
     const video = (creativePackage as any)?.video ?? null;
     const videoUrl = video?.videoUrl ?? '';
 
-    // Pre-launch: fetch live audiences from Meta and strip any expired IDs from ad sets
+    // Pre-launch: validate the audience IDs we actually use, one by one.
+    // Previous approach (GET /customaudiences?limit=200) silently truncated
+    // when accounts had >200 audiences — valid IDs beyond the cutoff got
+    // flagged as "unavailable" and stripped, sabotaging good launches. Now we
+    // ask Meta directly per ID: GET /{audienceId} returns 200 if usable, 404
+    // (or 100/2604) if deleted/missing, and the response's delivery_status
+    // surfaces "below-min-size" / "policy-suspended" / etc. Bounded to the few
+    // IDs we actually care about (typically 2-6 per launch).
     const validAudienceIds = new Set<string>();
-    try {
-      const normalizeId = (id: string) => id.startsWith('act_') ? id : `act_${id}`;
-      const accountIds = ((company.meta!.accountIds?.length ?? 0) > 0
-        ? company.meta!.accountIds!
-        : [company.meta!.accountId]
-      ).map(normalizeId);
-
-      for (const acctId of accountIds) {
-        const res = await axios.get(`https://graph.facebook.com/v21.0/${acctId}/customaudiences`, {
-          params: { fields: 'id', limit: '200', access_token: company.meta!.accessToken },
-          timeout: 15000,
-        }).catch(() => ({ data: { data: [] } }));
-        for (const a of res.data?.data ?? []) {
-          validAudienceIds.add(a.id);
+    const audienceIdsToCheck = new Set<string>();
+    for (const adSet of (config.adSets ?? []) as any[]) {
+      if (adSet.metaAudienceId) audienceIdsToCheck.add(adSet.metaAudienceId);
+      for (const id of (adSet.excludeAudienceIds ?? [])) audienceIdsToCheck.add(id);
+    }
+    if (audienceIdsToCheck.size > 0) {
+      try {
+        const results = await Promise.allSettled(
+          [...audienceIdsToCheck].map(async (id) => {
+            const res = await axios.get(`https://graph.facebook.com/v21.0/${id}`, {
+              params: {
+                fields: 'id,delivery_status,operation_status,approximate_count_lower_bound',
+                access_token: company.meta!.accessToken,
+              },
+              timeout: 10000,
+            });
+            const data = res.data ?? {};
+            // delivery_status.code 200 = ready; 300 = warning; 400 = error/below-min-size.
+            // operation_status.code 200 = no issues; 300 = audience being computed; 400 = error.
+            const deliveryCode = data.delivery_status?.code;
+            const operationCode = data.operation_status?.code;
+            const isUsable =
+              data.id === id
+              && (deliveryCode === undefined || deliveryCode < 400)
+              && (operationCode === undefined || operationCode < 400);
+            if (!isUsable) {
+              this.logger.warn(`Audience ${id} unusable: delivery_status=${JSON.stringify(data.delivery_status)} operation_status=${JSON.stringify(data.operation_status)}`);
+            }
+            return { id, isUsable };
+          }),
+        );
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value.isUsable) {
+            validAudienceIds.add(r.value.id);
+          } else if (r.status === 'rejected') {
+            const errMsg = (r.reason as any)?.response?.data?.error?.message ?? (r.reason as any)?.message ?? 'unknown';
+            this.logger.warn(`Audience validation failed for one ID: ${errMsg}`);
+          }
         }
+        this.logger.log(`Pre-launch audience check (per-ID): ${validAudienceIds.size}/${audienceIdsToCheck.size} usable`);
+      } catch (err: any) {
+        // Total failure (network etc.) — proceed without check rather than block launch.
+        this.logger.warn(`Audience validation failed (proceeding without check): ${err.message}`);
       }
-      this.logger.log(`Pre-launch audience check: ${validAudienceIds.size} valid audiences on Meta`);
-    } catch (err: any) {
-      this.logger.warn(`Audience validation failed (proceeding without check): ${err.message}`);
     }
 
     // For warm/hot briefs, expired-audience fallback must NOT degrade to
@@ -750,6 +782,49 @@ export class CampaignCreatorService {
     }
     this.logger.log(`imageHashes: ${JSON.stringify(Object.keys(imageHashes).map(k => `v${k}=${imageHashes[Number(k)].slice(0, 8)}...`))}`);
 
+    // Carousel path — if any ad set is creativeFormat=carousel, upload each
+    // card image and build the carouselCards payload Meta needs at ad-creation
+    // time. Cards live on the creativePackage.carouselCards array (populated
+    // by the Creative Team when brief.format === 'carousel').
+    const carouselCardsFromPackage = ((creativePackage as any)?.carouselCards ?? []) as Array<any>;
+    const needsCarousel = (config.adSets as any[]).some((as: any) => as.creativeFormat === 'carousel');
+    let resolvedCarouselCards: any[] = [];
+    if (needsCarousel) {
+      if (carouselCardsFromPackage.length < 2) {
+        // Carousel was requested but package didn't produce cards — degrade
+        // to image format using the existing variants. Fail loud in logs so the
+        // operator sees the missing creative orchestration.
+        this.logger.warn(`Carousel format requested but creativePackage.carouselCards has ${carouselCardsFromPackage.length} cards (need ≥2). Degrading all carousel ad sets to image-format.`);
+        for (const adSet of config.adSets as any[]) {
+          if (adSet.creativeFormat === 'carousel') adSet.creativeFormat = 'image';
+        }
+      } else {
+        resolvedCarouselCards = [];
+        for (const card of carouselCardsFromPackage) {
+          if (!card.imageUrl) continue;
+          try {
+            const hash = await this.metaAdsService.uploadImage(card.imageUrl, accountId, company.meta.accessToken);
+            resolvedCarouselCards.push({
+              imageHash: hash,
+              headline: card.headline,
+              description: card.description,
+              cardLink: card.cardLink,
+            });
+            this.logger.log(`Carousel card ${card.slotIndex} image uploaded: hash=${hash}`);
+          } catch (err: any) {
+            this.logger.warn(`Carousel card ${card.slotIndex} image upload failed: ${err.message}`);
+          }
+        }
+        if (resolvedCarouselCards.length < 2) {
+          this.logger.warn(`Only ${resolvedCarouselCards.length}/${carouselCardsFromPackage.length} carousel cards uploaded successfully. Need ≥2 — degrading carousel ad sets to image.`);
+          for (const adSet of config.adSets as any[]) {
+            if (adSet.creativeFormat === 'carousel') adSet.creativeFormat = 'image';
+          }
+          resolvedCarouselCards = [];
+        }
+      }
+    }
+
     // Upload video to Meta if available and any ad set needs it
     const needsVideo = (config.adSets ?? []).some(
       (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both',
@@ -800,6 +875,7 @@ export class CampaignCreatorService {
         selectedCopyIndex,
         landingUrl,
         declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
+        carouselCards: resolvedCarouselCards.length >= 2 ? resolvedCarouselCards : undefined,
       });
     } catch (err: any) {
       // Reset claim so /approve can be retried
@@ -1043,6 +1119,11 @@ Or reply here to discuss changes.`;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
     const conversionValue = product?.conversionValue ?? product?.price ?? 0;
     const optimizationGoal = product?.metaOptimizationGoal ?? 'OFFSITE_CONVERSIONS';
+    // Honor brief.format=carousel in the deterministic fallback too — if Strategy
+    // Team picked carousel and creative production succeeded, downgrading to
+    // image in fallback would waste the multi-card creative work.
+    const briefRequestedCarousel = (brief as any).format === 'carousel';
+    const fallbackCreativeFormat = briefRequestedCarousel ? 'carousel' as const : 'mixed' as const;
 
     // Funnel-stage-aware fallback: warm/hot briefs need a custom/retarget
     // audience — advantage_plus would be rejected by the downstream
@@ -1050,33 +1131,120 @@ Or reply here to discuss changes.`;
     // use it; otherwise the audienceStage guard correctly throws later.
     const briefStage = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
     const isWarmOrHot = briefStage === 'warm' || briefStage === 'hot';
+
+    // Derived per-ad-set floor — matches the math in Review Team prompts so
+    // both LLM-success and fallback paths converge on the same structure.
+    const productCpaForFloor = product?.performance?.avgCPA
+      ?? (product?.price ? Math.round(product.price * 0.3) : 2000);
+    const derivedFloor = Math.max(1000, Math.round((50 / 7) * productCpaForFloor * 1.5 / 100) * 100);
+
+    // Confidence detection: hypothesis-stage products (zero own data) should
+    // ship measurement campaigns, not single-set safety bets. This is the
+    // structural decision the LLM keeps getting wrong on first-time products —
+    // making the fallback do the right thing means even an LLM crash produces
+    // a useful campaign.
+    const productConfidence = product?.performance?.confidenceLevel ?? 'none';
+    const isHypothesisStage = !product?.performance?.totalConversions
+      || productConfidence === 'hypothesis'
+      || productConfidence === 'none'
+      || productConfidence === 'low';
+
+    // Pool eligible audience-A/B partners. We want a 1% lookalike of an
+    // existing buyer audience from same tenant (cross-product lookalike is
+    // explicitly the hypothesis we want to test — does buyer profile transfer).
+    // Match by name pattern (Lookalike 1% on a buyer/customer source).
+    const buyerLookalike1Pct = (product?.metaAudiences ?? []).find(
+      (a: any) => a.type === 'lookalike'
+        && (a.lookalikePercent === 1 || /lookalike\s*1\s*%|lal[_\s-]*1\s*%|1\s*%[^0-9]/i.test(a.name))
+        && /buyer|customer|purchase/i.test(a.name),
+    );
+    const pastPurchaserExcludes = (product?.metaAudiences ?? [])
+      .filter((a: any) => a.type === 'custom' && /buyer|customer|purchase/i.test(a.name))
+      .map((a: any) => a.id);
+
+    // Can we afford a measurement A/B? Need budget ≥ 2× derived floor for both
+    // ad sets to clear the learning threshold.
+    const canAffordMeasurementAB = fallbackBudget >= derivedFloor * 2;
+    const shouldSplitMeasurement = !isWarmOrHot
+      && isHypothesisStage
+      && canAffordMeasurementAB
+      && !!buyerLookalike1Pct;
+
     const customAudience = isWarmOrHot
       ? (product?.metaAudiences ?? []).find(a => a.type === 'custom')
       : undefined;
-    const fallbackAdSet = isWarmOrHot && customAudience
-      ? {
-          name: `META_CONVERSIONS_${customAudience.name.toUpperCase().slice(0, 20)}_FALLBACK_${new Date().toISOString().split('T')[0]}`,
-          budgetPercent: 100,
-          audienceType: 'custom' as const,
-          metaAudienceId: customAudience.id,
-          geoLocations: [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()],
-          optimizationGoal,
-          ads: [0, 1, 2, 3],
-          creativeFormat: 'mixed' as const,
-          excludedAudienceIds: [],
-        }
-      : {
-          name: `META_CONVERSIONS_ADV-PLUS_FALLBACK_${new Date().toISOString().split('T')[0]}`,
-          budgetPercent: 100,
+    const geoLocations = [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()];
+
+    let fallbackAdSets: any[];
+    let fallbackDebateSummary: string;
+    let fallbackRationale: string;
+
+    if (isWarmOrHot && customAudience) {
+      // Warm/hot: single custom-audience retargeting set (unchanged from before).
+      fallbackAdSets = [{
+        name: `META_CONVERSIONS_${customAudience.name.toUpperCase().slice(0, 20)}_FALLBACK_${new Date().toISOString().split('T')[0]}`,
+        budgetPercent: 100,
+        audienceType: 'custom' as const,
+        metaAudienceId: customAudience.id,
+        geoLocations,
+        optimizationGoal,
+        ads: [0, 1, 2, 3],
+        creativeFormat: fallbackCreativeFormat,
+        excludedAudienceIds: [],
+      }];
+      fallbackDebateSummary = 'Review Team unparseable — fallback: 1 custom-audience retargeting set (warm/hot stage).';
+      fallbackRationale = `DETERMINISTIC FALLBACK (warm/hot): ₹${fallbackBudget}/day, 1 custom-audience ad set (${customAudience.name}), all variants, optimizationGoal=${optimizationGoal}.`;
+    } else if (shouldSplitMeasurement) {
+      // Hypothesis-stage cold campaign with available buyer lookalike: ship the
+      // 2-ad-set measurement A/B. This is the structural decision the LLM keeps
+      // getting wrong — make the fallback do it right.
+      const dateTag = new Date().toISOString().split('T')[0];
+      fallbackAdSets = [
+        {
+          name: `META_CONVERSIONS_ADV-PLUS_BROAD_FALLBACK_${dateTag}`,
+          budgetPercent: 50,
           audienceType: 'advantage_plus' as const,
-          geoLocations: [company.geography === 'India' ? 'IN' : (company.geography ?? 'IN').slice(0, 2).toUpperCase()],
+          geoLocations,
           optimizationGoal,
           ads: [0, 1, 2, 3],
-          creativeFormat: 'mixed' as const,
-          excludedAudienceIds: (product?.metaAudiences ?? [])
-            .filter(a => a.type === 'custom' && /buyer|customer|purchase/i.test(a.name))
-            .map(a => a.id),
-        };
+          creativeFormat: fallbackCreativeFormat,
+          excludedAudienceIds: pastPurchaserExcludes,
+        },
+        {
+          name: `META_CONVERSIONS_LAL-1PCT-BUYERS_FALLBACK_${dateTag}`,
+          budgetPercent: 50,
+          audienceType: 'lookalike' as const,
+          metaAudienceId: buyerLookalike1Pct.id,
+          geoLocations,
+          optimizationGoal,
+          ads: [0, 1, 2, 3],
+          creativeFormat: fallbackCreativeFormat,
+          excludedAudienceIds: pastPurchaserExcludes,
+        },
+      ];
+      fallbackDebateSummary = `Review Team unparseable — fallback: 2-ad-set measurement A/B (advantage_plus + 1% lookalike of buyers, 50/50 at ₹${fallbackBudget}/day, exclude past purchasers). Hypothesis-stage product; audience-fit is the primary unknown.`;
+      fallbackRationale = `DETERMINISTIC FALLBACK (measurement-run): hypothesis-stage product (confidence=${productConfidence}). Built 2-ad-set audience-A/B at ₹${fallbackBudget}/day: advantage_plus broad (50%, ₹${Math.round(fallbackBudget * 0.5)}/day) + 1% lookalike of ${buyerLookalike1Pct.name} (50%, ₹${Math.round(fallbackBudget * 0.5)}/day). Both clear derived floor ₹${derivedFloor}/day. Same creative variants in both — isolates audience as the variable. Excludes past purchasers from both. Tests whether the existing buyer profile transfers to this product. Operator should review before approving.`;
+    } else {
+      // Single advantage_plus (budget too tight for A/B, OR proven-confidence
+      // product, OR no buyer lookalike available to seed the second set).
+      const reasonSingle = !canAffordMeasurementAB
+        ? `budget ₹${fallbackBudget}/day below 2× derived floor (₹${derivedFloor * 2}/day)`
+        : !isHypothesisStage
+          ? `proven-confidence product (confidence=${productConfidence}) — consolidation fine`
+          : 'no buyer-seeded lookalike audience available to test against';
+      fallbackAdSets = [{
+        name: `META_CONVERSIONS_ADV-PLUS_FALLBACK_${new Date().toISOString().split('T')[0]}`,
+        budgetPercent: 100,
+        audienceType: 'advantage_plus' as const,
+        geoLocations,
+        optimizationGoal,
+        ads: [0, 1, 2, 3],
+        creativeFormat: fallbackCreativeFormat,
+        excludedAudienceIds: pastPurchaserExcludes,
+      }];
+      fallbackDebateSummary = `Review Team unparseable — fallback: 1 advantage_plus ad set. Reason single-set vs measurement A/B: ${reasonSingle}.`;
+      fallbackRationale = `DETERMINISTIC FALLBACK (single-set): ₹${fallbackBudget}/day on advantage_plus broad, all variants, pause at CPA > ₹${breakevenCPA}, scale at ROAS > ${scaleROAS}x with ≥10 conv. Reason single-set: ${reasonSingle}. Operator should review before approving.`;
+    }
 
     return {
       approved: true,
@@ -1085,9 +1253,9 @@ Or reply here to discuss changes.`;
         objective: 'OUTCOME_SALES',
         conversionEvent,
         conversionValue,
-        adSets: [fallbackAdSet],
-        scaleRules: `After 7 days: if ROAS > ${scaleROAS}x AND conversions >= 10 → scale 20% (single step, max 40% cumulative). Manual approval required for scale.`,
-        pauseRules: `Per ad: CTR < ${pauseCTR}% after ₹${Math.round(breakevenCPA * 2)} spent → pause ad. Per ad set: ROAS < ${pauseROAS} after 7 days → pause. CPA > ₹${breakevenCPA} (product price) after ₹${Math.round(breakevenCPA * 3)} spend → pause and flag.`,
+        adSets: fallbackAdSets,
+        scaleRules: `After 7 days per ad set: if ROAS > ${scaleROAS}x AND conversions >= 10 → scale 20% (single step, max 40% cumulative). Manual approval required for scale.${fallbackAdSets.length > 1 ? ' Scale the better-performing audience first; if both <breakeven after week 1, pause both and re-strategize.' : ''}`,
+        pauseRules: `Per ad: CTR < ${pauseCTR}% after ₹${Math.round(breakevenCPA * 2)} spent → pause ad. Per ad set: ROAS < ${pauseROAS} after 7 days → pause. CPA > ₹${breakevenCPA} (product price) after ₹${Math.round(breakevenCPA * 3)} spend → pause and flag.${fallbackAdSets.length > 1 ? ' Day-7 checkpoint: pause whichever audience has worse blended CPA if no improvement after another 7 days.' : ''}`,
       },
       adjustments: {
         budgetAdjusted: fallbackBudget !== brief.suggestedBudget,
@@ -1096,9 +1264,9 @@ Or reply here to discuss changes.`;
       },
       debateRounds: 0,
       debateLog: [
-        { round: 0, from: 'system', summary: 'Campaign Review Team failed to produce parseable output after retry — deterministic fallback config used (1 advantage_plus ad set, conservative budget, all variants).' },
+        { round: 0, from: 'system', summary: fallbackDebateSummary },
       ],
-      debateRationale: `DETERMINISTIC FALLBACK: Review Team unparseable after retry. Built safe-default config: ₹${fallbackBudget}/day on a single advantage_plus ad set with all available variants, pause at CPA > ₹${breakevenCPA}, scale at ROAS > ${scaleROAS}x with ≥10 conv. Operator should review before approving.`,
+      debateRationale: fallbackRationale,
     };
   }
 

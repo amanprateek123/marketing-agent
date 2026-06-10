@@ -20,7 +20,7 @@ export interface MetaLaunchResult {
       adId: string;
       creativeId: string;
       copyVariantIndex: number;
-      format: 'video' | 'image';   // populated at launch — required to measure mixed-format ad sets
+      format: 'video' | 'image' | 'carousel';   // populated at launch — required to measure mixed-format ad sets; carousel = one ad with N child cards
     }[];
   }[];
 }
@@ -29,11 +29,13 @@ export interface MetaAdSetConfig {
   name: string;
   budgetPercent: number;
   audienceType: string;
-  creativeFormat?: 'video' | 'image' | 'both' | 'mixed';
+  creativeFormat?: 'video' | 'image' | 'both' | 'mixed' | 'carousel';
   // 'mixed' = the selected variant ships as a video ad, all OTHER variants in adSet.ads
   // ship as image ads. Lets a single ad set test 1 video + N images side-by-side
   // (Meta-recommended creative diversity within one optimization bucket) without
   // duplicating the same video across N copy variants the way 'both' does.
+  // 'carousel' = ONE ad with N linked cards (config.carouselCards). Ignores
+  // adSet.ads variant list — carousel ships as a single ad regardless of variant count.
   metaAudienceId?: string;
   excludeAudienceIds?: string[];
   ageMin?: number;
@@ -77,6 +79,19 @@ export interface MetaCampaignConfig {
   selectedCopyIndex?: number;           // which copy variant the video matches (for 'mixed' format)
   landingUrl: string;
   declaredSpecialAdCategories?: string[];  // for safety check on regulated copy
+  /**
+   * Carousel cards — required when an ad set has creativeFormat='carousel'.
+   * Each card needs an image hash (uploaded ahead of launch), headline,
+   * optional description, and optional per-card link override. Cards form a
+   * narrative; ordering matters. multi_share_optimized=false at the API layer
+   * preserves order so step-1→step-2→step-3 stories don't break.
+   */
+  carouselCards?: Array<{
+    imageHash: string;
+    headline: string;
+    description?: string;
+    cardLink?: string;
+  }>;
 }
 
 // Track all created Meta objects for rollback on failure
@@ -300,7 +315,8 @@ export class MetaAdsService {
         );
         created.adSetIds.push(adSetId);
 
-        // Create ads (one per copy variant)
+        // Create ads (one per copy variant — EXCEPT for carousel, which ships
+        // as ONE ad with N linked cards regardless of variant list)
         const adResults: MetaLaunchResult['adSets'][0]['ads'] = [];
         const creativeFormat = adSetConfig.creativeFormat ?? 'image';
         const selectedCopyIndex = config.selectedCopyIndex ?? 0;
@@ -310,6 +326,36 @@ export class MetaAdsService {
           adSetName: adSetConfig.name,
           adName,
         });
+
+        // Carousel: one ad per ad set, N cards inside it. Uses selected copy
+        // variant's primaryText as the message above the cards, and the cards
+        // themselves come from config.carouselCards (orchestrated upstream).
+        if (creativeFormat === 'carousel') {
+          if (!config.carouselCards || config.carouselCards.length < 2) {
+            throw new Error(`Ad set "${adSetConfig.name}" is creativeFormat=carousel but config.carouselCards has < 2 entries; cannot launch.`);
+          }
+          const selectedVariant = config.copyVariants[selectedCopyIndex] ?? config.copyVariants[0];
+          if (!selectedVariant) {
+            throw new Error(`Ad set "${adSetConfig.name}" carousel needs at least one copy variant for primaryText + cta`);
+          }
+          const adName = `${adSetConfig.name} — Carousel`;
+          const { adId, creativeId } = await this.createCarouselAd(
+            config.accountId,
+            config.accessToken,
+            adSetId,
+            adName,
+            selectedVariant.primaryText,
+            selectedVariant.cta,
+            config.pageId ?? '',
+            buildLandingUrl(adName),
+            config.carouselCards,
+          );
+          created.creativeIds.push(creativeId);
+          created.adIds.push(adId);
+          adResults.push({ adId, creativeId, copyVariantIndex: selectedCopyIndex, format: 'carousel' });
+          adSetResults.push({ adSetId, name: adSetConfig.name, ads: adResults });
+          continue;
+        }
 
         for (const variantIndex of adSetConfig.ads) {
           const variant = config.copyVariants[variantIndex];
@@ -633,20 +679,46 @@ export class MetaAdsService {
     // Attribution: 7-day click + 1-day view — view-through captures 15-25% more
     // attributed conversions for video-heavy creative. Click-only under-counts
     // video performance and biases the audit loop's format-comparison toward image.
-    adSetData.attribution_spec = [
-      { event_type: 'CLICK_THROUGH', window_days: 7 },
-      { event_type: 'VIEW_THROUGH', window_days: 1 },
-    ];
+    //
+    // EXCEPT for VALUE optimization (VBB) on OUTCOME_SALES: Meta restricts the
+    // allowed attribution windows to (CLICK_THROUGH 1, 0) or (CLICK_THROUGH 7, 0)
+    // — NO view-through accepted. Including a VIEW_THROUGH entry returns
+    // subcode 1885501 "View-through attribution window is invalid" and the
+    // whole launch fails. Drop view-through when optimizationGoal === 'VALUE'.
+    if (isValueOptimization) {
+      adSetData.attribution_spec = [
+        { event_type: 'CLICK_THROUGH', window_days: 7 },
+      ];
+    } else {
+      adSetData.attribution_spec = [
+        { event_type: 'CLICK_THROUGH', window_days: 7 },
+        { event_type: 'VIEW_THROUGH', window_days: 1 },
+      ];
+    }
 
     // Pixel for conversion optimization
+    //
+    // The promoted_object shape depends on optimization_goal:
+    //   - OFFSITE_CONVERSIONS + customConversionId: just custom_conversion_id.
+    //     Meta derives the pixel internally; sending pixel_id alongside this
+    //     path triggers subcode 1885014 ("invalid combination of parameters").
+    //   - VALUE (VBB) + customConversionId: REQUIRES pixel_id alongside the
+    //     custom_conversion_id. Sending custom_conversion_id alone returns
+    //     subcode 1815430 ("Select a promoted object for your ad set") —
+    //     Meta doesn't accept the implicit-pixel derivation for VBB. Hit on
+    //     Nadi Leaf launch 2026-06-09.
+    //   - No customConversionId: standard pixel+event path.
     if (customConversionId) {
-      // Custom Conversion — custom_conversion_id alone is sufficient.
-      // Sending pixel_id alongside triggers subcode 1885014 ("invalid
-      // combination of parameters") because Meta derives the pixel from
-      // the custom conversion internally.
-      adSetData.promoted_object = {
-        custom_conversion_id: customConversionId,
-      };
+      if (isValueOptimization && pixelId) {
+        adSetData.promoted_object = {
+          pixel_id: pixelId,
+          custom_conversion_id: customConversionId,
+        };
+      } else {
+        adSetData.promoted_object = {
+          custom_conversion_id: customConversionId,
+        };
+      }
     } else if (pixelId && conversionEvent) {
       // Standard or custom event
       adSetData.promoted_object = {
@@ -836,6 +908,112 @@ export class MetaAdsService {
     if (!adId) throw new Error(`No ad ID for video ad ${adName} (dangling creative: ${creativeId})`);
 
     this.logger.log(`Video ad created: ${adId} (${adName})`);
+    return { adId, creativeId };
+  }
+
+  /**
+   * Carousel ad — one ad with N linked cards (slides) the viewer swipes through.
+   *
+   * Different from single-image / video / mixed: those create N independent
+   * variants in one ad set that compete via Meta's dynamic optimization.
+   * Carousel is ONE ad with a coherent N-slide narrative, ideal for:
+   *  - Multi-step process (the 5-step Nadi Leaf booking flow)
+   *  - Multi-tier pricing (Starter / Standard / Complete shown as 3 cards)
+   *  - Sequential storytelling (16 Kandams overview, before-the-leaf vs after)
+   *  - Multi-feature showcase (4 differentiators as 4 cards)
+   *
+   * Each card has its own image, headline, optional description, and link. The
+   * carousel as a whole has a single primaryText (`message`) shown above the
+   * cards. Cards must share visual language — handled by the image generator
+   * orchestration that produces N coherent images for one carousel package.
+   *
+   * Min 2 cards, Meta supports up to 10. Most performant range: 3-5 cards.
+   */
+  private async createCarouselAd(
+    accountId: string,
+    accessToken: string,
+    adSetId: string,
+    adName: string,
+    primaryText: string,
+    cta: string,
+    pageId: string,
+    landingUrl: string,
+    cards: Array<{
+      imageHash: string;
+      headline: string;
+      description?: string;
+      cardLink?: string;  // optional per-card link override (defaults to landingUrl)
+    }>,
+  ): Promise<{ adId: string; creativeId: string }> {
+    if (!cards || cards.length < 2) {
+      throw new Error(`Carousel ad "${adName}" requires at least 2 cards (got ${cards?.length ?? 0})`);
+    }
+    if (cards.length > 10) {
+      this.logger.warn(`Carousel ad "${adName}" has ${cards.length} cards; trimming to 10 (Meta hard limit)`);
+      cards = cards.slice(0, 10);
+    }
+    const ctaType = this.mapCta(cta);
+    const childAttachments = cards.map((card) => ({
+      image_hash: card.imageHash,
+      link: card.cardLink ?? landingUrl,
+      name: card.headline,
+      ...(card.description ? { description: card.description } : {}),
+      call_to_action: {
+        type: ctaType,
+        value: { link: card.cardLink ?? landingUrl },
+      },
+    }));
+
+    const creativeData: any = {
+      name: `Creative — ${adName}`,
+      object_story_spec: {
+        page_id: pageId,
+        link_data: {
+          link: landingUrl,
+          message: primaryText,
+          child_attachments: childAttachments,
+          // Multi_share_optimized lets Meta reorder cards by per-user performance.
+          // For narrative carousels (step 1 → step 2 → step 3) this MUST be false
+          // or the story breaks. Default to false; can be exposed as a flag later
+          // if non-narrative carousels (independent benefit cards) want it on.
+          multi_share_optimized: false,
+          multi_share_end_card: true,  // append page-end card with CTA — boosts CVR
+          call_to_action: {
+            type: ctaType,
+            value: { link: landingUrl },
+          },
+        },
+      },
+      access_token: accessToken,
+    };
+
+    this.logger.log(`Creating carousel creative: ${adName} (${cards.length} cards)`);
+
+    const creativeResponse = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/adcreatives`,
+      creativeData,
+    );
+
+    const creativeId = creativeResponse.data?.id;
+    if (!creativeId) throw new Error(`No creative ID for carousel ad ${adName}`);
+
+    const adResponse = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/ads`,
+      {
+        name: adName,
+        adset_id: adSetId,
+        creative: { creative_id: creativeId },
+        status: 'PAUSED',
+        access_token: accessToken,
+      },
+    );
+
+    const adId = adResponse.data?.id;
+    if (!adId) throw new Error(`No ad ID for carousel ad ${adName} (dangling creative: ${creativeId})`);
+
+    this.logger.log(`Carousel ad created: ${adId} (${adName}, ${cards.length} cards)`);
     return { adId, creativeId };
   }
 

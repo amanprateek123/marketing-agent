@@ -30,6 +30,7 @@ import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { StrategyTeamService } from '../teams/strategy-team.service';
 import { CreativeTeamService } from '../teams/creative-team.service';
 import { CampaignReviewTeamService } from '../teams/campaign-review-team.service';
+import { ExperimentDesignerService } from '../teams/experiment-designer.service';
 import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
 
@@ -74,6 +75,7 @@ import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
     PipelineOrchestratorService,
     StrategyTeamService,
     CreativeTeamService,
+    ExperimentDesignerService,
     CampaignReviewTeamService,
   ],
   exports: [

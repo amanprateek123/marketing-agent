@@ -583,6 +583,30 @@ RULES
   * NEVER output suggestedBudget as 0
 
 ═══════════════════════════════════════════════════════
+FORMAT SELECTION
+═══════════════════════════════════════════════════════
+
+For each brief, pick "format" deliberately based on what the idea needs to *show*. The format determines downstream creative production — do NOT pick at random.
+
+- **single_image** (default): One striking visual + copy. Best for: single-claim hooks, social-proof flashes, urgency/scarcity (price drop, deadline), promotion announcements. Fast to produce, cheap to test. Use this when there's ONE thing to say.
+
+- **video** / **reel**: 15-40s vertical video with voiceover + captions. Best for: pain_point story arcs, before_after transformations, founder/expert authority, complex value props that need explanation, emotional hooks needing tone. Use when one frame can't tell the story. Slower to produce.
+
+- **carousel** (3-5 linked cards the viewer swipes through): Use when the story has SEQUENTIAL beats or PARALLEL options. Best fits:
+   * Multi-step process — "Step 1 → Step 2 → Step 3 → Step 4" (e.g. a booking/onboarding flow, a how-it-works walkthrough)
+   * Tier reveal — "Starter / Standard / Complete" or "Free / Pro / Premium" laid out as comparable options
+   * Story arc — "Before / Discovery / Transformation / After" emotional progression
+   * Differentiator stack — 3-5 unique selling points, one per card
+   * 16-Kandam / multi-chapter products — let each card show one chapter category
+  Pick carousel when the brief's keyMessage names a process, a comparison, or a multi-part concept. AVOID carousel for single-claim impulse hooks (single_image wins).
+
+- **meme**: Short, viral, native-feeling. Only when riding a current cultural moment with explicit fit. Most ideas should NOT be meme.
+
+- **collection**: Catalog/shopping experience. Rarely the right pick for consultation / info-product verticals; reserve for e-commerce with 5+ visible SKUs.
+
+Default precedence when uncertain: single_image > video > carousel. Pick carousel only when the brief explicitly maps to one of the bullets above — not as a tiebreaker.
+
+═══════════════════════════════════════════════════════
 STEPS
 ═══════════════════════════════════════════════════════
 
@@ -664,7 +688,7 @@ STEP 8: Return ONLY this JSON (no markdown, no explanation):
       "product": "exact product name from the catalog",
       "targetSegment": "audience segment name if defined, or general",
       "platform": "instagram|facebook|youtube|reddit",
-      "format": "reel|carousel|video|single_image|collection",
+      "format": "reel|carousel|video|single_image|collection — see FORMAT SELECTION below",
       "audience": "full audience description",
       "audienceStage": "cold|warm|hot — STRICT funnel definition (industry-standard, no exceptions): cold = ANY audience that has NOT engaged with our brand (lookalikes, interests, broad/advantage_plus, 1%-10% lookalikes-of-buyers ALL count as cold — these are still NEW people who never visited our site). warm = retargeting custom audiences of people who DID engage (site visitors, IG/FB engagers, video viewers, page followers). hot = high-intent retargeting (cart abandoners, initiate-checkout, 30d engaged without purchase). Lookalikes are NEVER warm — being a lookalike of a buyer ≠ engaging with our brand. Default to cold unless brief explicitly references retargeting a custom audience.",
       "targetLanguage": "hinglish|hindi|marathi|tamil|telugu|bengali|gujarati|punjabi|kannada|malayalam|english — language ALL downstream creative is produced in (copy, image overlays, video VO). Pick based on the AUDIENCE description and any geo signals. If audience explicitly names a language (\"Marathi-speaking\", \"Tamil audience\", \"Hindi-belt\") use that. If audience targets a single state/region with a dominant language (Maharashtra → marathi, Tamil Nadu → tamil, West Bengal → bengali, Karnataka → kannada, Hindi belt: UP/MP/Delhi/Bihar/Rajasthan/Haryana → hindi), use that. Default 'hinglish' for all-India broad audiences. Do NOT default to a regional language without a clear audience or geo signal — Hinglish reaches the widest Indian DTC audience.",
@@ -865,6 +889,14 @@ RULES
   * Hard cap: never above ₹${company.maxBudgetPerCampaign ?? 10000}/day
   * Weekly: suggestedBudget × 7 must fit within ₹${company.weeklyBudgetCap ?? 20000}
   * NEVER output suggestedBudget as 0
+
+FORMAT SELECTION (pick deliberately, not at random):
+- single_image: one striking visual + copy. Single-claim hooks, urgency, promos. Default for impulse plays.
+- video / reel: 15-40s vertical with voiceover + captions. Pain story arcs, before/after, founder authority, complex value props.
+- carousel (3-5 linked cards user swipes): pick when keyMessage names a PROCESS, COMPARISON, or MULTI-PART concept. Fits: multi-step flows (e.g. booking walkthrough), tier reveals (Starter/Standard/Complete), story arcs (before/discovery/transformation/after), differentiator stacks (3-5 USPs), multi-chapter products (e.g. 16-Kandam summary). AVOID for single-claim impulse — single_image wins there.
+- meme: only when riding a specific current cultural moment with explicit fit.
+- collection: rarely right for consultation/info-product; reserve for 5+ visible SKUs.
+Default precedence when uncertain: single_image > video > carousel. Pick carousel only when the brief explicitly maps to a multi-part concept.
 
 ═══════════════════════════════════════════════════════
 OUTPUT

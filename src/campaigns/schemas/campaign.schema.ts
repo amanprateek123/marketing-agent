@@ -144,7 +144,7 @@ export class Campaign {
       interests?: string[];
       optimizationGoal: string;
       ads: number[];
-      creativeFormat?: 'video' | 'image' | 'both' | 'mixed';
+      creativeFormat?: 'video' | 'image' | 'both' | 'mixed' | 'carousel';
     }[];
     scaleRules: string;
     pauseRules: string;
@@ -203,11 +203,12 @@ export class Campaign {
       metaAdId: string;
       copyVariantIndex: number;
       hookStyle: string;
-      // Which creative format actually shipped — 'video' or 'image'. Set at launch.
-      // Required for measuring 'mixed' ad sets (1 video + N image): without this,
-      // audit + hookStyle learning conflate format-level performance with
-      // hook-level performance because both are in the same ad set bucket.
-      format?: 'video' | 'image';
+      // Which creative format actually shipped — 'video', 'image', or 'carousel'.
+      // Set at launch. Required for measuring 'mixed' ad sets (1 video + N image):
+      // without this, audit + hookStyle learning conflate format-level performance
+      // with hook-level performance because both are in the same ad set bucket.
+      // 'carousel' = one ad with N linked cards (single entry per ad set).
+      format?: 'video' | 'image' | 'carousel';
       status: string;
       metrics?: {
         spend: number;
@@ -241,6 +242,34 @@ export class Campaign {
   @Prop({ type: Date })
   winnerCandidateAt?: Date;
 
+  /**
+   * Demographic + placement breakdown snapshot — populated by the audit loop or
+   * a dedicated breakdown-fetch job from meta-metrics.fetchDemographicBreakdown.
+   * Each row is one (age × gender × publisher_platform × platform_position)
+   * combination with its own performance. Used by the demographic analyzer to
+   * write insights like "best demo+placement for product X is women 35-44 on
+   * Reels". MVP: storage shape only — analyzer not yet wired.
+   *
+   * fetchedAt lets readers skip stale snapshots; refresh cadence should be
+   * daily for active campaigns (~1 Graph API call per campaign per day).
+   */
+  @Prop({ type: Object, default: null })
+  demographicBreakdown?: {
+    fetchedAt: Date;
+    rows: Array<{
+      age: string;
+      gender: string;
+      publisherPlatform: string;
+      platformPosition: string;
+      spend: number;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      ctr: number;
+      cpa: number;
+    }>;
+  } | null;
+
   // Pending optimization actions (auditor recommends, human approves or grace period expires)
   @Prop({ type: [Object], default: [] })
   pendingActions: {
@@ -249,11 +278,27 @@ export class Campaign {
     targetId: string;                 // Meta ad/adset/campaign ID
     targetName: string;
     reason: string;
+    /**
+     * Verdict-supplied priority: 'high' for safety-rail breaches and saturation
+     * corrections; 'medium' / 'low' for opportunistic optimizations. Persisted
+     * so downstream consumers (timing-guard review, audit history, Slack
+     * notifications, dashboard) can see the original urgency level. Previously
+     * was being dropped during the push() write — observers saw priority=undefined
+     * even though the timing guard had used the real value upstream.
+     */
+    priority?: 'low' | 'medium' | 'high';
     metrics: Record<string, any>;     // relevant metrics + action-specific params
     recommendedAt: Date;
     executeAt: Date;                  // recommendedAt + gracePeriod
     status: 'pending' | 'executed' | 'overridden' | 'expired';
     executedAt?: Date;
+    /**
+     * True when the action was auto-applied via the Layer 3 low-risk path
+     * (AUTO_APPLY_TYPES = narrow_placement, add_creative, dayparting, small
+     * shift_budget_between_adsets). Distinguishes "human approved this" from
+     * "system applied this automatically per safety policy" in audit history.
+     */
+    autoApplied?: boolean;
     replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed';  // replace/add creative only
   }[];
 }

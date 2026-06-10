@@ -8,7 +8,17 @@ import { PipelineRun, PipelineRunDocument } from '../pipeline/schemas/pipeline-r
 import { QUEUES } from './queue.constants';
 
 const AUDIT_INTERVAL_MS = 3 * 60 * 60 * 1000;  // 3 hours — matches cooldown in campaign-auditor
-const SYNC_INTERVAL_MS  = 30 * 60 * 1000;  // 30 minutes
+// Campaign sync interval. Env-overridable so operators can tune for active-launch
+// monitoring (e.g. 10 min during first week of a fresh product) without code changes.
+// Floor: 60s (Meta insight data has a ~15-min lag from event firing, polling more
+// frequently returns mostly unchanged data). Default: 10 minutes for near-real-time
+// monitoring of active campaigns. The sync itself is bulk-fetched per account
+// (~7 Meta API calls regardless of campaign count) so cost scales with tenant count,
+// not campaign count.
+const SYNC_INTERVAL_MS  = Math.max(
+  60_000,
+  parseInt(process.env.CAMPAIGN_SYNC_INTERVAL_MS ?? '', 10) || 10 * 60 * 1000,
+);
 
 @Injectable()
 export class SchedulerService implements OnModuleInit {
@@ -99,7 +109,7 @@ export class SchedulerService implements OnModuleInit {
         jobId: `campaign-sync-${tenantId}`,
       },
     );
-    this.logger.log(`Scheduled campaign sync every 1h for tenantId=${tenantId}`);
+    this.logger.log(`Scheduled campaign sync every ${Math.round(SYNC_INTERVAL_MS / 60000)} min for tenantId=${tenantId}`);
   }
 
   async scheduleAuditForTenant(tenantId: string): Promise<void> {

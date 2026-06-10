@@ -28,7 +28,10 @@ export interface AdSetConfig {
   interests?: string[];             // Meta interest targeting
   optimizationGoal: string;         // e.g. "OFFSITE_CONVERSIONS"
   ads: number[];                    // indices into copy variants (e.g. [0, 1, 2, 3])
-  creativeFormat?: 'video' | 'image' | 'both' | 'mixed'; // which creative type to use for this ad set
+  creativeFormat?: 'video' | 'image' | 'both' | 'mixed' | 'carousel'; // which creative type to use for this ad set
+  // 'carousel' = ONE ad with N linked cards (multi-step process, tier reveal, story arc).
+  // Required when brief.format === 'carousel'. The creative producer populates
+  // creativePackage.carouselCards; campaign-creator uploads each card's image at launch.
   // 'mixed' = selected variant → video ad; other variants → image ads (1 video + N image, recommended for prospecting)
 }
 
@@ -67,7 +70,7 @@ export interface CampaignReviewBriefInput {
     metaAdId: string;
     hookStyle: string;
     audienceType: string;
-    format?: 'video' | 'image';
+    format?: 'video' | 'image' | 'carousel';
     budgetTier: number;
     sourceCPA: number;
     sourceROAS: number;
@@ -228,18 +231,43 @@ export class CampaignReviewTeamService {
     // Lookalikes are NEVER warm — being a lookalike of a buyer ≠ engaging with our brand.
     const briefStageForReview = (brief as any).audienceStage as 'cold' | 'warm' | 'hot' | undefined;
     const isWarmOrHot = briefStageForReview === 'warm' || briefStageForReview === 'hot';
+    // Derived per-ad-set floor: 50 conv/week / 7 = 7 events/day per ad set to
+    // exit learning. At product CPA × 1.5 safety. Falls back to ₹3,000 when no
+    // historical CPA exists (hardcoded prior). Product-aware → ₹1,799 product
+    // with ₹1,400 CPA → floor ~₹1,500; ₹10K product with ₹3K estimated CPA →
+    // floor ~₹3,200.
+    const productCpaForFloor = product?.performance?.avgCPA
+      ?? (product?.price ? Math.round(product.price * 0.3) : 2000);  // fallback: 30% of price as CPA hypothesis
+    const derivedFloor = Math.max(1000, Math.round((50 / 7) * productCpaForFloor * 1.5 / 100) * 100);
+    // Confidence-aware override: hypothesis-stage products (zero own-campaign
+    // data) MUST ship as audience-measurement campaigns, not single-set safe
+    // bets. The single biggest unknown is "who actually buys this" — answer that
+    // in week 1 with 2+ ad sets testing distinct audience hypotheses (advantage+
+    // broad + 1% lookalike of an existing same-tenant buyer audience, when
+    // available). Single-ad-set fallback only when total budget can't sustain
+    // 2 × derivedFloor.
+    const productConfidence = product?.performance?.confidenceLevel ?? 'none';
+    const isHypothesisStage = !product?.performance?.totalConversions
+      || productConfidence === 'hypothesis'
+      || productConfidence === 'none'
+      || productConfidence === 'low';
+    const briefBudget = (brief as any).suggestedBudget ?? 0;
+    const canAffordTwoAdSets = briefBudget >= derivedFloor * 2;
+    const measurementRunRule = isHypothesisStage && !isWarmOrHot && canAffordTwoAdSets
+      ? `\n   ⚠ MEASUREMENT-RUN MODE (hypothesis-stage product, confidence=${productConfidence}):\n   - For unproven products like this one, audience-fit is the primary unknown — NOT creative fit.\n   - REQUIRE 2+ ad sets testing distinct audience hypotheses. DO NOT consolidate to 1 ad set citing budget — that wastes week 1 on a single audience guess.\n   - Recommended structure for cold + hypothesis-stage: ad-set-A advantage_plus broad (Meta's targeting); ad-set-B lookalike (1%) seeded from an existing same-tenant buyer audience if AVAILABLE META AUDIENCES has one (it lets you test whether the existing buyer profile transfers to this product/price tier).\n   - Split budget ~50/50. Both ad sets ship the SAME creative variants — that isolates AUDIENCE as the variable. Equal sample sizes for clean A/B.\n   - Exclude past purchasers from BOTH ad sets (hygiene; don't pay for re-marketing to existing buyers in a cold-prospecting test).\n   - If no buyer-seeded lookalike audience is available in the AVAILABLE META AUDIENCES list, fall back to: ad-set-A advantage_plus + ad-set-B audience-segment with explicit interests from the product's audienceSegments. Single ad-set ONLY when neither alternative exists.`
+      : '';
     const adSetCountRule = isWarmOrHot
       ? `2. AD SET COUNT (warm/hot stage — RETARGETING ONLY, no prospecting audiences):
    - audienceType MUST be "custom" or "retarget" (NOT lookalike, NOT advantage_plus, NOT interest — those are cold-prospecting)
-   - Budget ≤₹3,000/day → MUST be 1 ad set, custom-audience retargeting
-   - Budget ₹3-15k → max 2 ad sets (e.g. 7d engagers + cart-abandoners). Each ad set needs ₹2,000+/day minimum.
+   - Budget ≤₹${derivedFloor}/day → MUST be 1 ad set, custom-audience retargeting
+   - Budget ${derivedFloor}-15k → max 2 ad sets (e.g. 7d engagers + cart-abandoners). Each ad set needs ≥₹${Math.round(derivedFloor * 0.67)}/day.
    - Budget >₹15k → max 3 ad sets, all retargeting custom audiences.
    - If no custom/retarget audience is available in AVAILABLE META AUDIENCES, REJECT the campaign — do not silently downgrade to a cold audience type.`
       : `2. AD SET COUNT (cold stage):
-   - Budget ≤₹5,000/day → MUST be 1 ad set (advantage_plus or lookalike, both fine for cold prospecting).
-   - Budget ₹5-15k → max 2 ad sets. Each ad set needs ₹3,000+/day minimum.
-   - Budget >₹15k → max 3 ad sets.
-   - If the Strategist proposed too many ad sets for the budget, consolidate them.`;
+   - Derived per-ad-set floor for this product = ₹${derivedFloor}/day (formula: 50 conv-per-week / 7 × ₹${productCpaForFloor} estimated CPA × 1.5 safety). Each ad set must clear this OR the test is too thin to learn from.
+   - Budget < ₹${derivedFloor * 2}/day → 1 ad set (can't afford 2 above floor).
+   - Budget ≥ ₹${derivedFloor * 2}/day → at least 2 ad sets when hypothesis-stage; consolidate only when proven-confidence allows.
+   - Budget > ₹${derivedFloor * 3}/day → up to 3 ad sets.${measurementRunRule}`;
 
     // Targeting-fix rule: warm/hot must use retargeting custom audiences. If
     // none exist for the product, REJECT — don't fall back to lookalike (which
@@ -787,7 +815,7 @@ ${audiencePerfContext ? 'Audience data available — see context brief.' : 'No a
 
     const formatSection = hasFormatData
       ? `CREATIVE FORMAT — video vs image per ad set:
-Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both".
+Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both" | "carousel". Pick "carousel" ONLY when brief.format === "carousel" (the upstream Strategy Team chose carousel deliberately for a multi-part concept). When brief.format !== "carousel", DO NOT pick carousel — the creative producer won't have populated carouselCards and launch will degrade to image format.
 Format performance: Winning: ${winningFormats.join(', ')}. Losing: ${losingFormats.join(', ') || 'none'}.
 - Assign winning format to largest budget ad sets. Test the other on smallest budget ad set.
 - If both winning → split test across ad sets, or use "mixed".
@@ -798,7 +826,7 @@ IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was 
 - "image" ad sets → use ads: ${allVariantsArr} (each variant has its own image)
 - "both" → DEPRECATED for prospecting (creates duplicate ads). Use "mixed" instead.`
       : `CREATIVE FORMAT — video vs image per ad set:
-Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both".
+Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both" | "carousel". Pick "carousel" ONLY when brief.format === "carousel" (the upstream Strategy Team chose carousel deliberately for a multi-part concept). When brief.format !== "carousel", DO NOT pick carousel — the creative producer won't have populated carouselCards and launch will degrade to image format.
 No format data yet. Decide from first principles:
 - Prospecting / advantage_plus / lookalike / broad → "mixed" (1 video + N image, lets Meta pick).
 - Retargeting / past visitors → "image" (warm audience, simpler ads convert).
@@ -928,11 +956,18 @@ ${audienceStageBlock}
 
 ${formatSection}
 
-AD SET COUNT (scale to budget):
-- Budget ≤ ₹5,000/day → 1 ad set (advantage_plus). Concentrate all signal. Do NOT split.
-- Budget ₹5,000–15,000/day → max 2 ad sets (1 advantage_plus + 1 audience-based if valid audiences exist)
-- Budget > ₹15,000/day → up to 3 ad sets (advantage_plus + lookalike + retarget/custom)
-- Each ad set needs ₹3,000+/day minimum to have any chance of exiting Meta's learning phase.
+AD SET COUNT (derived floor, confidence-aware):
+- Derived per-ad-set floor = ₹${(() => {
+  const cpa = product?.performance?.avgCPA ?? (product?.price ? Math.round(product.price * 0.3) : 2000);
+  return Math.max(1000, Math.round((50 / 7) * cpa * 1.5 / 100) * 100);
+})()}/day (formula: 7 events/day × ₹${product?.performance?.avgCPA ?? (product?.price ? Math.round(product.price * 0.3) : 2000)} estimated CPA × 1.5 safety). Each ad set must clear this floor or it's too thin to learn from.
+- Confidence: this product is ${product?.performance?.confidenceLevel ?? 'no data'} (${product?.performance?.totalConversions ?? 0} conversions on record).
+- ${(!product?.performance?.totalConversions || product?.performance?.confidenceLevel === 'hypothesis' || product?.performance?.confidenceLevel === 'low')
+    ? `**MEASUREMENT-RUN MODE** (hypothesis-stage product): audience-fit is the primary unknown. REQUIRE 2+ ad sets testing distinct audience hypotheses when budget allows (≥2× floor). Recommended structure: advantage_plus broad + 1% lookalike of an existing buyer audience from AVAILABLE META AUDIENCES if one exists. Same creative variants in both — isolate audience as the variable. 50/50 budget split. Exclude past purchasers from both. Single ad-set only when budget is below 2× floor OR no second audience option exists.`
+    : `Proven-confidence product (avgCPA ₹${product?.performance?.avgCPA}): can consolidate to single advantage_plus if budget tight, can expand to 3 ad sets if budget is high.`}
+- Budget < 2× floor → 1 ad set.
+- Budget ≥ 2× floor and ≤ 3× floor → 2 ad sets.
+- Budget > 3× floor → up to 3 ad sets.
 - The audit loop will add retarget/narrowed ad sets later based on performance data — don't over-segment at launch.
 
 GUARDRAILS:

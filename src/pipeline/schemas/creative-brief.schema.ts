@@ -71,7 +71,7 @@ export class CreativeBrief {
     metaAdId: string;
     hookStyle: string;
     audienceType: string;
-    format?: 'video' | 'image';
+    format?: 'video' | 'image' | 'carousel';
     budgetTier: number;
     sourceCPA: number;
     sourceROAS: number;
@@ -115,6 +115,56 @@ export class CreativeBrief {
 
   @Prop({ type: String, default: null })
   debateRationale: string;
+
+  /**
+   * Structured A/B experiment metadata. When set, this brief is part of a
+   * deliberate isolated test — variants differ ONLY on `isolatedVariable`,
+   * everything else (audience, budget, format, landing) is held constant.
+   *
+   * Why: today the Creative Team produces 4 independent variants delivered
+   * via Meta's dynamic optimization. Meta picks a winner but doesn't tell us
+   * *why* — variants differ on multiple variables simultaneously (hook + image
+   * + headline), so the resulting "winningHooks" learnings are correlative,
+   * not causal. Structured experiments fix that: hold N-1 variables constant,
+   * vary 1, attribute the win cleanly.
+   *
+   * MVP scaffold: schema fields only. Strategy Team prompt change + audit-
+   * loop evaluator that calls the experiment at sample-size threshold come
+   * in the next session. When `experimentId` is null/undefined, the brief
+   * behaves as today (free-form 4-variant generation).
+   */
+  @Prop({ type: String, default: null })
+  experimentId?: string | null;
+
+  @Prop({
+    type: String,
+    enum: ['hookStyle', 'audience', 'budget_band', 'format', 'cta', 'headline_pattern', null],
+    default: null,
+  })
+  isolatedVariable?: 'hookStyle' | 'audience' | 'budget_band' | 'format' | 'cta' | 'headline_pattern' | null;
+
+  @Prop({ type: Number, default: null })
+  controlVariantIdx?: number | null;
+
+  /**
+   * Target conversions required to declare significance. Computed at design
+   * time from power-calc.util given the brief's expected effect size and the
+   * baseline conversion rate. Default null = no explicit target; auditor
+   * applies the standard 50-conversions-per-arm rule.
+   */
+  @Prop({ type: Number, default: null })
+  sampleSizeTarget?: number | null;
+
+  /**
+   * Status of the experiment evaluation. 'pending' until enough data; 'evaluated'
+   * once auditor runs the significance test and writes the result.
+   */
+  @Prop({
+    type: String,
+    enum: ['pending', 'evaluated', 'inconclusive', 'aborted', null],
+    default: null,
+  })
+  experimentStatus?: 'pending' | 'evaluated' | 'inconclusive' | 'aborted' | null;
 }
 
 export const CreativeBriefSchema = SchemaFactory.createForClass(CreativeBrief);

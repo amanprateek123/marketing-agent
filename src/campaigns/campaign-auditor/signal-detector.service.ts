@@ -114,7 +114,7 @@ export interface AuditSignalPacket {
       adSetId: string;
       hookStyle: string;
       audienceType: string;
-      format?: 'video' | 'image';
+      format?: 'video' | 'image' | 'carousel';
       spend: number;
       conversions: number;
       ctr: number;
@@ -220,7 +220,22 @@ export class SignalDetectorService {
     weeklySpend?: number,
     marketEnvironment?: AuditSignalPacket['marketEnvironment'],
     breakdowns?: AuditSignalPacket['breakdowns'],
+    /**
+     * Product this campaign is selling — resolved by the caller from
+     * brief.product (NOT "first active product"). Passing this is critical
+     * for multi-product tenants: without it, signal-detector defaults to
+     * `company.products.find(p => p.active)` which always returns the first
+     * active product. That caused the Nadi Leaf campaign on 2026-06-10 to be
+     * audited against Nadi Report's ₹1,400 CPA — wrong product, wrong floor.
+     *
+     * When omitted (legacy callers), falls back to first-active product —
+     * same behavior as before this param existed, but emits a warn log so
+     * the leak is visible.
+     */
+    auditedProduct?: any,
   ): AuditSignalPacket {
+    const resolvedProduct = auditedProduct
+      ?? (company.products ?? []).find((p: any) => p.active);
     const launchedAt = new Date(campaign.launchedAt ?? Date.now());
     const ageMs = Date.now() - launchedAt.getTime();
     const ageHours = ageMs / (1000 * 60 * 60);
@@ -290,7 +305,7 @@ export class SignalDetectorService {
     //   2. Vertical × objective-aware CPA band (lead vs purchase vs install vs subscription)
     //   3. Wide vertical fallback when objective doesn't map (awareness/traffic)
     // Solves the "spirituality lead at ₹150 vs paid consultation at ₹800 share one band" problem.
-    const productCPA = (company.products ?? []).find(p => p.active)?.performance?.avgCPA;
+    const productCPA = resolvedProduct?.performance?.avgCPA;
     const cpaFromVertical = getCPARange(company.industry, company.primaryObjective);
     const expectedCPARange: { min: number; max: number } = productCPA && productCPA > 0
       ? { min: productCPA * 0.7, max: productCPA * 1.5 }
@@ -315,7 +330,7 @@ export class SignalDetectorService {
     // Flag ad sets with zero conversions after enough click volume to make "zero" meaningful.
     // Spend alone is insufficient — a high-CPM low-volume audience can spend ₹2k on 10 clicks
     // and "zero conversions out of 10 clicks" is just noise.
-    const expectedCPA = (company.products ?? []).find(p => p.active)?.performance?.avgCPA ?? dailyBudget;
+    const expectedCPA = resolvedProduct?.performance?.avgCPA ?? dailyBudget;
     const highSpendThreshold = Math.max(expectedCPA * 2, dailyBudget);
     const highSpendZeroConversions = current.adSets
       .filter(as => as.conversions === 0
@@ -395,8 +410,8 @@ export class SignalDetectorService {
     // Resolution chain: product.contributionMargin → vertical typical → 0.50 default.
     // For 91astro (spirituality, margin 0.70), breakeven ROAS = 1.43.
     // For DTC food/grocery (margin 0.20), breakeven = 5.0. Hardcoded 1.0 was wrong.
-    const activeProduct = (company.products ?? []).find(p => p.active);
-    const breakeven = getBreakevenROAS(company.industry, activeProduct?.contributionMargin);
+    const activeProduct = resolvedProduct;  // alias — downstream references use activeProduct
+    const breakeven = getBreakevenROAS(company.industry, resolvedProduct?.contributionMargin);
 
     // Considered-purchase verticals need an extra 2 days for the 7d-click conversion
     // window to settle — at Day 3 a late-window conversion hasn't fired yet. Use AOV
@@ -476,8 +491,8 @@ export class SignalDetectorService {
 
     // ── Opportunities ─────────────────────────────────────────────────────────
     const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
-    const conversionValue = (company.products ?? []).find(p => p.active)?.conversionValue
-      ?? (company.products ?? []).find(p => p.active)?.price ?? 0;
+    const conversionValue = resolvedProduct?.conversionValue
+      ?? resolvedProduct?.price ?? 0;
     // Winner detection via Bayesian posterior, not point-threshold cliff.
     // Two conditions must both hold:
     //   1. Shrunken ROAS > scaleThreshold — the point estimate (after pulling toward

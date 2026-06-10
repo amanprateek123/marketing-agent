@@ -4,7 +4,7 @@ import { Model } from 'mongoose';
 import axios from 'axios';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
-import { extractConversions } from './conversion-extractor.util';
+import { extractConversions, extractActionValue } from './conversion-extractor.util';
 import {
   inferHookStyleFromCopy,
   inferAudienceType as sharedInferAudienceType,
@@ -64,6 +64,9 @@ export class CampaignSyncService {
       const ctr = parseFloat(insights.ctr ?? '0');
       const cpc = parseFloat(insights.cpc ?? '0');
       const conversions = this.extractConversions(insights.actions, conversionTypes);
+      // Real ROAS: pull action_values from Meta. Each pixel event's `value`
+      // param sums into action_values. ROAS = sum(value) / spend.
+      const actionValue = extractActionValue(insights.action_values, conversionTypes);
 
       const metaStatus = campaign.status ?? 'PAUSED';
       const internalStatus = META_TO_INTERNAL_STATUS[metaStatus] ?? 'paused';
@@ -71,7 +74,12 @@ export class CampaignSyncService {
       // Build metaAdSets from enriched data
       const metaAdSets = this.buildMetaAdSets(campaign, conversionTypes);
 
-      const roas = spend > 0 && conversions > 0 ? (conversions * 1) / spend : 0; // approximate
+      // ROAS resolution: prefer Meta-reported action_values (true value-tracked);
+      // fall back to (conversions × 0) → 0 when neither available. The
+      // syncFromEnrichedData path doesn't have product context here, so it can't
+      // do the fallback-to-product.conversionValue trick — that's only available
+      // in syncActiveCampaigns where we have company.products in scope.
+      const roas = spend > 0 && actionValue > 0 ? actionValue / spend : 0;
 
       const existing = await this.campaignModel.findOne({
         tenantId,
@@ -132,10 +140,37 @@ export class CampaignSyncService {
       : [company.meta!.accountId]
     ).map(normalizeAccountId);
 
+    // Build conversionTypes from BOTH standard events AND each product's custom
+    // conversion ID. Without the per-product custom IDs, sync reports 0
+    // conversions for products that rely on custom conversions (e.g. Nadi Leaf
+    // uses customConversionId=1534101314938858 — without `offsite_conversion.
+    // custom.1534101314938858` in this Set, the actions array from Meta is
+    // silently filtered out as non-matching). Hit on 2026-06-10: 5 actual
+    // conversions reported as 0.
     const conversionTypes = new Set<string>([
       'purchase', 'offsite_conversion.fb_pixel_purchase', 'lead',
       'offsite_conversion.fb_pixel_lead', 'complete_registration',
     ]);
+    for (const p of (company.products ?? [])) {
+      if (p.customConversionId) {
+        conversionTypes.add(`offsite_conversion.custom.${p.customConversionId}`);
+      }
+      // Also include custom event names (when product fires a named custom event
+      // like NADI_REPORT_PURCHASE_COMPLETED instead of a custom conversion).
+      if (p.customEventName) {
+        conversionTypes.add(p.customEventName);
+      }
+    }
+    // For fallback ROAS calc when Meta returns no action_values (pixel didn't
+    // fire with value param): use product.conversionValue ?? product.price.
+    // Indexed by custom conversion ID to attribute per-product correctly.
+    const fallbackValueByConversionType = new Map<string, number>();
+    for (const p of (company.products ?? [])) {
+      const v = p.conversionValue ?? p.price ?? 0;
+      if (v > 0 && p.customConversionId) {
+        fallbackValueByConversionType.set(`offsite_conversion.custom.${p.customConversionId}`, v);
+      }
+    }
 
     let totalSynced = 0;
 
@@ -164,7 +199,7 @@ export class CampaignSyncService {
 
         const insightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
           params: {
-            fields: 'campaign_id,spend,impressions,clicks,ctr,cpc,actions',
+            fields: 'campaign_id,spend,impressions,clicks,ctr,cpc,actions,action_values',
             level: 'campaign',
             date_preset: 'maximum',
             filtering: JSON.stringify([
@@ -203,7 +238,7 @@ export class CampaignSyncService {
         // Fetch ad set insights in one bulk call
         const adSetInsightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
           params: {
-            fields: 'adset_id,spend,impressions,clicks,ctr,cpc,actions,frequency',
+            fields: 'adset_id,spend,impressions,clicks,ctr,cpc,actions,action_values,frequency',
             level: 'adset',
             date_preset: 'maximum',
             filtering: JSON.stringify([
@@ -224,7 +259,7 @@ export class CampaignSyncService {
         const adsRes = activeCampaignIds.length > 0
           ? await axios.get(`${META_API_BASE}/${accountId}/ads`, {
               params: {
-                fields: 'id,name,status,adset_id,creative{id,name,object_story_spec},insights{spend,impressions,clicks,ctr,cpc,actions}',
+                fields: 'id,name,status,adset_id,creative{id,name,object_story_spec},insights{spend,impressions,clicks,ctr,cpc,actions,action_values}',
                 filtering: JSON.stringify([
                   { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
                   { field: 'campaign.id', operator: 'IN', value: activeCampaignIds },
