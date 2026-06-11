@@ -9,6 +9,7 @@ import {
   ValidateNested,
   IsBoolean,
   Min,
+  Max,
   IsNotEmpty,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -30,6 +31,9 @@ class ProductDto {
   @IsOptional() @IsString() conversionEvent?: string;
   @IsOptional() @IsNumber() @Min(0) conversionValue?: number;
   @IsOptional() @IsNumber() @Min(0) contributionMargin?: number;
+  // Whitelist trap: without this line, whitelist:true silently strips
+  // refundRatePercent on PUT and the refund haircut quietly turns off.
+  @IsOptional() @IsNumber() @Min(0) @Max(95) refundRatePercent?: number;
   @IsOptional() @IsString() customEventName?: string;
   @IsOptional() @IsString() customConversionId?: string;
   @IsOptional() @IsString() pixelId?: string;

@@ -43,4 +43,10 @@ export default () => ({
   youtube: {
     apiKey: process.env.YOUTUBE_API_KEY ?? '',
   },
+  ops: {
+    // System-failure alert channel (pipeline deaths, creative failures, stale-data
+    // audit skips, Slack delivery failures). Separate from tenant webhooks — this
+    // is for whoever operates the system. Unset = alerts degrade to error logs.
+    alertWebhook: process.env.OPS_ALERT_WEBHOOK ?? '',
+  },
 });

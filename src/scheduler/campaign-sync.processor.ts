@@ -5,7 +5,14 @@ import { CompaniesService } from '../companies/companies.service';
 import { CampaignSyncService } from '../campaigns/meta-ads/campaign-sync.service';
 import { QUEUES } from './queue.constants';
 
-@Processor(QUEUES.CAMPAIGN_SYNC, { lockDuration: 120000 })
+// Bulk sync over a 449-campaign account is 6 chunked+paginated Meta fetch
+// rounds with 3-5s politeness delays between them — real runtime is 3-8 min.
+// At lockDuration=120s BullMQ declared the worker stalled mid-sync (same
+// failure mode as creative-production pre-fix). 15 min covers worst case.
+@Processor(QUEUES.CAMPAIGN_SYNC, {
+  lockDuration: 15 * 60 * 1000,    // 15 min
+  lockRenewTime: 5 * 60 * 1000,
+})
 export class CampaignSyncProcessor extends WorkerHost {
   private readonly logger = new Logger(CampaignSyncProcessor.name);
 

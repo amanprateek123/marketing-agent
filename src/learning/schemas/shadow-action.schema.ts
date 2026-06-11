@@ -40,8 +40,11 @@ export class ShadowAction {
   // Why it was blocked
   @Prop({ required: true, enum: [
     'recipient_thin_evidence',          // shift_budget recipient < MIN_RECIPIENT_CONVERSIONS
+    'recipient_learned_poor_audience',  // shift_budget recipient audience has learned ROAS < breakeven (n>=3, product scope)
     'timing_guard_day_0_3',             // pause/throttle blocked in first 72h
     'timing_guard_day_3_7_growth',      // growth actions blocked before day 7
+    'early_pause_thin_evidence',        // day 0-3 pause on 0 conv with < half the vertical click floor
+    'oscillation_cooldown',             // budget-direction reversal against an action executed <72h ago
     'tz_guard_dayparting',              // dayparting on non-IST account
     'donor_floor_shift_budget',         // donor at MIN_DONOR_FLOOR_PCT
     'recipient_cap_shift_budget',       // recipient at MAX_RECIPIENT_PCT

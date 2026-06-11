@@ -5,6 +5,7 @@ import axios from 'axios';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { extractConversions, extractActionValue } from './conversion-extractor.util';
+import { getEffectiveConversionValue } from '../../common/conversion-value.util';
 import {
   inferHookStyleFromCopy,
   inferAudienceType as sharedInferAudienceType,
@@ -166,7 +167,8 @@ export class CampaignSyncService {
     // Indexed by custom conversion ID to attribute per-product correctly.
     const fallbackValueByConversionType = new Map<string, number>();
     for (const p of (company.products ?? [])) {
-      const v = p.conversionValue ?? p.price ?? 0;
+      // Net of refunds — fallback revenue must match the audit chain's basis.
+      const v = getEffectiveConversionValue(p);
       if (v > 0 && p.customConversionId) {
         fallbackValueByConversionType.set(`offsite_conversion.custom.${p.customConversionId}`, v);
       }

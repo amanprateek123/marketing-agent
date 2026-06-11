@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { PipelineRun, PipelineRunSchema } from './schemas/pipeline-run.schema';
 import { ScoutOutput, ScoutOutputSchema } from './schemas/scout-output.schema';
 import { ScoutSignal, ScoutSignalSchema } from './schemas/scout-signal.schema';
+import { CompetitorAdObservation, CompetitorAdObservationSchema } from './schemas/competitor-ad-observation.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from './schemas/intelligence-brief.schema';
 import { CreativeBrief, CreativeBriefSchema } from './schemas/creative-brief.schema';
 import { CoordinatorOutput, CoordinatorOutputSchema } from './schemas/coordinator-output.schema';
@@ -11,6 +12,7 @@ import { Digest, DigestSchema } from './schemas/digest.schema';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { DeliveryModule } from '../delivery/delivery.module';
+import { CommonModule } from '../common/common.module';
 import { CreativeModule } from '../creative/creative.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputSchema } from './schemas/meta-ads-library-output.schema';
@@ -23,6 +25,7 @@ import { YoutubeApiService } from './scouts/youtube-api.service';
 import { RedditApiService } from './scouts/reddit-api.service';
 import { CoordinatorService } from './coordinator.service';
 import { IdeaPoolService } from './idea-pool.service';
+import { SignalAccuracyService } from './signal-accuracy.service';
 import { DigestWriterService } from './digest-writer.service';
 import { PipelineOrchestratorService } from './pipeline-orchestrator.service';
 import { PipelineController } from './pipeline.controller';
@@ -41,6 +44,7 @@ import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
       { name: MetaAdsLibraryOutput.name, schema: MetaAdsLibraryOutputSchema },
       { name: ScoutOutput.name, schema: ScoutOutputSchema },
       { name: ScoutSignal.name, schema: ScoutSignalSchema },
+      { name: CompetitorAdObservation.name, schema: CompetitorAdObservationSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: CreativeBrief.name, schema: CreativeBriefSchema },
       { name: CoordinatorOutput.name, schema: CoordinatorOutputSchema },
@@ -59,6 +63,8 @@ import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
     DeliveryModule,
     CreativeModule,
     CampaignsModule,
+    // EventCalendarService for the scouts' seasonal directive
+    CommonModule,
   ],
   controllers: [PipelineController],
   providers: [
@@ -71,6 +77,7 @@ import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
     YoutubeScout,
     CoordinatorService,
     IdeaPoolService,
+    SignalAccuracyService,
     DigestWriterService,
     PipelineOrchestratorService,
     StrategyTeamService,

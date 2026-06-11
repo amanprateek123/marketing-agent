@@ -6,6 +6,7 @@ import { getBenchmark, getCPARange, resolveVertical, getBreakevenROAS } from '..
 import { adSetWinnerPosterior, adSetLoserPosterior, shrinkTowardPrior } from '../../common/statistics/bayesian-estimator.util';
 import { deriveFloorsFromVertical } from '../../common/statistics/power-calc.util';
 import { thompsonAllocate, ThompsonAllocationResult } from '../../common/statistics/bandit-allocator.util';
+import { getEffectiveConversionValue } from '../../common/conversion-value.util';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -401,7 +402,18 @@ export class SignalDetectorService {
       && current.campaign.spend >= dailyBudget * 2
       && current.campaign.clicks >= MIN_CLICKS_FOR_CAMPAIGN_ZERO_CONV;
 
-    const stuckInLearning = ageDays > coldStartDays && current.campaign.conversions === 0;
+    // Conversion-floor, not day-count: Meta's learning phase exits on ~50
+    // conversions, not calendar age. A low-budget campaign at Day 15 with
+    // ₹3K spent against a ₹1.5K expected CPA has only bought ~2 chances to
+    // convert — "0 conversions" there is pace, not failure. Require spend
+    // covering ≥3 expected conversions before the age flag fires; hard
+    // fallback at 2× coldStartDays so a misconfigured CPA benchmark can't
+    // keep a genuinely dead campaign invisible forever.
+    const stuckSpendFloor = expectedCPARange.max * 3;
+    const stuckInLearning = current.campaign.conversions === 0 && (
+      (ageDays > coldStartDays && current.campaign.spend >= stuckSpendFloor)
+      || ageDays > coldStartDays * 2
+    );
     // budgetExhaustionRisk: spending >15% more than expected for the days elapsed
     const budgetExhaustionRisk = dailyBudget > 0 && expectedSpendToDate > 0 &&
       current.campaign.spend / expectedSpendToDate > 1.15;
@@ -425,7 +437,9 @@ export class SignalDetectorService {
     // can't compute ROAS because the active product has no conversionValue set.
     // Without this, `unprofitableAfterDay3` silently never fires for misconfigured
     // tenants and the chronic-loss case stays invisible.
-    const productConversionValue = activeProduct?.conversionValue ?? activeProduct?.price ?? 0;
+    // NET of refunds — the loser posterior below must judge net revenue, or a
+    // 30%-refund product looks breakeven while actually bleeding.
+    const productConversionValue = getEffectiveConversionValue(activeProduct);
     const conversionDataIntegrity = (
       ageDays >= unprofitableMinAge
       && spendClearedGate
@@ -491,8 +505,9 @@ export class SignalDetectorService {
 
     // ── Opportunities ─────────────────────────────────────────────────────────
     const scaleThreshold = company.scaleIfROASAbove ?? 1.5;
-    const conversionValue = resolvedProduct?.conversionValue
-      ?? resolvedProduct?.price ?? 0;
+    // Net of refunds — winner detection and bandit allocation downstream both
+    // consume this value; gross would crown refund-heavy "winners".
+    const conversionValue = getEffectiveConversionValue(resolvedProduct);
     // Winner detection via Bayesian posterior, not point-threshold cliff.
     // Two conditions must both hold:
     //   1. Shrunken ROAS > scaleThreshold — the point estimate (after pulling toward

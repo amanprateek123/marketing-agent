@@ -122,6 +122,26 @@ export class IntelligenceBrief {
   @Prop({ type: [String], default: [] })
   sourcePlatforms: string[];
 
+  /**
+   * Where the idea came from: scout_signal | viral_trend | competitor_gap |
+   * market_insight | meta_ads_gap. The LLM has emitted this since the
+   * viral/meme upgrade but it was dropped at persist time — without it,
+   * signal-accuracy rollups can't tell which intelligence source produces
+   * briefs that actually convert.
+   */
+  @Prop({ default: '' })
+  ideaSource?: string;
+
+  /**
+   * The specific coordinator signals that inspired this brief (verbatim
+   * snapshot — signals TTL out of scout_signals after 30d, so we copy the
+   * identifying fields rather than reference). This is the missing half of
+   * signal→outcome traceability: day7/14/30Performance lands on this brief,
+   * and joining it back to these signals is what lets scouts be graded.
+   */
+  @Prop({ type: [Object], default: [] })
+  sourceSignals?: Array<{ topic: string; platforms: string[]; compositeScore: number }>;
+
   @Prop({ required: true, default: 0 })
   suggestedBudget: number;
 

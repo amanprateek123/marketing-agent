@@ -50,6 +50,16 @@ export interface Product {
   conversionEvent?: string;          // Meta pixel event: "Purchase", "Lead", "CompleteRegistration", "Subscribe", or custom event name
   conversionValue?: number;          // revenue per conversion (e.g. 999 for ₹999 product) — used for ROAS calculation
   contributionMargin?: number;       // decimal 0-1 (e.g. 0.3 = 30% margin after COGS/shipping/fees). Drives breakeven ROAS = 1/margin. Falls back to vertical default when unset.
+  /**
+   * Percent of conversions that refund (0-95, e.g. 30 = 30% refund rate).
+   * Pixel `value` params and conversionValue are GROSS bookings — for
+   * refundable funnels the decision chain must optimize on NET revenue or it
+   * scales campaigns that lose money ("ROAS 2.0" at 30% refunds is really 1.4).
+   * Applied via getEffectiveConversionValue() / the refundRatePercent param on
+   * MetaMetricsService — never haircut manually, or it double-counts.
+   * Unset/0 = no refunds (current behavior).
+   */
+  refundRatePercent?: number;
   customEventName?: string;          // if conversionEvent is "CustomEvent", this is the event name (e.g. "NADI_REPORT_PURCHASE_COMPLETED")
   customConversionId?: string;       // Meta Custom Conversion ID — takes priority, sends pixel_id + custom_conversion_id to Meta
   pixelId?: string;                  // Meta Pixel ID if different from company.meta.pixelId

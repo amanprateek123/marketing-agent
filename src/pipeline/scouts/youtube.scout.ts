@@ -8,6 +8,7 @@ import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { ScoutOutput, ScoutOutputDocument } from '../schemas/scout-output.schema';
 import { ScoutSignal, ScoutSignalDocument } from '../schemas/scout-signal.schema';
 import { ScoutBaseService } from './scout-base.service';
+import { EventCalendarService } from '../../common/calendar/event-calendar.service';
 import { YoutubeApiService } from './youtube-api.service';
 
 @Injectable()
@@ -28,8 +29,9 @@ export class YoutubeScout extends ScoutBaseService {
     @InjectModel(ScoutOutput.name) scoutOutputModel: Model<ScoutOutputDocument>,
     @InjectModel(ScoutSignal.name) scoutSignalModel: Model<ScoutSignalDocument>,
     private readonly youtubeApi: YoutubeApiService,
+    eventCalendar: EventCalendarService,
   ) {
-    super(claudeService, liveContextBuilder, scoutOutputModel, scoutSignalModel);
+    super(claudeService, liveContextBuilder, scoutOutputModel, scoutSignalModel, eventCalendar);
   }
 
   protected async prefetchApiData(company: CompanyDocument): Promise<string> {

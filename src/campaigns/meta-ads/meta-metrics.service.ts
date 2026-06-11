@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
 import { extractConversions, extractActionValue } from './conversion-extractor.util';
+import { getRefundFactor } from '../../common/conversion-value.util';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -19,6 +20,13 @@ export interface CampaignMetrics {
   cpa: number;
   roas: number;
   frequency: number;
+  /**
+   * `date_stop` of the insights row — the last day Meta's reporting covers.
+   * Normally today; when Meta's reporting pipeline lags (or the row is
+   * missing entirely), this falls behind and verdicts would be judged on
+   * stale data. null = no insights row returned.
+   */
+  dataAsOf: string | null;
 }
 
 export interface AdSetMetrics {
@@ -80,9 +88,16 @@ export class MetaMetricsService {
      * across the entire audit + metrics chain.
      */
     customConversionId?: string,
+    /**
+     * product.refundRatePercent — haircuts the action_values-based ROAS to net
+     * revenue (pixel values are gross bookings). The conversionValue param is
+     * expected to be refund-adjusted ALREADY (getEffectiveConversionValue);
+     * this param only nets down the real-pixel-revenue branch.
+     */
+    refundRatePercent?: number,
   ): Promise<FullCampaignMetrics> {
     const [campaign, adSets] = await Promise.all([
-      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent, customConversionId),
+      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent, customConversionId, refundRatePercent),
       this.fetchAdSetMetrics(campaignId, accessToken, conversionEvent, customConversionId),
     ]);
 
@@ -106,6 +121,7 @@ export class MetaMetricsService {
     conversionValue: number,
     conversionEvent?: string,
     customConversionId?: string,
+    refundRatePercent?: number,
   ): Promise<CampaignMetrics> {
     this.logger.log(`Fetching campaign metrics: ${campaignId}`);
 
@@ -147,9 +163,15 @@ export class MetaMetricsService {
     // Fall back to (conversions × conversionValue) when action_values is empty
     // — which happens for products where the pixel doesn't fire with a value.
     const actionValue = extractActionValue(data.action_values, conversionTypes);
+    // Pixel action_values are GROSS bookings — net them down by the product's
+    // refund rate so refundable funnels don't report inflated ROAS. The
+    // conversionValue fallback is NOT haircut here: callers pass it already
+    // refund-adjusted (getEffectiveConversionValue), so doubling up would
+    // understate revenue.
+    const refundFactor = getRefundFactor({ refundRatePercent });
     const roas = spend > 0
       ? (actionValue > 0
-          ? actionValue / spend
+          ? (actionValue * refundFactor) / spend
           : (conversions > 0 && conversionValue > 0 ? (conversions * conversionValue) / spend : 0))
       : 0;
 
@@ -166,6 +188,7 @@ export class MetaMetricsService {
       cpa: conversions > 0 ? spend / conversions : 0,
       roas,
       frequency: parseFloat(data.frequency ?? '0'),
+      dataAsOf: data.date_stop ?? null,
     };
   }
 

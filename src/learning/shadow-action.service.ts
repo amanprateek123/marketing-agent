@@ -5,6 +5,7 @@ import { ShadowAction, ShadowActionDocument } from './schemas/shadow-action.sche
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { MetaMetricsService } from '../campaigns/meta-ads/meta-metrics.service';
 import { CompaniesService } from '../companies/companies.service';
+import { getEffectiveConversionValue } from '../common/conversion-value.util';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -181,13 +182,20 @@ export class ShadowActionService {
       const company = await this.companiesService.findByTenantId(shadow.tenantId);
       if (!company?.meta?.accessToken) return null;
       const product = (company.products ?? []).find((p: any) => p.active);
-      const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+      // Net of refunds — regret labels compare CPA/ROAS deltas, so the anchor
+      // and the +72h read must use the same refund-adjusted basis as the audit.
+      const conversionValue = getEffectiveConversionValue(product);
       const conversionEvent = product?.conversionEvent ?? 'Purchase';
       const full = await this.metaMetrics.fetchFullMetrics(
         shadow.metaCampaignId,
         company.meta.accessToken,
         conversionValue,
         conversionEvent,
+        // Without the Custom Conversion ID, products like Nadi Leaf read 0
+        // conversions here and every regret label goes 'inconclusive' — same
+        // counting bug class fixed in audit/sync/metrics on 2026-06-10.
+        product?.customConversionId,
+        product?.refundRatePercent,
       );
       const c = full.campaign;
       // Schema's metricsAtT is `type: Object` (loose) — extending with `adSets` is safe

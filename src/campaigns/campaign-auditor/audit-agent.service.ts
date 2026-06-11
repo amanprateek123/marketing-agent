@@ -7,6 +7,7 @@ import { LiveContextBuilder } from '../../companies/prompt-generator/live-contex
 import { AuditSignalPacket } from './signal-detector.service';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { ShadowActionService } from '../../learning/shadow-action.service';
+import { ActionOutcomeService } from '../../learning/action-outcome.service';
 
 export type LeakDiagnosis =
   | 'creative_leak'         // CTR below benchmark / creativeFatigue
@@ -295,6 +296,7 @@ export class AuditAgentService {
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
     private readonly shadowActions: ShadowActionService,
+    private readonly actionOutcomes: ActionOutcomeService,
   ) {}
 
   async analyze(
@@ -310,11 +312,19 @@ export class AuditAgentService {
      * with the cross-product CPA leak risk.
      */
     auditedProduct?: any,
+    /** Rendered PORTFOLIO VIEW block from the auditor — sibling campaigns' ROAS/spend. */
+    portfolioContext?: string,
   ): Promise<AuditVerdict> {
     const learnings = company.learnings;
     const caseStudies = (company as any).caseStudies ?? [];
 
-    const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot, auditedProduct);
+    // Measured +72h outcomes of this tenant's past executed actions — the
+    // ground-truth counterweight to the model's priors about what each action
+    // type does. Empty string until ≥3 finalized outcomes exist; errors inside
+    // renderTrackRecord degrade to '' so the audit never blocks on it.
+    const actionTrackRecord = await this.actionOutcomes.renderTrackRecord(company.tenantId);
+
+    const context = this.buildContext(campaign, signals, snapshots, company, learnings, caseStudies, liveSnapshot, auditedProduct, actionTrackRecord, portfolioContext);
     // Skill directive prepended so the LLM applies paid-ads + ab-test-setup
     // frameworks when reasoning about pause/scale/replace verdicts. Otherwise
     // the auditor defaults to generic CTR/ROAS thresholds and ignores
@@ -346,7 +356,7 @@ export class AuditAgentService {
       });
 
       const verdict = this.parseVerdict(result.content);
-      return this.applyBusinessGuards(verdict, liveSnapshot, campaign, company, signals);
+      return this.applyBusinessGuards(verdict, liveSnapshot, campaign, company, signals, auditedProduct);
     } catch (err: any) {
       this.logger.error(`Audit agent failed: ${err.message} — defaulting to watch`);
       return this.safeDefault(signals);
@@ -367,6 +377,7 @@ export class AuditAgentService {
     campaign: any,
     company: CompanyDocument,
     signals: AuditSignalPacket,
+    auditedProduct?: any,
   ): AuditVerdict {
     const MIN_RECIPIENT_CONVERSIONS = 10;
     const liveAdSets = (liveSnapshot?.adSets ?? []) as any[];
@@ -374,11 +385,49 @@ export class AuditAgentService {
     const banditLeaderId = signals.banditAllocation?.leader?.adSetId;
     const banditLeaderConfidence = signals.banditAllocation?.leaderConfidence ?? 0;
 
+    // Learned-audience floor for shift recipients: TS enforcement of the
+    // DECISION PRIORS prompt rule. Per-product scope only and n≥3 — a
+    // tenant-aggregate prior is hypothesis-grade and must not hard-block.
+    const MIN_LEARNED_N_FOR_BLOCK = 3;
+    const learnedRoasFor = (audienceType: string): { roas: number; n: number } | null => {
+      const byProduct = (company.learnings?.campaign as any)?.audienceScoresByProduct as
+        Record<string, Record<string, { roas: number; n: number }>> | undefined;
+      const entry = auditedProduct?.name ? byProduct?.[auditedProduct.name]?.[audienceType] : undefined;
+      return entry && entry.n > 0 ? { roas: entry.roas, n: entry.n } : null;
+    };
+
     const filtered = verdict.recommendedActions.filter(a => {
       if (a.type !== 'shift_budget_between_adsets') return true;
       const toAdSetId = a.params?.toAdSetId;
       const recipient = liveAdSets.find(as => as.metaAdSetId === toAdSetId);
       const recipientConv = Number(recipient?.conversions) || 0;
+
+      const recipientLearned = learnedRoasFor(recipient?.audienceType ?? '');
+      if (
+        recipientLearned
+        && recipientLearned.n >= MIN_LEARNED_N_FOR_BLOCK
+        && recipientLearned.roas < signals.breakeven.breakevenROAS
+        // Fresh data can overturn a stale prior: only block while the recipient
+        // hasn't yet proven itself in THIS campaign (below the conversion floor).
+        && recipientConv < MIN_RECIPIENT_CONVERSIONS
+      ) {
+        this.logger.warn(
+          `Dropping shift_budget — recipient ${toAdSetId} audience "${recipient?.audienceType}" has learned ROAS ${recipientLearned.roas.toFixed(2)} < breakeven ${signals.breakeven.breakevenROAS.toFixed(2)} (n=${recipientLearned.n}, this product). Won't move budget into a measured loser.`,
+        );
+        void this.shadowActions.recordBlocked({
+          tenantId: company.tenantId,
+          campaignId: campaign?._id?.toString() ?? campaign?.campaignId ?? '',
+          metaCampaignId: campaign?.metaCampaignId ?? liveCampaign.metaCampaignId ?? '',
+          proposedAction: {
+            type: a.type, targetId: a.targetId, targetName: a.targetName,
+            reason: a.reason, priority: a.priority,
+            params: { ...a.params, learnedROAS: recipientLearned.roas, learnedN: recipientLearned.n },
+          },
+          blockedReason: 'recipient_learned_poor_audience',
+          metricsAtT: this.snapshotToMetrics(liveCampaign),
+        });
+        return false;
+      }
       if (recipientConv < MIN_RECIPIENT_CONVERSIONS) {
         this.logger.warn(
           `Dropping shift_budget action — recipient ${toAdSetId} has ${recipientConv} conversions (< ${MIN_RECIPIENT_CONVERSIONS}). Won't move budget into noise.`,
@@ -459,6 +508,8 @@ export class AuditAgentService {
     caseStudies: any[],
     liveSnapshot?: any,
     auditedProduct?: any,
+    actionTrackRecord?: string,
+    portfolioContext?: string,
   ): string {
     const age = signals.campaignAge;
     const curr = campaign;
@@ -467,14 +518,42 @@ export class AuditAgentService {
     // historical CPA line in the prompt leaks across products.
     const resolvedProduct = auditedProduct ?? (company.products ?? []).find((p: any) => p.active);
 
+    // ── Learned audience history lookup ──────────────────────────────────────
+    // Binds Day-30 learnings to the live ad sets being judged. The same data
+    // already renders in the TENANT CONTEXT block, but as a separate generic
+    // list — the model had to cross-reference two distant blocks to connect
+    // "this slow ad set" with "this audience has ROAS 2.8 over 12 campaigns."
+    // Putting the prior ON the ad-set row makes it part of the decision data.
+    const learnedScoreFor = (audienceType: string): { roas: number; n: number; scope: string } | null => {
+      if (!audienceType) return null;
+      const byProduct = learnings?.campaign?.audienceScoresByProduct as
+        Record<string, Record<string, { roas: number; n: number }>> | undefined;
+      const productEntry = resolvedProduct?.name ? byProduct?.[resolvedProduct.name]?.[audienceType] : undefined;
+      if (productEntry && productEntry.n > 0) {
+        return { roas: productEntry.roas, n: productEntry.n, scope: 'this product' };
+      }
+      const aggregate = learnings?.campaign?.audienceScores?.[audienceType];
+      if (aggregate !== undefined && aggregate !== null) {
+        // Back-compat: entries may be flat numbers or { roas, n }.
+        const roas = typeof aggregate === 'number' ? aggregate : Number((aggregate as any).roas) || 0;
+        const n = typeof aggregate === 'number' ? 1 : Number((aggregate as any).n) || 1;
+        if (roas > 0) return { roas, n, scope: 'tenant-aggregate — may not transfer' };
+      }
+      return null;
+    };
+
     // ── Per-ad-set breakdown (like Ads Manager view) ──────────────────────────
     const adSetLines = (liveSnapshot?.adSets ?? []).map((as: any) => {
       const verdict = as.conversions > 0 && as.roas > 1.5 ? '🟢 WINNING'
         : as.conversions === 0 && as.spend > 500 ? '🔴 ZERO CONV'
         : as.roas > 0 && as.roas < 0.8 ? '🟡 LOW ROAS'
         : '⚪ LEARNING';
+      const learned = learnedScoreFor(as.audienceType);
+      const learnedLine = learned
+        ? `\n    Learned history for this audience: ROAS ${learned.roas.toFixed(2)}x over n=${learned.n} campaigns (${learned.scope})`
+        : '';
       return `  ${verdict} | ${as.name} [${as.metaAdSetId}]
-    Audience: ${as.audienceType || 'advantage_plus'} | Spend: ₹${as.spend?.toFixed(0)} | Conv: ${as.conversions} | CTR: ${as.ctr?.toFixed(2)}% | CPA: ₹${as.cpa?.toFixed(0) || '∞'} | ROAS: ${as.roas?.toFixed(2) || '0.00'}x | Freq: ${as.frequency?.toFixed(1)}`;
+    Audience: ${as.audienceType || 'advantage_plus'} | Spend: ₹${as.spend?.toFixed(0)} | Conv: ${as.conversions} | CTR: ${as.ctr?.toFixed(2)}% | CPA: ₹${as.cpa?.toFixed(0) || '∞'} | ROAS: ${as.roas?.toFixed(2) || '0.00'}x | Freq: ${as.frequency?.toFixed(1)}${learnedLine}`;
     }).join('\n');
 
     // ── Per-ad breakdown (creative performance) ──────────────────────────────
@@ -563,6 +642,44 @@ export class AuditAgentService {
       );
     }
 
+    // ── Decision priors from Day-30 causal learnings ─────────────────────────
+    // Causal insights + offer-fit issues were previously consumed only by the
+    // creative/strategy teams — 30 days of matched-pair analysis never touched
+    // a single pause/scale decision. Render the ones relevant to this product
+    // WITH explicit rules for how they modify verdict thresholds.
+    const decisionPriorsBlock = (() => {
+      const lines: string[] = [];
+      const causal = (learnings?.causalInsights ?? learnings?.campaign?.causalInsights ?? []) as any[];
+      const relevantCausal = causal
+        .filter(ci => (ci.confidence ?? 0) >= 0.5 && (ci.dataPoints ?? 0) >= 2)
+        .filter(ci => !ci.productName || ci.productName === resolvedProduct?.name)
+        .sort((a, b) => (b.dataPoints ?? 0) - (a.dataPoints ?? 0))
+        .slice(0, 5);
+      for (const ci of relevantCausal) {
+        lines.push(
+          `  [${ci.rootCause ?? 'pattern'} | confidence ${(ci.confidence * 100).toFixed(0)}% | n=${ci.dataPoints}${ci.productName ? '' : ' | tenant-wide'}] ${ci.finding}`,
+        );
+      }
+      const FIT_FRESHNESS_DAYS = 60;
+      const fitCutoff = Date.now() - FIT_FRESHNESS_DAYS * 24 * 60 * 60 * 1000;
+      const fitIssues = ((learnings?.campaign?.offerAudienceFitIssues ?? []) as any[])
+        .filter(f => (!f.productName || f.productName === resolvedProduct?.name)
+          && (f.lastUpdated ? new Date(f.lastUpdated).getTime() >= fitCutoff : true))
+        .slice(0, 3);
+      for (const f of fitIssues) {
+        lines.push(
+          `  [offer-fit] Audience "${f.audienceType ?? f.audience ?? 'unknown'}" clicks but doesn't convert — post-click problem (offer/lander/price), NOT audience quality. Do not refresh_audience to fix this; flag the funnel in contextInsight.`,
+        );
+      }
+      if (lines.length === 0) return '';
+      return `━━━ DECISION PRIORS (measured causal learnings — apply to this verdict) ━━━
+${lines.join('\n')}
+  RULE: An ad set whose audience has learned ROAS ≥ breakeven with n≥3 on THIS product earns patience — a slow start there is pace, not failure; prefer watch over pause unless fresh evidence floors are met AND the data clearly contradicts the prior. The reverse also holds: an audience with learned ROAS below breakeven (n≥3) needs LESS fresh evidence to justify acting against it, and must NOT be a shift_budget recipient or add_adset target without explicit justification.
+  RULE: Tenant-aggregate priors (marked "may not transfer") are hypothesis-grade — never cite them as the sole reason for an action on this product.
+  RULE: When a prior influenced your verdict (either direction), name it in contextInsight.
+`;
+    })();
+
     // ── Snapshot history (with prior verdicts so the agent isn't stateless) ──
     // Filter out synthetic verdicts written by the cooldown / all-green short-circuits.
     // Those weren't real Claude decisions — feeding them into the consistency nudge
@@ -615,7 +732,8 @@ Objective: ${campaign.objective}
 Age: ${age.hours}h (${age.days} days) | ${age.inLearningPhase ? 'IN LEARNING PHASE' : 'POST LEARNING PHASE'}
 Daily Budget: ₹${campaign.budget}/day | Spend pace: ${signals.trends.spendPace}
 Product being sold: ${resolvedProduct?.name ?? 'unknown'} (price ₹${resolvedProduct?.price ?? '?'}, confidence: ${resolvedProduct?.performance?.confidenceLevel ?? 'none'})
-Historical CPA for this product: ${resolvedProduct?.performance?.avgCPA ? `₹${resolvedProduct.performance.avgCPA}` : 'no own-product data (hypothesis-stage — do NOT cite CPA numbers from other products as a floor for this one)'}
+Historical CPA for this product: ${resolvedProduct?.performance?.avgCPA ? `₹${resolvedProduct.performance.avgCPA}` : 'no own-product data (hypothesis-stage — do NOT cite CPA numbers from other products as a floor for this one)'}${(resolvedProduct as any)?.refundRatePercent > 0 ? `
+REFUND ADJUSTMENT: ~${(resolvedProduct as any).refundRatePercent}% of conversions refund. All ROAS figures in this audit are already NET of refunds (they will read LOWER than Meta Ads Manager, which shows gross bookings — that difference is correct, not a data error). Judge profitability on these net numbers.` : ''}
 
 ━━━ CAMPAIGN METRICS (live) ━━━
   Spend: ₹${curr.spend?.toFixed(0) ?? 0} | Impressions: ${curr.impressions ?? 0} | Clicks: ${totalClicks}
@@ -741,7 +859,7 @@ ${signals.breakdowns.byDayOfWeek.map(d => {
   RULE: When proposing dayparting, the schedule's days array MUST reflect this pattern. STRONG days (≥1.5× avg CVR) should always be included; WEAK days (≤0.5× avg with ≥${dowEvidenceFloor} clicks of evidence) should be excluded. Defer to observed data; ignore prior assumptions about the vertical's "auspicious" days.
 `;
 })() : ''}
-━━━ PRIOR AUDIT DECISIONS (most recent first; cooldown/skip entries excluded) ━━━
+${portfolioContext ? `${portfolioContext}\n` : ''}${decisionPriorsBlock ? `${decisionPriorsBlock}\n` : ''}${actionTrackRecord ? `${actionTrackRecord}\n` : ''}━━━ PRIOR AUDIT DECISIONS (most recent first; cooldown/skip entries excluded) ━━━
 ${snapshotSummary}
   (In the contextInsight, briefly state whether your verdict aligns with or reverses the prior decisions, and why. Both directions need explanation — do not default to consistency.)
 

@@ -13,6 +13,7 @@ import { CreativePackage, CreativePackageDocument } from '../creative/schemas/cr
 import { LearningRun, LearningRunDocument } from './schemas/learning-run.schema';
 import { CampaignLearnings, CausalInsight, OfferAudienceFitIssue } from '../companies/schemas/company.types';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
+import { PromptVersionEvalService } from './prompt-version-eval.service';
 
 const MIN_CAMPAIGNS = 3;
 
@@ -87,6 +88,7 @@ export class CampaignLearningService {
     private readonly creativePackageModel: Model<CreativePackageDocument>,
     @InjectModel(LearningRun.name)
     private readonly learningRunModel: Model<LearningRunDocument>,
+    private readonly promptVersionEval: PromptVersionEvalService,
   ) {}
 
   // Triggered after Day 30 writeback — full causal analysis + prompt regen
@@ -241,6 +243,12 @@ Return ONLY the JSON object described in your instructions.`,
     await this.companiesService.setCampaignLearningSlice(tenantId, enrichedCampaign);
     await this.companiesService.setTopicScores(tenantId, topicScores);
     await this.companiesService.replaceCausalInsights(tenantId, causalInsights);
+
+    // Eval the PREVIOUS cycle before regenerating: did campaigns created under
+    // the current prompt version beat the version before it? Runs pre-regen so
+    // a 'regressed' verdict (ops-alerted) lands before this cycle compounds a
+    // potentially poisoned learning. Best-effort — never blocks the deep run.
+    await this.promptVersionEval.evaluate(tenantId);
 
     // Deep run regenerates prompts — campaign creator, auditor, coordinator
     await this.promptGenerator.generate(tenantId);

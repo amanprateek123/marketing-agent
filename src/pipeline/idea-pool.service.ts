@@ -14,6 +14,7 @@ import { CoordinatorResult } from './coordinator.service';
 import { StructuredResearch } from './schemas/research-output.schema';
 import { MetaAdsLibraryInsights } from './schemas/meta-ads-library-output.schema';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
+import { SignalAccuracyService } from './signal-accuracy.service';
 
 export interface IdeaPoolResult {
   briefs: Array<{
@@ -43,6 +44,7 @@ export class IdeaPoolService {
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
     private readonly metaLearningImporter: MetaLearningImporterService,
+    private readonly signalAccuracy: SignalAccuracyService,
     @InjectModel(IntelligenceBrief.name)
     private readonly intelligenceBriefModel: Model<IntelligenceBriefDocument>,
     @InjectModel(CreativeBrief.name)
@@ -80,6 +82,10 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
       this.logger.warn(`Case studies unavailable for ${tenantId}: ${err.message}`);
     }
 
+    // Measured outcomes of past briefs by source/platform — lets ranking
+    // weight by what historically converted instead of starting cold weekly.
+    const signalTrackRecord = await this.signalAccuracy.buildTrackRecordBlock(tenantId);
+
     const generateMessage = this.buildGeneratePrompt(
       coordinatorResult,
       competitorResearch,
@@ -89,6 +95,7 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
       ideasPerRun,
       caseStudyContext,
       coordinatorResult.viralTrends ?? [],
+      signalTrackRecord,
     );
 
     const generated = await this.claudeService.runAgent({
@@ -166,6 +173,18 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
         urgencyScore: b.urgent ? 10 : 5,
         finalScore: b.priorityScore ?? 0,
         sourcePlatforms: b.sourcePlatforms ?? [],
+        ideaSource: b.ideaSource ?? '',
+        // Snapshot the inspiring coordinator signals onto the brief (signals
+        // TTL out of scout_signals in 30d; day7/14/30 performance lands here,
+        // so the join must live here too). sourceSignalIndices is the LLM's
+        // multi-signal citation; signalRank is the legacy single primary.
+        sourceSignals: [...new Set([
+          ...(Array.isArray(b.sourceSignalIndices) ? b.sourceSignalIndices : []),
+          ...(Number.isInteger(b.signalRank) && b.signalRank > 0 ? [b.signalRank] : []),
+        ])]
+          .map((idx: number) => coordinatorResult.topSignals?.[idx - 1])
+          .filter(Boolean)
+          .map((s: any) => ({ topic: s.topic, platforms: s.platforms ?? [], compositeScore: s.compositeScore ?? 0 })),
         suggestedBudget: b.suggestedBudget ?? 0,
         selected: b.briefId === briefId,
       })),
@@ -224,6 +243,7 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
     ideasPerRun: number,
     caseStudyContext: string = '',
     viralTrends: CoordinatorResult['viralTrends'] = [],
+    signalTrackRecord: string = '',
   ): string {
     const generationTarget = Math.max(20, ideasPerRun * 2);
     const activeProducts = (company.products ?? []).filter(p => p.active);
@@ -246,7 +266,7 @@ Use the exact product name in the "product" field of each brief.
 ALL INTELLIGENCE — generate ideas from ANY of these sources
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-COORDINATOR SIGNALS (cross-validated from 4 platforms, ranked by score):
+${signalTrackRecord ? `${signalTrackRecord}\n\n` : ''}COORDINATOR SIGNALS (cross-validated from 4 platforms, ranked by score):
 ${topSignals || 'No ranked signals this run.'}
 
 COMPETITOR INSIGHTS (may have standalone opportunities the scouts didn't catch):
@@ -307,6 +327,7 @@ Generate ~${generationTarget} ideas internally, rank by priorityScore, return on
       "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight|meta_ads_gap",
       "sourcePlatforms": ["instagram", "youtube"],
       "signalRank": 1,
+      "sourceSignalIndices": [1, 3],
       "urgent": false,
       "priorityScore": 8.5,
       "selectionReason": "one sentence on why this idea matters now",
@@ -323,6 +344,7 @@ Rules:
 - For VIRAL TRENDS: generate trend-jacking ad ideas. Adapt the meme/cultural moment to naturally feature the product. Use format: "meme" and ideaSource: "viral_trend". These are time-sensitive — mark urgent: true if the trend dies in <7 days. Fill in trendJackingNote explaining the adaptation.
 - Generate ~${generationTarget} raw ideas total, rank by priorityScore, return the top ${ideasPerRun}
 - signalRank: 1/2/3/etc for coordinator signal ideas, null for competitor/market/meta_ads_gap ideas
+- sourceSignalIndices: numbers of ALL coordinator signals that fed this idea (e.g. [1, 3] when two signals combined); [] for ideas with no coordinator-signal input. This drives signal-accuracy tracking — cite honestly, do not pad.
 - urgent: true only if this idea must be executed THIS WEEK
 - priorityScore: your honest 1-10 rating — rank by this to pick the top ${ideasPerRun}
 - suggestedBudget: DAILY in ₹/day. NEVER output 0. Minimum ₹${Math.round((company.weeklyBudgetCap ?? 20000) * 0.10)}/day, max ₹${company.maxBudgetPerCampaign ?? 10000}/day

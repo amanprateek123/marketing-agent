@@ -10,6 +10,7 @@ import { ScoutSignal, ScoutSignalDocument } from './schemas/scout-signal.schema'
 import { ScoutOutput, ScoutOutputDocument } from './schemas/scout-output.schema';
 import { CoordinatorOutput, CoordinatorOutputDocument } from './schemas/coordinator-output.schema';
 import { ResearchOutput, ResearchOutputDocument, StructuredResearch, ResearchInsight } from './schemas/research-output.schema';
+import { SignalAccuracyService } from './signal-accuracy.service';
 
 export interface CoordinatorResult {
   coordinatorOutputId: string;
@@ -44,6 +45,7 @@ export class CoordinatorService {
     private readonly coordinatorOutputModel: Model<CoordinatorOutputDocument>,
     @InjectModel(ResearchOutput.name)
     private readonly researchOutputModel: Model<ResearchOutputDocument>,
+    private readonly signalAccuracy: SignalAccuracyService,
   ) {}
 
   async run(
@@ -77,7 +79,12 @@ export class CoordinatorService {
       viral_trends: o.data?.viral_trends ?? [],
     }));
 
-    const userMessage = this.buildCoordinatorPrompt(signals, viralTrendInputs);
+    // Platform-level track record (which platforms' signals historically led
+    // to converting campaigns) — informs the coordinator's composite scoring.
+    const signalTrackRecord = await this.signalAccuracy.buildTrackRecordBlock(tenantId);
+
+    const userMessage = (signalTrackRecord ? `${signalTrackRecord}\n\n` : '')
+      + this.buildCoordinatorPrompt(signals, viralTrendInputs);
 
     const result = await this.claudeService.runAgent({
       tenantId,

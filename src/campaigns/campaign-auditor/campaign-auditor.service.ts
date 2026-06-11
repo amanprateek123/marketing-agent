@@ -21,9 +21,11 @@ import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/sch
 import { CreativeLearningService } from '../../learning/creative-learning.service';
 import { CampaignLearningService } from '../../learning/campaign-learning.service';
 import { ShadowActionService } from '../../learning/shadow-action.service';
+import { ActionOutcomeService } from '../../learning/action-outcome.service';
 import { CampaignOptimizerService } from './campaign-optimizer.service';
 import { QUEUES } from '../../scheduler/queue.constants';
 import { HOOK_STYLES_DR } from '../../common/creative/hook-styles';
+import { getEffectiveConversionValue } from '../../common/conversion-value.util';
 
 export interface AuditResult {
   tenantId: string;
@@ -94,6 +96,7 @@ export class CampaignAuditorService {
     private readonly creativeLearning: CreativeLearningService,
     private readonly campaignLearning: CampaignLearningService,
     private readonly shadowActions: ShadowActionService,
+    private readonly actionOutcomes: ActionOutcomeService,
     private readonly metaMetrics: MetaMetricsService,
     private readonly metaAds: MetaAdsService,
     private readonly slackService: SlackService,
@@ -270,7 +273,9 @@ export class CampaignAuditorService {
     // conversionValue serves as the FALLBACK when Meta's action_values return
     // empty (pixel without value param). For VBB-style dynamic-value setups we
     // prefer the actual event values; the static price is just the safety net.
-    const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+    // NET of refunds — every ROAS downstream of this line (verdicts, winner
+    // detection, ad-set ROAS at line ~387) judges net revenue, not bookings.
+    const conversionValue = getEffectiveConversionValue(product);
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
     const customConversionId = product?.customConversionId;
 
@@ -281,6 +286,7 @@ export class CampaignAuditorService {
         conversionValue,
         conversionEvent,
         customConversionId,
+        product?.refundRatePercent,
       ),
       this.metaMetrics.fetchPlacementBreakdown(
         campaign.metaCampaignId,
@@ -301,6 +307,47 @@ export class CampaignAuditorService {
         customConversionId,
       ),
     ]);
+
+    // ── Data-staleness gate ───────────────────────────────────────────────────
+    // Never let the verdict machinery run on data we can't trust. Two failure
+    // modes, both real on this account:
+    //   1. Meta's reporting pipeline lags — insights date_stop falls >48h
+    //      behind. Pausing/scaling on a 2-day-old picture is how the auditor
+    //      killed campaigns whose conversions had already landed.
+    //   2. The fetch silently returns an empty row (rate limit, truncation —
+    //      see the 449-campaign filter-URL bug) while the DB knows the
+    //      campaign has real spend. Zero-spend on a spending campaign is an
+    //      API failure, not a metric.
+    // Skip the whole audit cycle; the 6h cron retries with fresh data. DB
+    // metrics are NOT updated from a suspect fetch — that would poison sync.
+    const STALE_DATA_HOURS = 48;
+    const dataAsOfMs = full.campaign.dataAsOf ? new Date(full.campaign.dataAsOf).getTime() : null;
+    // date_stop is a date (00:00) — a value of "yesterday" is normal reporting
+    // cadence; only flag when even the day AFTER date_stop ended >48h ago.
+    const reportingLagMs = dataAsOfMs !== null
+      ? Date.now() - (dataAsOfMs + 24 * 60 * 60 * 1000)
+      : null;
+    const reportingStale = reportingLagMs !== null && reportingLagMs > STALE_DATA_HOURS * 60 * 60 * 1000;
+    const emptyFetchOnSpendingCampaign = full.campaign.spend === 0 && (campaign.spend ?? 0) > 500;
+    if (reportingStale || emptyFetchOnSpendingCampaign) {
+      const why = reportingStale
+        ? `insights date_stop=${full.campaign.dataAsOf} is >${STALE_DATA_HOURS}h behind`
+        : `fetch returned ₹0 spend but DB shows ₹${(campaign.spend ?? 0).toFixed(0)} — likely silent API failure`;
+      this.logger.warn(`Audit skipped for ${campaign.metaCampaignId}: stale/suspect Meta data (${why})`);
+      await this.actionLogger.log({
+        tenantId: company.tenantId,
+        agent: AgentType.CAMPAIGN_AUDITOR,
+        action: 'audit_skipped_stale_data',
+        reason: why,
+        outcome: 'No verdict — audit deferred to next cycle rather than deciding on stale data',
+        metadata: { campaignId: campaign._id.toString(), metaCampaignId: campaign.metaCampaignId },
+      });
+      void this.slackService.sendOpsAlert(
+        `Audit skipped on stale/suspect Meta data (tenant=${company.tenantId}, campaign=${campaign.metaCampaignId}): ${why}`,
+        { campaignId: campaign._id.toString() },
+      );
+      return;
+    }
 
     // Save ad-level metrics to campaign document
     await this.saveAdLevelMetrics(campaign, full);
@@ -379,6 +426,7 @@ export class CampaignAuditorService {
         name: as.adSetName,
         audienceType: (campaign as any).adSets?.find((a: any) => a.metaAdSetId === as.adSetId)?.audienceType ?? '',
         spend: as.spend,
+        clicks: as.clicks,
         conversions: as.conversions,
         ctr: as.ctr,
         cpa: as.cpa,
@@ -400,6 +448,7 @@ export class CampaignAuditorService {
             adSetId: as.adSetId,
             spend: ad.spend,
             impressions: ad.impressions ?? 0,
+            clicks: ad.clicks ?? 0,
             conversions: ad.conversions,
             ctr: ad.ctr,
             cpc: ad.cpc,
@@ -479,7 +528,8 @@ export class CampaignAuditorService {
     }
 
     const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).lean().exec();
-    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company, snapshotData, product);
+    const portfolioContext = await this.buildPortfolioContext(campaign, company);
+    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company, snapshotData, product, portfolioContext);
 
     // Save verdict to snapshot
     snapshotData.verdict = verdict as any;
@@ -572,7 +622,7 @@ export class CampaignAuditorService {
       const ageDays = signals.campaignAge.days;
 
       // TypeScript-enforced timing rules — Claude cannot override
-      const recordTimingShadow = (action: any, reason: 'timing_guard_day_0_3' | 'timing_guard_day_3_7_growth') => {
+      const recordTimingShadow = (action: any, reason: 'timing_guard_day_0_3' | 'timing_guard_day_3_7_growth' | 'early_pause_thin_evidence') => {
         void this.shadowActions.recordBlocked({
           tenantId: company.tenantId,
           campaignId: campaign._id.toString(),
@@ -621,6 +671,27 @@ export class CampaignAuditorService {
           // Day 0-3: high-priority pause/throttle (safety), or additive add_creative
           // (creative-diversity correction). Allocation growth + replace blocked.
           if ((isPause || isSafetyThrottle) && action.priority === 'high') {
+            // Evidence floor on performance pauses: a zero-conversion target
+            // with fewer than half the vertical click floor is statistical
+            // noise, not a loser — killing it on day 1-2 is how winners die
+            // to bad luck. Budget-breach safety still has reduce_total_budget
+            // (allowed below) as the escape hatch, so blocking the pause
+            // doesn't strand a runaway campaign.
+            if (isPause) {
+              const live = action.type === 'pause_adset'
+                ? (snapshotData.adSets as any[])?.find(as => as.metaAdSetId === action.targetId)
+                : (snapshotData.ads as any[])?.find(ad => ad.metaAdId === action.targetId);
+              const targetClicks = Number(live?.clicks ?? 0);
+              const targetConversions = Number(live?.conversions ?? 0);
+              const clickFloor = Math.ceil(signals.evidenceFloors.clicksForZeroConvSignal * 0.5);
+              if (live && targetConversions === 0 && targetClicks < clickFloor) {
+                this.logger.warn(
+                  `Timing guard: blocking ${action.type} on "${action.targetName}" — ${targetClicks} clicks < ${clickFloor} evidence floor (day ${ageDays.toFixed(1)}, 0 conv = noise, not a loser)`,
+                );
+                recordTimingShadow(action, 'early_pause_thin_evidence');
+                return false;
+              }
+            }
             this.logger.log(`Timing guard: allowing high-priority ${action.type} on "${action.targetName}" in day 0-3 (safety exception)`);
             return true;
           }
@@ -948,6 +1019,95 @@ export class CampaignAuditorService {
         this.logger.log(
           `Skipping add_creative on "${action.targetName}" — hookStyle "${action.metrics?.hookStyle}" already added/queued within 24h (existing action ${recentSameHook.actionId})`,
         );
+        return false;
+      }
+    }
+
+    // ── Oscillation cooldown ──────────────────────────────────────────────────
+    // Audits run every 6h on noisy data; without a damper the system can scale
+    // an ad set on Tuesday's numbers and throttle it back on Wednesday's —
+    // each action resets Meta's learning and the whipsaw costs more than
+    // either decision was worth. Rule: a budget-direction REVERSAL against
+    // something executed <72h ago is blocked. Asymmetric escape: high-priority
+    // CONTRACTIONS always pass (safety must be able to throttle a runaway
+    // right after a scale); there is no urgent reason to expand.
+    const OSCILLATION_COOLDOWN_MS = 72 * 60 * 60 * 1000;
+    const cooldownNow = Date.now();
+    const expandsTarget = (a: any, targetId: string) =>
+      ((a.type === 'scale_adset' || a.type === 'add_adset') && a.targetId === targetId)
+      || (a.type === 'shift_budget_between_adsets' && String(a.metrics?.toAdSetId) === String(targetId));
+    const contractsTarget = (a: any, targetId: string) =>
+      ((a.type === 'pause_adset' || a.type === 'pause_ad') && a.targetId === targetId)
+      || a.type === 'reduce_total_budget'   // campaign-level — touches every ad set
+      || (a.type === 'shift_budget_between_adsets' && a.targetId === targetId);  // donor side
+    const recentlyExecuted = (pendingActions as any[]).filter(
+      (a: any) => a.status === 'executed' && a.executedAt
+        && cooldownNow - new Date(a.executedAt).getTime() < OSCILLATION_COOLDOWN_MS,
+    );
+
+    const newIsExpand = action.type === 'scale_adset' || action.type === 'add_adset'
+      || action.type === 'shift_budget_between_adsets';  // judged on its recipient
+    const newIsContract = action.type === 'pause_adset' || action.type === 'pause_ad'
+      || action.type === 'reduce_total_budget';
+    if (newIsExpand) {
+      const expandTargetId = action.type === 'shift_budget_between_adsets'
+        ? String(action.metrics?.toAdSetId ?? '') : action.targetId;
+      // shift_budget is REVENUE-NEUTRAL rebalancing — the optimizer's primary
+      // lever ("rebalance before pause") and exactly what you want right after
+      // a campaign-level throttle (redistribute the smaller envelope toward
+      // winners). Only a contraction that hit the RECIPIENT specifically
+      // (pause, or donor-side of a prior shift) conflicts with it; a
+      // reduce_total_budget does not. True expansions (scale/add_adset) keep
+      // the full contraction check including campaign-level reduce.
+      const conflict = recentlyExecuted.find(a =>
+        action.type === 'shift_budget_between_adsets'
+          ? (((a.type === 'pause_adset' || a.type === 'pause_ad') && a.targetId === expandTargetId)
+            || (a.type === 'shift_budget_between_adsets' && a.targetId === expandTargetId))
+          : contractsTarget(a, expandTargetId),
+      );
+      if (conflict) {
+        this.logger.warn(
+          `Oscillation cooldown: blocking ${action.type} on "${action.targetName}" — ${conflict.type} executed ${Math.round((cooldownNow - new Date(conflict.executedAt).getTime()) / 36e5)}h ago reversed the same direction (<72h)`,
+        );
+        void this.shadowActions.recordBlocked({
+          tenantId: company.tenantId,
+          campaignId: campaign._id.toString(),
+          metaCampaignId: campaign.metaCampaignId,
+          proposedAction: { type: action.type, targetId: action.targetId, targetName: action.targetName, reason: action.reason, priority: action.priority, params: action.metrics },
+          blockedReason: 'oscillation_cooldown',
+          metricsAtT: {
+            spend: campaign.spend ?? 0, impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0, conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0, cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0, roas: campaign.roas ?? 0,
+            frequency: (campaign as any).frequency ?? 0,
+          },
+        });
+        return false;
+      }
+    } else if (newIsContract && action.priority !== 'high') {
+      const conflict = recentlyExecuted.find(a => expandsTarget(a, action.targetId))
+        ?? (action.type === 'reduce_total_budget'
+          ? recentlyExecuted.find(a => a.type === 'scale_adset' || a.type === 'add_adset')
+          : undefined);
+      if (conflict) {
+        this.logger.warn(
+          `Oscillation cooldown: blocking ${action.type} on "${action.targetName}" — ${conflict.type} executed ${Math.round((cooldownNow - new Date(conflict.executedAt).getTime()) / 36e5)}h ago reversed the same direction (<72h, priority=${action.priority ?? 'medium'} — high would pass)`,
+        );
+        void this.shadowActions.recordBlocked({
+          tenantId: company.tenantId,
+          campaignId: campaign._id.toString(),
+          metaCampaignId: campaign.metaCampaignId,
+          proposedAction: { type: action.type, targetId: action.targetId, targetName: action.targetName, reason: action.reason, priority: action.priority, params: action.metrics },
+          blockedReason: 'oscillation_cooldown',
+          metricsAtT: {
+            spend: campaign.spend ?? 0, impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0, conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0, cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0, roas: campaign.roas ?? 0,
+            frequency: (campaign as any).frequency ?? 0,
+          },
+        });
         return false;
       }
     }
@@ -1340,6 +1500,42 @@ export class CampaignAuditorService {
         action.executedAt = now;
         updated = true;
 
+        // Measure what this action actually did: anchor metrics now, re-measure
+        // at +24h/+72h via the shadow-eval job, label improved/worsened. Without
+        // this, executed actions were write-only — the optimizer never learned
+        // whether its own scales/pauses helped. Fire-and-forget; never blocks.
+        const adSetsForContext = ((campaign as any).adSets ?? []) as any[];
+        const measuredAdSetId =
+          action.type === 'shift_budget_between_adsets'
+            ? String(action.metrics?.toAdSetId ?? '')
+            // pause_ad / replace_creative target an AD — measure its parent ad set.
+            // Ad-set-targeted actions fall through to targetId itself.
+            : adSetsForContext.find(as => as.ads?.some((a: any) => a.metaAdId === action.targetId))?.metaAdSetId
+              ?? String(action.targetId ?? '');
+        const launchedAtMs = new Date((campaign as any).launchedAt ?? (campaign as any).createdAt ?? now).getTime();
+        void this.actionOutcomes.recordExecuted({
+          tenantId: company.tenantId,
+          campaignId: campaign._id.toString(),
+          metaCampaignId: campaign.metaCampaignId,
+          action: {
+            type: action.type, targetId: action.targetId, targetName: action.targetName,
+            reason: action.reason, priority: action.priority, params: action.metrics ?? {},
+          },
+          trigger: manuallyApproved ? 'human_approved' : action.autoApplied ? 'auto_applied' : 'grace_expired',
+          context: {
+            ageDays: Math.round(((now.getTime() - launchedAtMs) / (24 * 60 * 60 * 1000)) * 10) / 10,
+            productName: (company.products ?? []).find((p: any) => p.active)?.name,
+            audienceType: adSetsForContext.find(as => String(as.metaAdSetId) === measuredAdSetId)?.audienceType,
+            targetAdSetId: measuredAdSetId || undefined,
+          },
+          fallbackMetrics: {
+            spend: campaign.spend ?? 0, impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0, conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0, cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0, roas: campaign.roas ?? 0,
+          },
+        });
+
         await this.actionLogger.log({
           tenantId: company.tenantId,
           agent: AgentType.CAMPAIGN_AUDITOR,
@@ -1360,6 +1556,44 @@ export class CampaignAuditorService {
         { _id: campaign._id },
         { pendingActions, adSets: (campaign as any).adSets },
       );
+    }
+  }
+
+  /**
+   * Compact view of the tenant's OTHER active agent campaigns. Each campaign
+   * was previously audited in total isolation: "ROAS 2.1 > 1.5 threshold →
+   * scale" even when a sibling at ROAS 3.2 was the better home for the next
+   * rupee. The verdict can't move budget across campaigns (no such action
+   * exists — deliberately), but it can refuse a mediocre scale and surface
+   * the reallocation in contextInsight for the operator.
+   */
+  private async buildPortfolioContext(campaign: CampaignDocument, company: CompanyDocument): Promise<string> {
+    try {
+      const siblings = await this.campaignModel
+        .find({
+          tenantId: company.tenantId,
+          status: 'active',
+          source: 'agent',
+          _id: { $ne: campaign._id },
+          spend: { $gte: 500 },
+        })
+        .select('name budget spend conversions roas')
+        .sort({ roas: -1 })
+        .limit(8)
+        .lean()
+        .exec();
+      if (siblings.length === 0) return '';
+
+      const lines = siblings.map((s: any) =>
+        `  ${s.name || s._id}: ₹${(s.budget ?? 0).toFixed(0)}/day | spent ₹${(s.spend ?? 0).toFixed(0)} | ${s.conversions ?? 0} conv | ROAS ${(s.roas ?? 0).toFixed(2)}x`,
+      ).join('\n');
+      return `━━━ PORTFOLIO VIEW (tenant's other active agent campaigns, by ROAS) ━━━
+${lines}
+  RULE: Budget is shared across this portfolio (weekly cap). Before recommending scale_adset here, check this campaign earns it RELATIVE to the siblings — if a sibling runs materially higher ROAS (>1.5× this campaign's) with budget headroom, the next rupee belongs there, not here: skip the scale and say so in contextInsight so the operator can reallocate. The reverse too: if this campaign clearly leads the portfolio, a scale recommendation is stronger than its standalone numbers suggest.
+`;
+    } catch (err: any) {
+      this.logger.warn(`Portfolio context unavailable: ${err.message}`);
+      return '';
     }
   }
 

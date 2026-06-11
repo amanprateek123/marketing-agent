@@ -15,6 +15,7 @@ import {
   ViralTrend,
 } from '../schemas/scout-output.schema';
 import { ScoutSignal, ScoutSignalDocument } from '../schemas/scout-signal.schema';
+import { EventCalendarService } from '../../common/calendar/event-calendar.service';
 
 @Injectable()
 export abstract class ScoutBaseService {
@@ -29,6 +30,7 @@ export abstract class ScoutBaseService {
     protected readonly scoutOutputModel: Model<ScoutOutputDocument>,
     @InjectModel(ScoutSignal.name)
     protected readonly scoutSignalModel: Model<ScoutSignalDocument>,
+    protected readonly eventCalendar: EventCalendarService,
   ) {}
 
   async execute(
@@ -46,8 +48,22 @@ export abstract class ScoutBaseService {
     // Pre-fetch real API data if the scout supports it (YouTube, Reddit)
     const prefetchedData = await this.prefetchApiData(company);
 
+    // Seasonal directive — liveContext already lists events passively (21d),
+    // but scouts need (a) a LONGER horizon, because campaign prep for a big
+    // festival starts 4-6 weeks out (pre-Diwali shopping content trends weeks
+    // before the date), and (b) an ACTIVE instruction to hunt event-tied
+    // signals, not just know the calendar exists.
+    const upcomingEvents = this.eventCalendar.buildEventSummary(company.geography || 'India', 45);
+    const eventBlock = upcomingEvents.startsWith('No major events')
+      ? ''
+      : `UPCOMING EVENTS (next 45 days, ${company.geography || 'India'}):
+${upcomingEvents}
+DIRECTIVE: Actively search for content trends TIED to these events (prep rituals, gifting, muhurat/timing questions, festival anxieties). Event-window signals convert disproportionately because buying intent is already spiking — when you find one, mention the event name in the signal's topic or angle so downstream ranking can see the tie-in. Do not force it: only report event-tied signals with real engagement, same bar as everything else.
+
+`;
+
     const userMessage = this.wrapWithIterativePhases(
-      this.buildResearchPrompt(company, recentlyCovered),
+      eventBlock + this.buildResearchPrompt(company, recentlyCovered),
       prefetchedData,
     );
 

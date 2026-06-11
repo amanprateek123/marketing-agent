@@ -279,6 +279,24 @@ export class MetaAdsService {
       }
     }
 
+    // ── Idempotency pre-check ──────────────────────────────────────────────
+    // Meta has no idempotency key on campaign creation. If a BullMQ retry or
+    // a double /approve re-enters this path after a mid-flight timeout, the
+    // second call would create a SECOND live campaign spending money that the
+    // DB doesn't track. Campaign names are deterministic per brief+date
+    // (AGENT_<topic>_<date>), so an exact-name match on Meta means this launch
+    // already ran — fail loudly for the operator instead of double-spending.
+    const existingId = await this.findCampaignIdByName(
+      config.accountId, config.accessToken, config.campaignName,
+    );
+    if (existingId) {
+      throw new Error(
+        `Refusing to launch: campaign named "${config.campaignName}" already exists on Meta (id=${existingId}). ` +
+        `This is a duplicate-launch guard — if the previous attempt died mid-launch, inspect campaign ${existingId} on Meta ` +
+        `(delete it or link it in the DB) before retrying.`,
+      );
+    }
+
     const created: CreatedObjects = {
       campaignId: null,
       adSetIds: [],
@@ -512,6 +530,31 @@ export class MetaAdsService {
   }
 
   // ─── Private: Meta API methods ──────────────────────────────────────────────
+
+  /**
+   * Exact-name campaign lookup for the duplicate-launch guard. Fails OPEN
+   * (returns null on API error) — blocking every launch because the lookup
+   * hiccuped would be worse than the rare duplicate it protects against.
+   */
+  private async findCampaignIdByName(
+    accountId: string,
+    accessToken: string,
+    name: string,
+  ): Promise<string | null> {
+    try {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/${accountId}/campaigns`, {
+        fields: 'id,name',
+        filtering: JSON.stringify([{ field: 'name', operator: 'EQUAL', value: name }]),
+        limit: '5',
+        access_token: accessToken,
+      });
+      const match = (res.data?.data ?? []).find((c: any) => c.name === name);
+      return match?.id ?? null;
+    } catch (err: any) {
+      this.logger.warn(`Duplicate-launch pre-check failed (proceeding without it): ${err.message}`);
+      return null;
+    }
+  }
 
   private async createCampaign(
     accountId: string,

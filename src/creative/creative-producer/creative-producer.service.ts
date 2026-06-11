@@ -351,7 +351,17 @@ export class CreativeProducerService {
         video = null;
       }
 
-      const allFailed = !copyPackage && images.length === 0 && carouselCards.length === 0 && !video;
+      // 'completed' must mean LAUNCHABLE: copy + at least one usable visual
+      // (image with a real URL, carousel cards, or a video). The old rule only
+      // failed when EVERYTHING failed — so "copy fine, every S3 upload failed"
+      // shipped as completed with imageUrl:'' across the board, and the run
+      // looked green until campaign creation exploded (or worse, launched a
+      // text-only shell). Failing here lets BullMQ/pipeline retry the
+      // production step, which is where the problem actually is.
+      const hasUsableVisual = images.some((i: any) => i.imageUrl)
+        || carouselCards.length > 0
+        || !!video?.videoUrl;
+      const allFailed = !copyPackage || !hasUsableVisual;
       const status = allFailed ? 'failed' : 'completed';
 
       await this.creativePackageModel.updateOne(
@@ -400,6 +410,11 @@ export class CreativeProducerService {
             this.logger.error(`Slack notification failed for creative ${briefId} — package saved: ${slackErr.message}`);
           }
         }
+      } else {
+        void this.slackService.sendOpsAlert(
+          `Creative production FAILED (tenant=${tenantId}, brief=${briefId}): copy=${!!copyPackage} usableImages=${imageCount}/${images.length} carouselCards=${carouselCards.length} video=${!!video?.videoUrl}. Package marked failed — needs retry.`,
+          { tenantId, briefId, packageId: pkg._id.toString() },
+        );
       }
 
       return (await this.creativePackageModel.findOne({ tenantId, _id: pkg._id }).lean().exec()) as any;

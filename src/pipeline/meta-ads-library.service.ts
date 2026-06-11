@@ -14,6 +14,7 @@ import {
   AdLibraryGap,
 } from './schemas/meta-ads-library-output.schema';
 import { ScoutSignal, ScoutSignalDocument } from './schemas/scout-signal.schema';
+import { CompetitorAdObservation, CompetitorAdObservationDocument } from './schemas/competitor-ad-observation.schema';
 
 @Injectable()
 export class MetaAdsLibraryService {
@@ -26,6 +27,8 @@ export class MetaAdsLibraryService {
     private readonly outputModel: Model<MetaAdsLibraryOutputDocument>,
     @InjectModel(ScoutSignal.name)
     private readonly scoutSignalModel: Model<ScoutSignalDocument>,
+    @InjectModel(CompetitorAdObservation.name)
+    private readonly adObservationModel: Model<CompetitorAdObservationDocument>,
   ) {}
 
   async runIdempotent(
@@ -158,7 +161,7 @@ OUTPUT — synthesise into this exact JSON shape (no markdown, no extra prose):
 
 RULES (non-negotiable):
 - Every competitorAds[].hook and .cta MUST be a string you actually fetched from a real URL — not training-data recall, not made up.
-- Set estimatedDaysRunning to 0 (we cannot observe paid-ad longevity from websites — be honest, don't guess).
+- Set estimatedDaysRunning to 0 (you cannot observe longevity from one visit — our code computes it from cross-run observation history, don't guess).
 - Every competitorAds[].source MUST be a URL you fetched in this turn (not facebook.com/ads/library — those are blocked).
 - competitorAds: max 5, ranked by score descending. Score = how strong/distinct the competitive threat is.
 - gaps: max 5, ranked by score descending. Each gap must be defensible — only claim it if NO competitor you investigated does it.
@@ -177,6 +180,14 @@ RULES (non-negotiable):
 
     const insights = this.parseInsights(result.content);
 
+    // ── Cross-run persistence ─────────────────────────────────────────────────
+    // The agent honestly reports estimatedDaysRunning=0 (one visit can't see
+    // longevity). Upserting each observation lets US compute it: a hook still
+    // live after 2+ runs spanning a week has survived the competitor's own
+    // optimization — the best proven-winner signal available. The enriched
+    // value flows to the idea pool, which already renders "~Xd running".
+    await this.trackAdPersistence(tenantId, runId, insights);
+
     await this.outputModel.create({
       tenantId,
       runId,
@@ -189,6 +200,65 @@ RULES (non-negotiable):
     );
 
     return insights;
+  }
+
+  /**
+   * Upsert this run's observations and enrich each insight's
+   * estimatedDaysRunning from observation history. Mutates `insights` in
+   * place. Best-effort — competitive intel must not fail the pipeline phase.
+   */
+  private async trackAdPersistence(
+    tenantId: string,
+    runId: string,
+    insights: MetaAdsLibraryInsights,
+  ): Promise<void> {
+    const now = new Date();
+    for (const ad of insights.competitorAds) {
+      try {
+        const hookKey = `${ad.competitor}|${ad.hook}`
+          .toLowerCase()
+          .replace(/[^a-z0-9ऀ-ॿ]+/g, ' ')   // keep Devanagari — Hindi hooks are common
+          .trim()
+          .slice(0, 160);
+        if (!hookKey) continue;
+
+        const obs = await this.adObservationModel.findOneAndUpdate(
+          { tenantId, hookKey },
+          {
+            $set: {
+              competitor: ad.competitor, hook: ad.hook, angle: ad.angle,
+              format: ad.format, cta: ad.cta, lastSeenAt: now, lastRunId: runId,
+            },
+            $setOnInsert: { firstSeenAt: now },
+            // Count distinct RUNS, not calls — runIdempotent can re-enter the
+            // same run on resume and must not inflate the persistence count.
+            ...(await this.adObservationModel.exists({ tenantId, hookKey, lastRunId: runId })
+              ? {}
+              : { $inc: { timesSeen: 1 } }),
+          },
+          // setDefaultsOnInsert OFF: the schema default on timesSeen would
+          // $setOnInsert the same path $inc creates → Mongoose path conflict.
+          // $inc alone correctly initializes timesSeen=1 on insert.
+          { upsert: true, new: true, setDefaultsOnInsert: false },
+        ).lean().exec();
+
+        // Longevity only counts once persistence is PROVEN across ≥2 runs —
+        // a single observation says nothing about how long the hook has run.
+        if (obs && obs.timesSeen >= 2) {
+          ad.estimatedDaysRunning = Math.max(
+            1,
+            Math.round((now.getTime() - new Date(obs.firstSeenAt).getTime()) / (24 * 60 * 60 * 1000)),
+          );
+        }
+      } catch (err: any) {
+        this.logger.warn(`Ad persistence tracking failed for "${ad.competitor}": ${err.message}`);
+      }
+    }
+
+    const proven = insights.competitorAds.filter(a => a.estimatedDaysRunning >= 7);
+    if (proven.length > 0) {
+      insights.rawSummary += ` PROVEN: ${proven.map(a => `${a.competitor}'s "${a.hook.slice(0, 50)}" angle has persisted ${a.estimatedDaysRunning}d across runs — likely working.`).join(' ')}`;
+    }
   }
 
   private parseInsights(content: string): MetaAdsLibraryInsights {

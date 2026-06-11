@@ -8,6 +8,7 @@ import { LiveContextBuilder } from '../companies/prompt-generator/live-context.b
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
+import { getEffectiveConversionValue } from '../common/conversion-value.util';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
@@ -748,7 +749,8 @@ USE THIS TO: allocate higher budget % to audience types with lowest CPA.`;
       return `PRODUCT BEING SOLD:
   ${product.name} — ₹${product.price}
   Landing: ${product.landingUrl ?? 'not set'}
-  Conversion event: ${product.conversionEvent ?? 'Purchase'} (each conversion = ₹${product.conversionValue ?? product.price})
+  Conversion event: ${product.conversionEvent ?? 'Purchase'} (each conversion = ₹${product.conversionValue ?? product.price})${(product as any).refundRatePercent > 0 ? `
+  REFUNDS: ~${(product as any).refundRatePercent}% of conversions refund — NET revenue per conversion is ₹${Math.round(getEffectiveConversionValue(product))}. Judge breakeven CPA and target ROAS on the NET number, not the booking value.` : ''}
   Past performance: ${perf?.totalConversions ?? 0} conversions, CPA ₹${perf?.avgCPA ?? 'N/A'}, ROAS ${perf?.avgROAS ?? 'N/A'}x (${perf?.confidenceLevel ?? 'no data'})
 
 AVAILABLE AUDIENCE SEGMENTS:
