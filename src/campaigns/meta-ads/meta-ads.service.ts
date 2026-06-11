@@ -1545,6 +1545,76 @@ export class MetaAdsService {
   }
 
   /**
+   * Validate interest IDs against Meta's catalog before launch. Invalid IDs
+   * previously shipped as-is — Meta either errors mid-launch (partial campaign)
+   * or silently ignores them (ad set becomes accidental broad prospecting).
+   * Uses /search?type=adinterestvalid with interest_fbid_list. Fails OPEN:
+   * on lookup error every ID is reported valid — blocking launches because a
+   * validation endpoint hiccuped would be worse than the rare bad ID.
+   */
+  async validateInterestIds(
+    interestIds: string[],
+    accessToken: string,
+  ): Promise<{ valid: string[]; invalid: string[] }> {
+    if (interestIds.length === 0) return { valid: [], invalid: [] };
+    try {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/search`, {
+        type: 'adinterestvalid',
+        interest_fbid_list: JSON.stringify(interestIds),
+        access_token: accessToken,
+      });
+      const rows: any[] = res.data?.data ?? [];
+      const validSet = new Set(rows.filter(r => r.valid === true).map(r => String(r.id)));
+      const valid = interestIds.filter(id => validSet.has(String(id)));
+      const invalid = interestIds.filter(id => !validSet.has(String(id)));
+      return { valid, invalid };
+    } catch (err: any) {
+      this.logger.warn(`Interest ID validation unavailable (proceeding unvalidated): ${err.message}`);
+      return { valid: interestIds, invalid: [] };
+    }
+  }
+
+  // Locale lookups are stable per language; cache for the process lifetime so
+  // repeated launches don't re-query Meta for the same name.
+  private static readonly localeIdCache = new Map<string, number | null>();
+
+  /**
+   * Live-resolve a language name to its Meta locale ID via
+   * /search?type=adlocale. This replaces the "verify each ID manually via
+   * curl and update the table" workflow — only Marathi was ever verified, so
+   * every other language silently shipped with zero locale targeting. Returns
+   * null when Meta has no matching locale (caller skips that language).
+   */
+  async lookupLocaleId(languageName: string, accessToken: string): Promise<number | null> {
+    const key = languageName.toLowerCase().trim();
+    if (MetaAdsService.localeIdCache.has(key)) return MetaAdsService.localeIdCache.get(key)!;
+    try {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/search`, {
+        type: 'adlocale',
+        q: key,
+        access_token: accessToken,
+      });
+      const rows: any[] = res.data?.data ?? [];
+      // Prefer exact name match ("Tamil"), else the language-only entry over
+      // region variants ("Tamil (India)") — Meta returns both shapes.
+      const exact = rows.find(r => String(r.name ?? '').toLowerCase() === key);
+      const prefix = rows.find(r => String(r.name ?? '').toLowerCase().startsWith(key));
+      const match = exact ?? prefix;
+      const id = match?.key != null ? Number(match.key) : null;
+      MetaAdsService.localeIdCache.set(key, id);
+      if (id !== null) {
+        this.logger.log(`Locale resolved live: ${key} → ${id} (${match.name}). Consider adding to META_LOCALE_IDS as verified.`);
+      } else {
+        this.logger.warn(`Locale lookup found no Meta adlocale for "${key}" — language targeting skipped for it.`);
+      }
+      return id;
+    } catch (err: any) {
+      this.logger.warn(`Locale lookup failed for "${key}" (language targeting skipped): ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Get the ad account's configured timezone (e.g. "Asia/Kolkata", "America/Los_Angeles").
    * Used to gate dayparting — schedules are interpreted in this TZ, not UTC.
    */

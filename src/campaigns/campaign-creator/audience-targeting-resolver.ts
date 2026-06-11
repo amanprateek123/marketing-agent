@@ -82,8 +82,8 @@ export const META_LOCALE_IDS: Record<string, number> = {
  * verified) silently produces zero locale targeting and the campaign reaches
  * everyone in the geo.
  */
-export function resolveLocaleIds(input: Array<string | number> | undefined): number[] {
-  if (!input?.length) return [];
+export function resolveLocaleIds(input: Array<string | number> | undefined): { ids: number[]; dropped: string[] } {
+  if (!input?.length) return { ids: [], dropped: [] };
   const ids: number[] = [];
   const dropped: string[] = [];
   for (const item of input) {
@@ -97,18 +97,18 @@ export function resolveLocaleIds(input: Array<string | number> | undefined): num
       if (id) {
         ids.push(id);
       } else {
-        dropped.push(item);
+        dropped.push(key);
       }
     }
   }
   if (dropped.length > 0) {
-    // Use console because resolver module has no Logger injected. The caller
-    // (campaign-creator) also logs the final `localesApplied` count, but this
-    // line surfaces *which* inputs were silently dropped — vital when adding
-    // a new language and forgetting to verify its Meta locale ID.
-    console.warn(`[resolveLocaleIds] Dropped unverified language(s): ${dropped.join(', ')}. Add verified Meta locale IDs to META_LOCALE_IDS in audience-targeting-resolver.ts. See verification curl in the table comment.`);
+    // Surfaced to the caller as `unresolvedLanguages` — campaign-creator now
+    // live-resolves these against Meta's /search?type=adlocale at launch time
+    // (lookupLocaleId), so an unverified language no longer silently produces
+    // zero locale targeting. This warn remains for non-launch callers.
+    console.warn(`[resolveLocaleIds] Language(s) not in verified table: ${dropped.join(', ')} — will attempt live Meta adlocale lookup at launch.`);
   }
-  return Array.from(new Set(ids));
+  return { ids: Array.from(new Set(ids)), dropped };
 }
 
 /**
@@ -277,7 +277,16 @@ export function applyAudienceTargeting(input: {
   // Product-level language fallback. Resolver fills locales from segment.languages
   // first; if unset, falls back to this. Empty/unset means no locale filter.
   productLanguages?: Array<string | number>;
-}): { patches: number; segmentMatched: boolean; segmentUsed: string | undefined; localesApplied: number[] } {
+}): {
+  patches: number;
+  segmentMatched: boolean;
+  segmentUsed: string | undefined;
+  localesApplied: number[];
+  /** Language names requested (segment/product/geo-derived) that have no verified Meta locale ID — caller should live-resolve via Meta /search?type=adlocale. */
+  unresolvedLanguages: string[];
+  /** Indices of ad sets whose locales came from this resolver (eligible for live-resolved locale augmentation). LLM-explicit locales are NOT in this list. */
+  localeTargetIndices: number[];
+} {
   const { adSets, productSegments, briefTargetSegment, briefAudienceStage, geography, productLanguages } = input;
 
   const segment = findSegment(productSegments, briefTargetSegment);
@@ -301,9 +310,10 @@ export function applyAudienceTargeting(input: {
       derivedFromGeo = languageFromGeoStates(adSetWithGeo.geoStates);
     }
   }
-  const resolvedLocales = resolveLocaleIds(
+  const { ids: resolvedLocales, dropped: unresolvedLanguages } = resolveLocaleIds(
     explicitLangs?.length ? explicitLangs : (derivedFromGeo ? [derivedFromGeo] : undefined),
   );
+  const localeTargetIndices: number[] = [];
 
   for (const adSet of adSets) {
     // 1. Age — fill from segment if not set
@@ -344,10 +354,16 @@ export function applyAudienceTargeting(input: {
 
     // 5. Locales — fill from resolved (segment.languages → product.languages).
     // Only patches when the ad set has no locales of its own; explicit LLM-set
-    // locales (numeric IDs) win.
-    if (resolvedLocales.length > 0 && (!Array.isArray(adSet.locales) || adSet.locales.length === 0)) {
-      adSet.locales = resolvedLocales;
-      totalPatches++;
+    // locales (numeric IDs) win. Ad sets without explicit locales are recorded
+    // as locale targets even when nothing resolved — the caller may live-resolve
+    // unverified languages against Meta and augment exactly these ad sets.
+    const hasExplicitLocales = Array.isArray(adSet.locales) && adSet.locales.length > 0;
+    if (!hasExplicitLocales) {
+      localeTargetIndices.push(adSets.indexOf(adSet));
+      if (resolvedLocales.length > 0) {
+        adSet.locales = resolvedLocales;
+        totalPatches++;
+      }
     }
   }
 
@@ -356,5 +372,7 @@ export function applyAudienceTargeting(input: {
     segmentMatched: !!segment,
     segmentUsed: segment?.name,
     localesApplied: resolvedLocales,
+    unresolvedLanguages,
+    localeTargetIndices,
   };
 }

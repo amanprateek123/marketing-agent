@@ -14,6 +14,7 @@ import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
+import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
 import axios from 'axios';
 
 @Injectable()
@@ -711,9 +712,28 @@ export class CampaignCreatorService {
       );
     } else {
       const briefForTargeting = creativeBrief as any;
-      const productForTargeting = (company.products ?? []).find(
+      let productForTargeting = (company.products ?? []).find(
         (p) => p.name === briefForTargeting?.product,
       );
+      // Product-name guard: a brief naming a product that doesn't exist used
+      // to silently degrade to all-defaults targeting (whole-country geo,
+      // 18-65, all genders, no interests) — exactly the "random targeting"
+      // failure mode. Retry case-insensitively (idea-pool normalizes casing,
+      // but manual /produce paths and product renames don't), then fail loud.
+      if (!productForTargeting && briefForTargeting?.product) {
+        productForTargeting = (company.products ?? []).find(
+          (p) => p.name?.toLowerCase() === String(briefForTargeting.product).toLowerCase(),
+        );
+        if (productForTargeting) {
+          this.logger.warn(`Targeting product casing mismatch: brief says "${briefForTargeting.product}", resolved to "${productForTargeting.name}"`);
+        } else {
+          throw new Error(
+            `Brief product "${briefForTargeting.product}" not found in company.products ` +
+            `(have: ${(company.products ?? []).map(p => p.name).join(', ')}). ` +
+            `Refusing to launch with default broad targeting — fix the brief's product name or add the product first.`,
+          );
+        }
+      }
       const targetingResult = applyAudienceTargeting({
         adSets: config.adSets as any[],
         productSegments: productForTargeting?.audienceSegments as any,
@@ -725,6 +745,62 @@ export class CampaignCreatorService {
       this.logger.log(
         `Targeting resolver: segment=${targetingResult.segmentUsed ?? 'none'}, patches=${targetingResult.patches}, matched=${targetingResult.segmentMatched}, locales=[${targetingResult.localesApplied.join(',')}]`,
       );
+
+      // Live-resolve languages without a verified Meta locale ID. Only Marathi
+      // was ever manually verified — Hindi/Tamil/etc. silently shipped with NO
+      // locale targeting. Now /search?type=adlocale resolves them at launch
+      // time and the resolver-eligible ad sets get the verified IDs.
+      if (targetingResult.unresolvedLanguages.length > 0) {
+        const liveIds: number[] = [];
+        for (const lang of targetingResult.unresolvedLanguages) {
+          const id = await this.metaAdsService.lookupLocaleId(lang, company.meta.accessToken);
+          if (id !== null) liveIds.push(id);
+        }
+        if (liveIds.length > 0) {
+          for (const idx of targetingResult.localeTargetIndices) {
+            const adSet = (config.adSets as any[])[idx];
+            adSet.locales = [...new Set([...(adSet.locales ?? []), ...liveIds])];
+          }
+          this.logger.log(`Live locale resolution: [${targetingResult.unresolvedLanguages.join(', ')}] → [${liveIds.join(', ')}] applied to ${targetingResult.localeTargetIndices.length} ad set(s)`);
+        }
+      }
+    }
+
+    // ── Targeting sanity layer ────────────────────────────────────────────────
+    // Validates the COMBINED result (LLM output + resolver patches) before any
+    // Meta write. Age clamping and geo-language coherence are deterministic;
+    // interest IDs are checked against Meta's live catalog.
+    const ageCorrections = clampAgeRanges(config.adSets as any[]);
+    for (const c of ageCorrections) this.logger.warn(`Age range corrected: ${c}`);
+
+    const geoCorrections = enforceGeoLanguageCoherence(
+      config.adSets as any[],
+      (creativeBrief as any)?.targetLanguage,
+    );
+    for (const c of geoCorrections) this.logger.warn(`Geo-language coherence: ${c}`);
+
+    const overlapWarnings = checkAdSetOverlap(config.adSets as any[]);
+    for (const w of overlapWarnings) this.logger.warn(`Ad set overlap: ${w}`);
+
+    // Interest IDs: validate the union across ad sets in ONE Meta call, then
+    // strip invalid ones per ad set. Partial success beats mid-launch failure —
+    // an ad set keeps its valid interests instead of dying on one bad ID.
+    const allInterestIds = [...new Set((config.adSets as any[]).flatMap(as => as.interests ?? []).map(String))];
+    if (allInterestIds.length > 0) {
+      const { invalid } = await this.metaAdsService.validateInterestIds(allInterestIds, company.meta.accessToken);
+      if (invalid.length > 0) {
+        const invalidSet = new Set(invalid);
+        for (const adSet of config.adSets as any[]) {
+          if (!Array.isArray(adSet.interests) || adSet.interests.length === 0) continue;
+          const before = adSet.interests.length;
+          adSet.interests = adSet.interests.filter((id: any) => !invalidSet.has(String(id)));
+          if (adSet.interests.length < before) {
+            this.logger.warn(
+              `Ad set "${adSet.name}": dropped ${before - adSet.interests.length} invalid Meta interest ID(s) [${invalid.join(', ')}] — remaining ${adSet.interests.length}. Interest-type ad sets with ZERO remaining interests become broad targeting.`,
+            );
+          }
+        }
+      }
     }
 
     // Validate ad sets before touching Meta API
