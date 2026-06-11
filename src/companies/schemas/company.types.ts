@@ -213,6 +213,13 @@ export interface CreativeLearnings {
     hookLine: string;            // verbatim primaryText opening line
     hookStyle: string;
     audienceSegment?: string;    // which audience this won on
+    /**
+     * Which product this exemplar won FOR. Without it, a Nadi Leaf brief
+     * anchored on Nadi Report's winners (different price tier, different
+     * buyer intent) — the cross-product exemplar leak. Readers filter by
+     * brief.product first, falling back to the full pool when thin.
+     */
+    product?: string;
     ctr: number;                 // CTR % at time of extraction
     sampleSize: number;          // total impressions when measured
     extractedAt: Date;

@@ -87,11 +87,12 @@ export class ClaudeService {
         maxTurns: params.maxTurns ?? 10,
         cwd: process.cwd(),
         persistSession: false,
-        allowedTools: NO_TOOL_AGENTS.includes(params.agentType)
-          ? []
-          : TEAM_LEAD_AGENTS.includes(params.agentType)
-            ? ['TeamCreate', 'TeamDelete', 'Agent', 'SendMessage', 'TaskCreate', 'WebSearch', 'WebFetch']
-            : ['WebSearch', 'WebFetch', 'Bash'],
+        allowedTools: params.allowedTools
+          ?? (NO_TOOL_AGENTS.includes(params.agentType)
+            ? []
+            : TEAM_LEAD_AGENTS.includes(params.agentType)
+              ? ['TeamCreate', 'TeamDelete', 'Agent', 'SendMessage', 'TaskCreate', 'WebSearch', 'WebFetch']
+              : ['WebSearch', 'WebFetch', 'Bash']),
       };
       if (params.thinking) queryOptions.thinking = params.thinking;
       // SDK preloads named skills from .claude/skills/ into the agent context.

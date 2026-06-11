@@ -95,3 +95,31 @@ export const HOOK_STYLE_DESCRIPTIONS: Record<(typeof HOOK_STYLES_DR)[number], st
     "Sensory: an astronomical event date OR a real capacity limit (consultations/week). " +
     "BANNED: fake 'ends tonight', 'last 3 hours' if not actually true. Meta will flag it.",
 };
+
+/**
+ * Specs for meme hookStyles — same role as HOOK_STYLE_DESCRIPTIONS but for
+ * format='meme' briefs. These had NO specs while the 7 DR hooks each carried
+ * trigger/sensory/banned guidance, so meme variants were the one place the
+ * LLM free-styled. Meme ads live or die on the setup-payoff rhythm; generic
+ * "relatable astrology meme" instructions produce cringe, not shares.
+ */
+export const HOOK_STYLE_DESCRIPTIONS_MEME: Record<(typeof HOOK_STYLES_MEME)[number], string> = {
+  meme_relatable:
+    "ONE hyper-specific shared experience the audience has LIVED — named so precisely they tag a friend. " +
+    "Example: 'Mercury retrograde shuru hote hi sabse pehle ex ka message aata hai 💀'. " +
+    "Structure: LINE 1 = the situation (no setup, drop them in), LINE 2 = product tie-in as the 'fix'. " +
+    "Sensory: a concrete moment (notification, 3am scroll, rishta call), not a category of moments. " +
+    "BANNED: 'hum sab', 'every Indian', 'so relatable' — if the line announces relatability it isn't.",
+  meme_punchline:
+    "Setup-punchline with a HARD turn — line 1 builds one expectation, line 2 breaks it sideways. " +
+    "Example: 'Maine apni kundli banwayi… ab pata hai kis din boss se baat NAHI karni hai.' " +
+    "The punchline must be the product benefit wearing a joke, not a joke next to the product. " +
+    "Sensory: punchline under 10 words; the turn lands on the LAST word. " +
+    "BANNED: explaining the joke, emoji-as-punchline, puns on the brand name.",
+  meme_self_aware:
+    "The ad admits it's an ad — names the exact skepticism the viewer is feeling, then flips it with proof. " +
+    "Example: 'Haan, ek aur astrology ad. Lekin yeh wala batata hai ki REPORT mein exactly kya milega 👇'. " +
+    "Structure: LINE 1 = voice the objection ('scroll karne wale the na?'), LINE 2 = the concrete reason to stop. " +
+    "Sensory: second-person, present tense, conversational — reads like a reply, not a billboard. " +
+    "BANNED: irony with no payoff (self-awareness must END in a real claim), mocking the customer.",
+};

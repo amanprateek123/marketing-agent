@@ -8,6 +8,7 @@ import { VideoGeneratorService } from '../video-generator/video-generator.servic
 import { CreativeTeamService } from '../../teams/creative-team.service';
 import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../schemas/creative-package.schema';
 import { SlackService } from '../../delivery/slack.service';
+import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
 
 export interface BriefData {
@@ -61,6 +62,7 @@ export class CreativeProducerService {
     private readonly imageGenerator: ImageGeneratorService,
     private readonly videoGenerator: VideoGeneratorService,
     private readonly creativeTeam: CreativeTeamService,
+    private readonly creativeQa: CreativeQaService,
     private readonly slackService: SlackService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
@@ -351,6 +353,45 @@ export class CreativeProducerService {
         video = null;
       }
 
+      // ── Post-generation vision QA ─────────────────────────────────────────
+      // Every prompt upstream was reviewed; the RENDER never was. One Haiku
+      // vision pass per image checks legible overlay text, hook-matched
+      // centerpiece, and AI artifacts. A FAIL drops the imageUrl (the prompt
+      // survives for regeneration) so a garbled render can't reach Meta as a
+      // paid ad. QA infra errors pass open — see CreativeQaService.
+      const verifyAndMaybeDrop = async (
+        item: { imageUrl: string },
+        hookStyle: string | undefined,
+        expectedText: string | undefined,
+        label: string,
+      ) => {
+        if (!item.imageUrl) return;
+        const qa = await this.creativeQa.verifyImage({
+          tenantId, runId,
+          imageUrl: item.imageUrl,
+          hookStyle,
+          expectedOverlayText: expectedText,
+        });
+        if (!qa.pass) {
+          this.logger.warn(`Image QA dropped ${label}: ${qa.issues.join(' | ')} — prompt kept for regeneration`);
+          item.imageUrl = '';
+        }
+      };
+      await Promise.all([
+        ...images.map((img: any) => verifyAndMaybeDrop(
+          img,
+          copyPackage?.variants?.[img.variantIndex]?.hookStyle,
+          copyPackage?.variants?.[img.variantIndex]?.headline,
+          `variant ${img.variantIndex} image`,
+        )),
+        ...carouselCards.map((card: any) => verifyAndMaybeDrop(
+          card,
+          undefined,
+          card.headline,
+          `carousel card ${card.slotIndex}`,
+        )),
+      ]);
+
       // 'completed' must mean LAUNCHABLE: copy + at least one usable visual
       // (image with a real URL, carousel cards, or a video). The old rule only
       // failed when EVERYTHING failed — so "copy fine, every S3 upload failed"
@@ -359,7 +400,7 @@ export class CreativeProducerService {
       // text-only shell). Failing here lets BullMQ/pipeline retry the
       // production step, which is where the problem actually is.
       const hasUsableVisual = images.some((i: any) => i.imageUrl)
-        || carouselCards.length > 0
+        || carouselCards.some((c: any) => c.imageUrl)
         || !!video?.videoUrl;
       const allFailed = !copyPackage || !hasUsableVisual;
       const status = allFailed ? 'failed' : 'completed';

@@ -22,6 +22,8 @@ export enum AgentType {
   CAMPAIGN_REVIEW_LEAD = 'campaign_review_lead',
   // Learning
   CASE_STUDY_GENERATOR = 'case_study_generator',
+  // Post-generation creative QA — vision check on rendered images
+  CREATIVE_QA = 'creative_qa',
 }
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
@@ -36,6 +38,7 @@ export const HAIKU_AGENTS: AgentType[] = [
   AgentType.CASE_STUDY_GENERATOR,
   AgentType.DIGEST_WRITER,        // summarization — no reasoning needed
   AgentType.META_ADS_LIBRARY,        // ad library scraping — structured output, no deep reasoning
+  AgentType.CREATIVE_QA,             // vision pass/fail on rendered images — perception, not reasoning
 ];
 
 // Phase 9 team leads — get TeamCreate, Agent, SendMessage on top of web tools
@@ -97,6 +100,13 @@ export interface RunAgentParams {
    * the prompt references them. Pass the per-agent list from agent-skill-map.ts.
    */
   skills?: string[];
+  /**
+   * Explicit tool allowlist override. When set, takes precedence over the
+   * NO_TOOL_AGENTS / TEAM_LEAD_AGENTS routing. Used by CREATIVE_QA, which
+   * needs exactly ['Read'] to view a downloaded image file — vision via the
+   * Read tool is the only image path through the Agent SDK.
+   */
+  allowedTools?: string[];
 }
 
 export interface AgentResult {

@@ -16,6 +16,7 @@ import { UsageLog, UsageLogSchema } from '../claude/schemas/usage-log.schema';
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputSchema } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { CreativeTeamService } from '../teams/creative-team.service';
 import { HeygenService } from './video-generator/heygen.service';
+import { CreativeQaService } from './creative-qa/creative-qa.service';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { HeygenService } from './video-generator/heygen.service';
     HeygenService,
     VideoGeneratorService,
     CreativeTeamService,
+    CreativeQaService,
     CreativeProducerService,
   ],
   exports: [CreativeProducerService],

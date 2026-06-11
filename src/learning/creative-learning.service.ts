@@ -8,6 +8,7 @@ import { ActionLoggerService } from '../common/action-logger/action-logger.servi
 import { CreativePackage, CreativePackageDocument } from '../creative/schemas/creative-package.schema';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { LearningRun, LearningRunDocument } from './schemas/learning-run.schema';
+import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
 import { CreativeLearnings } from '../companies/schemas/company.types';
 import { wilsonLowerBound, inverseNormalCdf } from '../common/statistics/bayesian-estimator.util';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
@@ -58,6 +59,8 @@ export class CreativeLearningService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(LearningRun.name)
     private readonly learningRunModel: Model<LearningRunDocument>,
+    @InjectModel(IntelligenceBrief.name)
+    private readonly briefModel: Model<IntelligenceBriefDocument>,
   ) {}
 
   async runQuickScan(tenantId: string): Promise<void> {
@@ -265,6 +268,7 @@ Return ONLY the JSON object.`,
     packages: CreativePackageDocument[],
   ): Promise<Array<{
     briefId: string;
+    product: string;
     adId: string;
     copyVariantIndex: number;
     primaryText: string;
@@ -286,6 +290,16 @@ Return ONLY the JSON object.`,
       .lean()
       .exec();
     const packageByBrief = new Map(packages.map(p => [p.briefId, p]));
+    // briefId → product, so exemplars carry product attribution. Without it,
+    // every exemplar was tenant-aggregate and the Creative Team anchored fresh
+    // products on a different product's winners (the Nadi Leaf ↔ Nadi Report
+    // cross-product leak).
+    const briefs = await this.briefModel
+      .find({ tenantId, briefId: { $in: briefIds } })
+      .select('briefId product')
+      .lean()
+      .exec();
+    const productByBrief = new Map(briefs.map(b => [b.briefId, (b as any).product ?? '']));
 
     const rows: Awaited<ReturnType<typeof this.enrichPerAd>> = [];
     const now = Date.now();
@@ -316,6 +330,7 @@ Return ONLY the JSON object.`,
           const spend = m.spend ?? 0;
           rows.push({
             briefId: campaign.briefId,
+            product: productByBrief.get(campaign.briefId) ?? '',
             adId: ad.metaAdId,
             copyVariantIndex: variantIdx,
             primaryText: variant.primaryText,
@@ -411,6 +426,7 @@ Return ONLY the JSON object.`,
         hookLine: firstLine,
         hookStyle: r.hookStyle,
         audienceSegment: r.audienceType,
+        product: r.product || undefined,
         ctr: r.ctr,
         sampleSize: r.impressions,
         extractedAt: now,

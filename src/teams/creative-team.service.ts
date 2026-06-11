@@ -13,6 +13,7 @@ import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputDocument } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { resolveVertical } from '../common/benchmarks/vertical-benchmarks';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
+import { HOOK_STYLES_MEME, HOOK_STYLE_DESCRIPTIONS_MEME } from '../common/creative/hook-styles';
 
 /**
  * Brief input to the Creative Team. winnerCloneOf is the exploit-winner
@@ -197,6 +198,9 @@ Review the creative package below for:
 6. PRODUCT ACCURACY — product name must be "${resolvedProduct?.name ?? brief.product ?? 'correct'}"${resolvedProduct?.hidePriceInCreative ? `. PRICE SUPPRESSION ACTIVE: copy must NOT mention any price (no ₹, no rupees, no numbers like ${resolvedProduct?.price}, no "booking fee" amounts). If any variant includes a price, REJECT it and rewrite without price.` : `, price must be ₹${resolvedProduct?.price ?? 'correct'}`}
 7. FACT-ANCHOR VERIFICATION — every named entity (competitor name, person, news event, statistic, deadline, fabricated quote${resolvedProduct?.hidePriceInCreative ? '' : ', specific price other than the product price'}) in primaryText/headline MUST appear in the BRIEF FACTS block below. If a variant cites something not in BRIEF FACTS — it is fabrication. Rewrite it using only sourced facts or replace with a generic relatable pain.
 8. LOGICAL COHERENCE — for each variant, the chain must hold: HEADLINE promises X → primaryText opening 90 chars deliver X (not unrelated story Y) → body's value proposition is what the CTA acts on. If headline and body are about different things, that is a bait-and-switch — rewrite the body to deliver the headline's promise (or rewrite the headline to match the body, whichever stays closer to the brief).
+9. IMAGE↔COPY COHERENCE (mandatory, per variant — not optional polish): imagePrompts[i] MUST specify the visual centerpiece REQUIRED by variant[i]'s hookStyle:
+   pain_point → person mid-distress at a concrete trigger moment | bold_claim → split-screen chaos/calm or dramatic single subject | price_shock → the ₹ price in dominant numerals | social_proof → testimonial face + name/city caption | curiosity_gap → covered/redacted element (blurred chart, withheld word) | before_after → literal two-state split of the same person | urgency → planetary transit visual with a date | meme_* → candid un-polished phone-photo aesthetic matching the meme beat.
+   If imagePrompts[i] describes a generic lifestyle scene, the wrong centerpiece, or a different variant's hook — REWRITE the image prompt. A scroll-stopping image that contradicts its own copy converts worse than a boring one that matches. Do NOT approve a package where any variant's image prompt fails this check.
 
 BRIEF FACTS (the ONLY facts that may be cited — anything else is fabrication):
 ${briefFactsBlock}
@@ -438,11 +442,22 @@ ${priceLine}
       };
       const briefStage = brief.audienceStage ?? 'cold';
       let pool = exemplars;
+      // Product filter FIRST: a hook that won for a ₹1,799 mass product is a
+      // hypothesis, not a pattern, for a ₹6K-51K premium tier (the Nadi Leaf ↔
+      // Nadi Report leak). Same ≥3 fallback as the stage filter — thin
+      // product-specific data falls back to tenant pool rather than zero
+      // inspiration. Exemplars without product attribution (pre-migration)
+      // stay in every pool.
+      if (brief.product) {
+        const productMatched = pool.filter((e: any) => !e.product || e.product === brief.product);
+        const ownProduct = pool.filter((e: any) => e.product === brief.product);
+        pool = ownProduct.length >= 3 ? ownProduct : productMatched;
+      }
       if (brief.audienceStage) {
-        const matching = exemplars.filter((e: any) => stageOfSegment(e.audienceSegment) === briefStage);
+        const matching = pool.filter((e: any) => stageOfSegment(e.audienceSegment) === briefStage);
         // If filtered set is too small (<3), fall back to full pool — better to have
         // some inspiration than none. Logged via the rendering itself (mixed-stage banner).
-        pool = matching.length >= 3 ? matching : exemplars;
+        pool = matching.length >= 3 ? matching : pool;
       }
 
       const top5 = [...pool].sort((a, b) => b.ctr - a.ctr).slice(0, 5);
@@ -630,7 +645,8 @@ ${brief.format === 'meme' ? `Each variant needs:
   LINE 2 — THE TIE-IN: The product as the natural punchline or solution. Feels organic, not forced. MUST mention product name.
 - headline: 5-7 words. Can be the punchline or CTA.
 - cta: "Shop Now", "Order Now", "Buy Today"
-- hookStyle: one of "meme_relatable", "meme_punchline", "meme_self_aware" (each variant must use a DIFFERENT one)
+- hookStyle: one of "meme_relatable", "meme_punchline", "meme_self_aware" (each variant must use a DIFFERENT one). Follow each style's spec exactly:
+${HOOK_STYLES_MEME.map(h => `  - ${h}: ${HOOK_STYLE_DESCRIPTIONS_MEME[h]}`).join('\n')}
 
 MEME COPY RULES:
 - Short is everything — if it needs explaining, it's not a meme

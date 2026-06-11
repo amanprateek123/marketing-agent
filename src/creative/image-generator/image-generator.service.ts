@@ -202,6 +202,9 @@ HOOK → CENTERPIECE (use the row matching the selected hookStyle):
   curiosity_gap  → covered/redacted element: blurred kundli chart, hand covering face, withheld word in headline
   before_after   → literal vertical split: same person, identical pose, lighting shifts (dim → golden); time-gap label between
   urgency        → planetary transit visual (chart wheel with planet glyph + date) — NEVER a generic countdown clock
+  meme_relatable → candid phone-photo aesthetic: person caught in the EXACT situation from line 1 (3am scroll, notification face) — deliberately un-polished, NOT studio-lit
+  meme_punchline → two-beat visual: setup expression left/top, reaction right/bottom (same person) — the visual IS the turn
+  meme_self_aware→ the ad winking at itself: subject looking straight at camera mid-eyeroll or screenshot-of-an-ad framing — breaks the fourth wall
 ${isSpiritual ? '  (spirituality bonus: use astrology-specific iconography — Shani for Sade Sati, Lakshmi for wealth, Hanuman for protection — never generic "spiritual" Western aesthetic)' : ''}
 `.trim();
 
