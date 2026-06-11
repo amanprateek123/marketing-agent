@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Param,
+  Query,
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
@@ -409,6 +410,7 @@ export class PipelineController {
     @Param('tenantId') tenantId: string,
     @Param('runId') runId: string,
     @Param('briefId') briefId: string,
+    @Query('force') force?: string,
   ) {
     try {
       const company = await this.companiesService.findByTenantId(tenantId);
@@ -473,6 +475,10 @@ export class PipelineController {
           // on the source winner's hookLine pattern.
           winnerCloneOf: (brief as any).winnerCloneOf,
         },
+        // ?force=true bypasses the producer's resume-safe dedup. Use when an
+        // operator intentionally re-produces (e.g. after a bug fix). Without
+        // this flag, the second call silently returns the stale package.
+        { forceRegenerate: force === 'true' || force === '1' },
       );
 
       // Phase G: Campaign creation (review + pending approval)

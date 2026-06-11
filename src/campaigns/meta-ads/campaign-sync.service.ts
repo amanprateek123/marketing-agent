@@ -181,35 +181,40 @@ export class CampaignSyncService {
           { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
         ]);
 
-        const res = await axios.get(`${META_API_BASE}/${accountId}/campaigns`, {
-          params: {
+        // Campaigns — paginated. limit=200 was exactly hitting the cap for
+        // 91astrology (200 active+paused campaigns) → certainty that some
+        // campaigns were silently truncated. Following paging.next surfaces
+        // the full list.
+        const res = await this.fetchAllPages(
+          `${META_API_BASE}/${accountId}/campaigns`,
+          {
             fields: 'id,name,status,objective,daily_budget,lifetime_budget,start_time',
             filtering,
             limit: '200',
             access_token: accessToken,
           },
-          timeout: 60000,
-        });
+          `Campaigns ${accountId}`,
+        );
 
         const campaigns: any[] = res.data?.data ?? [];
 
-        // Fetch insights for these campaigns in one bulk call
+        // Fetch insights for these campaigns in one bulk call (paginated).
         const campaignIds = campaigns.map(c => c.id);
         if (campaignIds.length === 0) continue;
 
-        const insightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
-          params: {
+        const insightsRes = await this.fetchAllPagesChunked(
+          `${META_API_BASE}/${accountId}/insights`,
+          {
             fields: 'campaign_id,spend,impressions,clicks,ctr,cpc,actions,action_values',
             level: 'campaign',
             date_preset: 'maximum',
-            filtering: JSON.stringify([
-              { field: 'campaign.id', operator: 'IN', value: campaignIds },
-            ]),
             limit: '200',
             access_token: accessToken,
           },
-          timeout: 60000,
-        }).catch(() => ({ data: { data: [] } }));
+          'campaign.id',
+          campaignIds,
+          `Campaign insights ${accountId}`,
+        );
 
         const insightsMap = new Map<string, any>();
         for (const row of insightsRes.data?.data ?? []) {
@@ -217,61 +222,60 @@ export class CampaignSyncService {
         }
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // Fetch all active/paused ad sets for this account in one call (retry once on rate limit)
-        const adSetsRes = await this.fetchWithRetry(
-          () => axios.get(`${META_API_BASE}/${accountId}/adsets`, {
-            params: {
-              fields: 'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal',
-              filtering: JSON.stringify([
-                { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
-                { field: 'campaign.id', operator: 'IN', value: campaignIds },
-              ]),
-              limit: '500',
-              access_token: accessToken,
-            },
-            timeout: 60000,
-          }),
-          `AdSets ${accountId}`,
-        );
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        // Fetch ad set insights in one bulk call
-        const adSetInsightsRes = await axios.get(`${META_API_BASE}/${accountId}/insights`, {
-          params: {
-            fields: 'adset_id,spend,impressions,clicks,ctr,cpc,actions,action_values,frequency',
-            level: 'adset',
-            date_preset: 'maximum',
+        // Ad-set metadata — paginated + chunked. Across 200+ active+paused
+        // campaigns × 1-3 ad sets each, easily exceeds limit=500. Filtering by
+        // hundreds of campaign IDs also overflows Meta's URL cap.
+        const adSetsRes = await this.fetchAllPagesChunked(
+          `${META_API_BASE}/${accountId}/adsets`,
+          {
+            fields: 'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal',
             filtering: JSON.stringify([
-              { field: 'campaign.id', operator: 'IN', value: campaignIds },
+              { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
             ]),
             limit: '500',
             access_token: accessToken,
           },
-          timeout: 60000,
-        }).catch((err: any) => {
-          this.logger.warn(`AdSet insights fetch failed for ${accountId}: ${err.response?.data?.error?.message ?? err.message}`);
-          return { data: { data: [] } };
-        });
+          'campaign.id',
+          campaignIds,
+          `AdSets ${accountId}`,
+        );
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // Fetch ads with embedded insights for ACTIVE campaigns only (single call, avoids rate limits)
+        // Ad-set insights — paginated + chunked by campaign IDs.
+        const adSetInsightsRes = await this.fetchAllPagesChunked(
+          `${META_API_BASE}/${accountId}/insights`,
+          {
+            fields: 'adset_id,spend,impressions,clicks,ctr,cpc,actions,action_values,frequency',
+            level: 'adset',
+            date_preset: 'maximum',
+            limit: '500',
+            access_token: accessToken,
+          },
+          'campaign.id',
+          campaignIds,
+          `AdSet insights ${accountId}`,
+        );
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        // Ads — paginated. With many active campaigns × 4 variants each,
+        // total active ads can exceed limit=500. Without paging some ads
+        // get dropped from adsByAdSet → metaAdSets[].ads[] missing entries.
         const activeCampaignIds = campaigns.filter(c => c.status === 'ACTIVE').map(c => c.id);
         const adsRes = activeCampaignIds.length > 0
-          ? await axios.get(`${META_API_BASE}/${accountId}/ads`, {
-              params: {
+          ? await this.fetchAllPagesChunked(
+              `${META_API_BASE}/${accountId}/ads`,
+              {
                 fields: 'id,name,status,adset_id,creative{id,name,object_story_spec},insights{spend,impressions,clicks,ctr,cpc,actions,action_values}',
                 filtering: JSON.stringify([
                   { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
-                  { field: 'campaign.id', operator: 'IN', value: activeCampaignIds },
                 ]),
                 limit: '500',
                 access_token: accessToken,
               },
-              timeout: 60000,
-            }).catch((err: any) => {
-              this.logger.warn(`Ads fetch failed for ${accountId}: ${err.response?.data?.error?.message ?? err.message}`);
-              return { data: { data: [] } };
-            })
+              'campaign.id',
+              activeCampaignIds,
+              `Ads ${accountId}`,
+            )
           : { data: { data: [] } };
 
         // Group ad sets and insights by campaign_id
@@ -339,20 +343,20 @@ export class CampaignSyncService {
               };
             });
 
-            // Aggregate adset metrics from ads if available, fall back to adSetInsightsMap
+            // Aggregate adset metrics: ALWAYS prefer the ad-set-level insights
+            // from Meta (canonical source). Previously: "if ads have data, sum
+            // ads — else fall back to adset insights." That logic broke for any
+            // ad set with paused ads, because the `/ads` query filters
+            // `effective_status IN [ACTIVE]` — so paused ads' historical spend
+            // is excluded from the rollup, while the ad-set-level insights
+            // include EVERY ad (active + paused). Symptom: Nadi Leaf's
+            // ADV-PLUS_BROAD showed ₹38 (only active ads' visible spend) when
+            // Meta's true cumulative was ₹3,702. Hit 2026-06-11.
             const asi = adSetInsightsMap.get(as.id) ?? {};
-            let asSpend: number, asImpressions: number, asClicks: number, asConversions: number;
-            if (ads.length > 0) {
-              asSpend = ads.reduce((s, a) => s + a.spend, 0);
-              asImpressions = ads.reduce((s, a) => s + a.impressions, 0);
-              asClicks = ads.reduce((s, a) => s + a.clicks, 0);
-              asConversions = ads.reduce((s, a) => s + a.conversions, 0);
-            } else {
-              asSpend = parseFloat(asi.spend ?? '0');
-              asImpressions = parseInt(asi.impressions ?? '0', 10);
-              asClicks = parseInt(asi.clicks ?? '0', 10);
-              asConversions = this.extractConversions(asi.actions, conversionTypes);
-            }
+            const asSpend = parseFloat(asi.spend ?? '0');
+            const asImpressions = parseInt(asi.impressions ?? '0', 10);
+            const asClicks = parseInt(asi.clicks ?? '0', 10);
+            const asConversions = this.extractConversions(asi.actions, conversionTypes);
             const asCtr = asImpressions > 0 ? (asClicks / asImpressions) * 100 : 0;
             const asCpc = asClicks > 0 ? asSpend / asClicks : 0;
             const asCpa = asConversions > 0 ? asSpend / asConversions : 0;
@@ -441,6 +445,88 @@ export class CampaignSyncService {
       }
     }
     return { data: { data: [] } };
+  }
+
+  /**
+   * Chunked + paginated fetch for endpoints that filter on a list of IDs.
+   * Meta's filter param has a max URL length (~5000 chars). For tenants
+   * with 200+ campaigns, an `IN [...]` filter listing all campaign IDs
+   * overflows that → request returns no data (silent failure, since the
+   * URL got truncated).
+   *
+   * Chunks the ID list into batches (default 50 ≈ 850 chars of IDs), runs
+   * fetchAllPages per chunk, merges results. Use for any /insights call
+   * that filters by campaign.id, ad set ID, or ad ID across many entities.
+   */
+  private async fetchAllPagesChunked(
+    initialUrl: string,
+    baseParams: any,
+    filterField: string,         // e.g. 'campaign.id'
+    ids: string[],
+    label: string,
+    chunkSize = 50,
+  ): Promise<{ data: { data: any[] } }> {
+    const allRows: any[] = [];
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      // Compose filtering: merge any base filtering with the chunk's ID list.
+      const baseFiltering = baseParams.filtering ? JSON.parse(baseParams.filtering) : [];
+      // Drop any existing filter on filterField so the chunk's IDs are the
+      // only constraint on that field.
+      const otherFilters = baseFiltering.filter((f: any) => f.field !== filterField);
+      const filtering = JSON.stringify([
+        ...otherFilters,
+        { field: filterField, operator: 'IN', value: chunk },
+      ]);
+      const chunkParams = { ...baseParams, filtering };
+      const res = await this.fetchAllPages(initialUrl, chunkParams, `${label} chunk ${i / chunkSize + 1}/${Math.ceil(ids.length / chunkSize)}`);
+      allRows.push(...(res.data?.data ?? []));
+    }
+    this.logger.log(`${label}: ${allRows.length} rows fetched across ${Math.ceil(ids.length / chunkSize)} chunks`);
+    return { data: { data: allRows } };
+  }
+
+  /**
+   * Paginated Meta Graph API fetch. Follows `paging.next` cursor URLs until
+   * the page returns empty or the maxPages cap is hit.
+   *
+   * Why this helper exists: Meta's bulk endpoints (`/insights`, `/ads`,
+   * `/campaigns`, `/customaudiences`) return up to `limit` rows + a cursor.
+   * Setting `limit=500` and ignoring the cursor silently truncates the
+   * response — symptoms include missing ad sets in adSetInsightsMap, missing
+   * audiences in pre-launch validation, etc. We've hit this three times so
+   * far (custom audiences, ad-set insights, and now generalized). 20-page
+   * hard cap is defensive — bounded total of 20 × limit rows; protects
+   * against runaway cursor loops.
+   *
+   * Returns `{ data: { data: [...] } }` shape mirroring axios .data for
+   * drop-in compatibility with existing call sites that expected
+   * axios-response objects.
+   */
+  private async fetchAllPages(
+    initialUrl: string,
+    initialParams: any,
+    label: string,
+    maxPages = 20,
+  ): Promise<{ data: { data: any[] } }> {
+    const rows: any[] = [];
+    let url: string | null = initialUrl;
+    let params: any = initialParams;
+    for (let page = 0; page < maxPages && url; page++) {
+      try {
+        const res: any = await axios.get(url, { params, timeout: 60000 });
+        rows.push(...(res.data?.data ?? []));
+        // Meta returns paging.next as a fully-qualified URL with cursor
+        // embedded. Pass with no params on subsequent pages.
+        url = res.data?.paging?.next ?? null;
+        params = undefined;
+      } catch (err: any) {
+        this.logger.warn(`${label} fetch failed (page ${page}): ${err.response?.data?.error?.message ?? err.message}`);
+        url = null;
+      }
+    }
+    this.logger.log(`${label}: ${rows.length} rows fetched across pages`);
+    return { data: { data: rows } };
   }
 
   private buildMetaAdSets(campaign: any, conversionTypes: Set<string>): any[] {

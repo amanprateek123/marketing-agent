@@ -379,6 +379,7 @@ export class MetaMetricsService {
     campaignId: string,
     accessToken: string,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<Array<{
     publisherPlatform: string;
     platformPosition: string;
@@ -399,10 +400,12 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
       return rows.map((r: any) => {
         const spend = parseFloat(r.spend ?? '0');
-        const conversions = this.extractConversions(r.actions, conversionEvent);
+        const conversions = extractConversions(r.actions, conversionTypes);
         return {
           publisherPlatform: r.publisher_platform ?? 'unknown',
           platformPosition: r.platform_position ?? 'unknown',
@@ -439,6 +442,7 @@ export class MetaMetricsService {
     campaignId: string,
     accessToken: string,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<Array<{
     age: string;
     gender: string;
@@ -461,10 +465,12 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
       return rows.map((r: any) => {
         const spend = parseFloat(r.spend ?? '0');
-        const conversions = this.extractConversions(r.actions, conversionEvent);
+        const conversions = extractConversions(r.actions, conversionTypes);
         return {
           age: r.age ?? 'unknown',
           gender: r.gender ?? 'unknown',
@@ -497,6 +503,7 @@ export class MetaMetricsService {
     campaignId: string,
     accessToken: string,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<Array<{
     dayOfWeek: number;             // 0=Sun, 6=Sat (matches Meta adset_schedule day numbering)
     dayLabel: string;              // 'Sun' | 'Mon' | ...
@@ -518,6 +525,8 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
 
       // Aggregate per day-of-week (0=Sun..6=Sat).
@@ -531,7 +540,7 @@ export class MetaMetricsService {
         const [y, m, d] = dateStart.split('-').map((n: string) => parseInt(n, 10));
         if (!y || !m || !d) continue;
         const dow = new Date(y, m - 1, d).getDay();
-        const conversions = this.extractConversions(r.actions, conversionEvent);
+        const conversions = extractConversions(r.actions, conversionTypes);
         buckets[dow].spend += parseFloat(r.spend ?? '0');
         buckets[dow].impressions += parseInt(r.impressions ?? '0', 10);
         buckets[dow].clicks += parseInt(r.clicks ?? '0', 10);
@@ -565,6 +574,7 @@ export class MetaMetricsService {
     campaignId: string,
     accessToken: string,
     conversionEvent?: string,
+    customConversionId?: string,
   ): Promise<Array<{
     hourOfDay: string;            // Meta returns "00:00:00 - 00:59:59" format
     spend: number;
@@ -584,10 +594,12 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
       return rows.map((r: any) => {
         const spend = parseFloat(r.spend ?? '0');
-        const conversions = this.extractConversions(r.actions, conversionEvent);
+        const conversions = extractConversions(r.actions, conversionTypes);
         return {
           hourOfDay: r.hourly_stats_aggregated_by_advertiser_time_zone ?? 'unknown',
           spend,
@@ -614,32 +626,13 @@ export class MetaMetricsService {
     return JSON.stringify({ since: fmt(since), until: fmt(until) });
   }
 
-  private extractConversions(actions: any[] | undefined, conversionEvent?: string): number {
-    if (!actions) return 0;
-
-    // Map company conversion event to Meta action_type patterns
-    const eventMap: Record<string, string[]> = {
-      'Purchase': ['purchase', 'offsite_conversion.fb_pixel_purchase'],
-      'Lead': ['lead', 'offsite_conversion.fb_pixel_lead'],
-      'CompleteRegistration': ['complete_registration', 'offsite_conversion.fb_pixel_complete_registration'],
-      'Subscribe': ['subscribe', 'offsite_conversion.fb_pixel_subscribe'],
-      'AddToCart': ['add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart'],
-      'InitiateCheckout': ['initiate_checkout', 'offsite_conversion.fb_pixel_initiate_checkout'],
-      'ViewContent': ['view_content', 'offsite_conversion.fb_pixel_view_content'],
-    };
-
-    const patterns = eventMap[conversionEvent ?? 'Purchase']
-      ?? [conversionEvent?.toLowerCase() ?? 'purchase'];
-
-    const match = actions.find((a: any) =>
-      patterns.some(p => a.action_type === p || a.action_type?.includes(p)),
-    );
-
-    // No fallback to generic offsite_conversion — that counts ALL conversion types
-    // (ViewContent + AddToCart + Purchase etc.) and inflates numbers.
-    // If we can't find the specific event, report 0 rather than wrong data.
-    return parseInt(match?.value ?? '0', 10);
-  }
+  // [REMOVED 2026-06-11] Private extractConversions(actions, conversionEvent: string)
+  // Replaced by the shared util `extractConversions` (Set-based, handles custom
+  // conversions). The old private silently dropped Custom Conversion events
+  // because it pattern-matched against a hardcoded standard-event map only —
+  // products like Nadi Leaf (custom conversion 1534101314938858) returned 0
+  // conversions in every breakdown call. All 4 callers now use the util +
+  // buildConversionTypesSet + customConversionId param.
 
   private async metaApiGet(url: string, params: any): Promise<any> {
     for (let attempt = 1; attempt <= 3; attempt++) {

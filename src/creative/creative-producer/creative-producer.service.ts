@@ -78,14 +78,43 @@ export class CreativeProducerService {
     briefId: string,
     runId: string,
     brief: BriefData,
+    /**
+     * Bypass the resume-safe dedup when true. The default `produce()` call has
+     * a safety check: if a completed package exists for this (tenantId, briefId),
+     * return it without regenerating. Designed for resume-from-crash scenarios
+     * — pipeline reruns shouldn't double-produce.
+     *
+     * BUT this also fires for legitimate re-produce intents:
+     *   - User clicks "regenerate" from the dashboard
+     *   - /briefs/:briefId/approve called twice (e.g. after a bug fix)
+     *   - Operator manually re-triggers /produce after fixing a flag
+     *
+     * In those cases the silent short-circuit is confusing — the button "does
+     * nothing." Caused real friction during the 2026-06-02 hidePriceInCreative
+     * fix where re-producing kept returning the stale leaky package until the
+     * existing record was manually deleted.
+     *
+     * Set `forceRegenerate: true` from any caller that has intentional intent
+     * to re-produce. Existing completed package gets deleted, fresh production
+     * runs. The pipeline orchestrator and resume paths keep default `false`.
+     */
+    options?: { forceRegenerate?: boolean },
   ): Promise<CreativePackageDocument> {
     const company = await this.companiesService.findByTenantId(tenantId);
+    const forceRegenerate = options?.forceRegenerate === true;
 
-    // Check for existing package — avoid duplicates on resume
+    // Check for existing package — avoid duplicates on resume.
+    // forceRegenerate bypass: legitimate re-produce intents (manual regenerate,
+    // post-bug-fix reruns) skip the dedup and treat the existing record as
+    // stale-to-be-replaced.
     const existing = await this.creativePackageModel.findOne({ tenantId, briefId }).lean().exec();
-    if (existing && existing.status === 'completed') {
-      this.logger.log(`Creative production skipped — already completed for briefId=${briefId}`);
+    if (existing && existing.status === 'completed' && !forceRegenerate) {
+      this.logger.log(`Creative production skipped — already completed for briefId=${briefId} (set options.forceRegenerate=true to override)`);
       return existing as any;
+    }
+    if (existing && forceRegenerate) {
+      await this.creativePackageModel.deleteOne({ _id: existing._id });
+      this.logger.log(`Force-regenerate: deleted existing package for briefId=${briefId} (status was ${existing.status})`);
     }
     // Resume video polling if we have a videoId but no completed video
     if (existing && existing.heygenVideoId && !(existing.video as any)?.videoUrl) {

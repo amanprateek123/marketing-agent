@@ -4,7 +4,15 @@ import { Job } from 'bullmq';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { QUEUES } from './queue.constants';
 
-@Processor(QUEUES.META_LEARNING_IMPORT)
+// Meta learning import pulls a tenant's full Meta Ads history (campaigns,
+// ad sets, ads, insights) + runs Claude pattern analysis. 5-30 minutes
+// depending on tenant size. 91astrology with 449 campaigns trends toward
+// upper end. Default 30s lockDuration would falsely flag the worker stalled.
+@Processor(QUEUES.META_LEARNING_IMPORT, {
+  lockDuration: 30 * 60 * 1000,    // 30 min
+  lockRenewTime: 15 * 60 * 1000,
+  stalledInterval: 15 * 60 * 1000,
+})
 export class MetaLearningProcessor extends WorkerHost {
   private readonly logger = new Logger(MetaLearningProcessor.name);
 

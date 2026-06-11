@@ -6,7 +6,18 @@ import { SchedulerService } from './scheduler.service';
 import { CompaniesService } from '../companies/companies.service';
 import { QUEUES } from './queue.constants';
 
-@Processor(QUEUES.PIPELINE)
+// Pipeline runs the full intelligence DAG: 4 parallel scouts (~5min) +
+// coordinator (~2min) + competitor + market research (~5min each) +
+// strategy team debate (~5-10min) + creative team debate (~5-10min) +
+// creative production (~3-5min) + campaign review (~3-5min). Worst-case
+// ~45-60 min end-to-end. Default 30s lockDuration causes BullMQ to wrongly
+// flag the worker stalled while it's mid-LLM-call. Same root cause as
+// creative-production fix on 2026-06-11.
+@Processor(QUEUES.PIPELINE, {
+  lockDuration: 60 * 60 * 1000,    // 60 min — covers worst-case full DAG
+  lockRenewTime: 30 * 60 * 1000,
+  stalledInterval: 30 * 60 * 1000,
+})
 export class PipelineProcessor extends WorkerHost {
   private readonly logger = new Logger(PipelineProcessor.name);
 

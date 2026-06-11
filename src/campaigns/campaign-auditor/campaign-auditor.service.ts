@@ -286,16 +286,19 @@ export class CampaignAuditorService {
         campaign.metaCampaignId,
         company.meta.accessToken,
         conversionEvent,
+        customConversionId,
       ),
       this.metaMetrics.fetchHourlyBreakdown(
         campaign.metaCampaignId,
         company.meta.accessToken,
         conversionEvent,
+        customConversionId,
       ),
       this.metaMetrics.fetchDayOfWeekBreakdown(
         campaign.metaCampaignId,
         company.meta.accessToken,
         conversionEvent,
+        customConversionId,
       ),
     ]);
 

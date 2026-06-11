@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Param, Body, NotFoundException, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, NotFoundException, Logger, Query } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CreativeProducerService, BriefData } from './creative-producer/creative-producer.service';
@@ -449,6 +449,7 @@ Return ONLY the image prompt, nothing else.
   async approve(
     @Param('tenantId') tenantId: string,
     @Param('briefId') briefId: string,
+    @Query('force') force?: string,
   ) {
     const brief = await this.intelligenceBriefModel
       .findOne({ tenantId, briefId })
@@ -480,9 +481,17 @@ Return ONLY the image prompt, nothing else.
       winnerCloneOf: (brief as any).winnerCloneOf,
     };
 
-    // Fire and forget — returns immediately, production runs in background
-    this.creativeProducer.produce(tenantId, briefId, brief.runId, briefData)
-      .catch(() => {});
+    // Fire and forget — returns immediately, production runs in background.
+    // ?force=true bypasses the producer's resume-safe dedup. Use when an
+    // operator intentionally re-approves the same brief (e.g. after the
+    // previous creative shipped with stale data and was fixed in the brief).
+    this.creativeProducer.produce(
+      tenantId,
+      briefId,
+      brief.runId,
+      briefData,
+      { forceRegenerate: force === 'true' || force === '1' },
+    ).catch(() => {});
 
     return { status: 'started', briefId, topic: brief.topic };
   }

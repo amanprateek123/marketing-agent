@@ -23,7 +23,22 @@ interface ReplacementJobData {
   audienceStage?: 'cold' | 'warm' | 'hot';  // retarget pods get 'warm' so generated copy isn't cold-prospect-shaped
 }
 
-@Processor(QUEUES.CREATIVE_PRODUCTION)
+// Creative production jobs typically run 60-180 seconds: Creative Team LLM
+// debate (~30-60s) + 4 image generations in parallel (~30-60s) + Meta uploads
+// (~10-20s). BullMQ default lockDuration is 30s, so the worker can't heartbeat
+// fast enough — BullMQ wrongly flags the job as stalled, retries on a fresh
+// worker, that stalls too, and after attempts cap the job moves to FAILED
+// permanently. Cascading failures hit Nadi Leaf 2026-06-11: 3 add_creative
+// actions queued (urgency, before_after, curiosity_gap), all stuck at
+// status=executed in DB but never produced on Meta. Fix: lockDuration 10min.
+// Trade-off: a genuinely-crashed worker takes 10min to be detected vs 30s.
+// Acceptable — creative production isn't time-critical at minute scale, and
+// we don't have a stalled-job problem that the short timeout was solving.
+@Processor(QUEUES.CREATIVE_PRODUCTION, {
+  lockDuration: 10 * 60 * 1000,    // 10 minutes — covers worst-case LLM + Heygen + Meta
+  lockRenewTime: 5 * 60 * 1000,    // renew at half the lock window
+  stalledInterval: 5 * 60 * 1000,  // check for stalled jobs every 5min instead of 30s
+})
 export class CreativeReplacementProcessor extends WorkerHost {
   private readonly logger = new Logger(CreativeReplacementProcessor.name);
 
