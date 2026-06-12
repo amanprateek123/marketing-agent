@@ -272,10 +272,22 @@ export class MetaLearningImporterService {
    * Finalize: calculate patterns + generate case studies from all enriched data.
    */
   async finalizeImport(importId: string): Promise<void> {
-    // Atomic claim — only proceed if status is NOT already finalizing or completed
-    // Prevents duplicate runs when BullMQ retries the finalize job
+    // Atomic claim — only proceed if status is NOT already finalizing or completed.
+    // Prevents duplicate runs when BullMQ retries the finalize job. STALE-CLAIM
+    // ESCAPE: a finalize that crashed mid-run leaves status='finalizing' forever
+    // and every retry no-ops — so a 'finalizing' claim older than 45 min (no
+    // updatedAt progress) is treated as dead and reclaimable. Without this, a
+    // single crashed finalize made the import permanently unrecoverable.
+    const STALE_FINALIZING_MS = 45 * 60 * 1000;
+    const staleCutoff = new Date(Date.now() - STALE_FINALIZING_MS);
     const importDoc = await this.importModel.findOneAndUpdate(
-      { _id: importId, status: { $nin: ['finalizing', 'completed'] } },
+      {
+        _id: importId,
+        $or: [
+          { status: { $nin: ['finalizing', 'completed'] } },
+          { status: 'finalizing', updatedAt: { $lt: staleCutoff } },
+        ],
+      },
       { $set: { status: 'finalizing' } },
       { new: true },
     ).exec();
@@ -427,7 +439,17 @@ export class MetaLearningImporterService {
 
     for (let i = 0; i < topCampaigns.length; i += csBatchSize) {
       const batch = topCampaigns.slice(i, i + csBatchSize);
-      const caseStudies = await this.generateCaseStudies(batch, company);
+      // Non-fatal per batch: one Claude error (timeout/rate limit) used to
+      // throw out of finalizeImport entirely — killing the cleanup +
+      // status='completed' steps below, and the retry then hit the claim
+      // guard and no-op'd, leaving the import stuck at 'finalizing' forever
+      // (importId 6a2b65cf, 2026-06-12: died at 25/50 case studies).
+      let caseStudies: Awaited<ReturnType<typeof this.generateCaseStudies>> = [];
+      try {
+        caseStudies = await this.generateCaseStudies(batch, company);
+      } catch (err: any) {
+        this.logger.warn(`Case-study batch ${i / csBatchSize + 1} failed (skipping, non-fatal): ${err.message}`);
+      }
 
       if (caseStudies.length > 0) {
         await this.caseStudyModel.insertMany(
