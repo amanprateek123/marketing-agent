@@ -369,6 +369,24 @@ export class MetaLearningImporterService {
         losingFormats,
       }, { incrementVersion: true });
       const importedAt = new Date();
+      // Per-product audience scores from ALL products' patterns — not just
+      // productPatterns[0]. Two writes of the same map:
+      //   - audienceScoresByProduct: immediately consumable by the audit
+      //     DECISION PRIORS, the learned-bad-recipient guard, and LiveContext
+      //     (which all prefer per-product over tenant-aggregate)
+      //   - importedAudienceScoresByProduct: the STABLE baseline the Day-30
+      //     deep run merges with — without it, the first deep run replaced
+      //     this map with agent-campaign-only aggregates and a year of
+      //     imported audience knowledge vanished (n=47 → n=5).
+      const importedByProduct: Record<string, Record<string, { roas: number; n: number; updatedAt: Date }>> = {};
+      for (const pattern of productPatterns) {
+        if (!pattern.product) continue;
+        importedByProduct[pattern.product] = Object.fromEntries(
+          pattern.audiencePerformance
+            .filter(a => a.audienceType && a.audienceType !== 'unknown' && a.adSetCount > 0)
+            .map(a => [a.audienceType, { roas: a.avgROAS, n: a.adSetCount, updatedAt: importedAt }]),
+        );
+      }
       await this.companiesService.setCampaignLearningSlice(tenantId, {
         audienceScores: Object.fromEntries(
           bestPattern.audiencePerformance.map(a => [
@@ -376,6 +394,8 @@ export class MetaLearningImporterService {
             { roas: a.avgROAS, n: a.adSetCount, updatedAt: importedAt },
           ]),
         ),
+        audienceScoresByProduct: importedByProduct,
+        importedAudienceScoresByProduct: importedByProduct,
         budgetInsights: bestPattern.budgetInsights,
         timingInsights: bestPattern.seasonalPeaks.length > 0
           ? [`Seasonal peaks: ${bestPattern.seasonalPeaks.join(', ')}`]

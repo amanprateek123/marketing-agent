@@ -229,6 +229,35 @@ Return ONLY the JSON object described in your instructions.`,
       }
     }
 
+    // Merge the Meta-import baseline (importedAudienceScoresByProduct — written
+    // once by finalizeImport, never recomputed) into the agent-derived scores.
+    // n-weighted: a year of history at n=42 dominates 3 fresh agent campaigns
+    // until the agent data earns its weight; (product, audience) cells that only
+    // exist in the baseline carry over unchanged. Merging against the STATIC
+    // baseline (not current learnings) keeps this idempotent across deep runs.
+    // Without this merge, the first deep run REPLACED the map wholesale and a
+    // year of imported audience knowledge silently vanished.
+    const importBaseline = (company.learnings?.campaign as any)?.importedAudienceScoresByProduct as
+      Record<string, Record<string, { roas: number; n: number }>> | undefined;
+    if (importBaseline) {
+      for (const [product, audMap] of Object.entries(importBaseline)) {
+        audienceScoresByProduct[product] = audienceScoresByProduct[product] ?? {};
+        for (const [audType, imp] of Object.entries(audMap)) {
+          if (!imp || !(imp.n > 0)) continue;
+          const agent = audienceScoresByProduct[product][audType];
+          if (!agent || !(agent.n > 0)) {
+            audienceScoresByProduct[product][audType] = { roas: imp.roas, n: imp.n, updatedAt: now };
+          } else {
+            audienceScoresByProduct[product][audType] = {
+              roas: (agent.roas * agent.n + imp.roas * imp.n) / (agent.n + imp.n),
+              n: agent.n + imp.n,
+              updatedAt: now,
+            };
+          }
+        }
+      }
+    }
+
     const enrichedCampaign: CampaignLearnings = {
       ...campaign,
       audienceScores: enrichedAudienceScores,

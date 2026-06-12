@@ -310,6 +310,23 @@ export interface CampaignLearnings {
    * both fields in parallel so existing readers keep working during migration.
    */
   audienceScoresByProduct?: Record<string, Record<string, AudienceScoreEntry>>;
+
+  /**
+   * STABLE baseline of per-product audience scores derived from the Meta
+   * historical import (pattern-calculator over up to 1 year of pre-agent
+   * campaigns). Written ONCE per import by finalizeImport; never recomputed
+   * by learning runs.
+   *
+   * Why it exists: the Day-30 deep run rebuilds audienceScoresByProduct from
+   * brief-linked agent campaigns only — without this baseline, the FIRST deep
+   * run clobbered a year of imported audience knowledge (n=47 → n=5). The
+   * deep run now merges this baseline (n-weighted) into its agent-derived
+   * scores each cycle; keeping the baseline separate makes the merge
+   * idempotent across runs (no compounding double-counts).
+   * Note: n here is ad-set count (import granularity) vs campaign count on
+   * agent entries — close enough as a weighting unit.
+   */
+  importedAudienceScoresByProduct?: Record<string, Record<string, AudienceScoreEntry>>;
 }
 
 export interface CausalInsight {
