@@ -227,6 +227,19 @@ export class ActionOutcomeService {
   }
 
   /**
+   * Recent executed actions (all statuses) for dashboard display — newest
+   * first, with outcome labels where the +72h evaluation has finalized.
+   */
+  async listRecent(tenantId: string, limit: number = 50): Promise<ExecutedAction[]> {
+    return this.executedModel
+      .find({ tenantId })
+      .sort({ executedAt: -1 })
+      .limit(Math.min(limit, 200))
+      .lean()
+      .exec() as Promise<ExecutedAction[]>;
+  }
+
+  /**
    * Prompt block for the audit agent. Empty string until ≥3 finalized
    * outcomes exist — a track record of 1 would anchor the model on noise.
    */

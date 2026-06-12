@@ -32,6 +32,16 @@ export class PromptVersionEvalService {
     private readonly slackService: SlackService,
   ) {}
 
+  /** Eval history for dashboard display — newest first. */
+  async list(tenantId: string, limit: number = 20): Promise<PromptVersionEval[]> {
+    return this.evalModel
+      .find({ tenantId })
+      .sort({ createdAt: -1 })
+      .limit(Math.min(limit, 100))
+      .lean()
+      .exec() as Promise<PromptVersionEval[]>;
+  }
+
   /**
    * Compare the two most recent prompt versions that have campaign data.
    * Persists the eval and ops-alerts on regression. Never throws — the deep

@@ -27,6 +27,7 @@ import { CampaignsService } from '../campaigns/campaigns.service';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
 import { MetaAdsLibraryOutput } from './schemas/meta-ads-library-output.schema';
+import { SignalAccuracyService } from './signal-accuracy.service';
 
 @Controller('pipeline')
 export class PipelineController {
@@ -40,6 +41,7 @@ export class PipelineController {
     private readonly campaignReviewTeam: CampaignReviewTeamService,
     private readonly campaignCreator: CampaignCreatorService,
     private readonly creativeProducer: CreativeProducerService,
+    private readonly signalAccuracy: SignalAccuracyService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackage>,
     @InjectModel(MetaAdsLibraryOutput.name)
@@ -73,6 +75,16 @@ export class PipelineController {
       .lean()
       .exec();
     return runs;
+  }
+
+  /**
+   * GET /api/v1/pipeline/:tenantId/signal-accuracy
+   * Measured outcomes of past briefs grouped by ideaSource and signal platform —
+   * which intelligence sources actually produce converting campaigns.
+   */
+  @Get(':tenantId/signal-accuracy')
+  async getSignalAccuracy(@Param('tenantId') tenantId: string) {
+    return this.signalAccuracy.getAccuracy(tenantId);
   }
 
   /**

@@ -13,6 +13,7 @@ import { ActionOutcomeService } from './action-outcome.service';
 import { PromptVersionEvalService } from './prompt-version-eval.service';
 import { PromptVersionEval, PromptVersionEvalSchema } from './schemas/prompt-version-eval.schema';
 import { DeliveryModule } from '../delivery/delivery.module';
+import { LearningController } from './learning.controller';
 import { ClaudeModule } from '../claude/claude.module';
 import { CompaniesModule } from '../companies/companies.module';
 import { CommonModule } from '../common/common.module';
@@ -34,6 +35,7 @@ import { MetaMetricsService } from '../campaigns/meta-ads/meta-metrics.service';
     CommonModule,
     DeliveryModule,
   ],
+  controllers: [LearningController],
   providers: [CreativeLearningService, CampaignLearningService, ShadowActionService, ActionOutcomeService, PromptVersionEvalService, MetaMetricsService],
   exports: [CreativeLearningService, CampaignLearningService, ShadowActionService, ActionOutcomeService, PromptVersionEvalService],
 })
