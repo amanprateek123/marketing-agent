@@ -173,6 +173,14 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
         urgencyScore: b.urgent ? 10 : 5,
         finalScore: b.priorityScore ?? 0,
         sourcePlatforms: b.sourcePlatforms ?? [],
+        // Stage/language/segment were silently dropped on this (fallback) path —
+        // Strategy Team briefs carried them but IdeaPool briefs defaulted to
+        // cold/product-language/no-segment, disabling the warm-hot audience
+        // guards, geo-language enforcement, and segment-based targeting
+        // downstream whenever the team crashed and this path took over.
+        targetSegment: b.targetSegment ?? '',
+        audienceStage: ['cold', 'warm', 'hot'].includes(b.audienceStage) ? b.audienceStage : 'cold',
+        targetLanguage: typeof b.targetLanguage === 'string' ? b.targetLanguage.toLowerCase().trim() : '',
         ideaSource: b.ideaSource ?? '',
         // Snapshot the inspiring coordinator signals onto the brief (signals
         // TTL out of scout_signals in 30d; day7/14/30 performance lands here,
@@ -203,6 +211,12 @@ ${caseStudies.map((cs, i) => `  Case ${i + 1}: ${cs.campaignName} (${cs.dateRang
       hook: winner.hook,
       keyMessage: winner.keyMessage,
       conversionBridge: winner.conversionBridge,
+      // Same three fields as the IntelligenceBrief write above — the campaign
+      // creator reads audienceStage/targetSegment from THIS doc, and the
+      // creative producer resolves language from it.
+      targetSegment: winner.targetSegment ?? '',
+      audienceStage: ['cold', 'warm', 'hot'].includes(winner.audienceStage) ? winner.audienceStage : 'cold',
+      targetLanguage: typeof winner.targetLanguage === 'string' ? winner.targetLanguage.toLowerCase().trim() : '',
       suggestedBudget: winner.suggestedBudget ?? 0,
       finalScore: winner.priorityScore ?? 0,
       selected: true,
@@ -323,6 +337,9 @@ Generate ~${generationTarget} ideas internally, rank by priorityScore, return on
       "hook": "opening line or visual hook — for a PAID META AD, not organic content",
       "keyMessage": "what the audience should believe after seeing this ad",
       "conversionBridge": "how this paid ad leads directly to buying the product",
+      "targetSegment": "audience segment name from the product's defined segments, or empty string",
+      "audienceStage": "cold|warm|hot — cold for new-audience prospecting (the default for fresh ideas), warm/hot ONLY when the idea explicitly targets past engagers/cart-abandoners",
+      "targetLanguage": "language for ALL creative output — hinglish|hindi|marathi|tamil|telugu|bengali|gujarati|punjabi|kannada|malayalam|english. Match the audience's language, not the platform's",
       "suggestedBudget": 0,
       "ideaSource": "scout_signal|viral_trend|competitor_gap|market_insight|meta_ads_gap",
       "sourcePlatforms": ["instagram", "youtube"],
