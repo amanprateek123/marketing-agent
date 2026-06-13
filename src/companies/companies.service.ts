@@ -75,7 +75,28 @@ export class CompaniesService {
     );
 
     const { meta, pipelineConfig, ...rest } = dto as any;
-    Object.assign(company, rest);
+
+    // Strip undefined AND null values before merging. class-transformer +
+    // PartialType produces DTO instances where all optional class properties
+    // exist as keys with value=undefined; some client paths also send
+    // explicit nulls. Without this filter, Object.assign overwrites required
+    // existing fields with undefined/null → Mongoose `.save()` then fails
+    // validation. Hit 2026-06-12: PUT with partial body wiped primaryObjective
+    // ("Path `primaryObjective` is required"). undefined strip alone wasn't
+    // enough — the field was arriving as null from the dashboard PUT payload.
+    const cleanRest = Object.fromEntries(
+      Object.entries(rest).filter(([, v]) => v !== undefined && v !== null),
+    );
+    Object.assign(company, cleanRest);
+
+    // Diagnostic: log when required fields would have been wiped without the
+    // filter. Helps catch DTO-shape drifts before they break production.
+    const REQUIRED_GUARD_FIELDS = ['primaryObjective', 'name', 'industry', 'targetAudience', 'tone', 'uniqueValue', 'language'];
+    for (const field of REQUIRED_GUARD_FIELDS) {
+      if (field in rest && (rest[field] === undefined || rest[field] === null)) {
+        this.logger.warn(`Update for ${tenantId}: incoming DTO had ${field}=${rest[field]} — stripped to preserve existing value ("${(company as any)[field]}")`);
+      }
+    }
 
     // Merge meta fields instead of replacing — prevents wiping accessToken when only updating pixelId
     if (meta) {

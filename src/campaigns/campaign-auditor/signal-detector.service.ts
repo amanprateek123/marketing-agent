@@ -6,7 +6,7 @@ import { getBenchmark, getCPARange, resolveVertical, getBreakevenROAS } from '..
 import { adSetWinnerPosterior, adSetLoserPosterior, shrinkTowardPrior } from '../../common/statistics/bayesian-estimator.util';
 import { deriveFloorsFromVertical } from '../../common/statistics/power-calc.util';
 import { thompsonAllocate, ThompsonAllocationResult } from '../../common/statistics/bandit-allocator.util';
-import { getEffectiveConversionValue } from '../../common/conversion-value.util';
+import { getEffectiveConversionValue, getGrossConversionValue } from '../../common/conversion-value.util';
 
 export interface AuditSignalPacket {
   campaignAge: { hours: number; days: number; inLearningPhase: boolean };
@@ -428,7 +428,7 @@ export class SignalDetectorService {
     // Considered-purchase verticals need an extra 2 days for the 7d-click conversion
     // window to settle — at Day 3 a late-window conversion hasn't fired yet. Use AOV
     // as the proxy: ≥₹2000 conversionValue → push the floor to Day 5.
-    const aovProxy = activeProduct?.conversionValue ?? activeProduct?.price ?? 0;
+    const aovProxy = getGrossConversionValue(activeProduct);
     const MIN_FLOOR_CONVERSIONS_LOSER = 3;
     const unprofitableMinAge = aovProxy >= 2000 ? 5 : 3;
     const spendClearedGate = dailyBudget > 0 && current.campaign.spend >= dailyBudget * 2;

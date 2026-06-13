@@ -8,6 +8,7 @@ import { HOOK_STYLES_DR, HOOK_STYLE_DESCRIPTIONS } from '../../common/creative/h
 import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
 import { skillsForAgent, buildSkillBlock } from '../../common/skills/agent-skill-map';
 import { parseRobustJson } from '../../common/llm/robust-json-parser.util';
+import { getGrossConversionValue } from '../../common/conversion-value.util';
 import {
   resolveTargetLanguage,
   LANGUAGE_REGISTER_HINT,
@@ -108,7 +109,7 @@ LOSING PATTERNS (avoid these):
     // For high-AOV considered purchases (≥₹1500), warm needs 4-5 lines with
     // objection-handling — 2-3 lines is impulse-grade and tanks CVR on premium tiers.
     const activeProductForStage = (company.products ?? []).find(p => p.active);
-    const aov = activeProductForStage?.conversionValue ?? activeProductForStage?.price ?? 0;
+    const aov = getGrossConversionValue(activeProductForStage);
     const isHighAOV = aov >= 1500;
     const audienceStageRule = (() => {
       const stage = brief.audienceStage ?? 'cold';

@@ -34,10 +34,32 @@ export function getRefundFactor(product?: RefundableProduct | null): number {
 }
 
 /**
- * Net revenue per conversion: (conversionValue ?? price) × (1 − refund rate).
+ * GROSS revenue per conversion: conversionValue, falling back to price.
+ *
+ * Falsy-zero guard: a `conversionValue` of 0 (or negative) is NOT a valid
+ * revenue figure — no product is worth ₹0 per conversion — so it falls back
+ * to `price`, the same as a missing value. A plain `?? price` chain treated
+ * an explicit 0 as intentional and returned 0, which made ROAS read 0.00x and
+ * tripped the data_gap protocol indefinitely even when price was set
+ * (Nadi Leaf Reading: price ₹10,000, conversionValue 0 → 5 blocked audits,
+ * ₹21,625 of spend with no profitability decisions). When BOTH are 0/unset,
+ * this returns 0 and data_gap correctly fires — that path is preserved.
+ *
+ * Use for gross-context sites: the Meta campaign-config optimization target,
+ * the AOV attribution-window proxy, and prompt/display strings. For any
+ * ROAS / breakeven / bandit decision use getEffectiveConversionValue (net).
+ */
+export function getGrossConversionValue(product?: RefundableProduct | null): number {
+  const cv = Number(product?.conversionValue);
+  if (Number.isFinite(cv) && cv > 0) return cv;
+  const price = Number(product?.price);
+  return Number.isFinite(price) && price > 0 ? price : 0;
+}
+
+/**
+ * NET revenue per conversion: gross × (1 − refund rate).
  * This is the number all ROAS, breakeven, and bandit math should use.
  */
 export function getEffectiveConversionValue(product?: RefundableProduct | null): number {
-  const gross = product?.conversionValue ?? product?.price ?? 0;
-  return gross * getRefundFactor(product);
+  return getGrossConversionValue(product) * getRefundFactor(product);
 }

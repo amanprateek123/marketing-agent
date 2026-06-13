@@ -15,6 +15,7 @@ import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
+import { getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
 
 @Injectable()
@@ -1193,7 +1194,10 @@ Or reply here to discuss changes.`;
     const pauseCTR = company.pauseIfCTRBelow ?? 0.5;
     const scaleROAS = company.scaleIfROASAbove ?? 1.5;
     const conversionEvent = product?.conversionEvent ?? 'Purchase';
-    const conversionValue = product?.conversionValue ?? product?.price ?? 0;
+    // Falsy-zero-safe: a conversionValue of 0 falls back to price, otherwise the
+    // launched campaign bakes conversionValue=0 into its config and the auditor
+    // goes blind (data_gap) on it forever — the Nadi Leaf failure mode.
+    const conversionValue = getGrossConversionValue(product);
     const optimizationGoal = product?.metaOptimizationGoal ?? 'OFFSITE_CONVERSIONS';
     // Honor brief.format=carousel in the deterministic fallback too — if Strategy
     // Team picked carousel and creative production succeeded, downgrading to

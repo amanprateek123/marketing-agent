@@ -8,7 +8,7 @@ import { LiveContextBuilder } from '../companies/prompt-generator/live-context.b
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
-import { getEffectiveConversionValue } from '../common/conversion-value.util';
+import { getEffectiveConversionValue, getGrossConversionValue } from '../common/conversion-value.util';
 import { runTeamViaCli } from './team-cli.util';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
@@ -319,7 +319,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "budget": ${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)},
     "objective": "OUTCOME_SALES",
     "conversionEvent": "${product?.conversionEvent ?? 'Purchase'}",
-    "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
+    "conversionValue": ${getGrossConversionValue(product)},
     "adSets": [],
     "scaleRules": "specific ROAS/CTR threshold + scale %",
     "pauseRules": "specific CTR/ROAS threshold + spend amount"
@@ -673,7 +673,7 @@ Return ONLY this JSON (no markdown, no explanation):
     "budget": ${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)},
     "objective": "OUTCOME_SALES",
     "conversionEvent": "${product?.conversionEvent ?? 'Purchase'}",
-    "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
+    "conversionValue": ${getGrossConversionValue(product)},
     "adSets": [
       {
         "name": "ADVANTAGE_PLUS_BROAD",
@@ -749,7 +749,7 @@ USE THIS TO: allocate higher budget % to audience types with lowest CPA.`;
       return `PRODUCT BEING SOLD:
   ${product.name} — ₹${product.price}
   Landing: ${product.landingUrl ?? 'not set'}
-  Conversion event: ${product.conversionEvent ?? 'Purchase'} (each conversion = ₹${product.conversionValue ?? product.price})${(product as any).refundRatePercent > 0 ? `
+  Conversion event: ${product.conversionEvent ?? 'Purchase'} (each conversion = ₹${getGrossConversionValue(product)})${(product as any).refundRatePercent > 0 ? `
   REFUNDS: ~${(product as any).refundRatePercent}% of conversions refund — NET revenue per conversion is ₹${Math.round(getEffectiveConversionValue(product))}. Judge breakeven CPA and target ROAS on the NET number, not the booking value.` : ''}
   Past performance: ${perf?.totalConversions ?? 0} conversions, CPA ₹${perf?.avgCPA ?? 'N/A'}, ROAS ${perf?.avgROAS ?? 'N/A'}x (${perf?.confidenceLevel ?? 'no data'})
 
@@ -1032,7 +1032,7 @@ STEP 6: Return ONLY this JSON (no markdown, no explanation):
     "budget": ${brief.suggestedBudget > 0 ? brief.suggestedBudget : Math.round((company.weeklyBudgetCap ?? 20000) * 0.25)},
     "objective": "OUTCOME_SALES",
     "conversionEvent": "${product?.conversionEvent ?? 'Purchase'}",
-    "conversionValue": ${product?.conversionValue ?? product?.price ?? 0},
+    "conversionValue": ${getGrossConversionValue(product)},
     "adSets": [
       {
         "name": "ADVANTAGE_PLUS_BROAD",
