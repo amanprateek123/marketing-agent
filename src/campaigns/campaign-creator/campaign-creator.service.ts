@@ -6,7 +6,7 @@ import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { ActionLoggerService } from '../../common/action-logger/action-logger.service';
 import { CampaignsService } from '../campaigns.service';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
-import { CreativeBriefDocument } from '../../pipeline/schemas/creative-brief.schema';
+import { CreativeBrief, CreativeBriefDocument } from '../../pipeline/schemas/creative-brief.schema';
 import { CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
@@ -31,6 +31,8 @@ export class CampaignCreatorService {
     private readonly slackService: SlackService,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(CreativeBrief.name)
+    private readonly creativeBriefModel: Model<CreativeBriefDocument>,
   ) {}
 
   /**
@@ -291,6 +293,171 @@ export class CampaignCreatorService {
   }
 
   /**
+   * Landing-page A/B test launcher (operator-triggered, via CreativeController).
+   * Builds ONE campaign with TWO ad sets that are identical in audience and
+   * creatives and differ ONLY by destination URL (landingUrlOverride). Meta's
+   * per-ad-set reporting then isolates which landing page converts better.
+   *
+   * Deterministic — bypasses the Campaign Review Team (the structure is fixed:
+   * two 50/50 URL-split ad sets). Creative is produced upstream by the caller
+   * and passed in held-constant. Saves as pending_approval; the operator
+   * launches via the normal /approve endpoint. Report-only: the winner is
+   * surfaced by the audit loop, never auto-promoted to product.landingUrl.
+   */
+  async createLandingPageTest(opts: {
+    tenantId: string;
+    briefId: string;
+    runId: string;
+    briefData: {
+      topic: string; angle: string; platform: string; format: string; audience: string;
+      hook: string; keyMessage: string; conversionBridge: string;
+      targetSegment?: string; targetLanguage?: string; audienceStage?: 'cold' | 'warm' | 'hot';
+    };
+    creativePackage: CreativePackageDocument;
+    company: CompanyDocument;
+    productName: string;
+    controlUrl: string;
+    variantUrl: string;
+    budget: number;
+    audienceType?: string;
+    metaAudienceId?: string;
+  }): Promise<CampaignDocument> {
+    const { tenantId, briefId, runId, briefData, creativePackage, company, productName, controlUrl, variantUrl, budget } = opts;
+
+    const product = (company.products ?? []).find(p => p.name === productName);
+    if (!product) throw new Error(`Product "${productName}" not found for tenant ${tenantId}`);
+    if (!controlUrl) throw new Error(`Product "${productName}" has no landingUrl (the control page). Set it before running a landing-page test.`);
+    if (!variantUrl) throw new Error(`variantUrl (the challenger landing page) is required.`);
+    if (controlUrl === variantUrl) throw new Error(`variantUrl must differ from the product's current landingUrl (control).`);
+
+    // Guard: don't stack a second test on the same product while one runs.
+    if (product.landingPageTest?.status === 'running') {
+      throw new Error(`A landing-page test is already running for "${productName}" (campaign ${product.landingPageTest.campaignId}). Conclude it before starting another.`);
+    }
+
+    // Budget safety — same TypeScript caps every campaign honours.
+    SafetyChecks.checkCampaignBudget(budget, company);
+    await SafetyChecks.checkWeeklyBudget(tenantId, budget, company, this.campaignsService);
+
+    // Resolve the held-constant audience: explicit > tightest buyer-lookalike >
+    // advantage_plus broad (the merge that would collapse the two ad sets is
+    // skipped in launch() because campaignConfig.isLandingPageTest is set).
+    let audienceType = opts.audienceType;
+    let metaAudienceId = opts.metaAudienceId;
+    if (!metaAudienceId) {
+      const lookalike = (product.metaAudiences ?? [])
+        .filter(a => a.type === 'lookalike')
+        .sort((a, b) => (a.lookalikePercent ?? 99) - (b.lookalikePercent ?? 99))[0];
+      if (lookalike) {
+        audienceType = 'lookalike';
+        metaAudienceId = lookalike.id;
+      }
+    }
+    if (!audienceType) audienceType = 'advantage_plus';
+
+    // Variant indices that actually rendered an image — these creatives ship
+    // IDENTICALLY in both ad sets so the URL is the only difference.
+    const availableVariants = ((creativePackage as any).images ?? [])
+      .filter((im: any) => im.imageUrl)
+      .map((im: any) => im.variantIndex)
+      .sort((a: number, b: number) => a - b);
+    if (availableVariants.length === 0) {
+      throw new Error(`Creative package ${(creativePackage as any)._id} has no rendered images — cannot launch a landing-page test.`);
+    }
+
+    const optimizationGoal = product.metaOptimizationGoal || 'OFFSITE_CONVERSIONS';
+    const conversionEvent = product.customEventName || product.conversionEvent || 'Purchase';
+    const conversionValue = getGrossConversionValue(product);
+    const objective = company.primaryObjective ?? 'OUTCOME_SALES';
+    const dateTag = new Date().toISOString().split('T')[0];
+
+    const baseAdSet = {
+      budgetPercent: 50,
+      audienceType,
+      metaAudienceId,
+      optimizationGoal,
+      ads: availableVariants,
+      creativeFormat: 'image' as const,
+    };
+    const campaignConfig = {
+      // Marks this as an LP test so launch() skips the advantage_plus merge that
+      // would otherwise collapse the two URL-split ad sets into one.
+      isLandingPageTest: true,
+      budget,
+      objective,
+      conversionEvent,
+      conversionValue,
+      adSets: [
+        { ...baseAdSet, name: `LP_A_CONTROL_${dateTag}`, landingUrlOverride: controlUrl },
+        { ...baseAdSet, name: `LP_B_VARIANT_${dateTag}`, landingUrlOverride: variantUrl },
+      ],
+      scaleRules: '',
+      pauseRules: '',
+    };
+
+    // Persist a CreativeBrief so launch() resolves product context and the audit
+    // loop can attribute the test by briefId.
+    await this.creativeBriefModel.updateOne(
+      { tenantId, briefId },
+      {
+        $set: {
+          tenantId, briefId, runId, product: productName,
+          topic: briefData.topic, angle: briefData.angle, platform: briefData.platform,
+          format: briefData.format, audience: briefData.audience, hook: briefData.hook,
+          keyMessage: briefData.keyMessage, conversionBridge: briefData.conversionBridge,
+          audienceStage: briefData.audienceStage ?? 'cold',
+          targetSegment: briefData.targetSegment ?? '', targetLanguage: briefData.targetLanguage ?? '',
+          suggestedBudget: budget,
+        },
+      },
+      { upsert: true },
+    );
+
+    const campaign = await this.campaignModel.create({
+      tenantId,
+      runId,
+      briefId,
+      name: `LP_TEST_${productName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 24)}_${dateTag}`,
+      topic: briefData.topic,
+      angle: briefData.angle,
+      creativePackageId: (creativePackage as any)._id?.toString() ?? '',
+      metaCampaignId: '',
+      status: 'pending_approval',
+      budget,
+      objective,
+      source: 'agent',
+      reviewNotes: `Landing-page A/B test (deterministic — no Review Team). Ad set A → control ${controlUrl}; ad set B → variant ${variantUrl}. Same audience (${audienceType}) + same creatives in both; URL is the only variable.`,
+      campaignConfig,
+      promptsVersion: (company as any).promptsVersion ?? 1,
+    });
+
+    // Mark the test running on the product (direct write — NOT via the DTO path,
+    // whose whitelist would strip landingPageTest).
+    await this.companiesService.setProductLandingPageTest(tenantId, productName, {
+      controlUrl,
+      variantUrl,
+      audienceType,
+      metaAudienceId,
+      status: 'running',
+      campaignId: (campaign as any)._id.toString(),
+      startedAt: new Date(),
+    });
+
+    await this.actionLogger.log({
+      tenantId,
+      runId,
+      agent: AgentType.CAMPAIGN_CREATOR,
+      action: 'landing_page_test_created',
+      reason: `Landing-page A/B test for ${productName}: control vs ${variantUrl}`,
+      outcome: `Campaign saved as pending_approval — approve to launch`,
+      metadata: { briefId, campaignId: (campaign as any)._id.toString(), controlUrl, variantUrl },
+    });
+
+    this.logger.log(`Landing-page test created: tenant=${tenantId} product=${productName} campaign=${(campaign as any)._id} budget=₹${budget} audience=${audienceType}`);
+    return campaign;
+  }
+
+  /**
    * Phase G Step 2: Human approved → launch on Meta Ads.
    * Called via POST /campaigns/:tenantId/:campaignId/approve
    */
@@ -349,6 +516,13 @@ export class CampaignCreatorService {
     if (!config || !config.adSets || config.adSets.length === 0) {
       throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
     }
+
+    // Landing-page A/B test campaigns are built with TWO deliberately-separate
+    // ad sets that differ ONLY by destination URL (landingUrlOverride). The
+    // advantage_plus consolidation below would merge them into one — collapsing
+    // the test and keeping only the first ad set's URL. Skip that merge for LP
+    // tests so the two URL-split ad sets ship intact.
+    const isLandingPageTest = !!config.isLandingPageTest;
 
     // Load creative package for copy variants + image
     const creativePackage = campaign.creativePackageId
@@ -502,7 +676,7 @@ export class CampaignCreatorService {
     const advantagePlusAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType === 'advantage_plus');
     const otherAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType !== 'advantage_plus');
 
-    if (advantagePlusAdSets.length > 1) {
+    if (advantagePlusAdSets.length > 1 && !isLandingPageTest) {
       // Merge all advantage_plus ad sets into one
       const allVariants = [...new Set(advantagePlusAdSets.flatMap((as: any) => as.ads))].sort();
       const totalBudgetPercent = advantagePlusAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
@@ -994,6 +1168,10 @@ export class CampaignCreatorService {
           name: as.name,
           budgetPercent: config.adSets.find((c: any) => c.name === as.name)?.budgetPercent ?? 0,
           audienceType: config.adSets.find((c: any) => c.name === as.name)?.audienceType ?? '',
+          // Record which destination URL this ad set served — empty for normal
+          // campaigns (all ad sets share product.landingUrl), set for the
+          // landing-page A/B test so the audit loop can attribute per-URL.
+          landingUrl: config.adSets.find((c: any) => c.name === as.name)?.landingUrlOverride ?? '',
           status: 'active',
           ads: as.ads.map(ad => ({
             metaAdId: ad.adId,

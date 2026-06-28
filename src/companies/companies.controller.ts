@@ -11,6 +11,7 @@ import {
   Inject,
   Logger,
   ParseIntPipe,
+  BadRequestException,
   forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -153,6 +154,39 @@ export class CompaniesController {
         ? 'Company updated. Regenerating agent prompts in background.'
         : 'Company updated.',
     };
+  }
+
+  /**
+   * POST /api/v1/companies/:tenantId/promote-landing-page
+   * Operator promotes a landing-page test winner: sets the product's live
+   * landingUrl to `url` and clears the test. Body: { product, url }.
+   */
+  @Post(':tenantId/promote-landing-page')
+  async promoteLandingPage(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { product: string; url: string },
+  ) {
+    if (!body.product || !body.url) {
+      throw new BadRequestException('Both product and url are required.');
+    }
+    await this.companiesService.promoteLandingPageWinner(tenantId, body.product, body.url);
+    return { ok: true, product: body.product, landingUrl: body.url };
+  }
+
+  /**
+   * POST /api/v1/companies/:tenantId/cancel-landing-page-test
+   * Clear a product's landing-page test record (stop tracking it). Does NOT
+   * pause the underlying Meta campaign — pause that separately if it's live.
+   * Body: { product }.
+   */
+  @Post(':tenantId/cancel-landing-page-test')
+  async cancelLandingPageTest(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { product: string },
+  ) {
+    if (!body.product) throw new BadRequestException('product is required.');
+    await this.companiesService.setProductLandingPageTest(tenantId, body.product, null);
+    return { ok: true, product: body.product };
   }
 
   @Post(':tenantId/regenerate')

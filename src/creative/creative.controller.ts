@@ -1,9 +1,10 @@
-import { Controller, Get, Post, Patch, Param, Body, NotFoundException, Logger, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, NotFoundException, BadRequestException, Logger, Query } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CreativeProducerService, BriefData } from './creative-producer/creative-producer.service';
 import { ImageGeneratorService } from './image-generator/image-generator.service';
 import { VideoGeneratorService } from './video-generator/video-generator.service';
+import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
 import { CompaniesService } from '../companies/companies.service';
 import { ClaudeService } from '../claude/claude.service';
 import { AgentType } from '../claude/claude.types';
@@ -19,6 +20,7 @@ export class CreativeController {
     private readonly creativeProducer: CreativeProducerService,
     private readonly imageGenerator: ImageGeneratorService,
     private readonly videoGenerator: VideoGeneratorService,
+    private readonly campaignCreator: CampaignCreatorService,
     private readonly companiesService: CompaniesService,
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
@@ -532,5 +534,135 @@ Return ONLY the image prompt, nothing else.
     }
 
     return { fixed: results.filter(r => r.status === 'fixed').length, total: packages.length, results };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/landing-page-test
+   * Launch a landing-page A/B test for a product: generates ONE creative set,
+   * then ships a single campaign with TWO ad sets — identical audience +
+   * creatives, differing ONLY by destination URL. Variant A = the product's
+   * current landingUrl (control); variant B = body.variantUrl (challenger).
+   * Meta's per-ad-set reporting isolates which page converts better; the audit
+   * loop surfaces the winner (report-only — never auto-promoted).
+   *
+   * Body: {
+   *   product: string;          // product name (control URL = its landingUrl)
+   *   variantUrl: string;       // the challenger landing page (B)
+   *   budget: number;           // total daily budget (split 50/50)
+   *   audienceType?: string;    // held constant across both ad sets
+   *   metaAudienceId?: string;  // e.g. a buyer-lookalike id; auto-resolved if omitted
+   *   hook?, keyMessage?, angle?, topic?, platform?, audience?,
+   *   conversionBridge?, targetSegment?, targetLanguage?  // creative inputs (defaults derived from product)
+   * }
+   *
+   * Returns immediately; creative generation + campaign creation run in the
+   * background. The campaign is saved as pending_approval — approve it via
+   * POST /campaigns/:tenantId/:campaignId/approve to go live.
+   */
+  @Post(':tenantId/landing-page-test')
+  async landingPageTest(
+    @Param('tenantId') tenantId: string,
+    @Body() body: {
+      product: string;
+      variantUrl: string;
+      controlUrl?: string;      // defaults to the product's current landingUrl; pass to test two arbitrary pages
+      budget: number;
+      audienceType?: string;
+      metaAudienceId?: string;
+      hook?: string;
+      keyMessage?: string;
+      angle?: string;
+      topic?: string;
+      platform?: string;
+      audience?: string;
+      conversionBridge?: string;
+      targetSegment?: string;
+      targetLanguage?: string;
+    },
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    const product = (company.products ?? []).find(p => p.name === body.product);
+
+    // ── Synchronous validation — surface user errors as 400s before the
+    //    long-running background job kicks off. createLandingPageTest
+    //    re-validates as defense-in-depth. ──────────────────────────────────
+    if (!body.product || !product) {
+      throw new BadRequestException(`Product "${body.product}" not found for tenant ${tenantId}.`);
+    }
+    // Control = explicit controlUrl (to test two NEW pages head-to-head) or the
+    // product's current landingUrl by default (current vs new).
+    const controlUrl = body.controlUrl ?? product.landingUrl ?? '';
+    if (!controlUrl) {
+      throw new BadRequestException(`No control URL: product "${product.name}" has no landingUrl and no controlUrl was provided. Pass controlUrl (page A) to test two new pages.`);
+    }
+    if (!body.variantUrl) {
+      throw new BadRequestException(`variantUrl (page B) is required.`);
+    }
+    if (body.variantUrl === controlUrl) {
+      throw new BadRequestException(`variantUrl (B) must differ from controlUrl (A).`);
+    }
+    if (!body.budget || body.budget <= 0) {
+      throw new BadRequestException(`A positive budget is required.`);
+    }
+    if (product.landingPageTest?.status === 'running') {
+      throw new BadRequestException(`A landing-page test is already running for "${product.name}" (campaign ${product.landingPageTest.campaignId}). Conclude it before starting another.`);
+    }
+
+    const briefId = `lp-test-${Date.now()}`;
+    const runId = briefId;
+
+    // Creative inputs — operator-supplied, with neutral fallbacks derived from
+    // the product (no hardcoded copy). Format forced to image: the test holds
+    // ONE creative set constant across both ad sets, and image keeps the
+    // launch path off the mixed/video split logic.
+    const briefData: BriefData = {
+      product: product.name,
+      topic: body.topic ?? `Landing page test: ${product.name}`,
+      angle: body.angle ?? 'Direct-response ad driving clicks to the landing page',
+      platform: body.platform ?? 'facebook',
+      format: 'image',
+      audience: body.audience ?? product.audienceSegments?.[0]?.description ?? (product.description ?? '').slice(0, 120),
+      hook: body.hook ?? product.differentiators?.[0] ?? (product.description ?? '').split('.')[0],
+      keyMessage: body.keyMessage ?? (product.description ?? '').slice(0, 180),
+      conversionBridge: body.conversionBridge ?? 'Tap to explore the full details on the page.',
+      audienceStage: 'cold',
+      targetSegment: body.targetSegment ?? product.audienceSegments?.[0]?.name,
+      targetLanguage: body.targetLanguage as any,
+    };
+
+    this.logger.log(`Landing-page test requested: tenant=${tenantId} product=${product.name} variantUrl=${body.variantUrl} budget=₹${body.budget}`);
+
+    // Fire-and-forget: generate creative, then build the pending_approval
+    // campaign. Heavy (copy + image generation) — runs in the background.
+    (async () => {
+      try {
+        const pkg = await this.creativeProducer.produce(
+          tenantId, briefId, runId, briefData, { forceRegenerate: true },
+        );
+        await this.campaignCreator.createLandingPageTest({
+          tenantId, briefId, runId, briefData,
+          creativePackage: pkg,
+          company,
+          productName: product.name,
+          controlUrl,
+          variantUrl: body.variantUrl,
+          budget: body.budget,
+          audienceType: body.audienceType,
+          metaAudienceId: body.metaAudienceId,
+        });
+        this.logger.log(`Landing-page test campaign created (pending_approval): tenant=${tenantId} product=${product.name} briefId=${briefId}`);
+      } catch (err: any) {
+        this.logger.error(`Landing-page test creation failed for ${tenantId}/${product.name}: ${err.message}`);
+      }
+    })().catch(() => {});
+
+    return {
+      status: 'started',
+      product: product.name,
+      briefId,
+      control: controlUrl,
+      variant: body.variantUrl,
+      message: 'Generating creative, then creating the landing-page-test campaign as pending_approval. Poll GET /campaigns/:tenantId for the LP_TEST_* campaign, then approve it to launch.',
+    };
   }
 }

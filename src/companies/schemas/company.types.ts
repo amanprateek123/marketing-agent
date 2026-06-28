@@ -41,7 +41,26 @@ export interface Product {
   active: boolean;
 
   // Product marketing data
-  landingUrl?: string;
+  landingUrl?: string;               // canonical / control destination URL
+  /**
+   * Active landing-page A/B test. `landingUrl` above is the control (variant A);
+   * `variantUrl` is the challenger (variant B). The LP-test launcher ships ONE
+   * campaign with two ad sets — identical audience + creatives, differing only
+   * by URL — so Meta's per-ad-set reporting isolates which page converts better.
+   * status: 'running' while live, 'concluded' once a winner is surfaced.
+   * The agent NEVER auto-promotes the winner (report-only) — the operator
+   * promotes by setting the winning URL as `landingUrl` and clearing this.
+   */
+  landingPageTest?: {
+    variantUrl: string;
+    audienceType?: string;           // audience held constant across both ad sets (e.g. 'lookalike')
+    metaAudienceId?: string;
+    status: 'running' | 'concluded';
+    campaignId?: string;             // the LP-test campaign's _id
+    startedAt?: Date;
+    winnerUrl?: string;              // set when audit surfaces a confident winner (report-only)
+    concludedAt?: Date;
+  };
   languages?: string[];              // e.g. ["hindi", "english", "tamil"]
   trendKeywords?: string[];          // keywords that connect trends to this product
   differentiators?: string[];        // what makes this product unique vs competitors

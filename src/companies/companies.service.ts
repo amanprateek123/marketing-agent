@@ -124,6 +124,42 @@ export class CompaniesService {
     return { company, needsPromptRegen };
   }
 
+  /**
+   * Set (or update) the landing-page A/B test record on a specific product.
+   * Direct arrayFilters write — deliberately bypasses the DTO update() path,
+   * whose ValidationPipe whitelist would strip the freeform landingPageTest
+   * object. Pass `null` to clear the test (operator promoted a winner).
+   */
+  async setProductLandingPageTest(
+    tenantId: string,
+    productName: string,
+    test: Record<string, any> | null,
+  ): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      { $set: { 'products.$[p].landingPageTest': test } },
+      { arrayFilters: [{ 'p.name': productName }] },
+    );
+    this.logger.log(
+      `landingPageTest ${test ? 'set' : 'cleared'} for product "${productName}" (tenant ${tenantId})`,
+    );
+  }
+
+  /**
+   * Promote a landing-page test winner: set the product's live landingUrl to the
+   * chosen URL and clear the test record. Deliberate operator action — the agent
+   * never calls this (winner detection is report-only). Direct write so the
+   * freeform landingPageTest object isn't mangled by the DTO whitelist.
+   */
+  async promoteLandingPageWinner(tenantId: string, productName: string, url: string): Promise<void> {
+    await this.companyModel.updateOne(
+      { tenantId },
+      { $set: { 'products.$[p].landingUrl': url, 'products.$[p].landingPageTest': null } },
+      { arrayFilters: [{ 'p.name': productName }] },
+    );
+    this.logger.log(`Landing page promoted for "${productName}" → ${url} (tenant ${tenantId}); test cleared`);
+  }
+
   async updatePrompts(tenantId: string, prompts: CompanyPrompts): Promise<void> {
     // Use dot-notation to merge individual keys — avoids wiping optional fields
     // (e.g. intelligenceLead) that aren't part of the current generation batch

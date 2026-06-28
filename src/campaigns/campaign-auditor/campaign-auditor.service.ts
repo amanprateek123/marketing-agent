@@ -615,6 +615,16 @@ export class CampaignAuditorService {
       }
     }
 
+    // ── Landing-page A/B test: surface the winning page (report-only) ────────
+    // For LP-test campaigns the two ad sets are the two landing pages. Compare
+    // their live per-URL performance and record the verdict on the product —
+    // NEVER auto-promote (the operator changes product.landingUrl if they agree).
+    try {
+      await this.evaluateLandingPageTest(campaign, company, product, full, conversionValue);
+    } catch (err: any) {
+      this.logger.warn(`Landing-page test evaluation failed for ${campaign._id}: ${err.message}`);
+    }
+
     // ── Layer 4: Actions only for agent-created campaigns ────────────────────
     // Manual/imported campaigns: audit runs but no actions are created or executed
     if (campaign.source === 'agent' && verdict.verdict === 'act') {
@@ -904,6 +914,97 @@ export class CampaignAuditorService {
     }
 
     return false;
+  }
+
+  /**
+   * Landing-page A/B test evaluator (report-only). The two ad sets on an
+   * LP-test campaign are the two landing pages (each carries its own
+   * `landingUrl`). Join them to live per-ad-set metrics, compare CPA, and
+   * record the verdict on product.landingPageTest. Marks the test 'concluded'
+   * + winnerUrl ONLY when both arms clear a conversion floor AND the leader
+   * beats the laggard by a decisive margin. NEVER writes product.landingUrl —
+   * promotion is a deliberate operator action.
+   */
+  private async evaluateLandingPageTest(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    product: any,
+    full: FullCampaignMetrics,
+    conversionValue: number,
+  ): Promise<void> {
+    if (!(campaign as any).campaignConfig?.isLandingPageTest || !product) return;
+
+    // Join persisted ad sets (which carry the per-URL landingUrl) to live
+    // metrics by adSetId.
+    const arms = ((campaign as any).adSets ?? [])
+      .filter((as: any) => as.landingUrl)
+      .map((as: any) => {
+        const live = (full.adSets ?? []).find(a => a.adSetId === as.metaAdSetId);
+        const spend = live?.spend ?? 0;
+        const conversions = live?.conversions ?? 0;
+        return {
+          url: as.landingUrl as string,
+          spend,
+          conversions,
+          cpa: conversions > 0 ? spend / conversions : null,
+          roas: spend > 0 ? (conversions * conversionValue) / spend : 0,
+        };
+      });
+    if (arms.length < 2) return;
+
+    // Identify the control arm by the test's stored controlUrl (falls back to
+    // the product's current landingUrl, then to arms[0] for older records).
+    const controlUrl = product.landingPageTest?.controlUrl ?? product.landingUrl;
+    const control = arms.find((a: any) => a.url === controlUrl) ?? arms[0];
+    const variant = arms.find((a: any) => a.url !== control.url) ?? arms[1];
+
+    const MIN_CONV_PER_ARM = 15;   // floor for a trustworthy per-arm CPA read
+    const DECISIVE_MARGIN = 0.15;  // leader CPA must beat laggard by ≥15% to call it
+
+    let leaderUrl: string | null = null;
+    let marginPct = 0;
+    if (control.cpa != null && variant.cpa != null) {
+      const lo = Math.min(control.cpa, variant.cpa);
+      const hi = Math.max(control.cpa, variant.cpa);
+      marginPct = hi > 0 ? (hi - lo) / hi : 0;
+      leaderUrl = control.cpa <= variant.cpa ? control.url : variant.url;
+    }
+    const decided = control.conversions >= MIN_CONV_PER_ARM
+      && variant.conversions >= MIN_CONV_PER_ARM
+      && leaderUrl != null
+      && marginPct >= DECISIVE_MARGIN;
+
+    const round = (n: number | null) => (n == null ? null : Math.round(n));
+    const evaluation = {
+      control: { url: control.url, conversions: control.conversions, spend: Math.round(control.spend), cpa: round(control.cpa), roas: Number(control.roas.toFixed(2)) },
+      variant: { url: variant.url, conversions: variant.conversions, spend: Math.round(variant.spend), cpa: round(variant.cpa), roas: Number(variant.roas.toFixed(2)) },
+      leaderUrl,
+      marginPct: Number((marginPct * 100).toFixed(1)),
+      decided,
+      evaluatedAt: new Date(),
+    };
+
+    const existing = (product.landingPageTest ?? {}) as Record<string, any>;
+    const next: Record<string, any> = {
+      ...existing,
+      status: decided ? 'concluded' : 'running',
+      evaluation,
+    };
+    if (decided) {
+      next.winnerUrl = leaderUrl;
+      next.concludedAt = new Date();
+    }
+    await this.companiesService.setProductLandingPageTest(company.tenantId, product.name, next);
+
+    if (decided) {
+      this.logger.log(`Landing-page test DECIDED for ${product.name}: winner=${leaderUrl} (CPA ${evaluation.marginPct}% better) — REPORT-ONLY, operator must promote.`);
+      void this.slackService.sendOpsAlert(
+        `🧪 Landing-page test result — ${company.tenantId} / ${product.name}\nWinner: ${leaderUrl}\nControl: ₹${evaluation.control.cpa} CPA (${evaluation.control.conversions} conv) · Variant: ₹${evaluation.variant.cpa} CPA (${evaluation.variant.conversions} conv) · ${evaluation.marginPct}% better.\nReport-only — promote it by setting product.landingUrl if you agree.`,
+        { campaignId: campaign._id.toString() },
+      );
+    } else {
+      this.logger.log(`Landing-page test progress for ${product.name}: control ${control.conversions} conv / variant ${variant.conversions} conv (need ≥${MIN_CONV_PER_ARM} each + ≥${DECISIVE_MARGIN * 100}% CPA margin to call it).`);
+    }
   }
 
   private async saveAdLevelMetrics(campaign: CampaignDocument, full: FullCampaignMetrics): Promise<void> {

@@ -51,6 +51,13 @@ export interface MetaAdSetConfig {
   interests?: string[];      // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
   optimizationGoal: string;
   ads: number[];
+  // Optional per-ad-set destination URL. When set, every ad in THIS ad set
+  // points here instead of config.landingUrl (UTM params still appended per
+  // ad). Used by the landing-page A/B test: two ad sets share identical
+  // audience + creatives and differ ONLY by this URL, so Meta's per-ad-set
+  // reporting isolates which landing page converts better. Undefined → the
+  // ad set inherits the campaign-global config.landingUrl (normal behaviour).
+  landingUrlOverride?: string;
   // Optional cost-cap bid (in rupees, full not paise). When set, ad set ships
   // with bid_strategy=COST_CAP + bid_amount=this. Used to anchor broad cold
   // audiences (lookalike >1%, advantage_plus, interest) to the product's
@@ -339,7 +346,11 @@ export class MetaAdsService {
         const creativeFormat = adSetConfig.creativeFormat ?? 'image';
         const selectedCopyIndex = config.selectedCopyIndex ?? 0;
 
-        const buildLandingUrl = (adName: string) => withUtmParams(config.landingUrl, {
+        // Per-ad-set URL override (landing-page A/B test) falls back to the
+        // campaign-global landingUrl. UTM params are appended either way, so
+        // downstream analytics still attribute by campaign/ad-set/ad name.
+        const adSetLandingUrl = adSetConfig.landingUrlOverride || config.landingUrl;
+        const buildLandingUrl = (adName: string) => withUtmParams(adSetLandingUrl, {
           campaignName: config.campaignName,
           adSetName: adSetConfig.name,
           adName,
