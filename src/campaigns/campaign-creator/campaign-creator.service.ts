@@ -368,7 +368,10 @@ export class CampaignCreatorService {
     const optimizationGoal = product.metaOptimizationGoal || 'OFFSITE_CONVERSIONS';
     const conversionEvent = product.customEventName || product.conversionEvent || 'Purchase';
     const conversionValue = getGrossConversionValue(product);
-    const objective = company.primaryObjective ?? 'OUTCOME_SALES';
+    // Meta rejects the legacy lowercase company.primaryObjective ('conversions');
+    // use the modern sales objective the proven fallback path (buildFallbackReview)
+    // ships — every other agent campaign launches with OUTCOME_SALES.
+    const objective = 'OUTCOME_SALES';
     const dateTag = new Date().toISOString().split('T')[0];
 
     const baseAdSet = {
