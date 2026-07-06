@@ -39,3 +39,4 @@ dump.rdb
 
 # Claude Code session data — contains auth tokens
 .claude/settings.local.json
+docs

@@ -8,6 +8,7 @@ import { CreativeBrief, CreativeBriefSchema } from '../pipeline/schemas/creative
 import { CampaignsService } from './campaigns.service';
 import { CampaignsController } from './campaigns.controller';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
+import { ManualCampaignService } from './campaign-creator/manual-campaign.service';
 import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
 import { CampaignOptimizerService } from './campaign-auditor/campaign-optimizer.service';
 import { SignalDetectorService } from './campaign-auditor/signal-detector.service';
@@ -23,6 +24,9 @@ import { MetaMetricsService } from './meta-ads/meta-metrics.service';
 import { MetaLearningImporterService } from './meta-ads/meta-learning-importer.service';
 import { PatternCalculatorService } from './meta-ads/pattern-calculator.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
+import { MetaDeepSyncService } from './meta-ads/meta-deep-sync.service';
+import { MetricTimeseries, MetricTimeseriesSchema } from './schemas/metric-timeseries.schema';
+import { BreakdownSnapshot, BreakdownSnapshotSchema } from './schemas/breakdown-snapshot.schema';
 import { AudienceOrchestrationService } from './audience-orchestration/audience-orchestration.service';
 import { CampaignCaseStudy, CampaignCaseStudySchema } from './schemas/campaign-case-study.schema';
 import { MetaLearningImport, MetaLearningImportSchema } from './schemas/meta-learning-import.schema';
@@ -46,6 +50,8 @@ import { QUEUES } from '../scheduler/queue.constants';
       { name: EnrichedCampaign.name, schema: EnrichedCampaignSchema },
       // Read-only access for the /shadow-actions endpoint (writes happen in LearningModule)
       { name: ShadowAction.name, schema: ShadowActionSchema },
+      { name: MetricTimeseries.name, schema: MetricTimeseriesSchema },
+      { name: BreakdownSnapshot.name, schema: BreakdownSnapshotSchema },
     ]),
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
     BullModule.registerQueue({ name: QUEUES.CREATIVE_PRODUCTION }),
@@ -56,7 +62,7 @@ import { QUEUES } from '../scheduler/queue.constants';
     DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, AudienceOrchestrationService],
-  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService, MetaAdsService, AudienceOrchestrationService],
+  providers: [CampaignsService, CampaignCreatorService, ManualCampaignService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, MetaDeepSyncService, AudienceOrchestrationService],
+  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService, MetaDeepSyncService, MetaAdsService, MetaMetricsService, AudienceOrchestrationService],
 })
 export class CampaignsModule {}

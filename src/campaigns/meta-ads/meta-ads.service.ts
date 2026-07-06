@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
-import { checkCopySafety, formatSafetyError } from '../../common/safety/copy-safety-checker.util';
+import {
+  checkCopySafety,
+  formatSafetyError,
+} from '../../common/safety/copy-safety-checker.util';
 import { withUtmParams } from './meta-utm.util';
 
 const META_API_VERSION = 'v21.0';
@@ -20,7 +23,7 @@ export interface MetaLaunchResult {
       adId: string;
       creativeId: string;
       copyVariantIndex: number;
-      format: 'video' | 'image' | 'carousel';   // populated at launch — required to measure mixed-format ad sets; carousel = one ad with N child cards
+      format: 'video' | 'image' | 'carousel'; // populated at launch — required to measure mixed-format ad sets; carousel = one ad with N child cards
     }[];
   }[];
 }
@@ -41,14 +44,14 @@ export interface MetaAdSetConfig {
   ageMin?: number;
   ageMax?: number;
   gender?: string;
-  geoLocations?: string[];   // ISO country codes (e.g. ['IN'])
-  geoStates?: string[];      // Meta region keys (e.g. ['480'] for Maharashtra)
-  geoCities?: string[];      // Meta city keys (e.g. ['2295411'] for Mumbai)
+  geoLocations?: string[]; // ISO country codes (e.g. ['IN'])
+  geoStates?: string[]; // Meta region keys (e.g. ['480'] for Maharashtra)
+  geoCities?: string[]; // Meta city keys (e.g. ['2295411'] for Mumbai)
   // Meta locale IDs (e.g. [84] = Marathi, [53] = Hindi). Filters delivery to users
   // whose platform language matches. Populated by audience-targeting-resolver from
   // segment.languages or product.languages (canonical names → IDs via META_LOCALE_IDS).
   locales?: number[];
-  interests?: string[];      // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
+  interests?: string[]; // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
   optimizationGoal: string;
   ads: number[];
   // Optional per-ad-set destination URL. When set, every ad in THIS ad set
@@ -73,19 +76,19 @@ export interface MetaCampaignConfig {
   pageId?: string;
   pixelId?: string;
   campaignName: string;
-  budget: number;                   // in INR (full rupees, not paise)
+  budget: number; // in INR (full rupees, not paise)
   objective: string;
   conversionEvent: string;
-  customEventName?: string;      // used when conversionEvent === 'CustomEvent'
-  customConversionId?: string;   // Meta Custom Conversion ID — takes priority over conversionEvent
+  customEventName?: string; // used when conversionEvent === 'CustomEvent'
+  customConversionId?: string; // Meta Custom Conversion ID — takes priority over conversionEvent
   adSets: MetaAdSetConfig[];
   copyVariants: { primaryText: string; headline: string; cta: string }[];
   imageHashes?: Record<number, string>; // per-variant image hashes (variantIndex → hash)
-  videoThumbnailHash?: string;          // thumbnail extracted from video (used only in video ads)
-  videoId?: string;                     // Meta video ID (uploaded before launch)
-  selectedCopyIndex?: number;           // which copy variant the video matches (for 'mixed' format)
+  videoThumbnailHash?: string; // thumbnail extracted from video (used only in video ads)
+  videoId?: string; // Meta video ID (uploaded before launch)
+  selectedCopyIndex?: number; // which copy variant the video matches (for 'mixed' format)
   landingUrl: string;
-  declaredSpecialAdCategories?: string[];  // for safety check on regulated copy
+  declaredSpecialAdCategories?: string[]; // for safety check on regulated copy
   /**
    * Carousel cards — required when an ad set has creativeFormat='carousel'.
    * Each card needs an image hash (uploaded ahead of launch), headline,
@@ -142,8 +145,13 @@ export class MetaAdsService {
       payload = { bytes: base64, access_token: accessToken };
     } else {
       // Download image and send as base64 bytes — avoids app capability issues with URL fetch
-      this.logger.log(`Downloading image for base64 upload: ${imageUrl.slice(0, 80)}...`);
-      const imgResponse = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      this.logger.log(
+        `Downloading image for base64 upload: ${imageUrl.slice(0, 80)}...`,
+      );
+      const imgResponse = await axios.get(imageUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+      });
       const base64 = Buffer.from(imgResponse.data).toString('base64');
       payload = { bytes: base64, access_token: accessToken };
     }
@@ -186,19 +194,24 @@ export class MetaAdsService {
     const videoId = response.data?.id;
     if (!videoId) throw new Error('No video ID in Meta upload response');
 
-    this.logger.log(`Video uploaded: videoId=${videoId} — waiting for Meta processing`);
+    this.logger.log(
+      `Video uploaded: videoId=${videoId} — waiting for Meta processing`,
+    );
 
     // Poll until Meta finishes processing the video (async on their side)
     const deadline = Date.now() + 3 * 60 * 1000; // 3 min max
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 5000));
       const statusRes = await this.metaApiCall(
         'GET',
         `${META_API_BASE}/${videoId}?fields=status&access_token=${accessToken}`,
         {},
       );
-      const status = statusRes.data?.status?.processing_progress ?? statusRes.data?.status;
-      this.logger.log(`Meta video processing: videoId=${videoId} status=${JSON.stringify(status)}`);
+      const status =
+        statusRes.data?.status?.processing_progress ?? statusRes.data?.status;
+      this.logger.log(
+        `Meta video processing: videoId=${videoId} status=${JSON.stringify(status)}`,
+      );
       // Meta returns status.video_status = 'ready' when done
       if (statusRes.data?.status?.video_status === 'ready') {
         this.logger.log(`Meta video ready: videoId=${videoId}`);
@@ -210,7 +223,9 @@ export class MetaAdsService {
     }
 
     // If still not ready after 3min, proceed anyway — Meta may still serve it
-    this.logger.warn(`Meta video processing timeout — proceeding anyway: videoId=${videoId}`);
+    this.logger.warn(
+      `Meta video processing timeout — proceeding anyway: videoId=${videoId}`,
+    );
     return videoId;
   }
 
@@ -233,12 +248,16 @@ export class MetaAdsService {
       if (!thumbnails || thumbnails.length === 0) return undefined;
 
       // Pick the preferred thumbnail (is_preferred = true) or first one
-      const preferred = thumbnails.find((t: any) => t.is_preferred) ?? thumbnails[0];
+      const preferred =
+        thumbnails.find((t: any) => t.is_preferred) ?? thumbnails[0];
       const thumbUrl = preferred?.uri;
       if (!thumbUrl) return undefined;
 
       // Upload the thumbnail URL as an image to Meta and get the hash
-      const imgResponse = await axios.get(thumbUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      const imgResponse = await axios.get(thumbUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+      });
       const base64 = Buffer.from(imgResponse.data).toString('base64');
 
       const uploadResponse = await this.metaApiCall(
@@ -294,13 +313,15 @@ export class MetaAdsService {
     // (AGENT_<topic>_<date>), so an exact-name match on Meta means this launch
     // already ran — fail loudly for the operator instead of double-spending.
     const existingId = await this.findCampaignIdByName(
-      config.accountId, config.accessToken, config.campaignName,
+      config.accountId,
+      config.accessToken,
+      config.campaignName,
     );
     if (existingId) {
       throw new Error(
         `Refusing to launch: campaign named "${config.campaignName}" already exists on Meta (id=${existingId}). ` +
-        `This is a duplicate-launch guard — if the previous attempt died mid-launch, inspect campaign ${existingId} on Meta ` +
-        `(delete it or link it in the DB) before retrying.`,
+          `This is a duplicate-launch guard — if the previous attempt died mid-launch, inspect campaign ${existingId} on Meta ` +
+          `(delete it or link it in the DB) before retrying.`,
       );
     }
 
@@ -311,7 +332,10 @@ export class MetaAdsService {
       adIds: [],
     };
 
-    const expectedAdCount = config.adSets.reduce((sum, as) => sum + as.ads.length, 0);
+    const expectedAdCount = config.adSets.reduce(
+      (sum, as) => sum + as.ads.length,
+      0,
+    );
 
     try {
       // Step 1: Create campaign (PAUSED) — ABO (budget at ad set level for testing)
@@ -349,23 +373,30 @@ export class MetaAdsService {
         // Per-ad-set URL override (landing-page A/B test) falls back to the
         // campaign-global landingUrl. UTM params are appended either way, so
         // downstream analytics still attribute by campaign/ad-set/ad name.
-        const adSetLandingUrl = adSetConfig.landingUrlOverride || config.landingUrl;
-        const buildLandingUrl = (adName: string) => withUtmParams(adSetLandingUrl, {
-          campaignName: config.campaignName,
-          adSetName: adSetConfig.name,
-          adName,
-        });
+        const adSetLandingUrl =
+          adSetConfig.landingUrlOverride || config.landingUrl;
+        const buildLandingUrl = (adName: string) =>
+          withUtmParams(adSetLandingUrl, {
+            campaignName: config.campaignName,
+            adSetName: adSetConfig.name,
+            adName,
+          });
 
         // Carousel: one ad per ad set, N cards inside it. Uses selected copy
         // variant's primaryText as the message above the cards, and the cards
         // themselves come from config.carouselCards (orchestrated upstream).
         if (creativeFormat === 'carousel') {
           if (!config.carouselCards || config.carouselCards.length < 2) {
-            throw new Error(`Ad set "${adSetConfig.name}" is creativeFormat=carousel but config.carouselCards has < 2 entries; cannot launch.`);
+            throw new Error(
+              `Ad set "${adSetConfig.name}" is creativeFormat=carousel but config.carouselCards has < 2 entries; cannot launch.`,
+            );
           }
-          const selectedVariant = config.copyVariants[selectedCopyIndex] ?? config.copyVariants[0];
+          const selectedVariant =
+            config.copyVariants[selectedCopyIndex] ?? config.copyVariants[0];
           if (!selectedVariant) {
-            throw new Error(`Ad set "${adSetConfig.name}" carousel needs at least one copy variant for primaryText + cta`);
+            throw new Error(
+              `Ad set "${adSetConfig.name}" carousel needs at least one copy variant for primaryText + cta`,
+            );
           }
           const adName = `${adSetConfig.name} — Carousel`;
           const { adId, creativeId } = await this.createCarouselAd(
@@ -381,8 +412,17 @@ export class MetaAdsService {
           );
           created.creativeIds.push(creativeId);
           created.adIds.push(adId);
-          adResults.push({ adId, creativeId, copyVariantIndex: selectedCopyIndex, format: 'carousel' });
-          adSetResults.push({ adSetId, name: adSetConfig.name, ads: adResults });
+          adResults.push({
+            adId,
+            creativeId,
+            copyVariantIndex: selectedCopyIndex,
+            format: 'carousel',
+          });
+          adSetResults.push({
+            adSetId,
+            name: adSetConfig.name,
+            ads: adResults,
+          });
           continue;
         }
 
@@ -391,7 +431,9 @@ export class MetaAdsService {
           if (!variant) continue;
 
           // hookStyle in ad name for Meta UI clarity + downstream attribution by name
-          const hookStyle = (variant as any).hookStyle ? ` (${(variant as any).hookStyle})` : '';
+          const hookStyle = (variant as any).hookStyle
+            ? ` (${(variant as any).hookStyle})`
+            : '';
           const adName = `${adSetConfig.name} — Variant ${variantIndex + 1}${hookStyle}`;
 
           // Resolve per-variant image hash
@@ -417,7 +459,12 @@ export class MetaAdsService {
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
-              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'video' });
+              adResults.push({
+                adId,
+                creativeId,
+                copyVariantIndex: variantIndex,
+                format: 'video',
+              });
             } else if (variantImageHash) {
               const { adId, creativeId } = await this.createAd(
                 config.accountId,
@@ -431,13 +478,21 @@ export class MetaAdsService {
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
-              adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'image' });
+              adResults.push({
+                adId,
+                creativeId,
+                copyVariantIndex: variantIndex,
+                format: 'image',
+              });
             }
             continue;
           }
 
           // video-only or both → create video ad if videoId available
-          if ((creativeFormat === 'video' || creativeFormat === 'both') && config.videoId) {
+          if (
+            (creativeFormat === 'video' || creativeFormat === 'both') &&
+            config.videoId
+          ) {
             const videoAdName = `${adName} (video)`;
             const { adId, creativeId } = await this.createVideoAd(
               config.accountId,
@@ -452,12 +507,21 @@ export class MetaAdsService {
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
-            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'video' });
+            adResults.push({
+              adId,
+              creativeId,
+              copyVariantIndex: variantIndex,
+              format: 'video',
+            });
           }
 
           // image-only or both → create image ad using variant-specific hash
-          if ((creativeFormat === 'image' || creativeFormat === 'both') && variantImageHash) {
-            const adName2 = creativeFormat === 'both' ? `${adName} (image)` : adName;
+          if (
+            (creativeFormat === 'image' || creativeFormat === 'both') &&
+            variantImageHash
+          ) {
+            const adName2 =
+              creativeFormat === 'both' ? `${adName} (image)` : adName;
             const { adId, creativeId } = await this.createAd(
               config.accountId,
               config.accessToken,
@@ -470,7 +534,12 @@ export class MetaAdsService {
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
-            adResults.push({ adId, creativeId, copyVariantIndex: variantIndex, format: 'image' });
+            adResults.push({
+              adId,
+              creativeId,
+              copyVariantIndex: variantIndex,
+              format: 'image',
+            });
           }
 
           // fallback: if neither image nor video available, skip this variant
@@ -496,7 +565,9 @@ export class MetaAdsService {
       return { campaignId: created.campaignId, adSets: adSetResults };
     } catch (err: any) {
       // Rollback: delete campaign (cascades to ad sets + ads)
-      this.logger.error(`Campaign launch failed — rolling back: ${err.message}`);
+      this.logger.error(
+        `Campaign launch failed — rolling back: ${err.message}`,
+      );
       await this.rollback(created, config.accessToken);
       throw err;
     }
@@ -512,29 +583,26 @@ export class MetaAdsService {
     launchResult: MetaLaunchResult,
   ): Promise<void> {
     // Activate campaign
-    await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${campaignId}`,
-      { status: 'ACTIVE', access_token: accessToken },
-    );
+    await this.metaApiCall('POST', `${META_API_BASE}/${campaignId}`, {
+      status: 'ACTIVE',
+      access_token: accessToken,
+    });
     this.logger.log(`Campaign activated: ${campaignId}`);
 
     // Activate all ad sets
     for (const adSet of launchResult.adSets) {
-      await this.metaApiCall(
-        'POST',
-        `${META_API_BASE}/${adSet.adSetId}`,
-        { status: 'ACTIVE', access_token: accessToken },
-      );
+      await this.metaApiCall('POST', `${META_API_BASE}/${adSet.adSetId}`, {
+        status: 'ACTIVE',
+        access_token: accessToken,
+      });
       this.logger.log(`Ad set activated: ${adSet.adSetId} (${adSet.name})`);
 
       // Activate all ads within each ad set
       for (const ad of adSet.ads) {
-        await this.metaApiCall(
-          'POST',
-          `${META_API_BASE}/${ad.adId}`,
-          { status: 'ACTIVE', access_token: accessToken },
-        );
+        await this.metaApiCall('POST', `${META_API_BASE}/${ad.adId}`, {
+          status: 'ACTIVE',
+          access_token: accessToken,
+        });
         this.logger.log(`Ad activated: ${ad.adId}`);
       }
     }
@@ -553,16 +621,24 @@ export class MetaAdsService {
     name: string,
   ): Promise<string | null> {
     try {
-      const res = await this.metaApiCall('GET', `${META_API_BASE}/${accountId}/campaigns`, {
-        fields: 'id,name',
-        filtering: JSON.stringify([{ field: 'name', operator: 'EQUAL', value: name }]),
-        limit: '5',
-        access_token: accessToken,
-      });
+      const res = await this.metaApiCall(
+        'GET',
+        `${META_API_BASE}/${accountId}/campaigns`,
+        {
+          fields: 'id,name',
+          filtering: JSON.stringify([
+            { field: 'name', operator: 'EQUAL', value: name },
+          ]),
+          limit: '5',
+          access_token: accessToken,
+        },
+      );
       const match = (res.data?.data ?? []).find((c: any) => c.name === name);
       return match?.id ?? null;
     } catch (err: any) {
-      this.logger.warn(`Duplicate-launch pre-check failed (proceeding without it): ${err.message}`);
+      this.logger.warn(
+        `Duplicate-launch pre-check failed (proceeding without it): ${err.message}`,
+      );
       return null;
     }
   }
@@ -574,7 +650,9 @@ export class MetaAdsService {
     objective: string,
     specialAdCategories: string[],
   ): Promise<string> {
-    this.logger.log(`Creating campaign: ${name}${specialAdCategories.length ? ` | special_ad_categories: ${specialAdCategories.join(',')}` : ''}`);
+    this.logger.log(
+      `Creating campaign: ${name}${specialAdCategories.length ? ` | special_ad_categories: ${specialAdCategories.join(',')}` : ''}`,
+    );
 
     const response = await this.metaApiCall(
       'POST',
@@ -616,7 +694,9 @@ export class MetaAdsService {
     customConversionId?: string,
   ): Promise<string> {
     // ABO: budget at ad set level for testing new creatives/audiences
-    const dailyBudgetPaise = Math.round((totalBudget * config.budgetPercent / 100) * 100);
+    const dailyBudgetPaise = Math.round(
+      ((totalBudget * config.budgetPercent) / 100) * 100,
+    );
 
     // Geo targeting — Meta rejects overlapping locations (subcode 1487756) if
     // we send both countries AND regions/cities of the same country. So when
@@ -631,7 +711,11 @@ export class MetaAdsService {
       geoLocations.regions = config.geoStates!.map((key) => ({ key }));
     }
     if (hasCities) {
-      geoLocations.cities = config.geoCities!.map((key) => ({ key, radius: 25, distance_unit: 'kilometer' }));
+      geoLocations.cities = config.geoCities!.map((key) => ({
+        key,
+        radius: 25,
+        distance_unit: 'kilometer',
+      }));
     }
     if (!hasStates && !hasCities) {
       geoLocations.countries = config.geoLocations ?? ['IN'];
@@ -639,7 +723,10 @@ export class MetaAdsService {
     const targeting: any = { geo_locations: geoLocations };
 
     // Audience type specific targeting
-    if (['lookalike', 'retarget', 'custom'].includes(config.audienceType) && config.metaAudienceId) {
+    if (
+      ['lookalike', 'retarget', 'custom'].includes(config.audienceType) &&
+      config.metaAudienceId
+    ) {
       targeting.custom_audiences = [{ id: config.metaAudienceId }];
       targeting.targeting_automation = { advantage_audience: 0 };
       if (config.ageMin) targeting.age_min = config.ageMin;
@@ -663,9 +750,11 @@ export class MetaAdsService {
     // Segments[].interests where each interest is { id, name }. The audience
     // resolver filters out plain-string interests so we never ship names here.
     if (config.interests && config.interests.length > 0) {
-      targeting.flexible_spec = [{
-        interests: config.interests.map((id) => ({ id, name: id })),
-      }];
+      targeting.flexible_spec = [
+        {
+          interests: config.interests.map((id) => ({ id, name: id })),
+        },
+      ];
     }
 
     // Locale targeting — filters delivery by platform language (e.g. 84=Marathi).
@@ -677,7 +766,9 @@ export class MetaAdsService {
 
     // Exclude audiences (past buyers)
     if (config.excludeAudienceIds && config.excludeAudienceIds.length > 0) {
-      targeting.excluded_custom_audiences = config.excludeAudienceIds.map(id => ({ id }));
+      targeting.excluded_custom_audiences = config.excludeAudienceIds.map(
+        (id) => ({ id }),
+      );
     }
 
     // Skip Audience Network by default — for Indian DTC, AN is mostly garbage
@@ -690,7 +781,13 @@ export class MetaAdsService {
       // When publisher_platforms is set, Meta requires explicit positions per platform
       // 'video_feeds' was deprecated in v21.0 (subcode 2490562). Reels-style
       // surface lives under 'facebook_reels' now.
-      targeting.facebook_positions = ['feed', 'facebook_reels', 'story', 'instream_video', 'marketplace'];
+      targeting.facebook_positions = [
+        'feed',
+        'facebook_reels',
+        'story',
+        'instream_video',
+        'marketplace',
+      ];
       targeting.instagram_positions = ['stream', 'story', 'reels', 'explore'];
     } else {
       targeting.publisher_platforms = (config as any).publisherPlatforms;
@@ -708,10 +805,15 @@ export class MetaAdsService {
     // When VALUE is set, suppress COST_CAP regardless of bidAmountInr.
     const optimizationGoal = config.optimizationGoal || 'OFFSITE_CONVERSIONS';
     const isValueOptimization = optimizationGoal === 'VALUE';
-    const useBidCap = !isValueOptimization
-      && typeof config.bidAmountInr === 'number'
-      && config.bidAmountInr > 0;
-    if (isValueOptimization && typeof config.bidAmountInr === 'number' && config.bidAmountInr > 0) {
+    const useBidCap =
+      !isValueOptimization &&
+      typeof config.bidAmountInr === 'number' &&
+      config.bidAmountInr > 0;
+    if (
+      isValueOptimization &&
+      typeof config.bidAmountInr === 'number' &&
+      config.bidAmountInr > 0
+    ) {
       this.logger.warn(
         `bidAmountInr=${config.bidAmountInr} supplied but suppressed — COST_CAP is incompatible with optimization_goal=VALUE. Ad set will ship with LOWEST_COST_WITHOUT_CAP (Highest Value).`,
       );
@@ -724,7 +826,9 @@ export class MetaAdsService {
       optimization_goal: optimizationGoal,
       destination_type: 'WEBSITE',
       bid_strategy: useBidCap ? 'COST_CAP' : 'LOWEST_COST_WITHOUT_CAP',
-      ...(useBidCap ? { bid_amount: Math.round(config.bidAmountInr! * 100) } : {}),
+      ...(useBidCap
+        ? { bid_amount: Math.round(config.bidAmountInr! * 100) }
+        : {}),
       targeting,
       status: 'PAUSED',
       access_token: accessToken,
@@ -781,13 +885,20 @@ export class MetaAdsService {
       };
       // Custom events need custom_event_str with the actual event name
       if (conversionEvent === 'CustomEvent') {
-        adSetData.promoted_object.custom_event_str = customEventName ?? conversionEvent;
-      } else if (!['Purchase', 'Lead', 'CompleteRegistration', 'Subscribe'].includes(conversionEvent)) {
+        adSetData.promoted_object.custom_event_str =
+          customEventName ?? conversionEvent;
+      } else if (
+        !['Purchase', 'Lead', 'CompleteRegistration', 'Subscribe'].includes(
+          conversionEvent,
+        )
+      ) {
         adSetData.promoted_object.custom_event_str = conversionEvent;
       }
     }
 
-    this.logger.log(`Creating ad set: ${config.name} | payload: ${JSON.stringify({ ...adSetData, access_token: '[REDACTED]' })}`);
+    this.logger.log(
+      `Creating ad set: ${config.name} | payload: ${JSON.stringify({ ...adSetData, access_token: '[REDACTED]' })}`,
+    );
 
     try {
       const response = await this.metaApiCall(
@@ -797,7 +908,8 @@ export class MetaAdsService {
       );
 
       const adSetId = response.data?.id;
-      if (!adSetId) throw new Error(`No ad set ID in response for ${config.name}`);
+      if (!adSetId)
+        throw new Error(`No ad set ID in response for ${config.name}`);
 
       this.logger.log(`Ad set created: ${adSetId}`);
       return adSetId;
@@ -805,15 +917,19 @@ export class MetaAdsService {
       // Custom audience expired/deleted — retry as advantage_plus
       // Catch audience errors — Meta returns "Invalid parameter" with error_subcode 1359207 for expired audiences
       // We only retry if we actually set custom_audiences in targeting
-      const hasAnyAudiences = targeting.custom_audiences || targeting.excluded_custom_audiences;
+      const hasAnyAudiences =
+        targeting.custom_audiences || targeting.excluded_custom_audiences;
       // Match on Meta error subcode 1359207 (expired audience) or code 100 with audiences present
-      const isAudienceError = hasAnyAudiences && (
-        err.message?.includes('subcode: 1359207') ||
-        err.message?.includes('subcode: 3858504') ||
-        (err.message?.includes('code: 100') && err.message?.includes('Invalid parameter'))
-      );
+      const isAudienceError =
+        hasAnyAudiences &&
+        (err.message?.includes('subcode: 1359207') ||
+          err.message?.includes('subcode: 3858504') ||
+          (err.message?.includes('code: 100') &&
+            err.message?.includes('Invalid parameter')));
       if (isAudienceError) {
-        this.logger.warn(`Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}, excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without audiences.`);
+        this.logger.warn(
+          `Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}, excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without audiences.`,
+        );
         delete targeting.custom_audiences;
         delete targeting.excluded_custom_audiences;
         targeting.targeting_automation = { advantage_audience: 1 };
@@ -828,7 +944,8 @@ export class MetaAdsService {
           adSetData,
         );
         const adSetId = retryResponse.data?.id;
-        if (!adSetId) throw new Error(`No ad set ID in retry response for ${config.name}`);
+        if (!adSetId)
+          throw new Error(`No ad set ID in retry response for ${config.name}`);
         this.logger.log(`Ad set created (advantage_plus fallback): ${adSetId}`);
         return adSetId;
       }
@@ -893,7 +1010,9 @@ export class MetaAdsService {
     const adId = adResponse.data?.id;
     if (!adId) {
       // Ad creation failed but creative exists — track for cleanup
-      throw new Error(`No ad ID for ${adName} (dangling creative: ${creativeId})`);
+      throw new Error(
+        `No ad ID for ${adName} (dangling creative: ${creativeId})`,
+      );
     }
 
     this.logger.log(`Ad created: ${adId} (${adName})`);
@@ -935,7 +1054,9 @@ export class MetaAdsService {
       access_token: accessToken,
     };
 
-    this.logger.log(`Creating video creative: ${JSON.stringify({ ...creativeData, access_token: '[REDACTED]' })}`);
+    this.logger.log(
+      `Creating video creative: ${JSON.stringify({ ...creativeData, access_token: '[REDACTED]' })}`,
+    );
 
     const creativeResponse = await this.metaApiCall(
       'POST',
@@ -959,7 +1080,10 @@ export class MetaAdsService {
     );
 
     const adId = adResponse.data?.id;
-    if (!adId) throw new Error(`No ad ID for video ad ${adName} (dangling creative: ${creativeId})`);
+    if (!adId)
+      throw new Error(
+        `No ad ID for video ad ${adName} (dangling creative: ${creativeId})`,
+      );
 
     this.logger.log(`Video ad created: ${adId} (${adName})`);
     return { adId, creativeId };
@@ -996,14 +1120,18 @@ export class MetaAdsService {
       imageHash: string;
       headline: string;
       description?: string;
-      cardLink?: string;  // optional per-card link override (defaults to landingUrl)
+      cardLink?: string; // optional per-card link override (defaults to landingUrl)
     }>,
   ): Promise<{ adId: string; creativeId: string }> {
     if (!cards || cards.length < 2) {
-      throw new Error(`Carousel ad "${adName}" requires at least 2 cards (got ${cards?.length ?? 0})`);
+      throw new Error(
+        `Carousel ad "${adName}" requires at least 2 cards (got ${cards?.length ?? 0})`,
+      );
     }
     if (cards.length > 10) {
-      this.logger.warn(`Carousel ad "${adName}" has ${cards.length} cards; trimming to 10 (Meta hard limit)`);
+      this.logger.warn(
+        `Carousel ad "${adName}" has ${cards.length} cards; trimming to 10 (Meta hard limit)`,
+      );
       cards = cards.slice(0, 10);
     }
     const ctaType = this.mapCta(cta);
@@ -1031,7 +1159,7 @@ export class MetaAdsService {
           // or the story breaks. Default to false; can be exposed as a flag later
           // if non-narrative carousels (independent benefit cards) want it on.
           multi_share_optimized: false,
-          multi_share_end_card: true,  // append page-end card with CTA — boosts CVR
+          multi_share_end_card: true, // append page-end card with CTA — boosts CVR
           call_to_action: {
             type: ctaType,
             value: { link: landingUrl },
@@ -1041,7 +1169,9 @@ export class MetaAdsService {
       access_token: accessToken,
     };
 
-    this.logger.log(`Creating carousel creative: ${adName} (${cards.length} cards)`);
+    this.logger.log(
+      `Creating carousel creative: ${adName} (${cards.length} cards)`,
+    );
 
     const creativeResponse = await this.metaApiCall(
       'POST',
@@ -1050,7 +1180,8 @@ export class MetaAdsService {
     );
 
     const creativeId = creativeResponse.data?.id;
-    if (!creativeId) throw new Error(`No creative ID for carousel ad ${adName}`);
+    if (!creativeId)
+      throw new Error(`No creative ID for carousel ad ${adName}`);
 
     const adResponse = await this.metaApiCall(
       'POST',
@@ -1065,35 +1196,47 @@ export class MetaAdsService {
     );
 
     const adId = adResponse.data?.id;
-    if (!adId) throw new Error(`No ad ID for carousel ad ${adName} (dangling creative: ${creativeId})`);
+    if (!adId)
+      throw new Error(
+        `No ad ID for carousel ad ${adName} (dangling creative: ${creativeId})`,
+      );
 
-    this.logger.log(`Carousel ad created: ${adId} (${adName}, ${cards.length} cards)`);
+    this.logger.log(
+      `Carousel ad created: ${adId} (${adName}, ${cards.length} cards)`,
+    );
     return { adId, creativeId };
   }
 
   // ─── Rollback: clean up on partial failure ──────────────────────────────────
 
-  private async rollback(created: CreatedObjects, accessToken: string): Promise<void> {
+  private async rollback(
+    created: CreatedObjects,
+    accessToken: string,
+  ): Promise<void> {
     // Deleting the campaign cascades to all child ad sets and ads
     if (created.campaignId) {
       try {
-        await axios.delete(
-          `${META_API_BASE}/${created.campaignId}`,
-          { params: { access_token: accessToken }, timeout: 15000 },
+        await axios.delete(`${META_API_BASE}/${created.campaignId}`, {
+          params: { access_token: accessToken },
+          timeout: 15000,
+        });
+        this.logger.log(
+          `Rollback: deleted campaign ${created.campaignId} (cascades to ad sets + ads)`,
         );
-        this.logger.log(`Rollback: deleted campaign ${created.campaignId} (cascades to ad sets + ads)`);
       } catch (err: any) {
-        this.logger.error(`Rollback failed for campaign ${created.campaignId}: ${err.message}`);
+        this.logger.error(
+          `Rollback failed for campaign ${created.campaignId}: ${err.message}`,
+        );
       }
     }
 
     // Clean up any dangling creatives that weren't attached to ads
     for (const creativeId of created.creativeIds) {
       try {
-        await axios.delete(
-          `${META_API_BASE}/${creativeId}`,
-          { params: { access_token: accessToken }, timeout: 10000 },
-        );
+        await axios.delete(`${META_API_BASE}/${creativeId}`, {
+          params: { access_token: accessToken },
+          timeout: 10000,
+        });
         this.logger.log(`Rollback: deleted dangling creative ${creativeId}`);
       } catch {
         // Ignore — creative may have been cascade-deleted with campaign
@@ -1119,21 +1262,32 @@ export class MetaAdsService {
     // "The parameter 'subtype' is not supported in the current API version."
     // The audience type is now inferred from the `rule` shape — presence of
     // event_sources + filters means it's a pixel-event custom audience.
-    const response = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/customaudiences`, {
-      name,
-      retention_days: rule.retentionDays,
-      rule: JSON.stringify({
-        inclusions: {
-          operator: 'or',
-          rules: [{
-            event_sources: [{ id: pixelId, type: 'pixel' }],
-            retention_seconds: rule.retentionDays * 86400,
-            filter: { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: rule.event }] },
-          }],
-        },
-      }),
-      access_token: accessToken,
-    });
+    const response = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/customaudiences`,
+      {
+        name,
+        retention_days: rule.retentionDays,
+        rule: JSON.stringify({
+          inclusions: {
+            operator: 'or',
+            rules: [
+              {
+                event_sources: [{ id: pixelId, type: 'pixel' }],
+                retention_seconds: rule.retentionDays * 86400,
+                filter: {
+                  operator: 'and',
+                  filters: [
+                    { field: 'event', operator: 'eq', value: rule.event },
+                  ],
+                },
+              },
+            ],
+          },
+        }),
+        access_token: accessToken,
+      },
+    );
     const id = response.data?.id;
     if (!id) throw new Error(`Failed to create audience "${name}"`);
     this.logger.log(`Pixel audience created: ${name} (${id})`);
@@ -1149,15 +1303,19 @@ export class MetaAdsService {
     name: string,
     sourceAudienceId: string,
     country: string,
-    ratio: number,  // 0.01 = 1%, 0.02 = 2%
+    ratio: number, // 0.01 = 1%, 0.02 = 2%
   ): Promise<string> {
-    const response = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/customaudiences`, {
-      name,
-      subtype: 'LOOKALIKE',
-      origin_audience_id: sourceAudienceId,
-      lookalike_spec: { country, ratio },
-      access_token: accessToken,
-    });
+    const response = await this.metaApiCall(
+      'POST',
+      `${META_API_BASE}/${accountId}/customaudiences`,
+      {
+        name,
+        subtype: 'LOOKALIKE',
+        origin_audience_id: sourceAudienceId,
+        lookalike_spec: { country, ratio },
+        access_token: accessToken,
+      },
+    );
     const id = response.data?.id;
     if (!id) throw new Error(`Failed to create lookalike "${name}"`);
     this.logger.log(`Lookalike audience created: ${name} (${id})`);
@@ -1187,10 +1345,14 @@ export class MetaAdsService {
     pixelId?: string,
   ): Promise<string> {
     // Need accountId from campaign — fetch it
-    const campaignRes = await this.metaApiCall('GET', `${META_API_BASE}/${campaignId}`, {
-      fields: 'account_id',
-      access_token: accessToken,
-    });
+    const campaignRes = await this.metaApiCall(
+      'GET',
+      `${META_API_BASE}/${campaignId}`,
+      {
+        fields: 'account_id',
+        access_token: accessToken,
+      },
+    );
     const accountId = `act_${campaignRes.data?.account_id}`;
 
     return this.createAdSet(
@@ -1234,17 +1396,30 @@ export class MetaAdsService {
     }
 
     // Get accountId from ad set
-    const adSetRes = await this.metaApiCall('GET', `${META_API_BASE}/${adSetId}`, {
-      fields: 'account_id',
-      access_token: accessToken,
-    });
+    const adSetRes = await this.metaApiCall(
+      'GET',
+      `${META_API_BASE}/${adSetId}`,
+      {
+        fields: 'account_id',
+        access_token: accessToken,
+      },
+    );
     const accountId = `act_${adSetRes.data?.account_id}`;
 
     // Upload image
     const imageHash = await this.uploadImage(imageUrl, accountId, accessToken);
 
     // Create ad + creative
-    const result = await this.createAd(accountId, accessToken, adSetId, adName, copy, imageHash, pageId, landingUrl);
+    const result = await this.createAd(
+      accountId,
+      accessToken,
+      adSetId,
+      adName,
+      copy,
+      imageHash,
+      pageId,
+      landingUrl,
+    );
 
     // Activate the ad
     await this.updateAdStatus(result.adId, 'ACTIVE', accessToken);
@@ -1267,10 +1442,14 @@ export class MetaAdsService {
     customAudienceId: string,
   ): Promise<void> {
     // Read current targeting so we don't lose geo/age/placements/excluded_audiences
-    const currentRes = await this.metaApiCall('GET', `${META_API_BASE}/${adSetId}`, {
-      fields: 'targeting',
-      access_token: accessToken,
-    });
+    const currentRes = await this.metaApiCall(
+      'GET',
+      `${META_API_BASE}/${adSetId}`,
+      {
+        fields: 'targeting',
+        access_token: accessToken,
+      },
+    );
     const targeting = currentRes.data?.targeting ?? {};
 
     // Merge: replace custom_audiences with the specified one. targeting_automation.advantage_audience
@@ -1286,7 +1465,9 @@ export class MetaAdsService {
       targeting: newTargeting,
       access_token: accessToken,
     });
-    this.logger.log(`Ad set ${adSetId}: custom audience patched to ${customAudienceId}`);
+    this.logger.log(
+      `Ad set ${adSetId}: custom audience patched to ${customAudienceId}`,
+    );
   }
 
   /**
@@ -1324,7 +1505,9 @@ export class MetaAdsService {
       daily_budget: budgetPaise,
       access_token: accessToken,
     });
-    this.logger.log(`Ad set budget updated: ${adSetId} → ₹${newDailyBudgetINR}/day`);
+    this.logger.log(
+      `Ad set budget updated: ${adSetId} → ₹${newDailyBudgetINR}/day`,
+    );
   }
 
   /**
@@ -1373,16 +1556,23 @@ export class MetaAdsService {
    * currently active vs already-excluded. Null/undefined returns mean the ad
    * set has no restriction in that field (Meta's "all" default).
    */
-  async getAdSetTargeting(adSetId: string, accessToken: string): Promise<Record<string, any> | null> {
+  async getAdSetTargeting(
+    adSetId: string,
+    accessToken: string,
+  ): Promise<Record<string, any> | null> {
     try {
       const response = await this.metaApiCall(
         'GET',
         `${META_API_BASE}/${adSetId}`,
         { fields: 'targeting', access_token: accessToken },
       );
-      return (response?.data?.targeting ?? response?.targeting ?? null) as Record<string, any> | null;
+      return (response?.data?.targeting ??
+        response?.targeting ??
+        null) as Record<string, any> | null;
     } catch (err: any) {
-      this.logger.warn(`getAdSetTargeting failed for ${adSetId}: ${err.message}`);
+      this.logger.warn(
+        `getAdSetTargeting failed for ${adSetId}: ${err.message}`,
+      );
       return null;
     }
   }
@@ -1390,16 +1580,18 @@ export class MetaAdsService {
   async updateAdSetPlacements(
     adSetId: string,
     placements: {
-      publisherPlatforms: string[];                    // e.g. ['facebook', 'instagram']
-      facebookPositions?: string[];                    // e.g. ['feed', 'video_feeds']
-      instagramPositions?: string[];                   // e.g. ['stream', 'reels']
+      publisherPlatforms: string[]; // e.g. ['facebook', 'instagram']
+      facebookPositions?: string[]; // e.g. ['feed', 'video_feeds']
+      instagramPositions?: string[]; // e.g. ['stream', 'reels']
       audienceNetworkPositions?: string[];
       messengerPositions?: string[];
     },
     accessToken: string,
   ): Promise<void> {
     if (!placements.publisherPlatforms?.length) {
-      throw new Error('updateAdSetPlacements: publisherPlatforms must be non-empty');
+      throw new Error(
+        'updateAdSetPlacements: publisherPlatforms must be non-empty',
+      );
     }
 
     // Fetch current targeting so we don't blow away age/geo/audience.
@@ -1408,12 +1600,16 @@ export class MetaAdsService {
       `${META_API_BASE}/${adSetId}`,
       { fields: 'targeting', access_token: accessToken },
     );
-    const currentTargeting: Record<string, any> = (existing?.data?.targeting ?? existing?.targeting ?? {}) as any;
+    const currentTargeting: Record<string, any> = (existing?.data?.targeting ??
+      existing?.targeting ??
+      {}) as any;
 
     // Deep-clone existing, then overlay placement subfields. Remove position fields
     // that are no longer relevant (e.g. dropping audience_network from publisher_platforms
     // means audience_network_positions must also go, otherwise Meta rejects the call).
-    const merged: Record<string, any> = JSON.parse(JSON.stringify(currentTargeting));
+    const merged: Record<string, any> = JSON.parse(
+      JSON.stringify(currentTargeting),
+    );
     merged.publisher_platforms = placements.publisherPlatforms;
 
     const platformPositionMap: Record<string, string> = {
@@ -1427,16 +1623,22 @@ export class MetaAdsService {
         delete merged[posKey];
       }
     }
-    if (placements.facebookPositions) merged.facebook_positions = placements.facebookPositions;
-    if (placements.instagramPositions) merged.instagram_positions = placements.instagramPositions;
-    if (placements.audienceNetworkPositions) merged.audience_network_positions = placements.audienceNetworkPositions;
-    if (placements.messengerPositions) merged.messenger_positions = placements.messengerPositions;
+    if (placements.facebookPositions)
+      merged.facebook_positions = placements.facebookPositions;
+    if (placements.instagramPositions)
+      merged.instagram_positions = placements.instagramPositions;
+    if (placements.audienceNetworkPositions)
+      merged.audience_network_positions = placements.audienceNetworkPositions;
+    if (placements.messengerPositions)
+      merged.messenger_positions = placements.messengerPositions;
 
     await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
       targeting: merged,
       access_token: accessToken,
     });
-    this.logger.log(`Ad set placements updated (merged into existing targeting): ${adSetId} → ${placements.publisherPlatforms.join(',')}`);
+    this.logger.log(
+      `Ad set placements updated (merged into existing targeting): ${adSetId} → ${placements.publisherPlatforms.join(',')}`,
+    );
   }
 
   /**
@@ -1454,21 +1656,34 @@ export class MetaAdsService {
     accessToken: string,
   ): Promise<void> {
     if (!schedule.length) {
-      throw new Error('updateAdSetSchedule: schedule must have at least one slot (use empty pacing_type to clear)');
+      throw new Error(
+        'updateAdSetSchedule: schedule must have at least one slot (use empty pacing_type to clear)',
+      );
     }
     for (const slot of schedule) {
-      if (slot.startMinute < 0 || slot.startMinute > 1440 || slot.endMinute < 0 || slot.endMinute > 1440) {
-        throw new Error(`updateAdSetSchedule: minutes must be 0-1440 (got ${slot.startMinute}-${slot.endMinute})`);
+      if (
+        slot.startMinute < 0 ||
+        slot.startMinute > 1440 ||
+        slot.endMinute < 0 ||
+        slot.endMinute > 1440
+      ) {
+        throw new Error(
+          `updateAdSetSchedule: minutes must be 0-1440 (got ${slot.startMinute}-${slot.endMinute})`,
+        );
       }
       if (slot.endMinute <= slot.startMinute) {
-        throw new Error(`updateAdSetSchedule: endMinute must be > startMinute (slot ${slot.startMinute}-${slot.endMinute})`);
+        throw new Error(
+          `updateAdSetSchedule: endMinute must be > startMinute (slot ${slot.startMinute}-${slot.endMinute})`,
+        );
       }
-      if (!slot.days.every(d => d >= 0 && d <= 6)) {
-        throw new Error(`updateAdSetSchedule: days must be 0-6 (got ${slot.days})`);
+      if (!slot.days.every((d) => d >= 0 && d <= 6)) {
+        throw new Error(
+          `updateAdSetSchedule: days must be 0-6 (got ${slot.days})`,
+        );
       }
     }
 
-    const adset_schedule = schedule.map(s => ({
+    const adset_schedule = schedule.map((s) => ({
       start_minute: s.startMinute,
       end_minute: s.endMinute,
       days: s.days,
@@ -1476,10 +1691,12 @@ export class MetaAdsService {
 
     await this.metaApiCall('POST', `${META_API_BASE}/${adSetId}`, {
       adset_schedule,
-      pacing_type: ['day_parting'],   // REQUIRED — Meta silently ignores adset_schedule without this
+      pacing_type: ['day_parting'], // REQUIRED — Meta silently ignores adset_schedule without this
       access_token: accessToken,
     });
-    this.logger.log(`Ad set schedule updated: ${adSetId} → ${schedule.length} slot(s)`);
+    this.logger.log(
+      `Ad set schedule updated: ${adSetId} → ${schedule.length} slot(s)`,
+    );
   }
 
   /**
@@ -1492,12 +1709,14 @@ export class MetaAdsService {
     sourceAdSetId: string,
     accessToken: string,
     newAudience: {
-      newAudienceId?: string;        // existing Meta custom/lookalike audience to use
-      useAdvantagePlus?: boolean;    // alternative: switch to Advantage+ Audience
+      newAudienceId?: string; // existing Meta custom/lookalike audience to use
+      useAdvantagePlus?: boolean; // alternative: switch to Advantage+ Audience
     },
   ): Promise<{ newAdSetId: string }> {
     if (!newAudience.newAudienceId && !newAudience.useAdvantagePlus) {
-      throw new Error('refresh_audience: must provide newAudienceId OR useAdvantagePlus=true');
+      throw new Error(
+        'refresh_audience: must provide newAudienceId OR useAdvantagePlus=true',
+      );
     }
 
     // 1) Deep-copy the source ad set (Meta /copies endpoint clones ads inside)
@@ -1510,9 +1729,12 @@ export class MetaAdsService {
         access_token: accessToken,
       },
     );
-    const newAdSetId = copyRes?.data?.copied_adset_id ?? copyRes?.data?.ad_object_ids?.[0];
+    const newAdSetId =
+      copyRes?.data?.copied_adset_id ?? copyRes?.data?.ad_object_ids?.[0];
     if (!newAdSetId) {
-      throw new Error('refresh_audience: Meta /copies did not return a new adset id');
+      throw new Error(
+        'refresh_audience: Meta /copies did not return a new adset id',
+      );
     }
 
     // 2) Read existing targeting on the new copy and merge audience changes (read-modify-write
@@ -1522,32 +1744,38 @@ export class MetaAdsService {
       `${META_API_BASE}/${newAdSetId}`,
       { fields: 'targeting', access_token: accessToken },
     );
-    const targeting: Record<string, any> = JSON.parse(JSON.stringify(existing?.data?.targeting ?? {}));
+    const targeting: Record<string, any> = JSON.parse(
+      JSON.stringify(existing?.data?.targeting ?? {}),
+    );
 
     if (newAudience.useAdvantagePlus) {
       // Switch to Advantage+ Audience: clear custom audiences, enable advantage_audience flag
       delete targeting.custom_audiences;
-      targeting.targeting_automation = { ...(targeting.targeting_automation ?? {}), advantage_audience: 1 };
+      targeting.targeting_automation = {
+        ...(targeting.targeting_automation ?? {}),
+        advantage_audience: 1,
+      };
     } else if (newAudience.newAudienceId) {
       targeting.custom_audiences = [{ id: newAudience.newAudienceId }];
       // Clear conflicting Advantage+ flag if it was set
       if (targeting.targeting_automation) {
-        targeting.targeting_automation = { ...targeting.targeting_automation, advantage_audience: 0 };
+        targeting.targeting_automation = {
+          ...targeting.targeting_automation,
+          advantage_audience: 0,
+        };
       }
     }
 
-    await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${newAdSetId}`,
-      { targeting, access_token: accessToken },
-    );
+    await this.metaApiCall('POST', `${META_API_BASE}/${newAdSetId}`, {
+      targeting,
+      access_token: accessToken,
+    });
 
     // 3) Activate the new ad set
-    await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${newAdSetId}`,
-      { status: 'ACTIVE', access_token: accessToken },
-    );
+    await this.metaApiCall('POST', `${META_API_BASE}/${newAdSetId}`, {
+      status: 'ACTIVE',
+      access_token: accessToken,
+    });
 
     this.logger.log(
       `refresh_audience: duplicated ${sourceAdSetId} → ${newAdSetId} with ${newAudience.useAdvantagePlus ? 'advantage_plus' : `audience ${newAudience.newAudienceId}`}`,
@@ -1575,14 +1803,42 @@ export class MetaAdsService {
         access_token: accessToken,
       });
       const rows: any[] = res.data?.data ?? [];
-      const validSet = new Set(rows.filter(r => r.valid === true).map(r => String(r.id)));
-      const valid = interestIds.filter(id => validSet.has(String(id)));
-      const invalid = interestIds.filter(id => !validSet.has(String(id)));
+      const validSet = new Set(
+        rows.filter((r) => r.valid === true).map((r) => String(r.id)),
+      );
+      const valid = interestIds.filter((id) => validSet.has(String(id)));
+      const invalid = interestIds.filter((id) => !validSet.has(String(id)));
       return { valid, invalid };
     } catch (err: any) {
-      this.logger.warn(`Interest ID validation unavailable (proceeding unvalidated): ${err.message}`);
+      this.logger.warn(
+        `Interest ID validation unavailable (proceeding unvalidated): ${err.message}`,
+      );
       return { valid: interestIds, invalid: [] };
     }
+  }
+
+  /**
+   * Keyword search for Meta detailed-targeting interests — powers the manual
+   * Create Campaign form's interest picker. Returns real Meta interest IDs so
+   * whatever the user picks passes validateInterestIds() unchanged at launch.
+   */
+  async searchInterests(
+    query: string,
+    accessToken: string,
+  ): Promise<Array<{ id: string; name: string; audienceSize: number }>> {
+    if (!query || query.trim().length < 2) return [];
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/search`, {
+      type: 'adinterest',
+      q: query.trim(),
+      limit: 15,
+      access_token: accessToken,
+    });
+    const rows: any[] = res.data?.data ?? [];
+    return rows.map((r) => ({
+      id: String(r.id),
+      name: String(r.name ?? ''),
+      audienceSize: Number(r.audience_size_lower_bound ?? r.audience_size ?? 0),
+    }));
   }
 
   // Locale lookups are stable per language; cache for the process lifetime so
@@ -1596,9 +1852,13 @@ export class MetaAdsService {
    * every other language silently shipped with zero locale targeting. Returns
    * null when Meta has no matching locale (caller skips that language).
    */
-  async lookupLocaleId(languageName: string, accessToken: string): Promise<number | null> {
+  async lookupLocaleId(
+    languageName: string,
+    accessToken: string,
+  ): Promise<number | null> {
     const key = languageName.toLowerCase().trim();
-    if (MetaAdsService.localeIdCache.has(key)) return MetaAdsService.localeIdCache.get(key)!;
+    if (MetaAdsService.localeIdCache.has(key))
+      return MetaAdsService.localeIdCache.get(key)!;
     try {
       const res = await this.metaApiCall('GET', `${META_API_BASE}/search`, {
         type: 'adlocale',
@@ -1608,19 +1868,31 @@ export class MetaAdsService {
       const rows: any[] = res.data?.data ?? [];
       // Prefer exact name match ("Tamil"), else the language-only entry over
       // region variants ("Tamil (India)") — Meta returns both shapes.
-      const exact = rows.find(r => String(r.name ?? '').toLowerCase() === key);
-      const prefix = rows.find(r => String(r.name ?? '').toLowerCase().startsWith(key));
+      const exact = rows.find(
+        (r) => String(r.name ?? '').toLowerCase() === key,
+      );
+      const prefix = rows.find((r) =>
+        String(r.name ?? '')
+          .toLowerCase()
+          .startsWith(key),
+      );
       const match = exact ?? prefix;
       const id = match?.key != null ? Number(match.key) : null;
       MetaAdsService.localeIdCache.set(key, id);
       if (id !== null) {
-        this.logger.log(`Locale resolved live: ${key} → ${id} (${match.name}). Consider adding to META_LOCALE_IDS as verified.`);
+        this.logger.log(
+          `Locale resolved live: ${key} → ${id} (${match.name}). Consider adding to META_LOCALE_IDS as verified.`,
+        );
       } else {
-        this.logger.warn(`Locale lookup found no Meta adlocale for "${key}" — language targeting skipped for it.`);
+        this.logger.warn(
+          `Locale lookup found no Meta adlocale for "${key}" — language targeting skipped for it.`,
+        );
       }
       return id;
     } catch (err: any) {
-      this.logger.warn(`Locale lookup failed for "${key}" (language targeting skipped): ${err.message}`);
+      this.logger.warn(
+        `Locale lookup failed for "${key}" (language targeting skipped): ${err.message}`,
+      );
       return null;
     }
   }
@@ -1629,8 +1901,13 @@ export class MetaAdsService {
    * Get the ad account's configured timezone (e.g. "Asia/Kolkata", "America/Los_Angeles").
    * Used to gate dayparting — schedules are interpreted in this TZ, not UTC.
    */
-  async getAdAccountTimezone(accountId: string, accessToken: string): Promise<string | null> {
-    const acctRef = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
+  async getAdAccountTimezone(
+    accountId: string,
+    accessToken: string,
+  ): Promise<string | null> {
+    const acctRef = accountId.startsWith('act_')
+      ? accountId
+      : `act_${accountId}`;
     try {
       const res = await this.metaApiCall('GET', `${META_API_BASE}/${acctRef}`, {
         fields: 'timezone_name',
@@ -1638,7 +1915,9 @@ export class MetaAdsService {
       });
       return res?.data?.timezone_name ?? null;
     } catch (err: any) {
-      this.logger.warn(`getAdAccountTimezone failed for ${accountId}: ${err.message}`);
+      this.logger.warn(
+        `getAdAccountTimezone failed for ${accountId}: ${err.message}`,
+      );
       return null;
     }
   }
@@ -1671,7 +1950,7 @@ export class MetaAdsService {
           this.logger.warn(
             `Meta API error (code ${metaErrorCode}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
           );
-          await new Promise(r => setTimeout(r, delay));
+          await new Promise((r) => setTimeout(r, delay));
           continue;
         }
 
@@ -1681,7 +1960,9 @@ export class MetaAdsService {
         const errorSubcode = fullError?.error_subcode;
         const errorDetail = fullError ? JSON.stringify(fullError) : '';
         this.logger.error(`Meta API full error: ${errorDetail}`);
-        throw new Error(`Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`);
+        throw new Error(
+          `Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`,
+        );
       }
     }
   }
@@ -1690,24 +1971,31 @@ export class MetaAdsService {
 
   private mapConversionEvent(event: string): string {
     const mapping: Record<string, string> = {
-      'Purchase': 'PURCHASE',
-      'Lead': 'LEAD',
-      'CompleteRegistration': 'COMPLETE_REGISTRATION',
-      'Subscribe': 'SUBSCRIBE',
-      'AddToCart': 'ADD_TO_CART',
-      'InitiateCheckout': 'INITIATE_CHECKOUT',
-      'ViewContent': 'VIEW_CONTENT',
+      Purchase: 'PURCHASE',
+      Lead: 'LEAD',
+      CompleteRegistration: 'COMPLETE_REGISTRATION',
+      Subscribe: 'SUBSCRIBE',
+      AddToCart: 'ADD_TO_CART',
+      InitiateCheckout: 'INITIATE_CHECKOUT',
+      ViewContent: 'VIEW_CONTENT',
     };
     return mapping[event] ?? 'OTHER';
   }
 
   private mapCta(ctaText: string): string {
     const lower = ctaText.toLowerCase();
-    if (lower.includes('buy') || lower.includes('shop') || lower.includes('karo')) return 'SHOP_NOW';
+    if (
+      lower.includes('buy') ||
+      lower.includes('shop') ||
+      lower.includes('karo')
+    )
+      return 'SHOP_NOW';
     if (lower.includes('learn') || lower.includes('jaano')) return 'LEARN_MORE';
     if (lower.includes('sign') || lower.includes('register')) return 'SIGN_UP';
-    if (lower.includes('book') || lower.includes('consult')) return 'BOOK_TRAVEL';
-    if (lower.includes('download') || lower.includes('install')) return 'INSTALL_MOBILE_APP';
+    if (lower.includes('book') || lower.includes('consult'))
+      return 'BOOK_TRAVEL';
+    if (lower.includes('download') || lower.includes('install'))
+      return 'INSTALL_MOBILE_APP';
     if (lower.includes('order')) return 'SHOP_NOW';
     return 'SHOP_NOW';
   }

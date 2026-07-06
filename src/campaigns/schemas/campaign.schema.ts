@@ -3,8 +3,34 @@ import { HydratedDocument } from 'mongoose';
 
 export type CampaignDocument = HydratedDocument<Campaign>;
 
-export type CampaignStatus = 'pending_approval' | 'active' | 'paused' | 'completed' | 'failed' | 'superseded';
-export type CampaignSource = 'agent' | 'manual';
+export type CampaignStatus =
+  | 'pending_approval'
+  | 'active'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'superseded';
+/**
+ * 'agent' = full AI pipeline (scout→brief→creative→review team) launched this.
+ * 'human' = launched through the dashboard's manual Create Campaign form —
+ *   a person supplied targeting + creative directly, no AI review team.
+ * 'manual' = imported from Meta; the tenant created it directly in Ads Manager,
+ *   we only observe it. Never launched or safety-rail-managed by this system.
+ */
+export type CampaignSource = 'agent' | 'manual' | 'human';
+
+/**
+ * 'agent' and 'human' campaigns were both launched BY this system (weekly
+ * budget cap, audit safety rails, auto-pause all apply). 'manual' campaigns
+ * were only ever imported for read-only tracking — treating them as managed
+ * would apply budget caps and auto-pause to spend the tenant controls outside
+ * this system entirely.
+ */
+export function isManagedCampaignSource(
+  source: CampaignSource | string | undefined,
+): boolean {
+  return source === 'agent' || source === 'human';
+}
 
 @Schema({ collection: 'campaigns', timestamps: true })
 export class Campaign {
@@ -41,7 +67,7 @@ export class Campaign {
   metaCampaignId: string;
 
   @Prop({ default: '' })
-  metaAccountId: string;   // which Meta ad account this campaign was launched on
+  metaAccountId: string; // which Meta ad account this campaign was launched on
 
   @Prop({ required: true, default: 'pending_approval' })
   status: CampaignStatus;
@@ -54,6 +80,39 @@ export class Campaign {
 
   @Prop()
   launchedAt?: Date;
+
+  // ── Campaign structure (synced from Meta; determines which levers exist) ──
+
+  /** LOWEST_COST_WITHOUT_CAP / LOWEST_COST_WITH_BID_CAP / COST_CAP */
+  @Prop({ default: '' })
+  bidStrategy?: string;
+
+  /** AUCTION / RESERVED */
+  @Prop({ default: '' })
+  buyingType?: string;
+
+  /** AUTOMATED_SHOPPING_ADS = Advantage+ shopping campaign. GUIDED_CREATION = manual. */
+  @Prop({ default: '' })
+  smartPromotionType?: string;
+
+  @Prop({ type: [String], default: [] })
+  specialAdCategories?: string[];
+
+  /** Account-currency units (already ÷100 from Meta's minor units). 0 = no cap. */
+  @Prop({ default: 0 })
+  spendCap?: number;
+
+  /**
+   * Where the budget lives — the lever map for budget actions.
+   * 'abo' = adset budgets (shift_budget_between_adsets executable)
+   * 'cbo' = campaign budget (Advantage campaign budget / CBO — only campaign-level budget moves)
+   * 'asc' = Advantage+ shopping (campaign budget + creative levers only)
+   */
+  @Prop({ default: '' })
+  budgetModel?: string;
+
+  @Prop()
+  stopTime?: Date;
 
   @Prop()
   approvedAt?: Date;
@@ -88,6 +147,10 @@ export class Campaign {
 
   @Prop({ default: 0 })
   roas: number;
+
+  /** Meta action_values sum (or fallback: conversions × product.conversionValue). ₹. */
+  @Prop({ default: 0 })
+  revenue: number;
 
   @Prop({ default: 0 })
   ctr: number;
@@ -162,9 +225,14 @@ export class Campaign {
     optimizationGoal: string;
     spend: number;
     impressions: number;
+    reach: number;
     clicks: number;
     conversions: number;
+    revenue: number;
+    roas: number;
     ctr: number;
+    cpc: number;
+    cpm: number;
     cpa: number;
     frequency: number;
     ads: {
@@ -174,9 +242,15 @@ export class Campaign {
       format: string;
       spend: number;
       impressions: number;
+      reach: number;
       clicks: number;
+      conversions: number;
+      revenue: number;
+      roas: number;
       ctr: number;
       cpc: number;
+      cpm: number;
+      cpa: number;
     }[];
   }[];
 
@@ -218,7 +292,7 @@ export class Campaign {
         ctr: number;
         cpc: number;
       };
-      ctrBaseline?: number;          // first 48h average CTR (for fatigue detection)
+      ctrBaseline?: number; // first 48h average CTR (for fatigue detection)
       baselineSetAt?: Date;
       replacementHistory?: {
         oldHook: string;
@@ -274,8 +348,14 @@ export class Campaign {
   @Prop({ type: [Object], default: [] })
   pendingActions: {
     actionId: string;
-    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
-    targetId: string;                 // Meta ad/adset/campaign ID
+    type:
+      | 'pause_ad'
+      | 'pause_adset'
+      | 'scale_adset'
+      | 'replace_creative'
+      | 'add_creative'
+      | 'add_adset';
+    targetId: string; // Meta ad/adset/campaign ID
     targetName: string;
     reason: string;
     /**
@@ -287,9 +367,9 @@ export class Campaign {
      * even though the timing guard had used the real value upstream.
      */
     priority?: 'low' | 'medium' | 'high';
-    metrics: Record<string, any>;     // relevant metrics + action-specific params
+    metrics: Record<string, any>; // relevant metrics + action-specific params
     recommendedAt: Date;
-    executeAt: Date;                  // recommendedAt + gracePeriod
+    executeAt: Date; // recommendedAt + gracePeriod
     status: 'pending' | 'executed' | 'overridden' | 'expired';
     executedAt?: Date;
     /**
@@ -299,7 +379,7 @@ export class Campaign {
      * "system applied this automatically per safety policy" in audit history.
      */
     autoApplied?: boolean;
-    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed';  // replace/add creative only
+    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed'; // replace/add creative only
   }[];
 }
 

@@ -13,16 +13,39 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
+import { ManualCampaignService } from './campaign-creator/manual-campaign.service';
+import { CreateManualCampaignDto } from './campaign-creator/manual-campaign.types';
 import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
 import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
+import { MetaDeepSyncService } from './meta-ads/meta-deep-sync.service';
 import { AudienceOrchestrationService } from './audience-orchestration/audience-orchestration.service';
-import { AuditSnapshot, AuditSnapshotDocument } from './schemas/audit-snapshot.schema';
+import {
+  AuditSnapshot,
+  AuditSnapshotDocument,
+} from './schemas/audit-snapshot.schema';
 import { Campaign, CampaignDocument } from './schemas/campaign.schema';
-import { ShadowAction, ShadowActionDocument } from '../learning/schemas/shadow-action.schema';
-import { CreativeBrief, CreativeBriefDocument } from '../pipeline/schemas/creative-brief.schema';
-import { CreativePackage, CreativePackageDocument } from '../creative/schemas/creative-package.schema';
+import {
+  MetricTimeseries,
+  MetricTimeseriesDocument,
+} from './schemas/metric-timeseries.schema';
+import {
+  BreakdownSnapshot,
+  BreakdownSnapshotDocument,
+} from './schemas/breakdown-snapshot.schema';
+import {
+  ShadowAction,
+  ShadowActionDocument,
+} from '../learning/schemas/shadow-action.schema';
+import {
+  CreativeBrief,
+  CreativeBriefDocument,
+} from '../pipeline/schemas/creative-brief.schema';
+import {
+  CreativePackage,
+  CreativePackageDocument,
+} from '../creative/schemas/creative-package.schema';
 import { SafetyChecks } from './campaign-creator/safety-checks';
 
 @Controller('campaigns')
@@ -30,10 +53,12 @@ export class CampaignsController {
   constructor(
     private readonly campaignsService: CampaignsService,
     private readonly campaignCreator: CampaignCreatorService,
+    private readonly manualCampaignService: ManualCampaignService,
     private readonly campaignAuditorService: CampaignAuditorService,
     private readonly companiesService: CompaniesService,
     private readonly metaAdsService: MetaAdsService,
     private readonly campaignSyncService: CampaignSyncService,
+    private readonly metaDeepSyncService: MetaDeepSyncService,
     private readonly audienceOrchestration: AudienceOrchestrationService,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
@@ -45,11 +70,73 @@ export class CampaignsController {
     private readonly creativeBriefModel: Model<CreativeBriefDocument>,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
+    @InjectModel(MetricTimeseries.name)
+    private readonly timeseriesModel: Model<MetricTimeseriesDocument>,
+    @InjectModel(BreakdownSnapshot.name)
+    private readonly breakdownModel: Model<BreakdownSnapshotDocument>,
   ) {}
 
   @Get(':tenantId')
   async findAll(@Param('tenantId') tenantId: string) {
     return this.campaignsService.findAll(tenantId);
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/meta-audiences?productName=X
+   * Lists the tenant's saved Meta custom/lookalike audiences (product.metaAudiences)
+   * for the Create Campaign form's audience picker. productName filters to one
+   * product; omit to get every product's audiences (tagged with productName).
+   *
+   * Registered BEFORE :tenantId/:campaignId — Nest/Express match routes in
+   * registration order, and "meta-audiences" would otherwise satisfy the
+   * :campaignId wildcard and get swallowed by findOne() below (hit 2026-07-06:
+   * every call here 500'd with a Mongo ObjectId cast error on the literal
+   * string "meta-audiences").
+   */
+  @Get(':tenantId/meta-audiences')
+  async getMetaAudiencesForCreate(
+    @Param('tenantId') tenantId: string,
+    @Query('productName') productName?: string,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    const products = ((company.products ?? []) as any[]).filter(
+      (p) => !productName || p.name === productName,
+    );
+    return products.flatMap((p) =>
+      (p.metaAudiences ?? []).map((a: any) => ({ ...a, productName: p.name })),
+    );
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/meta-interest-search?q=keyword
+   * Proxies Meta's detailed-targeting interest search — powers the Create
+   * Campaign form's interest picker. Returns real Meta interest IDs so
+   * whatever the user picks passes launch-time validation unchanged.
+   *
+   * Same route-ordering requirement as meta-audiences above — must precede
+   * :tenantId/:campaignId.
+   */
+  @Get(':tenantId/meta-interest-search')
+  async searchMetaInterests(
+    @Param('tenantId') tenantId: string,
+    @Query('q') q?: string,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
+    }
+    try {
+      return await this.metaAdsService.searchInterests(
+        q ?? '',
+        company.meta.accessToken,
+      );
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
   }
 
   @Get(':tenantId/:campaignId')
@@ -60,6 +147,43 @@ export class CampaignsController {
     const campaign = await this.campaignsService.findById(tenantId, campaignId);
     if (!campaign) throw new NotFoundException('Campaign not found');
     return campaign;
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/create-manual
+   * Manual Create Campaign form — a human specifies budget, targeting (or
+   * Advantage+), and creative directly; no AI Campaign Review Team involved.
+   * Writes a pending_approval Campaign exactly like the AI path produces, so
+   * the existing /approve endpoint launches it to Meta unchanged. Returns the
+   * new campaign id — the frontend should navigate to its detail page, where
+   * the standard "Awaiting Approval" panel and Approve & Launch flow take over.
+   */
+  @Post(':tenantId/create-manual')
+  async createManual(
+    @Param('tenantId') tenantId: string,
+    @Body() dto: CreateManualCampaignDto,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
+    }
+    try {
+      const campaign = await this.manualCampaignService.create(
+        tenantId,
+        company,
+        dto,
+      );
+      return {
+        success: true,
+        campaignId: String(campaign._id),
+        status: campaign.status,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
   }
 
   /**
@@ -77,19 +201,35 @@ export class CampaignsController {
       const company = await this.companiesService.findByTenantId(tenantId);
 
       // Validate accountId is in the tenant's allowed list
-      const allowedIds = company.meta?.accountIds ?? (company.meta?.accountId ? [company.meta.accountId] : []);
+      const allowedIds =
+        company.meta?.accountIds ??
+        (company.meta?.accountId ? [company.meta.accountId] : []);
       if (!accountId) {
-        throw new Error(`accountId is required. Available accounts: ${allowedIds.join(', ')}`);
+        throw new Error(
+          `accountId is required. Available accounts: ${allowedIds.join(', ')}`,
+        );
       }
       if (!accountId.startsWith('act_')) {
-        throw new Error(`accountId must start with "act_" (e.g. act_549390260260950). Got: "${accountId}"`);
+        throw new Error(
+          `accountId must start with "act_" (e.g. act_549390260260950). Got: "${accountId}"`,
+        );
       }
       if (!allowedIds.includes(accountId.substring(4))) {
-        throw new Error(`accountId "${accountId}" is not in your Meta account list. Available: ${allowedIds.join(', ')}`);
+        throw new Error(
+          `accountId "${accountId}" is not in your Meta account list. Available: ${allowedIds.join(', ')}`,
+        );
       }
 
-      const campaign = await this.campaignCreator.launch(campaignId, company, accountId);
-      return { success: true, metaCampaignId: campaign.metaCampaignId, status: campaign.status };
+      const campaign = await this.campaignCreator.launch(
+        campaignId,
+        company,
+        accountId,
+      );
+      return {
+        success: true,
+        metaCampaignId: campaign.metaCampaignId,
+        status: campaign.status,
+      };
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }
@@ -115,15 +255,22 @@ export class CampaignsController {
     @Body('customAudienceId') customAudienceId: string,
     @Body('audienceName') audienceName: string,
   ) {
-    const campaign: any = await this.campaignsService.findById(tenantId, campaignId);
+    const campaign: any = await this.campaignsService.findById(
+      tenantId,
+      campaignId,
+    );
     if (!campaign) throw new NotFoundException('Campaign not found');
-    if (!campaign.metaCampaignId) throw new BadRequestException('Campaign was never launched on Meta');
+    if (!campaign.metaCampaignId)
+      throw new BadRequestException('Campaign was never launched on Meta');
 
     const company = await this.companiesService.findByTenantId(tenantId);
-    if (!company?.meta?.accessToken) throw new BadRequestException('No Meta access token configured');
+    if (!company?.meta?.accessToken)
+      throw new BadRequestException('No Meta access token configured');
 
     // Resolve audience: prefer explicit ID, else look up by name in product config
-    const allAudiences = (company.products ?? []).flatMap((p: any) => p.metaAudiences ?? []);
+    const allAudiences = (company.products ?? []).flatMap(
+      (p: any) => p.metaAudiences ?? [],
+    );
     let resolvedId = customAudienceId;
     if (!resolvedId && audienceName) {
       const match = allAudiences.find((a: any) => a.name === audienceName);
@@ -136,7 +283,12 @@ export class CampaignsController {
     }
     if (!resolvedId) {
       throw new BadRequestException(
-        `Provide either customAudienceId or audienceName. Available custom audiences on this tenant: ${allAudiences.filter((a: any) => a.type === 'custom').map((a: any) => `${a.name} (${a.id})`).join(', ') || 'none'}`,
+        `Provide either customAudienceId or audienceName. Available custom audiences on this tenant: ${
+          allAudiences
+            .filter((a: any) => a.type === 'custom')
+            .map((a: any) => `${a.name} (${a.id})`)
+            .join(', ') || 'none'
+        }`,
       );
     }
 
@@ -148,13 +300,25 @@ export class CampaignsController {
       );
     }
 
-    const results: Array<{ adSetId: string; status: 'patched' | 'failed'; error?: string }> = [];
-    for (const liveAdSet of (campaign.metaAdSets ?? [])) {
+    const results: Array<{
+      adSetId: string;
+      status: 'patched' | 'failed';
+      error?: string;
+    }> = [];
+    for (const liveAdSet of campaign.metaAdSets ?? []) {
       try {
-        await this.metaAdsService.patchAdSetAudience(liveAdSet.id, company.meta.accessToken, resolvedId);
+        await this.metaAdsService.patchAdSetAudience(
+          liveAdSet.id,
+          company.meta.accessToken,
+          resolvedId,
+        );
         results.push({ adSetId: liveAdSet.id, status: 'patched' });
       } catch (err: any) {
-        results.push({ adSetId: liveAdSet.id, status: 'failed', error: err.message });
+        results.push({
+          adSetId: liveAdSet.id,
+          status: 'failed',
+          error: err.message,
+        });
       }
     }
 
@@ -167,7 +331,10 @@ export class CampaignsController {
             as.metaAudienceId = resolvedId;
           }
         }
-        await this.campaignModel.updateOne({ _id: campaign._id }, { $set: { campaignConfig: cfg } });
+        await this.campaignModel.updateOne(
+          { _id: campaign._id },
+          { $set: { campaignConfig: cfg } },
+        );
       }
     } catch {
       // best-effort persist
@@ -175,9 +342,13 @@ export class CampaignsController {
 
     return {
       campaignId,
-      patchedAudience: { id: resolvedId, name: auditMatch.name, type: auditMatch.type },
-      patched: results.filter(r => r.status === 'patched').length,
-      failed: results.filter(r => r.status === 'failed').length,
+      patchedAudience: {
+        id: resolvedId,
+        name: auditMatch.name,
+        type: auditMatch.type,
+      },
+      patched: results.filter((r) => r.status === 'patched').length,
+      failed: results.filter((r) => r.status === 'failed').length,
       results,
     };
   }
@@ -198,21 +369,40 @@ export class CampaignsController {
     @Param('tenantId') tenantId: string,
     @Param('campaignId') campaignId: string,
   ) {
-    const campaign: any = await this.campaignsService.findById(tenantId, campaignId);
+    const campaign: any = await this.campaignsService.findById(
+      tenantId,
+      campaignId,
+    );
     if (!campaign) throw new NotFoundException('Campaign not found');
-    if (!campaign.metaCampaignId) throw new BadRequestException('Campaign was never launched on Meta — backfill not applicable');
+    if (!campaign.metaCampaignId)
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — backfill not applicable',
+      );
 
     const company = await this.companiesService.findByTenantId(tenantId);
-    if (!company?.meta?.accessToken) throw new BadRequestException('No Meta access token configured for tenant');
-    if (!company.meta.pageId) throw new BadRequestException('company.meta.pageId is required for ad creative creation');
+    if (!company?.meta?.accessToken)
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
+    if (!company.meta.pageId)
+      throw new BadRequestException(
+        'company.meta.pageId is required for ad creative creation',
+      );
 
-    const pkg: any = await this.campaignsService.findCreativePackage(campaign.creativePackageId);
-    if (!pkg) throw new BadRequestException(`creativePackage ${campaign.creativePackageId} not found`);
+    const pkg: any = await this.campaignsService.findCreativePackage(
+      campaign.creativePackageId,
+    );
+    if (!pkg)
+      throw new BadRequestException(
+        `creativePackage ${campaign.creativePackageId} not found`,
+      );
 
     const copyVariants = pkg.copyVariants ?? [];
     const images = pkg.images ?? [];
     if (copyVariants.length === 0 || images.length === 0) {
-      throw new BadRequestException('Creative package has no variants or images');
+      throw new BadRequestException(
+        'Creative package has no variants or images',
+      );
     }
 
     // Resolve product → landing URL. Prefer brief.product if creativeBrief present;
@@ -220,37 +410,68 @@ export class CampaignsController {
     const briefId = campaign.briefId;
     let product: any = null;
     if (briefId) {
-      const brief = await this.creativeBriefModel.findOne({ tenantId, briefId }).lean().exec();
+      const brief = await this.creativeBriefModel
+        .findOne({ tenantId, briefId })
+        .lean()
+        .exec();
       if (brief?.product) {
-        product = (company.products ?? []).find((p: any) => p.name === brief.product);
+        product = (company.products ?? []).find(
+          (p: any) => p.name === brief.product,
+        );
       }
     }
     if (!product) {
-      product = (company.products ?? []).find((p: any) => p.active) ?? (company.products ?? [])[0];
+      product =
+        (company.products ?? []).find((p: any) => p.active) ??
+        (company.products ?? [])[0];
     }
     const landingUrl = product?.landingUrl;
-    if (!landingUrl) throw new BadRequestException(`No landingUrl on product "${product?.name ?? 'unknown'}" — cannot create ads`);
+    if (!landingUrl)
+      throw new BadRequestException(
+        `No landingUrl on product "${product?.name ?? 'unknown'}" — cannot create ads`,
+      );
 
-    const results: Array<{ adSetId: string; variantIndex: number; status: 'created' | 'skipped' | 'failed'; adId?: string; error?: string }> = [];
+    const results: Array<{
+      adSetId: string;
+      variantIndex: number;
+      status: 'created' | 'skipped' | 'failed';
+      adId?: string;
+      error?: string;
+    }> = [];
 
-    for (const liveAdSet of (campaign.metaAdSets ?? [])) {
+    for (const liveAdSet of campaign.metaAdSets ?? []) {
       const liveAds = liveAdSet.ads ?? [];
       // Variants already on this ad set — keyed by hookStyle since the ad name
       // includes "Variant N (hookStyle)" but variant index isn't directly stored
       // on the live ad. Use hookStyle as the dedupe key (each variant has a
       // distinct hookStyle in a single creative package).
-      const existingHookStyles = new Set(liveAds.map((ad: any) => (ad.hookStyle ?? '').toLowerCase()).filter(Boolean));
+      const existingHookStyles = new Set(
+        liveAds
+          .map((ad: any) => (ad.hookStyle ?? '').toLowerCase())
+          .filter(Boolean),
+      );
 
       for (let variantIdx = 0; variantIdx < copyVariants.length; variantIdx++) {
         const variant = copyVariants[variantIdx];
-        const image = images.find((img: any) => img.variantIndex === variantIdx);
+        const image = images.find(
+          (img: any) => img.variantIndex === variantIdx,
+        );
         if (!image?.imageUrl) {
-          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'failed', error: 'no image generated for this variant' });
+          results.push({
+            adSetId: liveAdSet.id,
+            variantIndex: variantIdx,
+            status: 'failed',
+            error: 'no image generated for this variant',
+          });
           continue;
         }
         const hs = (variant.hookStyle ?? '').toLowerCase();
         if (hs && existingHookStyles.has(hs)) {
-          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'skipped' });
+          results.push({
+            adSetId: liveAdSet.id,
+            variantIndex: variantIdx,
+            status: 'skipped',
+          });
           continue;
         }
 
@@ -260,15 +481,29 @@ export class CampaignsController {
             liveAdSet.id,
             company.meta.accessToken,
             adName,
-            { primaryText: variant.primaryText, headline: variant.headline, cta: variant.cta },
+            {
+              primaryText: variant.primaryText,
+              headline: variant.headline,
+              cta: variant.cta,
+            },
             image.imageUrl,
             company.meta.pageId,
             landingUrl,
             company.meta.specialAdCategories,
           );
-          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'created', adId: r.adId });
+          results.push({
+            adSetId: liveAdSet.id,
+            variantIndex: variantIdx,
+            status: 'created',
+            adId: r.adId,
+          });
         } catch (err: any) {
-          results.push({ adSetId: liveAdSet.id, variantIndex: variantIdx, status: 'failed', error: err.message });
+          results.push({
+            adSetId: liveAdSet.id,
+            variantIndex: variantIdx,
+            status: 'failed',
+            error: err.message,
+          });
         }
       }
     }
@@ -283,9 +518,9 @@ export class CampaignsController {
 
     return {
       campaignId,
-      created: results.filter(r => r.status === 'created').length,
-      skipped: results.filter(r => r.status === 'skipped').length,
-      failed: results.filter(r => r.status === 'failed').length,
+      created: results.filter((r) => r.status === 'created').length,
+      skipped: results.filter((r) => r.status === 'skipped').length,
+      failed: results.filter((r) => r.status === 'failed').length,
       results,
     };
   }
@@ -297,7 +532,11 @@ export class CampaignsController {
     @Body('reason') reason: string,
   ) {
     if (!reason) throw new BadRequestException('reason is required');
-    const campaign = await this.campaignsService.pause(tenantId, campaignId, reason);
+    const campaign = await this.campaignsService.pause(
+      tenantId,
+      campaignId,
+      reason,
+    );
     if (!campaign) throw new NotFoundException('Campaign not found');
 
     // Also pause on Meta if campaign was launched
@@ -305,7 +544,10 @@ export class CampaignsController {
     if (metaCampaignId) {
       const company = await this.companiesService.findByTenantId(tenantId);
       if (company?.meta?.accessToken) {
-        await this.metaAdsService.pauseCampaign(metaCampaignId, company.meta.accessToken);
+        await this.metaAdsService.pauseCampaign(
+          metaCampaignId,
+          company.meta.accessToken,
+        );
       }
     }
 
@@ -367,13 +609,24 @@ export class CampaignsController {
   ) {
     try {
       // 1. Flip status in DB
-      const result = await this.campaignsService.executeAction(tenantId, campaignId, actionId);
+      const result = await this.campaignsService.executeAction(
+        tenantId,
+        campaignId,
+        actionId,
+      );
 
       // 2. Execute on Meta immediately (don't wait for next audit cycle)
       const company = await this.companiesService.findByTenantId(tenantId);
-      const campaign = await this.campaignsService.findById(tenantId, campaignId);
+      const campaign = await this.campaignsService.findById(
+        tenantId,
+        campaignId,
+      );
       if (campaign && company) {
-        await this.campaignAuditorService.executeApprovedAction(campaign, company, actionId);
+        await this.campaignAuditorService.executeApprovedAction(
+          campaign,
+          company,
+          actionId,
+        );
       }
 
       return { success: true, ...result, executedImmediately: true };
@@ -395,9 +648,15 @@ export class CampaignsController {
     const campaign = await this.campaignsService.findById(tenantId, campaignId);
     if (!campaign) throw new NotFoundException('Campaign not found');
     if ((campaign as any).status !== 'pending_approval') {
-      throw new BadRequestException('Only pending_approval campaigns can be rejected');
+      throw new BadRequestException(
+        'Only pending_approval campaigns can be rejected',
+      );
     }
-    await this.campaignsService.reject(tenantId, campaignId, reason ?? 'Rejected by tenant');
+    await this.campaignsService.reject(
+      tenantId,
+      campaignId,
+      reason ?? 'Rejected by tenant',
+    );
     return { success: true, message: 'Campaign rejected' };
   }
 
@@ -418,7 +677,9 @@ export class CampaignsController {
     @Body('reason') reason?: string,
   ) {
     try {
-      const oldCampaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).exec();
+      const oldCampaign = await this.campaignModel
+        .findOne({ _id: campaignId, tenantId })
+        .exec();
       if (!oldCampaign) throw new NotFoundException('Campaign not found');
       if (oldCampaign.status !== 'pending_approval') {
         throw new BadRequestException(
@@ -426,19 +687,28 @@ export class CampaignsController {
         );
       }
       if (!oldCampaign.briefId) {
-        throw new BadRequestException('Campaign has no briefId — cannot reload original brief');
+        throw new BadRequestException(
+          'Campaign has no briefId — cannot reload original brief',
+        );
       }
 
       const brief = await this.creativeBriefModel
         .findOne({ tenantId, briefId: oldCampaign.briefId })
         .exec();
-      if (!brief) throw new NotFoundException(`Brief ${oldCampaign.briefId} not found`);
+      if (!brief)
+        throw new NotFoundException(`Brief ${oldCampaign.briefId} not found`);
 
       const creativePackage = await this.creativePackageModel
-        .findOne({ tenantId, briefId: oldCampaign.briefId, status: 'completed' })
+        .findOne({
+          tenantId,
+          briefId: oldCampaign.briefId,
+          status: 'completed',
+        })
         .exec();
       if (!creativePackage) {
-        throw new NotFoundException(`No completed creative package found for brief ${oldCampaign.briefId}`);
+        throw new NotFoundException(
+          `No completed creative package found for brief ${oldCampaign.briefId}`,
+        );
       }
 
       const company = await this.companiesService.findByTenantId(tenantId);
@@ -458,13 +728,21 @@ export class CampaignsController {
 
       let newCampaign;
       try {
-        newCampaign = await this.campaignCreator.create(brief, creativePackage, company, oldCampaign.runId);
+        newCampaign = await this.campaignCreator.create(
+          brief,
+          creativePackage,
+          company,
+          oldCampaign.runId,
+        );
       } catch (err: any) {
         // Restore old campaign if regenerate fails — don't leave the tenant
         // with no pending campaign at all.
         await this.campaignModel.updateOne(
           { _id: campaignId, tenantId },
-          { $set: { status: 'pending_approval' }, $unset: { pauseReason: '', pausedAt: '' } },
+          {
+            $set: { status: 'pending_approval' },
+            $unset: { pauseReason: '', pausedAt: '' },
+          },
         );
         throw err;
       }
@@ -478,7 +756,11 @@ export class CampaignsController {
         message: `Old campaign superseded — new pending_approval campaign created`,
       };
     } catch (err: any) {
-      if (err instanceof NotFoundException || err instanceof BadRequestException) throw err;
+      if (
+        err instanceof NotFoundException ||
+        err instanceof BadRequestException
+      )
+        throw err;
       throw new BadRequestException(err.message);
     }
   }
@@ -499,17 +781,26 @@ export class CampaignsController {
     if (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0) {
       throw new BadRequestException('budget must be a positive number');
     }
-    const campaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).exec();
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
     if (!campaign) throw new NotFoundException('Campaign not found');
     if (campaign.status !== 'pending_approval') {
-      throw new BadRequestException(`Only pending_approval campaigns can edit budget (current: ${campaign.status})`);
+      throw new BadRequestException(
+        `Only pending_approval campaigns can edit budget (current: ${campaign.status})`,
+      );
     }
 
     const company = await this.companiesService.findByTenantId(tenantId);
 
     // Same gates that ran at create time — TS-level safety, never overridable.
     SafetyChecks.checkCampaignBudget(budget, company);
-    await SafetyChecks.checkWeeklyBudget(tenantId, budget, company, this.campaignsService);
+    await SafetyChecks.checkWeeklyBudget(
+      tenantId,
+      budget,
+      company,
+      this.campaignsService,
+    );
 
     await this.campaignModel.updateOne(
       { _id: campaignId, tenantId },
@@ -536,7 +827,11 @@ export class CampaignsController {
     @Param('tenantId') tenantId: string,
     @Param('campaignId') campaignId: string,
   ) {
-    const campaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).select('_id').lean().exec();
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .select('_id')
+      .lean()
+      .exec();
     if (!campaign) throw new NotFoundException('Campaign not found');
     return this.shadowActionModel
       .find({ tenantId, campaignId })
@@ -566,12 +861,101 @@ export class CampaignsController {
       .lean()
       .exec();
 
-    return snapshots.map(s => ({
+    return snapshots.map((s) => ({
       auditedAt: s.auditedAt,
       metrics: s.metrics,
       adSets: s.adSets,
       verdict: s.verdict,
     }));
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/breakdowns
+   * Segment performance: age×gender, region, placement, hourly, day-of-week,
+   * and per-asset (video/body/title) rows — campaign-level rollup by default.
+   * Pass ?level=adset&entityId=<metaAdSetId> for one ad set's own rows instead.
+   */
+  @Get(':tenantId/:campaignId/breakdowns')
+  async getCampaignBreakdowns(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Query('level') level?: string,
+    @Query('entityId') entityId?: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    const metaCampaignId = (campaign as any).metaCampaignId;
+    if (!metaCampaignId) return {};
+
+    // Default (no entityId): campaign-wide view. Rollup types (age_gender,
+    // region, placement, hourly, dow) live as ONE doc at level='campaign'.
+    // Per-asset types (asset_body/title/video) live as ONE doc PER AD at
+    // level='ad' — there is no campaign-level rollup for those, so they must
+    // be concatenated across every ad's doc, not selected by a single level
+    // filter (querying level='campaign' alone silently returned zero rows
+    // for every asset_* type).
+    const docs = await this.breakdownModel
+      .find(
+        entityId
+          ? { tenantId, entityId }
+          : level
+            ? { tenantId, metaCampaignId, level }
+            : { tenantId, metaCampaignId, level: { $in: ['campaign', 'ad'] } },
+      )
+      .lean()
+      .exec();
+
+    const byType: Record<
+      string,
+      { rows: unknown[]; fetchedAt: Date; window: string }
+    > = {};
+    for (const d of docs) {
+      const bucket = byType[d.breakdownType] ?? {
+        rows: [],
+        fetchedAt: d.fetchedAt,
+        window: d.window,
+      };
+      bucket.rows.push(...d.rows);
+      if (d.fetchedAt > bucket.fetchedAt) bucket.fetchedAt = d.fetchedAt;
+      byType[d.breakdownType] = bucket;
+    }
+    return byType;
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/timeseries
+   * Daily rows (time_increment=1) for trend charts. level=campaign|adset|ad,
+   * defaults to campaign; pass entityId for a specific adset/ad's own series.
+   */
+  @Get(':tenantId/:campaignId/timeseries')
+  async getCampaignTimeseries(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Query('level') level?: string,
+    @Query('entityId') entityId?: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    const metaCampaignId = (campaign as any).metaCampaignId;
+    if (!metaCampaignId) return [];
+
+    const lvl = level ?? 'campaign';
+    const filter: Record<string, unknown> = {
+      tenantId,
+      metaCampaignId,
+      level: lvl,
+    };
+    if (entityId) filter.entityId = entityId;
+    else if (lvl === 'campaign') filter.entityId = metaCampaignId;
+
+    return this.timeseriesModel
+      .find(filter)
+      .sort({ date: 1 })
+      .select(
+        '-_id date spend impressions reach frequency clicks ctr cpc cpm conversions revenue addToCart initiateCheckout landingPageView video3s thruplay entityId adsetId',
+      )
+      .lean()
+      .exec();
   }
 
   /**
@@ -585,7 +969,11 @@ export class CampaignsController {
     @Param('actionId') actionId: string,
   ) {
     try {
-      await this.campaignsService.overrideAction(tenantId, campaignId, actionId);
+      await this.campaignsService.overrideAction(
+        tenantId,
+        campaignId,
+        actionId,
+      );
       return { success: true, message: 'Action overridden — will not execute' };
     } catch (err: any) {
       throw new BadRequestException(err.message);
@@ -600,7 +988,31 @@ export class CampaignsController {
   async syncCampaigns(@Param('tenantId') tenantId: string) {
     try {
       const company = await this.companiesService.findByTenantId(tenantId);
-      const result = await this.campaignSyncService.syncActiveCampaigns(company);
+      const result =
+        await this.campaignSyncService.syncActiveCampaigns(company);
+      return { success: true, ...result };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/deep-sync
+   * Daily-series backfill (time_increment=1, default 90d) + segment
+   * breakdowns (age×gender, region, placement, hourly, dow, per-asset) for
+   * all ACTIVE campaigns. Read-only against Meta. Heavier than /sync —
+   * expect a few minutes for a 7-campaign account.
+   */
+  @Post(':tenantId/deep-sync')
+  async deepSyncCampaigns(
+    @Param('tenantId') tenantId: string,
+    @Query('backfillDays') backfillDays?: string,
+  ) {
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+      const result = await this.metaDeepSyncService.deepSync(company, {
+        backfillDays: backfillDays ? parseInt(backfillDays, 10) : undefined,
+      });
       return { success: true, ...result };
     } catch (err: any) {
       throw new BadRequestException(err.message);
@@ -634,7 +1046,10 @@ export class CampaignsController {
     @Param('campaignId') campaignId: string,
   ) {
     try {
-      const result = await this.campaignAuditorService.auditOne(tenantId, campaignId);
+      const result = await this.campaignAuditorService.auditOne(
+        tenantId,
+        campaignId,
+      );
       return { success: true, campaignId, ...result };
     } catch (err: any) {
       throw new BadRequestException(err.message);
@@ -658,7 +1073,10 @@ export class CampaignsController {
     @Body() body: { productName?: string } = {},
   ) {
     try {
-      const results = await this.audienceOrchestration.createStandardStack(tenantId, body.productName);
+      const results = await this.audienceOrchestration.createStandardStack(
+        tenantId,
+        body.productName,
+      );
       const summary = {
         created: results.filter((r) => r.status === 'created').length,
         exists: results.filter((r) => r.status === 'exists').length,

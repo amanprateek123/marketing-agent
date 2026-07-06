@@ -15,6 +15,27 @@ import {
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
 
+/**
+ * Ad fields sourced from the account-wide "ad insights lifetime" call. When
+ * that call fails outright (rate limit / timeout), every ad's `adi` falls
+ * back to `{}` and these would silently be overwritten with zero for every
+ * ad in the account — while campaign-level spend (a separate, independent
+ * call) stays correct. Hit 2026-07-06: "Application request limit reached"
+ * zeroed spend/revenue/conversions for all 540 ads across all 7 campaigns
+ * in one sync cycle. On detected failure, these are preserved from the
+ * previous sync instead of overwritten.
+ */
+const AD_LIFETIME_METRIC_FIELDS = [
+  'spend', 'revenue', 'roas', 'cpc', 'cpm', 'cpa', 'aov',
+  'impressions', 'reach', 'frequency', 'clicks', 'ctr',
+  'inlineLinkClicks', 'outboundClicks', 'linkCtr',
+  'conversions', 'addToCart', 'initiateCheckout', 'landingPageView', 'cvr',
+  'video3s', 'thruplay', 'hookRate', 'holdRate',
+  'videoP25', 'videoP50', 'videoP75', 'videoP100',
+  'videoP25Pct', 'videoP50Pct', 'videoP75Pct', 'videoP100Pct',
+  'dateStart', 'dateStop', 'last7d',
+] as const;
+
 const META_TO_INTERNAL_STATUS: Record<string, string> = {
   ACTIVE: 'active',
   PAUSED: 'paused',
@@ -178,19 +199,18 @@ export class CampaignSyncService {
 
     for (const accountId of accountIds) {
       try {
-        // Fetch only active/paused campaigns with insights in one call
+        // ACTIVE-only sync. Large accounts (91astrology has 454 campaigns)
+        // burn through Meta's per-account API budget in minutes when we fetch
+        // paused/archived campaigns too. Paused campaigns keep their
+        // last-known state in Mongo; we only refresh what's live.
         const filtering = JSON.stringify([
-          { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
+          { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
         ]);
 
-        // Campaigns — paginated. limit=200 was exactly hitting the cap for
-        // 91astrology (200 active+paused campaigns) → certainty that some
-        // campaigns were silently truncated. Following paging.next surfaces
-        // the full list.
         const res = await this.fetchAllPages(
           `${META_API_BASE}/${accountId}/campaigns`,
           {
-            fields: 'id,name,status,objective,daily_budget,lifetime_budget,start_time',
+            fields: 'id,name,status,objective,daily_budget,lifetime_budget,start_time,stop_time,bid_strategy,buying_type,smart_promotion_type,special_ad_categories,spend_cap',
             filtering,
             limit: '200',
             access_token: accessToken,
@@ -200,7 +220,7 @@ export class CampaignSyncService {
 
         const campaigns: any[] = res.data?.data ?? [];
 
-        // Fetch insights for these campaigns in one bulk call (paginated).
+        // Fetch insights ONLY for the active campaigns just returned.
         const campaignIds = campaigns.map(c => c.id);
         if (campaignIds.length === 0) continue;
 
@@ -224,40 +244,56 @@ export class CampaignSyncService {
         }
         await new Promise(resolve => setTimeout(resolve, 3000));
 
-        // Ad-set metadata — paginated + chunked. Across 200+ active+paused
-        // campaigns × 1-3 ad sets each, easily exceeds limit=500. Filtering by
-        // hundreds of campaign IDs also overflows Meta's URL cap.
-        const adSetsRes = await this.fetchAllPagesChunked(
-          `${META_API_BASE}/${accountId}/adsets`,
-          {
-            fields: 'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal',
-            filtering: JSON.stringify([
-              { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
-            ]),
-            limit: '500',
-            access_token: accessToken,
-          },
-          'campaign.id',
-          campaignIds,
-          `AdSets ${accountId}`,
-        );
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        // Ad-set metadata — restricted to ACTIVE campaigns only. Fetching ad
+        // sets for every paused/archived campaign in a large account (454
+        // campaigns × chunks of 10 IDs) burns through Meta's per-account API
+        // budget in minutes and triggers "User request limit reached" errors
+        // for the actively-running campaigns we actually care about.
+        // For campaigns that later transition ACTIVE → PAUSED, their existing
+        // metaAdSets stays in Mongo (see the write-preservation guard below).
+        const activeMetaIds = campaigns
+          .filter((c) => c.status === 'ACTIVE')
+          .map((c) => c.id);
 
-        // Ad-set insights — paginated + chunked by campaign IDs.
-        const adSetInsightsRes = await this.fetchAllPagesChunked(
-          `${META_API_BASE}/${accountId}/insights`,
-          {
-            fields: 'adset_id,spend,impressions,clicks,ctr,cpc,actions,action_values,frequency',
-            level: 'adset',
-            date_preset: 'maximum',
-            limit: '500',
-            access_token: accessToken,
-          },
-          'campaign.id',
-          campaignIds,
-          `AdSet insights ${accountId}`,
-        );
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        const adSetsRes =
+          activeMetaIds.length > 0
+            ? await this.fetchAllPagesChunked(
+                `${META_API_BASE}/${accountId}/adsets`,
+                {
+                  fields:
+                    'id,name,status,campaign_id,daily_budget,lifetime_budget,optimization_goal,configured_status,effective_status,learning_stage_info,targeting,bid_amount,bid_strategy,billing_event,attribution_spec,promoted_object,start_time,end_time',
+                  filtering: JSON.stringify([
+                    { field: 'effective_status', operator: 'IN', value: ['ACTIVE', 'PAUSED'] },
+                  ]),
+                  limit: '500',
+                  access_token: accessToken,
+                },
+                'campaign.id',
+                activeMetaIds,
+                `AdSets ${accountId}`,
+              )
+            : { data: { data: [] } };
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
+        // Ad-set insights — same restriction. Only active campaigns get insights refreshed.
+        const adSetInsightsRes =
+          activeMetaIds.length > 0
+            ? await this.fetchAllPagesChunked(
+                `${META_API_BASE}/${accountId}/insights`,
+                {
+                  fields:
+                    'adset_id,spend,impressions,reach,clicks,ctr,cpc,cpm,actions,action_values,frequency,quality_ranking,engagement_rate_ranking,conversion_rate_ranking,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,date_start,date_stop',
+                  level: 'adset',
+                  date_preset: 'maximum',
+                  limit: '500',
+                  access_token: accessToken,
+                },
+                'campaign.id',
+                activeMetaIds,
+                `AdSet insights ${accountId}`,
+              )
+            : { data: { data: [] } };
+        await new Promise((resolve) => setTimeout(resolve, 3000));
 
         // Ads — paginated. With many active campaigns × 4 variants each,
         // total active ads can exceed limit=500. Without paging some ads
@@ -267,18 +303,89 @@ export class CampaignSyncService {
           ? await this.fetchAllPagesChunked(
               `${META_API_BASE}/${accountId}/ads`,
               {
-                fields: 'id,name,status,adset_id,creative{id,name,object_story_spec},insights{spend,impressions,clicks,ctr,cpc,actions,action_values}',
+                // Meta only computes quality_/engagement_rate_/conversion_rate_ranking
+                // over a rolling 7-day window — anything else returns UNKNOWN. We must
+                // pass date_preset to the insights subquery, otherwise it defaults to
+                // 'maximum' and every ranking comes back as UNKNOWN regardless of
+                // impression volume. Lifetime ad metrics come from the separate
+                // level=ad insights call below — this embedded query is the
+                // rankings + recency window only.
+                fields: 'id,name,status,effective_status,adset_id,creative{id,name,object_story_spec,asset_feed_spec,thumbnail_url},insights.date_preset(last_7d){spend,impressions,reach,clicks,ctr,cpc,cpm,actions,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions}',
+                // ACTIVE-only used to hide every ad inside a paused adset
+                // (effective_status=ADSET_PAUSED) — 20 of 42 adsets had zero
+                // ads despite ₹lakhs of historical spend, starving the
+                // learning engine of past winners/losers.
                 filtering: JSON.stringify([
-                  { field: 'effective_status', operator: 'IN', value: ['ACTIVE'] },
+                  {
+                    field: 'effective_status',
+                    operator: 'IN',
+                    value: ['ACTIVE', 'PAUSED', 'ADSET_PAUSED', 'CAMPAIGN_PAUSED', 'WITH_ISSUES'],
+                  },
                 ]),
-                limit: '500',
+                // limit=500 with creative{asset_feed_spec} + embedded insights
+                // trips Meta's per-request data cap ("Please reduce the amount
+                // of data") now that paused ads are included — small pages +
+                // one chunk per campaign, cursor-paging fetches the rest.
+                limit: '50',
                 access_token: accessToken,
               },
               'campaign.id',
               activeCampaignIds,
               `Ads ${accountId}`,
+              1,
             )
           : { data: { data: [] } };
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
+        // Ad-level LIFETIME insights — the embedded insights above are last_7d
+        // (required for rankings). Without this call, ad metrics were stored on
+        // a 7-day window while adset/campaign metrics were lifetime — cross-
+        // level math compared different windows, and 87% of ads showed zero
+        // conversions purely because of the short window. Also fetches the
+        // fields the embedded query never asked for: frequency, link clicks
+        // vs all clicks, 3-sec video plays (hook rate), thruplay.
+        const adLifetimeRes = activeCampaignIds.length > 0
+          ? await this.fetchAllPagesChunked(
+              `${META_API_BASE}/${accountId}/insights`,
+              {
+                fields:
+                  'ad_id,adset_id,spend,impressions,reach,frequency,clicks,inline_link_clicks,outbound_clicks,ctr,cpc,cpm,actions,action_values,video_play_actions,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,date_start,date_stop',
+                level: 'ad',
+                date_preset: 'maximum',
+                use_unified_attribution_setting: 'true',
+                limit: '500',
+                access_token: accessToken,
+              },
+              'campaign.id',
+              activeCampaignIds,
+              `Ad insights lifetime ${accountId}`,
+            )
+          : { data: { data: [] } };
+
+        const adLifetimeMap = new Map<string, any>();
+        for (const row of adLifetimeRes.data?.data ?? []) {
+          if (row.ad_id) adLifetimeMap.set(row.ad_id, row);
+        }
+
+        // Detect a total fetch failure (see AD_LIFETIME_METRIC_FIELDS comment)
+        // and preload each ad's last-known lifetime metrics so they can be
+        // preserved instead of zeroed below.
+        const adLifetimeFetchFailed = activeCampaignIds.length > 0 && adLifetimeMap.size === 0;
+        const prevAdMetricsById = new Map<string, any>();
+        if (adLifetimeFetchFailed) {
+          const existing = await this.campaignModel
+            .find({ tenantId, metaCampaignId: { $in: activeCampaignIds } }, { metaAdSets: 1 })
+            .lean()
+            .exec();
+          for (const c of existing) {
+            for (const as of (c as any).metaAdSets ?? []) {
+              for (const ad of as.ads ?? []) if (ad.id) prevAdMetricsById.set(ad.id, ad);
+            }
+          }
+          this.logger.warn(
+            `Ad lifetime insights fetch returned 0 rows for ${accountId} — preserving previous money/funnel metrics for ${prevAdMetricsById.size} ads instead of zeroing them`,
+          );
+        }
 
         // Group ad sets and insights by campaign_id
         const adSetsByCampaign = new Map<string, any[]>();
@@ -301,11 +408,12 @@ export class CampaignSyncService {
           adsByAdSet.set(ad.adset_id, list);
         }
 
-        // Build ad insights map from embedded insights{} on each ad
-        const adInsightsMap = new Map<string, any>();
+        // Last-7d map from the embedded insights{} on each ad — this is the
+        // rankings + recency window; lifetime metrics come from adLifetimeMap.
+        const ad7dMap = new Map<string, any>();
         for (const ad of adsRes.data?.data ?? []) {
           const insightRow = ad.insights?.data?.[0];
-          if (insightRow) adInsightsMap.set(ad.id, insightRow);
+          if (insightRow) ad7dMap.set(ad.id, insightRow);
         }
 
         for (const campaign of campaigns) {
@@ -316,33 +424,156 @@ export class CampaignSyncService {
           const ctr = parseFloat(insights.ctr ?? '0');
           const cpc = parseFloat(insights.cpc ?? '0');
           const conversions = this.extractConversions(insights.actions, conversionTypes);
+
+          // Revenue + ROAS: prefer Meta's action_values (true pixel-tracked
+          // revenue); fall back to conversions × product.conversionValue when
+          // the pixel doesn't fire with a `value` param.
+          let actionValue = extractActionValue(insights.action_values, conversionTypes);
+          if (actionValue === 0 && conversions > 0) {
+            // Pick the product-specific fallback: match any custom-conversion
+            // that this campaign's insights.actions reported.
+            for (const [type, val] of fallbackValueByConversionType.entries()) {
+              if (this.hasActionOfType(insights.actions, type)) {
+                actionValue = conversions * val;
+                break;
+              }
+            }
+          }
+          const roas = spend > 0 && actionValue > 0 ? actionValue / spend : 0;
+
           const internalStatus = META_TO_INTERNAL_STATUS[campaign.status] ?? 'active';
 
           // Build metaAdSets from fetched ad sets + insights + ads
           const metaAdSets = (adSetsByCampaign.get(campaign.id) ?? []).map((as: any) => {
             // Build ads for this adset — full metrics for active campaigns, metadata only for paused
             const ads = (adsByAdSet.get(as.id) ?? []).map((ad: any) => {
-              const adi = adInsightsMap.get(ad.id) ?? {};
+              const adi = adLifetimeMap.get(ad.id) ?? {};
+              const ad7 = ad7dMap.get(ad.id) ?? {};
               const creative = ad.creative ?? {};
-              const format = this.inferFormatFromCreative(creative, ad.name ?? '');
+              const creativeAttrs = parseCreativeAttributes(creative);
+              const format =
+                creativeAttrs.format || this.inferFormatFromCreative(creative, ad.name ?? '');
               const hookStyle = this.inferHookStyle(
                 ad.name ?? '',
-                creative.object_story_spec?.link_data?.message ?? creative.object_story_spec?.video_data?.message ?? '',
-                creative.name ?? '',
+                creativeAttrs.body ||
+                  (creative.object_story_spec?.link_data?.message ?? creative.object_story_spec?.video_data?.message ?? ''),
+                creativeAttrs.title || (creative.name ?? ''),
               );
-              return {
+              const adSpend = parseFloat(adi.spend ?? '0');
+              const adImpressions = parseInt(adi.impressions ?? '0', 10);
+              const adClicks = parseInt(adi.clicks ?? '0', 10);
+              const adConversions = this.extractConversions(adi.actions, conversionTypes);
+              let adActionValue = extractActionValue(adi.action_values, conversionTypes);
+              if (adActionValue === 0 && adConversions > 0) {
+                for (const [type, val] of fallbackValueByConversionType.entries()) {
+                  if (this.hasActionOfType(adi.actions, type)) {
+                    adActionValue = adConversions * val;
+                    break;
+                  }
+                }
+              }
+              const adRoas = adSpend > 0 && adActionValue > 0 ? adActionValue / adSpend : 0;
+              const adCpa = adConversions > 0 ? adSpend / adConversions : 0;
+              const adCvr = adClicks > 0 ? (adConversions / adClicks) * 100 : 0;
+              const adAov = adConversions > 0 ? adActionValue / adConversions : 0;
+              const adAddToCart = countAction(adi.actions, ['add_to_cart', 'omni_add_to_cart']);
+              const adInitiateCheckout = countAction(adi.actions, ['initiate_checkout', 'omni_initiated_checkout']);
+              const adLandingPageView = countAction(adi.actions, ['landing_page_view', 'omni_landing_page_view']);
+              const videoP25 = firstActionValue(adi.video_p25_watched_actions);
+              const videoP50 = firstActionValue(adi.video_p50_watched_actions);
+              const videoP75 = firstActionValue(adi.video_p75_watched_actions);
+              const videoP100 = firstActionValue(adi.video_p100_watched_actions);
+              const videoImp = adImpressions > 0 ? adImpressions : 0;
+              const adInlineLinkClicks = parseInt(adi.inline_link_clicks ?? '0', 10);
+              const adOutboundClicks = firstActionValue(adi.outbound_clicks);
+              // 3-sec plays + thruplay → hook rate (stopped the scroll) and
+              // hold rate (kept watching) — the two numbers creative learning
+              // actually correlates with winners.
+              const adVideo3s = firstActionValue(adi.video_play_actions);
+              const adThruplay = firstActionValue(adi.video_thruplay_watched_actions);
+              const ad7Conversions = this.extractConversions(ad7.actions, conversionTypes);
+              const ad7Spend = parseFloat(ad7.spend ?? '0');
+              const builtAd = {
                 id: ad.id,
                 name: ad.name ?? '',
                 status: (META_TO_INTERNAL_STATUS[ad.status] ?? ad.status ?? '').toLowerCase(),
+                effectiveStatus: ad.effective_status ?? '',
                 hookStyle,
                 format,
-                spend: parseFloat(adi.spend ?? '0'),
-                impressions: parseInt(adi.impressions ?? '0', 10),
-                clicks: parseInt(adi.clicks ?? '0', 10),
-                ctr: parseFloat(adi.ctr ?? '0'),
+                creativeId: creative.id ?? '',
+                creativeName: creative.name ?? '',
+                // Creative attributes (parsed from object_story_spec / asset_feed_spec)
+                creativeBody: creativeAttrs.body,
+                creativeTitle: creativeAttrs.title,
+                creativeCta: creativeAttrs.cta,
+                creativeLinkUrl: creativeAttrs.linkUrl,
+                creativeVideoId: creativeAttrs.videoId,
+                creativeImageHash: creativeAttrs.imageHash,
+                thumbnailUrl: creative.thumbnail_url ?? '',
+                isDynamicCreative: creativeAttrs.isDynamicCreative,
+                // Money (lifetime window — same basis as adset/campaign)
+                spend: adSpend,
+                revenue: adActionValue,
+                roas: adRoas,
                 cpc: parseFloat(adi.cpc ?? '0'),
-                conversions: this.extractConversions(adi.actions, conversionTypes),
-              };
+                cpm: parseFloat(adi.cpm ?? '0'),
+                cpa: adCpa,
+                aov: adAov,
+                // Reach / delivery
+                impressions: adImpressions,
+                reach: parseInt(adi.reach ?? '0', 10),
+                frequency: parseFloat(adi.frequency ?? '0'),
+                clicks: adClicks,
+                ctr: parseFloat(adi.ctr ?? '0'),
+                inlineLinkClicks: adInlineLinkClicks,
+                outboundClicks: adOutboundClicks,
+                linkCtr: adImpressions > 0 ? (adInlineLinkClicks / adImpressions) * 100 : 0,
+                // Funnel
+                conversions: adConversions,
+                addToCart: adAddToCart,
+                initiateCheckout: adInitiateCheckout,
+                landingPageView: adLandingPageView,
+                cvr: adCvr,
+                // Rankings — only computed by Meta over a rolling 7d window
+                qualityRanking: ad7.quality_ranking ?? undefined,
+                engagementRanking: ad7.engagement_rate_ranking ?? undefined,
+                conversionRanking: ad7.conversion_rate_ranking ?? undefined,
+                // Video watch counts + %
+                video3s: adVideo3s,
+                thruplay: adThruplay,
+                hookRate: videoImp > 0 ? (adVideo3s / videoImp) * 100 : 0,
+                holdRate: adVideo3s > 0 ? (adThruplay / adVideo3s) * 100 : 0,
+                videoP25,
+                videoP50,
+                videoP75,
+                videoP100,
+                videoP25Pct: videoImp > 0 ? (videoP25 / videoImp) * 100 : 0,
+                videoP50Pct: videoImp > 0 ? (videoP50 / videoImp) * 100 : 0,
+                videoP75Pct: videoImp > 0 ? (videoP75 / videoImp) * 100 : 0,
+                videoP100Pct: videoImp > 0 ? (videoP100 / videoImp) * 100 : 0,
+                dateStart: adi.date_start ?? '',
+                dateStop: adi.date_stop ?? '',
+                // Recency window (7d) — fatigue/decay reads this, not lifetime
+                last7d: {
+                  spend: ad7Spend,
+                  impressions: parseInt(ad7.impressions ?? '0', 10),
+                  clicks: parseInt(ad7.clicks ?? '0', 10),
+                  ctr: parseFloat(ad7.ctr ?? '0'),
+                  conversions: ad7Conversions,
+                  revenue: extractActionValue(ad7.action_values, conversionTypes),
+                  cpa: ad7Conversions > 0 ? ad7Spend / ad7Conversions : 0,
+                },
+              } as Record<string, unknown>;
+
+              if (adLifetimeFetchFailed) {
+                const prev = prevAdMetricsById.get(ad.id);
+                if (prev) {
+                  for (const f of AD_LIFETIME_METRIC_FIELDS) {
+                    if (prev[f] !== undefined) builtAd[f] = prev[f];
+                  }
+                }
+              }
+              return builtAd;
             });
 
             // Aggregate adset metrics: ALWAYS prefer the ad-set-level insights
@@ -357,12 +588,52 @@ export class CampaignSyncService {
             const asi = adSetInsightsMap.get(as.id) ?? {};
             const asSpend = parseFloat(asi.spend ?? '0');
             const asImpressions = parseInt(asi.impressions ?? '0', 10);
+            const asReach = parseInt(asi.reach ?? '0', 10);
             const asClicks = parseInt(asi.clicks ?? '0', 10);
             const asConversions = this.extractConversions(asi.actions, conversionTypes);
-            const asCtr = asImpressions > 0 ? (asClicks / asImpressions) * 100 : 0;
-            const asCpc = asClicks > 0 ? asSpend / asClicks : 0;
+            // Prefer Meta-reported ctr/cpc/cpm if present, fall back to computed.
+            const asCtr = parseFloat(asi.ctr ?? '0') || (asImpressions > 0 ? (asClicks / asImpressions) * 100 : 0);
+            const asCpc = parseFloat(asi.cpc ?? '0') || (asClicks > 0 ? asSpend / asClicks : 0);
+            const asCpm = parseFloat(asi.cpm ?? '0') || (asImpressions > 0 ? (asSpend / asImpressions) * 1000 : 0);
             const asCpa = asConversions > 0 ? asSpend / asConversions : 0;
             const asFrequency = parseFloat(asi.frequency ?? '0');
+
+            // Revenue + ROAS at ad-set level. Same logic as campaign level:
+            // prefer Meta's action_values, fall back to conversions ×
+            // product.conversionValue when the pixel event has no value param.
+            let asActionValue = extractActionValue(asi.action_values, conversionTypes);
+            if (asActionValue === 0 && asConversions > 0) {
+              for (const [type, val] of fallbackValueByConversionType.entries()) {
+                if (this.hasActionOfType(asi.actions, type)) {
+                  asActionValue = asConversions * val;
+                  break;
+                }
+              }
+            }
+            const asRoas = asSpend > 0 && asActionValue > 0 ? asActionValue / asSpend : 0;
+            const asCvr = asClicks > 0 ? (asConversions / asClicks) * 100 : 0;
+            const asAov = asConversions > 0 ? asActionValue / asConversions : 0;
+            const asAddToCart = countAction(asi.actions, ['add_to_cart', 'omni_add_to_cart']);
+            const asInitiateCheckout = countAction(asi.actions, [
+              'initiate_checkout',
+              'omni_initiated_checkout',
+            ]);
+            const asLandingPageView = countAction(asi.actions, [
+              'landing_page_view',
+              'omni_landing_page_view',
+            ]);
+            const asVideoP25 = firstActionValue(asi.video_p25_watched_actions);
+            const asVideoP50 = firstActionValue(asi.video_p50_watched_actions);
+            const asVideoP75 = firstActionValue(asi.video_p75_watched_actions);
+            const asVideoP100 = firstActionValue(asi.video_p100_watched_actions);
+            const videoImpressionBase = asImpressions > 0 ? asImpressions : 0;
+            const asVideoP25Pct = videoImpressionBase > 0 ? (asVideoP25 / videoImpressionBase) * 100 : 0;
+            const asVideoP50Pct = videoImpressionBase > 0 ? (asVideoP50 / videoImpressionBase) * 100 : 0;
+            const asVideoP75Pct = videoImpressionBase > 0 ? (asVideoP75 / videoImpressionBase) * 100 : 0;
+            const asVideoP100Pct = videoImpressionBase > 0 ? (asVideoP100 / videoImpressionBase) * 100 : 0;
+            const targeting = as.targeting ?? {};
+            const learningStage =
+              as.learning_stage_info?.status ?? as.configured_status ?? '';
 
             return {
               id: as.id,
@@ -372,28 +643,157 @@ export class CampaignSyncService {
               dailyBudget: parseFloat(as.daily_budget ?? '0') / 100,
               lifetimeBudget: parseFloat(as.lifetime_budget ?? '0') / 100,
               optimizationGoal: as.optimization_goal ?? '',
+              // Money
               spend: asSpend,
-              impressions: asImpressions,
-              clicks: asClicks,
-              conversions: asConversions,
-              ctr: asCtr,
+              revenue: asActionValue,
+              roas: asRoas,
               cpc: asCpc,
+              cpm: asCpm,
               cpa: asCpa,
+              aov: asAov,
+              // Reach / delivery
+              impressions: asImpressions,
+              reach: asReach,
               frequency: asFrequency,
+              clicks: asClicks,
+              ctr: asCtr,
+              // Funnel
+              conversions: asConversions,
+              addToCart: asAddToCart,
+              initiateCheckout: asInitiateCheckout,
+              landingPageView: asLandingPageView,
+              cvr: asCvr,
+              // Video watch %
+              videoP25: asVideoP25,
+              videoP50: asVideoP50,
+              videoP75: asVideoP75,
+              videoP100: asVideoP100,
+              videoP25Pct: asVideoP25Pct,
+              videoP50Pct: asVideoP50Pct,
+              videoP75Pct: asVideoP75Pct,
+              videoP100Pct: asVideoP100Pct,
+              // Rankings
+              qualityRanking: asi.quality_ranking ?? undefined,
+              engagementRanking: asi.engagement_rate_ranking ?? undefined,
+              conversionRanking: asi.conversion_rate_ranking ?? undefined,
+              // Delivery insight
+              learningStage,
+              effectiveStatus: as.effective_status ?? '',
+              // Bidding / delivery config
+              bidAmount: parseFloat(as.bid_amount ?? '0') / 100,
+              bidStrategy: as.bid_strategy ?? '',
+              billingEvent: as.billing_event ?? '',
+              attributionSpec: as.attribution_spec ?? undefined,
+              promotedObject: as.promoted_object ?? undefined,
+              startTime: as.start_time ?? '',
+              endTime: as.end_time ?? '',
+              // Targeting — legacy summary strings (dashboard) …
+              age: summarizeAge(targeting),
+              gender: summarizeGender(targeting),
+              placement: summarizePlacements(targeting),
+              audienceSize: Number(targeting.audience_size) || undefined,
+              interests: Array.isArray(targeting.interests)
+                ? targeting.interests.slice(0, 5).map((i: any) => i.name).filter(Boolean)
+                : [],
+              geo: Array.isArray(targeting.geo_locations?.countries)
+                ? targeting.geo_locations.countries.join(', ')
+                : '',
+              // … + the full structured version (previously discarded — custom
+              // audiences, exclusions, regions/cities, locales, Advantage flags
+              // were all lost at write time).
+              targetingDetail: structureTargeting(targeting),
+              rawTargeting: targeting,
+              dateStart: asi.date_start ?? '',
+              dateStop: asi.date_stop ?? '',
               ads,
             };
           });
 
+          // Only overwrite metaAdSets when we actually got ad sets back for
+          // THIS campaign. Meta's /adsets endpoint rate-limits aggressively at
+          // scale (chunked by 10 IDs) — a rate-limited chunk returns an empty
+          // array and would previously wipe out perfectly good ad sets from
+          // the last successful sync. Preserve existing data on partial fetch
+          // failures.
+          const gotAdSetsFromMeta = adSetsByCampaign.has(campaign.id);
+
+          // Same preservation rule for the ads arrays: the /ads fetch is
+          // chunked per campaign and swallows rate-limit failures — a
+          // throttled chunk yields zero ads for that campaign and would wipe
+          // every adset's ads[] (hit 2026-07-03: 4 of 7 campaigns lost their
+          // ad history to a "too many calls" burst). If Meta returned no ads
+          // for a campaign that previously had some, keep the old arrays.
+          const fetchedAdCount = metaAdSets.reduce(
+            (s: number, a: any) => s + (a.ads?.length ?? 0),
+            0,
+          );
+          if (gotAdSetsFromMeta && fetchedAdCount === 0) {
+            const existing = await this.campaignModel
+              .findOne(
+                { tenantId, metaCampaignId: campaign.id },
+                { 'metaAdSets.id': 1, 'metaAdSets.ads': 1 },
+              )
+              .lean();
+            const oldAds = new Map(
+              ((existing?.metaAdSets as any[]) ?? []).map((a) => [a.id, a.ads ?? []]),
+            );
+            let preserved = 0;
+            for (const a of metaAdSets as any[]) {
+              const prev = oldAds.get(a.id);
+              if (prev && prev.length > 0) {
+                a.ads = prev;
+                preserved += prev.length;
+              }
+            }
+            if (preserved > 0) {
+              this.logger.warn(
+                `Ads fetch returned 0 for ${campaign.id} — preserved ${preserved} existing ads`,
+              );
+            }
+          }
+
+          // Budget model — which budget levers exist on this campaign.
+          // ASC: Advantage+ shopping. CBO: campaign owns the budget. ABO:
+          // budget lives on the adsets (campaign daily_budget absent).
+          const campaignBudget =
+            parseFloat(campaign.daily_budget ?? campaign.lifetime_budget ?? '0') / 100;
+          const budgetModel =
+            campaign.smart_promotion_type === 'AUTOMATED_SHOPPING_ADS'
+              ? 'asc'
+              : campaignBudget > 0
+                ? 'cbo'
+                : 'abo';
+
+          const setDoc: Record<string, unknown> = {
+            name: campaign.name ?? '',
+            status: internalStatus,
+            spend,
+            impressions,
+            clicks,
+            conversions,
+            roas,
+            ctr,
+            cpc,
+            revenue: actionValue,
+            // Structure — previously only written on insert, so budget stayed
+            // stale (0) forever on existing docs. Now refreshed every sync.
+            budget: campaignBudget,
+            objective: campaign.objective ?? '',
+            bidStrategy: campaign.bid_strategy ?? '',
+            buyingType: campaign.buying_type ?? '',
+            smartPromotionType: campaign.smart_promotion_type ?? '',
+            specialAdCategories: campaign.special_ad_categories ?? [],
+            spendCap: parseFloat(campaign.spend_cap ?? '0') / 100,
+            budgetModel,
+            stopTime: campaign.stop_time ? new Date(campaign.stop_time) : undefined,
+            syncedAt: new Date(),
+          };
+          if (gotAdSetsFromMeta) setDoc.metaAdSets = metaAdSets;
+
           await this.campaignModel.updateOne(
             { tenantId, metaCampaignId: campaign.id },
             {
-              $set: {
-                name: campaign.name ?? '',
-                status: internalStatus,
-                spend, impressions, clicks, conversions, ctr, cpc,
-                metaAdSets,
-                syncedAt: new Date(),
-              },
+              $set: setDoc,
               $setOnInsert: {
                 tenantId,
                 runId: '',
@@ -402,8 +802,6 @@ export class CampaignSyncService {
                 metaCampaignId: campaign.id,
                 topic: '',
                 angle: '',
-                budget: parseFloat(campaign.daily_budget ?? campaign.lifetime_budget ?? '0') / 100,
-                objective: campaign.objective ?? '',
                 launchedAt: campaign.start_time ? new Date(campaign.start_time) : undefined,
               },
             },
@@ -619,4 +1017,169 @@ export class CampaignSyncService {
   private extractConversions(actions: any[] | undefined, conversionTypes: Set<string>): number {
     return extractConversions(actions, conversionTypes);
   }
+
+  /** Did Meta report ANY event of this action_type in the campaign's actions array? */
+  private hasActionOfType(actions: any[] | undefined, actionType: string): boolean {
+    if (!Array.isArray(actions)) return false;
+    return actions.some((a) => a?.action_type === actionType);
+  }
+}
+
+/** Sum the value across any of the given action_types. */
+function countAction(
+  actions: any[] | undefined,
+  types: string[],
+): number {
+  if (!Array.isArray(actions)) return 0;
+  for (const t of types) {
+    const hit = actions.find((a) => a?.action_type === t);
+    if (hit) return parseInt(hit.value ?? '0', 10) || 0;
+  }
+  return 0;
+}
+
+/** Pick the first `value` out of a Meta action-values-style array. */
+function firstActionValue(arr: any[] | undefined): number {
+  if (!Array.isArray(arr) || arr.length === 0) return 0;
+  const v = arr[0]?.value;
+  const n = typeof v === 'number' ? v : parseFloat(v ?? '0');
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Extract concrete creative attributes from object_story_spec /
+ * asset_feed_spec. Before this, hookStyle/format were inferred from ad NAMES
+ * (64% "unknown") while the actual copy, CTA, and media identity sat unparsed
+ * in the fetched creative object.
+ */
+function parseCreativeAttributes(creative: any): {
+  body: string;
+  title: string;
+  cta: string;
+  linkUrl: string;
+  videoId: string;
+  imageHash: string;
+  format: string;
+  isDynamicCreative: boolean;
+} {
+  const oss = creative?.object_story_spec ?? {};
+  const link = oss.link_data ?? {};
+  const video = oss.video_data ?? {};
+  const afs = creative?.asset_feed_spec ?? {};
+  const afsBodies = Array.isArray(afs.bodies) ? afs.bodies : [];
+  const afsTitles = Array.isArray(afs.titles) ? afs.titles : [];
+  const afsVideos = Array.isArray(afs.videos) ? afs.videos : [];
+  const afsImages = Array.isArray(afs.images) ? afs.images : [];
+  const afsCtas = Array.isArray(afs.call_to_action_types) ? afs.call_to_action_types : [];
+  const afsLinks = Array.isArray(afs.link_urls) ? afs.link_urls : [];
+
+  const body = link.message ?? video.message ?? afsBodies[0]?.text ?? '';
+  const title = link.name ?? video.title ?? afsTitles[0]?.text ?? '';
+  const cta =
+    link.call_to_action?.type ?? video.call_to_action?.type ?? afsCtas[0] ?? '';
+  const linkUrl =
+    link.link ?? video.call_to_action?.value?.link ?? afsLinks[0]?.website_url ?? '';
+  const videoId = video.video_id ?? afsVideos[0]?.video_id ?? '';
+  const imageHash = link.image_hash ?? afsImages[0]?.hash ?? '';
+
+  let format = '';
+  if (videoId) format = 'video';
+  else if (Array.isArray(link.child_attachments) && link.child_attachments.length > 0)
+    format = 'carousel';
+  else if (imageHash || link.picture || video.image_url) format = 'image';
+
+  // >1 body/title/media asset = Meta mixes variants at delivery time —
+  // per-ad copy attribution is unreliable; use asset breakdowns instead.
+  const isDynamicCreative =
+    afsBodies.length > 1 || afsTitles.length > 1 || afsVideos.length > 1 || afsImages.length > 1;
+
+  return { body, title, cta, linkUrl, videoId, imageHash, format, isDynamicCreative };
+}
+
+/**
+ * Full structured targeting — everything the agent needs to know WHO an adset
+ * reaches. Names + IDs preserved so decisions can reference ("exclude
+ * purchasers audience 123…") and the audience library can aggregate across
+ * campaigns by audience identity.
+ */
+function structureTargeting(targeting: any | undefined): Record<string, unknown> | undefined {
+  if (!targeting || typeof targeting !== 'object' || Object.keys(targeting).length === 0) {
+    return undefined;
+  }
+  const idName = (arr: any[] | undefined) =>
+    Array.isArray(arr) ? arr.map((x) => ({ id: x?.id ?? '', name: x?.name ?? '' })) : [];
+  const geo = targeting.geo_locations ?? {};
+  const excludedGeo = targeting.excluded_geo_locations ?? {};
+  return {
+    ageMin: targeting.age_min ?? null,
+    ageMax: targeting.age_max ?? null,
+    genders: summarizeGender(targeting),
+    geo: {
+      countries: geo.countries ?? [],
+      regions: idName(geo.regions).map((r, i) => ({ ...r, key: geo.regions?.[i]?.key ?? '' })),
+      cities: Array.isArray(geo.cities)
+        ? geo.cities.map((c: any) => ({
+            key: c?.key ?? '',
+            name: c?.name ?? '',
+            radius: c?.radius ?? null,
+            distanceUnit: c?.distance_unit ?? '',
+          }))
+        : [],
+      locationTypes: geo.location_types ?? [],
+      excludedCountries: excludedGeo.countries ?? [],
+      excludedRegions: idName(excludedGeo.regions),
+      excludedCities: idName(excludedGeo.cities),
+    },
+    interests: idName(targeting.interests),
+    behaviors: idName(targeting.behaviors),
+    /** AND/OR groups of detailed targeting (interests ∧ behaviors ∧ demographics). */
+    flexibleSpec: targeting.flexible_spec ?? [],
+    /** Detailed-targeting exclusions. */
+    exclusions: targeting.exclusions ?? undefined,
+    customAudiences: idName(targeting.custom_audiences),
+    excludedCustomAudiences: idName(targeting.excluded_custom_audiences),
+    locales: targeting.locales ?? [],
+    devicePlatforms: targeting.device_platforms ?? [],
+    publisherPlatforms: targeting.publisher_platforms ?? [],
+    facebookPositions: targeting.facebook_positions ?? [],
+    instagramPositions: targeting.instagram_positions ?? [],
+    audienceNetworkPositions: targeting.audience_network_positions ?? [],
+    messengerPositions: targeting.messenger_positions ?? [],
+    /** Advantage+ audience — targeting is a suggestion, not a constraint. */
+    advantageAudience:
+      targeting.targeting_automation?.advantage_audience === 1 ||
+      targeting.targeting_automation?.advantage_audience === true,
+    /** Advantage detailed-targeting / lookalike expansion flags. */
+    targetingOptimization: targeting.targeting_optimization ?? '',
+    brandSafety: targeting.brand_safety_content_filter_levels ?? [],
+  };
+}
+
+/** Summarize adset targeting into a compact placement string. */
+function summarizePlacements(targeting: any | undefined): string {
+  if (!targeting || typeof targeting !== 'object') return '';
+  const platforms: string[] = Array.isArray(targeting.publisher_platforms)
+    ? targeting.publisher_platforms
+    : [];
+  if (platforms.length === 0) return 'automatic';
+  return platforms.join(', ');
+}
+
+/** Format an adset targeting age range as "18-65+". */
+function summarizeAge(targeting: any | undefined): string {
+  if (!targeting) return '';
+  const lo = targeting.age_min;
+  const hi = targeting.age_max;
+  if (!lo && !hi) return '';
+  return `${lo ?? 18}-${hi ?? 65}`;
+}
+
+/** "male" / "female" / "all" from Meta genders array. */
+function summarizeGender(targeting: any | undefined): string {
+  if (!targeting) return '';
+  const g: number[] = Array.isArray(targeting.genders) ? targeting.genders : [];
+  if (g.length === 0 || g.length === 2) return 'all';
+  if (g.includes(1)) return 'male';
+  if (g.includes(2)) return 'female';
+  return '';
 }
