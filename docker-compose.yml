@@ -1,0 +1,59 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks: [internal]
+
+  backend:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - mongo
+      - redis
+    networks: [internal]
+
+  frontend:
+    build:
+      context: ../Marketing-Agent-Dashboard
+      args:
+        NEXT_PUBLIC_API_URL: https://marketing.91astrology.com/api/v1
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+    networks: [internal]
+
+volumes:
+  mongo_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
