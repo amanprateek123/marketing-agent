@@ -19,6 +19,11 @@ services:
       context: .
     restart: unless-stopped
     env_file: .env
+    # This instance has no public IP and sits behind an ALB, which routes
+    # marketing.91astrology.com/api/* here directly (its own target group
+    # on port 8082). Change the host port below if 8082 is ever taken.
+    ports:
+      - "8082:8082"
     depends_on:
       - mongo
       - redis
@@ -30,24 +35,12 @@ services:
       args:
         NEXT_PUBLIC_API_URL: https://marketing.91astrology.com/api/v1
     restart: unless-stopped
-    depends_on:
-      - backend
-    networks: [internal]
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    # Plain HTTP only — this instance has no public IP and sits behind an
-    # ALB, which terminates TLS (ACM cert) and forwards here. Point the
-    # ALB target group at this instance on port 8090. Change the host
-    # port below if 8090 is already taken on this box.
+    # ALB routes marketing.91astrology.com/* (everything else) here
+    # directly (its own target group on port 3002).
     ports:
-      - "8090:80"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - "3002:3000"
     depends_on:
       - backend
-      - frontend
     networks: [internal]
 
 volumes:
