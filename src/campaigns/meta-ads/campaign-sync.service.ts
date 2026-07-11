@@ -220,6 +220,67 @@ export class CampaignSyncService {
 
         const campaigns: any[] = res.data?.data ?? [];
 
+        // Reconcile drift: the fetch above only returns currently-ACTIVE
+        // campaigns, so a campaign that paused/archived/etc. since the last
+        // sync (whether via our own auditor, a manual pause in Ads Manager,
+        // or Meta's own automated rules) is silently absent from `campaigns`
+        // — its Mongo status stays frozen at whatever it was the last time
+        // it WAS active, potentially for days, with the dashboard showing
+        // "active" for a campaign that's long since stopped spending. Runs
+        // before the early-continue below so it still fires even when zero
+        // campaigns are currently active (e.g. everything got paused).
+        const activeMetaIdSet = new Set(campaigns.map(c => c.id));
+        const staleActiveDocs = await this.campaignModel
+          .find({ tenantId, status: 'active', metaCampaignId: { $nin: ['', null] } })
+          .select('metaCampaignId')
+          .lean()
+          .exec();
+        const staleIds = staleActiveDocs
+          .map(d => d.metaCampaignId)
+          .filter((id): id is string => !!id && !activeMetaIdSet.has(id));
+
+        if (staleIds.length > 0) {
+          const reconcileRes = await this.fetchAllPagesChunked(
+            `${META_API_BASE}/${accountId}/campaigns`,
+            { fields: 'id,status,updated_time', limit: '50', access_token: accessToken },
+            'id',
+            staleIds,
+            `Reconcile drifted status ${accountId}`,
+          );
+          const seen = new Set<string>();
+          for (const c of reconcileRes.data?.data ?? []) {
+            seen.add(c.id);
+            const newStatus = META_TO_INTERNAL_STATUS[c.status] ?? 'paused';
+            // updated_time is Meta's own last-modified timestamp on the
+            // campaign — the closest proxy to "when did this actually
+            // pause" (no dedicated status-change-time field exists). Only
+            // meaningful for the 'paused' outcome; other transitions don't
+            // surface a pausedAt in the UI.
+            const set: Record<string, unknown> = { status: newStatus, syncedAt: new Date() };
+            if (newStatus === 'paused') {
+              set.pausedAt = c.updated_time ? new Date(c.updated_time) : new Date();
+              set.pauseReason = 'Detected outside our sync — paused via Ads Manager, Meta automated rules, or another tool';
+            }
+            await this.campaignModel.updateOne(
+              { tenantId, metaCampaignId: c.id },
+              { $set: set },
+            );
+          }
+          // IDs Meta didn't return at all (deleted, or campaign-level access
+          // revoked) — can't distinguish those cases from here, so fall back
+          // to 'completed' rather than leaving them incorrectly 'active'.
+          const missing = staleIds.filter((id) => !seen.has(id));
+          if (missing.length > 0) {
+            await this.campaignModel.updateMany(
+              { tenantId, metaCampaignId: { $in: missing } },
+              { $set: { status: 'completed', syncedAt: new Date() } },
+            );
+          }
+          this.logger.log(
+            `Reconciled ${staleIds.length} campaign(s) that left the active set for ${accountId}`,
+          );
+        }
+
         // Fetch insights ONLY for the active campaigns just returned.
         const campaignIds = campaigns.map(c => c.id);
         if (campaignIds.length === 0) continue;
