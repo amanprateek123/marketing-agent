@@ -39,8 +39,36 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
     super(sliceRepo, eventBus, registry);
   }
 
+  // confidence depends on 10 slices spanning parallel branches of the DAG
+  // (e.g. diagnosis and forecast don't depend on each other, so their
+  // completion order isn't guaranteed) — triggering on forecast.completed
+  // alone meant confidence ran as soon as forecast finished regardless of
+  // whether the other 9 deps existed yet, failing with MissingDependencyError
+  // on effectively every cycle. Same fan-in pattern PortfolioEngine already
+  // uses for its 2 slow deps (business/revenue), extended to all 10: each
+  // dependency's completion re-attempts execute(), which is a no-op failure
+  // (fast, harmlessly logged) until the last one to actually finish arrives
+  // and every dependency is present — that attempt succeeds.
+  //
+  // Deliberately 10 stacked @OnEvent(string) decorators, NOT one
+  // @OnEvent(string[]) — confirmed the installed eventemitter2 version's
+  // plain .on() doesn't special-case an array `type` argument; it registers
+  // the listener under the array's stringified value as a single bogus key,
+  // so it silently never fires for any real single-event emission. Stacking
+  // individual decorators makes NestJS register 10 separate string
+  // subscriptions instead (each call to extendArrayMetadata appends one
+  // {event, options} entry, and the loader binds each entry separately).
+  @OnEvent('intelligence.snapshot.completed')
+  @OnEvent('intelligence.objective.completed')
+  @OnEvent('intelligence.lifecycle.completed')
+  @OnEvent('intelligence.trend.completed')
+  @OnEvent('intelligence.revenue.completed')
+  @OnEvent('intelligence.signal.completed')
+  @OnEvent('intelligence.diagnosis.completed')
+  @OnEvent('intelligence.business.completed')
+  @OnEvent('intelligence.portfolio.completed')
   @OnEvent('intelligence.forecast.completed')
-  async onForecastCompleted(payload: {
+  async onDependencyCompleted(payload: {
     cycleId: string;
     tenantId: string;
     campaignId: string;
