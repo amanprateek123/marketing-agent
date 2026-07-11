@@ -8,6 +8,8 @@ import {
   Query,
   NotFoundException,
   BadRequestException,
+  HttpCode,
+  Logger,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -50,6 +52,8 @@ import { SafetyChecks } from './campaign-creator/safety-checks';
 
 @Controller('campaigns')
 export class CampaignsController {
+  private readonly logger = new Logger(CampaignsController.name);
+
   constructor(
     private readonly campaignsService: CampaignsService,
     private readonly campaignCreator: CampaignCreatorService,
@@ -137,6 +141,21 @@ export class CampaignsController {
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/weekly-spend
+   * The rolling-7-day spend estimate used to gate new campaign creation
+   * (see SafetyChecks.checkWeeklyBudget / CampaignsService.getWeeklySpend) —
+   * exposed read-only so the dashboard can show the SAME number that's
+   * actually enforced, instead of the frontend reimplementing (and getting
+   * wrong) its own version of "weekly budget in use".
+   * Same route-ordering requirement as meta-audiences/meta-interest-search
+   * above — must precede :tenantId/:campaignId.
+   */
+  @Get(':tenantId/weekly-spend')
+  async getWeeklySpend(@Param('tenantId') tenantId: string) {
+    return { weeklySpend: await this.campaignsService.getWeeklySpend(tenantId) };
   }
 
   @Get(':tenantId/:campaignId')
@@ -983,17 +1002,36 @@ export class CampaignsController {
   /**
    * POST /api/v1/campaigns/:tenantId/sync
    * Manually trigger a Meta campaign sync for a tenant.
+   *
+   * Fire-and-forget: this instance sits behind an ALB with a 60s gateway
+   * timeout, well under the multi-minute runtime a sync can take (bulk
+   * chunked+paginated Meta fetches). Awaiting the sync here meant the ALB
+   * always killed the connection and returned a 504 to the caller even when
+   * the sync succeeded underneath — the backend kept running and wrote to
+   * Mongo regardless, but every caller saw a false failure. Validates
+   * preconditions synchronously (fast — no Meta calls), then dispatches the
+   * actual sync in the background and returns 202 immediately. Poll
+   * GET /:tenantId shortly after, or check server logs, for completion.
    */
   @Post(':tenantId/sync')
+  @HttpCode(202)
   async syncCampaigns(@Param('tenantId') tenantId: string) {
-    try {
-      const company = await this.companiesService.findByTenantId(tenantId);
-      const result =
-        await this.campaignSyncService.syncActiveCampaigns(company);
-      return { success: true, ...result };
-    } catch (err: any) {
-      throw new BadRequestException(err.message);
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
     }
+
+    this.campaignSyncService.syncActiveCampaigns(company).catch((err: any) => {
+      this.logger.error(`Background campaign sync failed for ${tenantId}: ${err.message}`);
+    });
+
+    return {
+      success: true,
+      status: 'started',
+      message: 'Campaign sync started in the background — poll GET /:tenantId shortly for updated data.',
+    };
   }
 
   /**
@@ -1002,21 +1040,38 @@ export class CampaignsController {
    * breakdowns (age×gender, region, placement, hourly, dow, per-asset) for
    * all ACTIVE campaigns. Read-only against Meta. Heavier than /sync —
    * expect a few minutes for a 7-campaign account.
+   *
+   * Fire-and-forget for the same reason as /sync above — the ALB's 60s
+   * gateway timeout can't turn a successful deep-sync into a false-looking
+   * 504. Returns 202 immediately; segment/timeseries data lands in Mongo a
+   * few minutes later regardless of whether anyone is still listening on
+   * the connection.
    */
   @Post(':tenantId/deep-sync')
+  @HttpCode(202)
   async deepSyncCampaigns(
     @Param('tenantId') tenantId: string,
     @Query('backfillDays') backfillDays?: string,
   ) {
-    try {
-      const company = await this.companiesService.findByTenantId(tenantId);
-      const result = await this.metaDeepSyncService.deepSync(company, {
-        backfillDays: backfillDays ? parseInt(backfillDays, 10) : undefined,
-      });
-      return { success: true, ...result };
-    } catch (err: any) {
-      throw new BadRequestException(err.message);
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
     }
+
+    const parsedBackfillDays = backfillDays ? parseInt(backfillDays, 10) : undefined;
+    this.metaDeepSyncService
+      .deepSync(company, { backfillDays: parsedBackfillDays })
+      .catch((err: any) => {
+        this.logger.error(`Background deep-sync failed for ${tenantId}: ${err.message}`);
+      });
+
+    return {
+      success: true,
+      status: 'started',
+      message: 'Deep sync started in the background — segment/timeseries data will update over the next few minutes.',
+    };
   }
 
   /**

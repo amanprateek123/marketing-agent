@@ -5,5 +5,6 @@ export const QUEUES = {
   MONTHLY_LEARNING: 'monthly-learning',       // Phase 7
   META_LEARNING_IMPORT: 'meta-learning-import', // Phase 7 — batch import
   CAMPAIGN_SYNC: 'campaign-sync',               // Phase 7 — real-time campaign sync
+  META_DEEP_SYNC: 'meta-deep-sync',             // Phase 7 — segment breakdowns + daily timeseries
   SHADOW_EVAL: 'shadow-eval',                   // Phase 6 step 4 — daily evaluation of blocked actions
 };

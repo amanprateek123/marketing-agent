@@ -20,6 +20,25 @@ const SYNC_INTERVAL_MS  = Math.max(
   parseInt(process.env.CAMPAIGN_SYNC_INTERVAL_MS ?? '', 10) || 10 * 60 * 1000,
 );
 
+// Deep sync (segment breakdowns + daily timeseries) is far heavier than the
+// structural campaign/adset sync above — roughly a dozen chunked Meta insight
+// calls per account with 3s politeness sleeps between each, several minutes
+// for a handful of active campaigns. Running it every 10 min like the basic
+// sync would burn through Meta's per-account API budget for no benefit
+// (breakdowns are last_30d windows that barely move minute to minute).
+// Default: every hour, keeping the Segments tab close behind the live
+// campaign/adset data without hammering the API. Floor: 15 min.
+const DEEP_SYNC_INTERVAL_MS = Math.max(
+  15 * 60 * 1000,
+  parseInt(process.env.META_DEEP_SYNC_INTERVAL_MS ?? '', 10) || 60 * 60 * 1000,
+);
+// Recurring runs only need to re-pull the last few days of daily timeseries
+// (Meta's attribution windows still settle for a few days after the fact) —
+// NOT the full 90-day backfill the manual /:tenantId/deep-sync endpoint uses
+// for fresh tenants / historical re-backfills. Breakdown snapshots always use
+// a fixed last_30d window regardless of this value (see MetaDeepSyncService).
+const DEEP_SYNC_BACKFILL_DAYS = parseInt(process.env.META_DEEP_SYNC_BACKFILL_DAYS ?? '', 10) || 3;
+
 @Injectable()
 export class SchedulerService implements OnModuleInit {
   private readonly logger = new Logger(SchedulerService.name);
@@ -29,6 +48,7 @@ export class SchedulerService implements OnModuleInit {
     @InjectQueue(QUEUES.CAMPAIGN_AUDIT) private readonly auditQueue: Queue,
     @InjectQueue(QUEUES.MONTHLY_LEARNING) private readonly learningQueue: Queue,
     @InjectQueue(QUEUES.CAMPAIGN_SYNC) private readonly campaignSyncQueue: Queue,
+    @InjectQueue(QUEUES.META_DEEP_SYNC) private readonly metaDeepSyncQueue: Queue,
     @InjectQueue(QUEUES.SHADOW_EVAL) private readonly shadowEvalQueue: Queue,
     private readonly companiesService: CompaniesService,
     @InjectModel(PipelineRun.name)
@@ -48,6 +68,7 @@ export class SchedulerService implements OnModuleInit {
       await this.scheduleAuditForTenant(company.tenantId);
       await this.scheduleLearningForTenant(company.tenantId);
       await this.scheduleCampaignSyncForTenant(company.tenantId);
+      await this.scheduleDeepSyncForTenant(company.tenantId);
     }
     // Shadow evaluator runs once globally (not per-tenant) — evaluates all pending shadows daily.
     await this.scheduleShadowEval();
@@ -110,6 +131,34 @@ export class SchedulerService implements OnModuleInit {
       },
     );
     this.logger.log(`Scheduled campaign sync every ${Math.round(SYNC_INTERVAL_MS / 60000)} min for tenantId=${tenantId}`);
+  }
+
+  /**
+   * Keeps breakdown_snapshots (segments) and metric_timeseries moving in
+   * lockstep with the campaign/adset sync above, instead of only updating
+   * when someone manually hits POST /:tenantId/deep-sync. Uses a short
+   * incremental backfill window (DEEP_SYNC_BACKFILL_DAYS) — the manual
+   * endpoint still defaults to a full 90-day backfill for onboarding/backfill use.
+   */
+  async scheduleDeepSyncForTenant(tenantId: string): Promise<void> {
+    const existingJobs = await this.metaDeepSyncQueue.getRepeatableJobs();
+    for (const job of existingJobs) {
+      if (job.name === `meta-deep-sync-${tenantId}`) {
+        await this.metaDeepSyncQueue.removeRepeatableByKey(job.key);
+      }
+    }
+
+    await this.metaDeepSyncQueue.add(
+      `meta-deep-sync-${tenantId}`,
+      { tenantId, backfillDays: DEEP_SYNC_BACKFILL_DAYS },
+      {
+        repeat: { every: DEEP_SYNC_INTERVAL_MS },
+        jobId: `meta-deep-sync-${tenantId}`,
+      },
+    );
+    this.logger.log(
+      `Scheduled meta deep-sync every ${Math.round(DEEP_SYNC_INTERVAL_MS / 60000)} min (backfillDays=${DEEP_SYNC_BACKFILL_DAYS}) for tenantId=${tenantId}`,
+    );
   }
 
   async scheduleAuditForTenant(tenantId: string): Promise<void> {

@@ -27,11 +27,16 @@ const BREAKDOWN_WINDOW = 'last_30d';
  *  1. metric_timeseries — daily rows (time_increment=1) per campaign/adset/ad,
  *     90-day backfill then incremental. Feeds trend EMAs immediately instead
  *     of waiting for 30-min snapshots to accumulate.
- *  2. breakdown_snapshots — segment performance: age×gender, region,
+ *  2. breakdown_snapshots — segment performance: age×gender, region, country,
  *     placement (platform×position×device), hour-of-day, day-of-week, and
  *     per-asset rows for dynamic-creative ads.
  *
  * Meta quirks encoded here:
+ *  - region breakdown carries NO conversion data for this account (verified
+ *    2026-07-03) — spend/clicks/CTR only, actions/action_values always empty
+ *    regardless of fields requested. 'country' is fetched as a coarser-
+ *    granularity check on the same restriction; if it's also always empty,
+ *    purchase-by-region/country requires a first-party join outside Meta.
  *  - age,gender CAN combine in one call; adding platform breakdowns to them
  *    can NOT (the old 4-way fetchDemographicBreakdown 400s — that's why
  *    demographicBreakdown was empty on every campaign).
@@ -127,9 +132,24 @@ export class MetaDeepSyncService {
       }
 
       // ── 2. Segment breakdowns (adset level; campaign docs are rollups) ──
+      // NOTE on 'region': verified against this account (2026-07-03) that
+      // Meta's region-breakdown rows carry NO conversion data at all — only
+      // on-platform actions (link_click, video_view, post_engagement), never
+      // pixel purchases/custom conversions/action_values, however this field
+      // list is constructed. Spend/impressions/clicks/CTR by region ARE real.
+      // 'country' is included alongside it as a coarser-granularity
+      // experiment — Meta sometimes preserves action attribution at country
+      // level even when a finer breakdown (region/DMA) suppresses it. If
+      // country rows also come back with conversions=0/revenue=0, that
+      // confirms the restriction applies account-wide regardless of
+      // granularity, and true region/country purchase amounts require a
+      // first-party join (tag orders with region/country from your own
+      // checkout data, then merge with this spend-by-region data yourself —
+      // Meta cannot supply attributed revenue at this breakdown via the API).
       const segmentSpecs: Array<{ type: string; breakdowns: string; keys: string[] }> = [
         { type: 'age_gender', breakdowns: 'age,gender', keys: ['age', 'gender'] },
         { type: 'region', breakdowns: 'region', keys: ['region'] },
+        { type: 'country', breakdowns: 'country', keys: ['country'] },
         {
           type: 'placement',
           breakdowns: 'publisher_platform,platform_position,device_platform',

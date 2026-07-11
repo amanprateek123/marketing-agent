@@ -310,7 +310,10 @@ export class CampaignSyncService {
                 // impression volume. Lifetime ad metrics come from the separate
                 // level=ad insights call below — this embedded query is the
                 // rankings + recency window only.
-                fields: 'id,name,status,effective_status,adset_id,creative{id,name,object_story_spec,asset_feed_spec,thumbnail_url},insights.date_preset(last_7d){spend,impressions,reach,clicks,ctr,cpc,cpm,actions,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions}',
+                // thumbnail_width/height must be requested — Meta defaults
+                // thumbnail_url to a tiny (often 64x64) image otherwise,
+                // which is unusable for the ad preview lightbox.
+                fields: 'id,name,status,effective_status,adset_id,creative.thumbnail_width(1080).thumbnail_height(1080){id,name,object_story_spec,asset_feed_spec,thumbnail_url},insights.date_preset(last_7d){spend,impressions,reach,clicks,ctr,cpc,cpm,actions,action_values,quality_ranking,engagement_rate_ranking,conversion_rate_ranking,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions}',
                 // ACTIVE-only used to hide every ad inside a paused adset
                 // (effective_status=ADSET_PAUSED) — 20 of 42 adsets had zero
                 // ads despite ₹lakhs of historical spend, starving the
