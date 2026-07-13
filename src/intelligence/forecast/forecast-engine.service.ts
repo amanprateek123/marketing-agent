@@ -16,7 +16,7 @@ export class ForecastEngine extends BaseEngine<'forecast', ForecastData> {
   readonly name = 'forecast' as const;
   readonly step = 10;
   readonly version = '1.0.0';
-  readonly dependsOn = ['snapshot', 'trend', 'portfolio'] as const;
+  readonly dependsOn = ['snapshot', 'trend', 'portfolio', 'lifecycle'] as const;
 
   private readonly identity = new Map<
     string,
@@ -57,17 +57,37 @@ export class ForecastEngine extends BaseEngine<'forecast', ForecastData> {
     const trend = deps.trend!;
     const cm = (snap.data as { metrics?: { campaignLevel?: Record<string, number> } })
       .metrics?.campaignLevel ?? {};
-    const spendPerDay = (cm.spend as number) ?? 0;
-    const revenuePerDay = (cm.revenue as number) ?? 0;
-    const roas = (cm.roas as number) ?? 0;
-    const purchasesPerDay = (cm.purchases as number) ?? 0;
+    // cm.spend/revenue/purchases are Meta's date_preset='maximum' totals —
+    // the campaign's ENTIRE LIFETIME to date, not a single day's worth (see
+    // meta-metrics.service.ts). This engine used to multiply that lifetime
+    // total by `days` directly, which is why a campaign with, say, ₹2.5M of
+    // lifetime spend produced a "7-day forecast" of ~₹17.8M: it was really
+    // computing lifetime_spend × 7, not a real week of future spend.
+    // Dividing by the campaign's real age (from LifecycleEngine) converts
+    // these into genuine per-day rates.
+    const ageDays = Math.max(1, (deps.lifecycle?.data.ageHours ?? 24) / 24);
+    const spendPerDay = ((cm.spend as number) ?? 0) / ageDays;
+    const revenuePerDay = ((cm.revenue as number) ?? 0) / ageDays;
+    const purchasesPerDay = ((cm.purchases as number) ?? 0) / ageDays;
 
-    const spendSlope = trend.data.perMetric?.spend?.slope7d ?? 0;
-    const revenueSlope = trend.data.perMetric?.revenue?.slope7d ?? 0;
+    // Trend nudge: previously used the trend engine's raw `slope7d`/`slope3d`
+    // in a days×(days-1)/2 quadratic term, but that slope is a regression
+    // over the last N *snapshot documents*, not N real calendar days (the
+    // cascade doesn't snapshot exactly once/day) — so its "per unit" doesn't
+    // actually mean "per day", and compounding it quadratically over a
+    // 30-day horizon amplified that unit mismatch further. `vsBaseline`
+    // (latest/earliest in the observed window) is a dimensionless ratio
+    // instead, so it's safe to use directly — damped to ±20% and clamped so
+    // one volatile window can't swing the whole projection.
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    const spendTrend = clamp(trend.data.perMetric?.spend?.vsBaseline || 1, 0.5, 2);
+    const revenueTrend = clamp(trend.data.perMetric?.revenue?.vsBaseline || 1, 0.5, 2);
+    const dampedSpendRate = spendPerDay * (1 + (spendTrend - 1) * 0.2);
+    const dampedRevenueRate = revenuePerDay * (1 + (revenueTrend - 1) * 0.2);
 
     const project = (days: number): ForecastPoint => {
-      const spend = Math.max(0, spendPerDay * days + spendSlope * (days * (days - 1) / 2));
-      const revenue = Math.max(0, revenuePerDay * days + revenueSlope * (days * (days - 1) / 2));
+      const spend = Math.max(0, dampedSpendRate * days);
+      const revenue = Math.max(0, dampedRevenueRate * days);
       const conversions = purchasesPerDay * days;
       return {
         spend: Number(spend.toFixed(2)),

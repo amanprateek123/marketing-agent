@@ -1,10 +1,11 @@
 import { Global, Module } from '@nestjs/common';
 import { CompaniesModule } from '../../companies/companies.module';
+import { LearningModule } from '../../learning/learning.module';
 import { MemoryEngine } from './memory-engine.service';
 
 @Global()
 @Module({
-  imports: [CompaniesModule],
+  imports: [CompaniesModule, LearningModule],
   providers: [MemoryEngine],
   exports: [MemoryEngine],
 })

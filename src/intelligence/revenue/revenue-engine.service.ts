@@ -152,6 +152,12 @@ export class RevenueEngine extends BaseEngine<
     // Breakeven ROAS = 1 / (net margin).
     const netMarginPct = usedMarginPct * (1 - usedRefundPct);
     const breakevenROAS = netMarginPct > 0 ? 1 / netMarginPct : Infinity;
+    // The profit GOAL — not a flat company-wide number (that's meaningless
+    // across products with different margins: a flat 2.0x would sit BELOW
+    // breakeven for a 45%-margin product whose breakeven is ~2.22x). 2x
+    // breakeven scales correctly per product and lands almost exactly on
+    // "2 ROAS" for this account's primary ~97%-margin product.
+    const targetROAS = Number.isFinite(breakevenROAS) ? breakevenROAS * 2 : Infinity;
 
     const netRevenue = grossRevenue; // snapshot revenue already refund-net
     const contributionMargin = netRevenue * usedMarginPct - spend;
@@ -171,6 +177,18 @@ export class RevenueEngine extends BaseEngine<
           `Below breakeven: ROAS ${observedROAS.toFixed(2)}× is ${Math.abs(gap).toFixed(2)}× short of breakeven ${breakevenROAS.toFixed(2)}× — every ₹1 in loses ₹${(Math.abs(gap) * usedMarginPct).toFixed(2)}.`,
         );
       }
+      if (Number.isFinite(targetROAS)) {
+        if (observedROAS >= targetROAS) {
+          notes.push(
+            `At or above the ${targetROAS.toFixed(2)}× profit target — a scale candidate, not just breakeven-safe.`,
+          );
+        } else {
+          const toGo = targetROAS - observedROAS;
+          notes.push(
+            `${toGo.toFixed(2)}× short of the ${targetROAS.toFixed(2)}× profit target (2× breakeven).`,
+          );
+        }
+      }
     }
 
     const attributedByAdSet: Record<string, number> = {};
@@ -181,11 +199,41 @@ export class RevenueEngine extends BaseEngine<
       ? { [product.name]: grossRevenue }
       : {};
 
+    // ROAS ≈ CTR × CVR × AOV × (impressions/spend), and impressions/spend is
+    // ~constant over a short window (CPM doesn't jump day to day) — so a
+    // log-additive decomposition of the CTR/CVR/AOV trend windows explains
+    // most of the ROAS trend's own movement. Frequency isn't a multiplicand
+    // of ROAS, so it's scored separately: it "contributes" only insofar as
+    // it's rising while CTR is falling in the same window (fatigue
+    // signature), which is the same relationship SignalEngine's
+    // creative_fatigue rule already uses.
+    const trend = deps.trend!.data;
+    const trendDelta = (metric: string): number => {
+      const v = trend.perMetric[metric]?.vsBaseline;
+      return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v - 1 : 0;
+    };
+    const ctrDelta = trendDelta('ctr');
+    const cvrDelta = trendDelta('cvr') || trendDelta('conversionRate');
+    const aovDelta = trendDelta('aov');
+    const freqDelta = trendDelta('frequency');
+
+    const logChange = (d: number) => Math.log(Math.max(0.01, 1 + d));
+    const logCtr = logChange(ctrDelta);
+    const logCvr = logChange(cvrDelta);
+    const logAov = logChange(aovDelta);
+    const totalLog = Math.abs(logCtr) + Math.abs(logCvr) + Math.abs(logAov);
+
     const decomposition = {
-      ctr: { contribution: 0, delta: 0 },
-      cvr: { contribution: 0, delta: 0 },
-      aov: { contribution: 0, delta: 0 },
-      frequency: { contribution: 0, delta: 0 },
+      ctr: { contribution: totalLog > 0 ? round(logCtr / totalLog, 3) : 0, delta: round(ctrDelta, 4) },
+      cvr: { contribution: totalLog > 0 ? round(logCvr / totalLog, 3) : 0, delta: round(cvrDelta, 4) },
+      aov: { contribution: totalLog > 0 ? round(logAov / totalLog, 3) : 0, delta: round(aovDelta, 4) },
+      frequency: {
+        // Fatigue signature: frequency climbing while CTR falls in the same
+        // window. Zero when either isn't true — this isn't a multiplicand
+        // of ROAS, just a risk flag for "is fatigue plausibly the driver".
+        contribution: round(Math.max(0, freqDelta) * Math.max(0, -ctrDelta), 3),
+        delta: round(freqDelta, 4),
+      },
     };
 
     return {
@@ -200,6 +248,7 @@ export class RevenueEngine extends BaseEngine<
         isProfitable,
         daysSinceBreakeven,
       },
+      targetROAS: Number.isFinite(targetROAS) ? round(targetROAS, 3) : breakevenROAS,
       derivation: {
         method,
         product: product?.name ?? null,
@@ -257,6 +306,7 @@ export class RevenueEngine extends BaseEngine<
         frequency: { contribution: 0, delta: 0 },
       },
       breakeven: { roas: 0, isProfitable: false, daysSinceBreakeven: 0 },
+      targetROAS: 0,
       derivation: {
         method: 'skipped',
         product: null,

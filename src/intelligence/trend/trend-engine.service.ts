@@ -87,12 +87,21 @@ export class TrendEngine extends BaseEngine<'trend', TrendData> {
 
   protected async compute(deps: ComputeDeps<'trend'>): Promise<TrendData> {
     const snap = deps.snapshot!;
-    const ident = deps as unknown as { tenantId?: string; campaignId?: string };
+    // deps carries only engine-slice outputs, never identity fields — the
+    // previous `deps as unknown as {tenantId, campaignId}` cast always
+    // resolved to undefined, so this query was always {tenantId:'',
+    // campaignId:''} and matched nothing. That silently forced every
+    // history series down to just the current snapshot (windowSize=1),
+    // which zeroed out slopes/EMAs/vsBaseline and made every trend-baseline
+    // signal (ctr_decay, creative_fatigue, audience_saturation) and the
+    // forecast engine's linear/ema_projection methods permanently
+    // unreachable, no matter how much real history existed in Mongo.
+    const ident = this.identity.values().next().value;
     // Load recent snapshots history (up to 30 days).
     const history = await this.snapshotModel
       .find({
-        tenantId: ident.tenantId ?? '',
-        campaignId: ident.campaignId ?? '',
+        tenantId: ident?.tenantId ?? '',
+        campaignId: ident?.campaignId ?? '',
       })
       .sort({ collectedAt: -1 })
       .limit(30)

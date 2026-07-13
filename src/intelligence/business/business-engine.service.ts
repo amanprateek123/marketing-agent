@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
@@ -8,6 +8,7 @@ import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { BusinessData } from '../orchestrator/decision-context';
 import { CompaniesService } from '../../companies/companies.service';
+import { CampaignsService } from '../../campaigns/campaigns.service';
 
 @Injectable()
 export class BusinessEngine extends BaseEngine<'business', BusinessData> {
@@ -25,7 +26,19 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
     sliceRepo: SliceRepository,
     eventBus: EngineEventBus,
     registry: EngineRegistry,
-    @Optional() private readonly companies: CompaniesService | null,
+    // Explicit @Inject() tokens — a bare `@Optional() x: Service | null`
+    // parameter relies on TS's emitted design:paramtypes reflection to know
+    // which provider to resolve, and a `Type | null` union can erase to
+    // `Object` in that metadata, which silently resolves to nothing under
+    // @Optional() even though the module correctly provides+exports the
+    // service. That's exactly what happened here: weeklyCapUsedINR's real
+    // getWeeklySpend() call, and the company doc itself, were never even
+    // attempted despite CompaniesModule/CampaignsModule being wired in
+    // business.module.ts. Every other @Optional() injection in this
+    // codebase already sidesteps this via an explicit token (@InjectModel);
+    // this does the same for plain service classes.
+    @Optional() @Inject(CompaniesService) private readonly companies: CompaniesService | null,
+    @Optional() @Inject(CampaignsService) private readonly campaigns: CampaignsService | null,
   ) {
     super(sliceRepo, eventBus, registry);
   }
@@ -52,8 +65,15 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
   }
 
   protected async compute(deps: ComputeDeps<'business'>): Promise<BusinessData> {
-    const ident = deps as unknown as { tenantId?: string };
-    const tenantId = ident.tenantId ?? '';
+    // deps carries only engine-slice outputs, never identity fields — the
+    // previous `deps as unknown as {tenantId}` cast always resolved to
+    // undefined, so tenantId was always '' here. That meant `company` never
+    // loaded (weeklyBudgetCap always defaulted to 0) and weeklyCapUsedINR's
+    // real getWeeklySpend() call was never even attempted — silently
+    // re-breaking the weekly-cap enforcement this engine exists to provide,
+    // via a different path than the original hardcoded-0 bug.
+    const ident = this.identity.values().next().value;
+    const tenantId = ident?.tenantId ?? '';
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)
@@ -79,14 +99,25 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
     const weeklyCap = Number(co.weeklyBudgetCap ?? 0);
     const perCampaignCap = Number(co.maxBudgetPerCampaign ?? 0);
 
+    // Was hardcoded to 0 — the system believed 0% of the weekly cap was
+    // ever used regardless of real spend, so scale-up/budget decisions had
+    // no way to know they were approaching or over the cap. Reuses the same
+    // rolling-7-day spend calc that already gates new campaign creation
+    // (CampaignsService.getWeeklySpend, SafetyChecks.checkWeeklyBudget) so
+    // this figure matches what's actually enforced elsewhere.
+    const weeklyCapUsedINR =
+      this.campaigns && tenantId
+        ? await this.campaigns.getWeeklySpend(tenantId).catch(() => 0)
+        : 0;
+
     return {
       activePromotions,
       seasonalContext: String(co.calendarContext ?? ''),
       competitorPressure: 'medium',
       budgetPolicy: {
         weeklyCapINR: weeklyCap,
-        weeklyCapUsedINR: 0,
-        weeklyCapRemainingINR: weeklyCap,
+        weeklyCapUsedINR,
+        weeklyCapRemainingINR: Math.max(0, weeklyCap - weeklyCapUsedINR),
         perCampaignCapINR: perCampaignCap,
       },
       forbiddenTopics: Array.isArray(co.forbiddenTopics) ? co.forbiddenTopics : [],
@@ -94,7 +125,7 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
   }
 
   protected computeConfidence(): number {
-    return this.companies ? 0.75 : 0.4;
+    return this.companies && this.campaigns ? 0.75 : 0.4;
   }
 
   protected buildEvidence(): Evidence[] {

@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
@@ -11,6 +13,7 @@ import {
   LifecycleStage,
 } from '../orchestrator/decision-context';
 import { LIFECYCLE_GATES, nextStageOf } from './lifecycle-gates';
+import { Campaign } from '../../campaigns/schemas/campaign.schema';
 
 /**
  * Determines the campaign stage and which actions are legal.
@@ -33,6 +36,9 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     sliceRepo: SliceRepository,
     eventBus: EngineEventBus,
     registry: EngineRegistry,
+    @Optional()
+    @InjectModel(Campaign.name)
+    private readonly campaignModel: Model<Campaign> | null,
   ) {
     super(sliceRepo, eventBus, registry);
   }
@@ -68,9 +74,33 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     const cm = data.metrics?.campaignLevel ?? {};
     const learningStage = data.meta?.learningStage;
     const deliveryStatus = data.meta?.deliveryStatus;
-    // Age is not on the snapshot payload today; approximate as 0 hours
-    // until Campaign adapter surfaces launchedAt in a follow-up.
-    const ageHours = 0;
+
+    // Real campaign age from Campaign.launchedAt (synced from Meta's own
+    // start_time — see campaign-sync.service.ts). Falls back to 0 (== "age
+    // unknown", not "just launched") when the doc or field is missing, so
+    // classify() only applies its age-based floor when age is genuinely known.
+    let ageHours = 0;
+    if (this.campaignModel) {
+      const ident = this.identity.values().next().value;
+      if (ident?.campaignId) {
+        try {
+          const c = await this.campaignModel
+            .findById(ident.campaignId)
+            .select('launchedAt')
+            .lean()
+            .exec();
+          const launchedAt = (c as { launchedAt?: Date } | null)?.launchedAt;
+          if (launchedAt) {
+            ageHours = Math.max(
+              0,
+              (Date.now() - new Date(launchedAt).getTime()) / (60 * 60 * 1000),
+            );
+          }
+        } catch {
+          // non-fatal — falls back to age-unknown behavior
+        }
+      }
+    }
 
     const stage = this.classify({
       learningStage,
@@ -86,7 +116,7 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     const gates = LIFECYCLE_GATES[stage];
     return {
       stage,
-      ageHours,
+      ageHours: Number(ageHours.toFixed(1)),
       metaLearningStage: learningStage,
       progressionScore: this.progressionScore(stage),
       nextExpectedStage: nextStageOf(stage),
@@ -117,7 +147,23 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     if (input.spend > 0 && input.purchases === 0 && input.ctr === 0) {
       return 'launching';
     }
-    if (input.frequency > 4 && input.ctr < 0.008) return 'fatigue';
+    // Age floor: Meta's own learning phase (roughly the first ~50
+    // conversions or several days of stable delivery) means metric-based
+    // stage guesses on a very young campaign are unreliable even when Meta
+    // hasn't explicitly reported learningStage. Without this, a lucky early
+    // purchase could fast-track a few-hour-old campaign straight to
+    // 'scaling' and expose it to performance signals (pause/cut/creative
+    // fatigue) before it's had a fair run. Only applies when age is
+    // actually known (ageHours > 0) — see class doc: "Meta learning_stage
+    // takes priority, then age + snapshot signals".
+    if (!input.learningStage && input.ageHours > 0 && input.ageHours < 48) {
+      return 'learning';
+    }
+    // ctr is Meta's own field convention: a percentage-point number (0.95
+    // means 0.95%), not a 0-1 fraction. The previous 0.008 threshold meant
+    // "CTR below 0.008%", which real data essentially never hits — this
+    // fatigue branch was structurally unreachable. 0.8 means "under 0.8%".
+    if (input.frequency > 4 && input.ctr < 0.8) return 'fatigue';
     if (input.roas >= 2 && input.purchases >= 10) return 'scaling';
     if (input.roas >= 1 && input.purchases >= 5) return 'growing';
     if (input.spend > 0 && input.purchases > 0) return 'stable';

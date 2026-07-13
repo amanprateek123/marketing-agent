@@ -16,12 +16,15 @@ import {
 import { Campaign } from '../../campaigns/schemas/campaign.schema';
 import {
   CampaignActionType,
+  DiagnosisData,
   RecommendationData,
   RecommendedAction,
   Signal,
   SignalKind,
   TrendData,
 } from '../orchestrator/decision-context';
+
+type DiagnosisFocus = DiagnosisData['rootCauses'][number]['suggestedFocus'];
 
 const RISK: Record<CampaignActionType, 'low' | 'medium' | 'high'> = {
   pause_ad: 'low',
@@ -49,15 +52,25 @@ const HUMAN_APPROVAL: CampaignActionType[] = [
  * Which targetTypes each action is valid for. Prevents e.g. reduce_total_budget
  * from being emitted with an adset targetId (which the executor could not act on).
  */
+// Widened from the original design after an audit found several signal→
+// action pairings were structurally dead (a signal computed at a target
+// level whose only mapped action excluded that scope, so it could never
+// produce a decision no matter how strong the evidence):
+//   - scale_adset now also allows 'campaign' — winner_emerging/confirmed
+//     fire at campaign level too (default targetType), and a campaign-wide
+//     budget increase is a real, valid lever (native for CBO campaigns).
+//   - reduce_total_budget now also allows 'adset' — unprofitable_run at
+//     adset level previously had no budget-cut option at all, only the
+//     nuclear pause_adset; a scoped cut is often the better first move.
 const ACTION_SCOPE: Record<CampaignActionType, Array<'campaign' | 'adset' | 'ad'>> = {
   pause_ad: ['ad', 'adset'],
   pause_adset: ['adset'],
-  scale_adset: ['adset'],
+  scale_adset: ['adset', 'campaign'],
   replace_creative: ['ad', 'adset'],
   add_creative: ['adset', 'campaign'],
   add_adset: ['campaign'],
   shift_budget_between_adsets: ['campaign', 'adset'],
-  reduce_total_budget: ['campaign'],
+  reduce_total_budget: ['campaign', 'adset'],
   narrow_placement: ['campaign', 'adset'],
   dayparting: ['campaign'],
 };
@@ -65,22 +78,46 @@ const ACTION_SCOPE: Record<CampaignActionType, Array<'campaign' | 'adset' | 'ad'
 /**
  * Signal → suggested action mapping. Kept deterministic — the *scoring*
  * happens on top of this using observed evidence.
+ *
+ * budget_saturation now also allows pause_adset (its adset-level firing had
+ * no live action before — reduce_total_budget is campaign-only in scope).
+ * hook_burn now also allows pause_ad — the only signal that gives pause_ad
+ * a reachable path at all; previously declared but never emitted anywhere.
  */
 const SIGNAL_TO_ACTIONS: Partial<Record<SignalKind, CampaignActionType[]>> = {
   creative_fatigue: ['replace_creative', 'add_creative'],
-  hook_burn: ['replace_creative', 'add_creative'],
+  hook_burn: ['replace_creative', 'add_creative', 'pause_ad'],
   ctr_decay: ['replace_creative'],
   cvr_collapse: ['pause_adset', 'replace_creative'],
   frequency_ceiling: ['narrow_placement', 'dayparting'],
   audience_saturation: ['narrow_placement', 'shift_budget_between_adsets'],
   audience_exhaustion: ['shift_budget_between_adsets', 'add_adset'],
-  budget_saturation: ['reduce_total_budget'],
+  budget_saturation: ['reduce_total_budget', 'pause_adset'],
   delivery_stalled: ['shift_budget_between_adsets'],
   placement_leak: ['narrow_placement'],
   unprofitable_run: ['pause_adset', 'reduce_total_budget'],
   winner_emerging: ['scale_adset'],
   winner_confirmed: ['scale_adset'],
   learning_limited_locked: ['shift_budget_between_adsets'],
+};
+
+/**
+ * Which DiagnosisEngine "focus" categories each action serves. Used to let
+ * a genuine root-cause diagnosis pull weight toward the action that
+ * actually addresses it, instead of every signal-implied action competing
+ * on raw ₹ estimate alone.
+ */
+const ACTION_FOCUS: Record<CampaignActionType, DiagnosisFocus[]> = {
+  pause_ad: ['creative', 'objective_mismatch'],
+  pause_adset: ['budget', 'objective_mismatch'],
+  scale_adset: ['budget'],
+  replace_creative: ['creative'],
+  add_creative: ['creative'],
+  add_adset: ['audience'],
+  shift_budget_between_adsets: ['budget', 'audience'],
+  reduce_total_budget: ['budget'],
+  narrow_placement: ['placement', 'audience'],
+  dayparting: ['placement'],
 };
 
 /**
@@ -177,8 +214,13 @@ export class RecommendationEngine extends BaseEngine<
     const lifecycle = deps.lifecycle!.data;
     const confidence = deps.confidence!.data;
     const diagnosis = deps.diagnosis!.data;
+    const business = deps.business!.data;
+    const forecast = deps.forecast!.data;
+    const memory = deps.memory!.data;
+    const portfolio = deps.portfolio!.data;
     const revenue = deps.revenue!.data as {
       breakeven: { roas: number; isProfitable: boolean };
+      targetROAS: number;
       derivation?: { method: string; marginPct: number; breakevenROAS: number };
     };
     const snapshot = deps.snapshot!.data as {
@@ -194,34 +236,98 @@ export class RecommendationEngine extends BaseEngine<
     const observedROAS = num(cm.roas);
     const observedSpend = num(cm.spend);
     const observedPurchases = num(cm.purchases);
-    // Approximate daily spend from 3d slope + current
-    const dailySpendVelocity = Math.max(
-      (trend.perMetric.spend?.ema3d ?? observedSpend) / 3,
-      observedSpend / 7,
-    );
+
+    // Daily spend velocity: prefer the forecast engine's trend-aware 7d
+    // linear projection (accounts for slope, not just a flat average) once
+    // there's enough history for it to mean something.
+    //
+    // observedSpend (cm.spend) is Meta's date_preset='maximum' figure — the
+    // CAMPAIGN'S ENTIRE LIFETIME spend, not a week's worth (same root cause
+    // as the ForecastEngine overshoot fixed earlier). `observedSpend / 7`
+    // was silently overriding the correct forecast value via Math.max() for
+    // any campaign older than ~7 days: an 88-day-old campaign with ₹2.5M
+    // lifetime spend produced "₹364,051/day" here (lifetime÷7) when the
+    // real pace was ~₹29,000/day. ageDays converts it to a genuine rate
+    // instead; the ema3d fallback path has the same unit problem (ema3d is
+    // an average of the cumulative-spend curve, not a daily figure) so it
+    // gets the same fix.
+    const forecastNext7d = forecast.horizons?.next7d;
+    const ageDays = Math.max(1, (lifecycle.ageHours ?? 24) / 24);
+    const dailySpendVelocity =
+      forecast.method !== 'insufficient_history' && forecastNext7d
+        ? forecastNext7d.spend / 7
+        : Math.max(
+            (trend.perMetric.spend?.ema3d ?? observedSpend) / ageDays,
+            observedSpend / ageDays,
+          );
 
     const marginPct = revenue.derivation?.marginPct ?? 0.4;
     const breakevenROAS = revenue.breakeven.roas || 2.5;
+    const targetROAS =
+      revenue.targetROAS && revenue.targetROAS > breakevenROAS
+        ? revenue.targetROAS
+        : breakevenROAS * 2;
+
+    // Forward-looking check: is the 7-day forecast trending back toward
+    // breakeven even though the campaign looks bad *today*? A real operator
+    // wouldn't kill a campaign that the trend already shows recovering —
+    // this dampens (not blocks) loss-avoidance actions when so.
+    const forecastROAS7d = forecastNext7d?.roas ?? observedROAS;
+    const forecastRecovering =
+      forecast.method !== 'insufficient_history' &&
+      forecastROAS7d > observedROAS &&
+      forecastROAS7d >= breakevenROAS * 0.9;
 
     // Resolve the campaign name once so reasoning references a real name
     // instead of "campaign unknown". Non-blocking — falls back to id.
     let campaignName = 'this campaign';
-    if (this.campaignModel) {
-      const ident = this.identity.values().next().value;
-      if (ident?.campaignId) {
-        try {
-          const c = await this.campaignModel
-            .findById(ident.campaignId)
-            .select('name')
-            .lean()
-            .exec();
-          const doc = c as { name?: string } | null;
-          if (doc?.name) campaignName = doc.name;
-        } catch {
-          // ignore
-        }
+    const ident = this.identity.values().next().value;
+    if (this.campaignModel && ident?.campaignId) {
+      try {
+        const c = await this.campaignModel
+          .findById(ident.campaignId)
+          .select('name')
+          .lean()
+          .exec();
+        const doc = c as { name?: string } | null;
+        if (doc?.name) campaignName = doc.name;
+      } catch {
+        // ignore
       }
     }
+
+    // Where this campaign ranks across the account, per PortfolioEngine.
+    // Currently a thin signal (PortfolioEngine is still a weak stub) so it
+    // only nudges score by ±15-20%, never gates — it will carry more
+    // weight automatically once that engine is fixed.
+    const portfolioTier = portfolio.ranking?.find(
+      (r) => r.campaignId === ident?.campaignId,
+    )?.tier;
+
+    // Weekly budget headroom, in ₹/day terms — gates spend-increasing
+    // actions (scale_adset/add_adset) so the agent never recommends growth
+    // it can't actually afford for the rest of the week.
+    const weeklyCapRemainingINR = business.budgetPolicy?.weeklyCapRemainingINR;
+    const capExhausted =
+      typeof weeklyCapRemainingINR === 'number' &&
+      Number.isFinite(weeklyCapRemainingINR) &&
+      weeklyCapRemainingINR <= dailySpendVelocity * 0.5;
+
+    // Action types that recently "worsened" the account somewhere (memory
+    // doesn't yet carry per-target history — see MemoryEngine stub audit —
+    // so this is a soft, account-wide caution, not a hard per-target gate).
+    const recentlyWorsenedTypes = new Set(
+      (memory.pastActions ?? [])
+        .filter((p) => p.outcomeLabel === 'worsened')
+        .map((p) => p.actionType),
+    );
+
+    // Account-wide creative history — which hook styles have actually
+    // earned clicks here before, and which have historically flopped. Used
+    // to make replace_creative/add_creative say WHAT to try next, not just
+    // "refresh the creative" with no direction.
+    const topWinningHooks = (memory.companyLearnings?.winningHooks ?? []).slice(0, 2);
+    const topLosingHooks = (memory.companyLearnings?.losingHooks ?? []).slice(0, 2);
 
     const blockedSet = new Set(
       lifecycle.blockedActions
@@ -230,50 +336,119 @@ export class RecommendationEngine extends BaseEngine<
     );
     const gateStarBlock = lifecycle.blockedActions.some((b) => b.action === '*');
 
-    const candidates: RecommendedAction[] = [];
+    // ── Group signals by target ───────────────────────────────────────
+    // Multiple corroborating signals on the same ad/adset/campaign must
+    // synthesize into ONE decision citing all of them, not N mono-causal
+    // duplicates competing for the operator's attention.
+    const groups = new Map<
+      string,
+      { targetType: Signal['targetType']; targetId: string; signals: Signal[] }
+    >();
     for (const s of signals) {
-      const actionTypes = SIGNAL_TO_ACTIONS[s.kind] ?? [];
-      for (const type of actionTypes) {
-        // Skip actions that don't apply at this signal's target level
-        // (e.g. reduce_total_budget from an adset-level unprofitable_run).
-        if (!ACTION_SCOPE[type].includes(s.targetType)) continue;
+      const key = `${s.targetType}:${s.targetId}`;
+      const g = groups.get(key);
+      if (g) g.signals.push(s);
+      else groups.set(key, { targetType: s.targetType, targetId: s.targetId, signals: [s] });
+    }
+
+    const candidates: RecommendedAction[] = [];
+    const evidenceByActionId = new Map<
+      string,
+      { kind: string; reasoning: string; metrics: Record<string, number> }
+    >();
+
+    for (const group of groups.values()) {
+      const { targetType, targetId, signals: groupSignals } = group;
+
+      // Union of action types any signal on this target could justify.
+      const actionTypesSeen = new Set<CampaignActionType>();
+      for (const s of groupSignals) {
+        for (const t of SIGNAL_TO_ACTIONS[s.kind] ?? []) {
+          if (ACTION_SCOPE[t].includes(targetType)) actionTypesSeen.add(t);
+        }
+      }
+
+      for (const type of actionTypesSeen) {
+        // Every signal on this target that actually recommends `type` —
+        // the "combine reasoning" step. If ctr_decay + creative_fatigue +
+        // hook_burn all point at replace_creative on the same ad, this
+        // builds ONE action citing all three, not three separate ones.
+        const supporting = groupSignals.filter((s) =>
+          (SIGNAL_TO_ACTIONS[s.kind] ?? []).includes(type),
+        );
+        if (supporting.length === 0) continue;
 
         const gatedBy: string[] = [];
         if (gateStarBlock) gatedBy.push('lifecycle:all-blocked');
         if (blockedSet.has(type)) gatedBy.push(`lifecycle:${lifecycle.stage}`);
         if (!confidence.gates.okToRecommend)
           gatedBy.push('confidence:not_okToRecommend');
+        if (
+          capExhausted &&
+          (type === 'scale_adset' || type === 'add_adset')
+        )
+          gatedBy.push('business:weekly_cap_exhausted');
 
-        // For adset-level signals, use the adset's own metrics in the
+        // For adset-level targets, use the adset's own metrics in the
         // reasoning + profit math — not the campaign's aggregate, which
         // can be profitable overall while individual adsets bleed.
         let scopedROAS = observedROAS;
         let scopedSpend = observedSpend;
         let scopedPurchases = observedPurchases;
         let scopedDailySpend = dailySpendVelocity;
-        if (s.targetType === 'adset' && adSetLevel[s.targetId]) {
-          const m = adSetLevel[s.targetId];
+        if (targetType === 'adset' && adSetLevel[targetId]) {
+          const m = adSetLevel[targetId];
           scopedROAS = num(m.roas);
           scopedSpend = num(m.spend);
           scopedPurchases = num(m.purchases);
-          scopedDailySpend = scopedSpend / 7;
+          // m.spend is also a lifetime total (same Meta date_preset='maximum'
+          // fetch as the campaign level) — no per-adset age is available, so
+          // the campaign's own age is the best available proxy, still far
+          // more accurate than dividing a potentially months-old lifetime
+          // total by a flat 7.
+          scopedDailySpend = scopedSpend / ageDays;
         }
 
-        candidates.push(
-          this.buildAction({
-            type,
-            signal: s,
-            gatedBy,
-            observedROAS: scopedROAS,
-            observedSpend: scopedSpend,
-            observedPurchases: scopedPurchases,
-            dailySpendVelocity: scopedDailySpend,
-            marginPct,
-            breakevenROAS,
-            diagnosisNarrative: diagnosis.narrative,
-            campaignName,
-          }),
+        // Does a genuine diagnosed root cause back this specific action —
+        // i.e. it names one of the signals we're citing AND shares this
+        // action's focus category? This is what makes diagnosis actually
+        // influence action choice instead of being an unused dependency.
+        const focuses = ACTION_FOCUS[type];
+        const matchingRootCause = diagnosis.rootCauses.find(
+          (rc) =>
+            focuses.includes(rc.suggestedFocus) &&
+            rc.evidenceSignals.some((k) => supporting.some((s) => s.kind === k)),
         );
+
+        const action = this.buildAction({
+          type,
+          targetType,
+          targetId,
+          signals: supporting,
+          gatedBy,
+          observedROAS: scopedROAS,
+          observedSpend: scopedSpend,
+          observedPurchases: scopedPurchases,
+          dailySpendVelocity: scopedDailySpend,
+          marginPct,
+          breakevenROAS,
+          targetROAS,
+          diagnosisNarrative: diagnosis.narrative,
+          matchingRootCause,
+          forecastRecovering,
+          forecastROAS7d,
+          portfolioTier,
+          recentlyWorsened: recentlyWorsenedTypes.has(type),
+          topWinningHooks,
+          topLosingHooks,
+          campaignName,
+        });
+        candidates.push(action);
+        evidenceByActionId.set(action.actionId, {
+          kind: supporting.map((s) => s.kind).join('+'),
+          reasoning: supporting.map((s) => s.reasoning).join(' '),
+          metrics: Object.assign({}, ...supporting.map((s) => s.metricEvidence)),
+        });
       }
     }
 
@@ -284,7 +459,7 @@ export class RecommendationEngine extends BaseEngine<
       adSetLevel,
       breakevenROAS,
       marginPct,
-      dailySpendVelocity,
+      ageDays,
       campaignName,
       diagnosisNarrative: diagnosis.narrative,
       blockedSet,
@@ -296,16 +471,15 @@ export class RecommendationEngine extends BaseEngine<
     // Drop gated candidates (their gatedBy tag stays for observability).
     const filtered = candidates.filter((c) => c.gatedBy.length === 0);
 
-    // Rank by expected ₹ profit delta (positive = profit gain, negative = loss avoided).
-    filtered.sort(
-      (a, b) => Math.abs(b.expectedProfitDeltaINR7d) - Math.abs(a.expectedProfitDeltaINR7d),
-    );
+    // Rank by score — which now folds in signal corroboration, diagnosis
+    // agreement, forecast trajectory and portfolio context, not just the
+    // raw ₹ estimate (see buildAction).
+    filtered.sort((a, b) => b.score - a.score);
 
     // Persist to intelligence_decisions (LOCAL, shadow_mode_only).
     // Every write here has shadowModeOnly=true — the Execution Engine
     // is contractually forbidden from touching Meta while that flag is set.
     if (this.decisionModel && filtered.length > 0) {
-      const ident = this.identity.values().next().value;
       const cycleId = this.currentCycleId ?? '';
       const now = new Date();
       const expires = new Date(now.getTime() + 48 * 60 * 60 * 1000);
@@ -328,22 +502,11 @@ export class RecommendationEngine extends BaseEngine<
         }
       }
 
-      // Attach signal evidence to each action for review
-      const signalByAction: Record<
-        string,
-        { kind: string; reasoning: string; metrics: Record<string, number> }
-      > = {};
-      for (const action of filtered) {
-        const kindMatch = action.evidenceChain[0]?.step.match(/'([^']+)'/)?.[1];
-        const originalSignal = signals.find((s) => s.kind === kindMatch);
-        if (originalSignal) {
-          signalByAction[action.actionId] = {
-            kind: originalSignal.kind,
-            reasoning: originalSignal.reasoning,
-            metrics: originalSignal.metricEvidence,
-          };
-        }
-      }
+      // Signal evidence per action, captured at construction time in
+      // evidenceByActionId (supports multiple co-firing signals per action —
+      // previously this was regex-recovered from the reasoning string,
+      // which could only ever resolve to a single signal kind).
+      const signalByAction = Object.fromEntries(evidenceByActionId);
 
       // ── Dedup: skip proposals for which an open shadow_review decision
       // already exists for (tenantId, targetId, actionType) inside the review
@@ -421,7 +584,9 @@ export class RecommendationEngine extends BaseEngine<
 
   private buildAction(input: {
     type: CampaignActionType;
-    signal: Signal;
+    targetType: 'campaign' | 'adset' | 'ad';
+    targetId: string;
+    signals: Signal[];
     gatedBy: string[];
     observedROAS: number;
     observedSpend: number;
@@ -429,12 +594,22 @@ export class RecommendationEngine extends BaseEngine<
     dailySpendVelocity: number;
     marginPct: number;
     breakevenROAS: number;
+    targetROAS: number;
     diagnosisNarrative: string;
+    matchingRootCause?: DiagnosisData['rootCauses'][number];
+    forecastRecovering: boolean;
+    forecastROAS7d: number;
+    portfolioTier?: 'A' | 'B' | 'C' | 'D';
+    recentlyWorsened: boolean;
+    topWinningHooks: string[];
+    topLosingHooks: string[];
     campaignName: string;
   }): RecommendedAction {
     const {
       type,
-      signal: s,
+      targetType,
+      targetId,
+      signals,
       gatedBy,
       observedROAS,
       observedSpend,
@@ -443,10 +618,27 @@ export class RecommendationEngine extends BaseEngine<
       marginPct,
       breakevenROAS,
       diagnosisNarrative,
+      matchingRootCause,
+      forecastRecovering,
+      forecastROAS7d,
+      portfolioTier,
+      recentlyWorsened,
+      topWinningHooks,
+      topLosingHooks,
       campaignName,
     } = input;
 
     const risk = RISK[type];
+
+    // Corroboration: multiple independent signals agreeing on the same
+    // action raises confidence more than any one of them alone (noisy-OR —
+    // with a single signal this reduces to exactly that signal's strength,
+    // so single-cause cases behave identically to before).
+    const combinedStrength = 1 - signals.reduce((acc, s) => acc * (1 - s.strength), 1);
+    const metricEvidence: Record<string, number> = Object.assign(
+      {},
+      ...signals.map((sig) => sig.metricEvidence),
+    );
 
     // ── Expected profit delta over next 7 days (contribution profit) ──
     // Each action type has a distinct profit-mechanics model.
@@ -454,6 +646,19 @@ export class RecommendationEngine extends BaseEngine<
     let impactMetric = 'roas';
     let deltaPct = 0;
     let mechanicsExplanation = '';
+
+    // Revenue basis for uplift-style actions (replace_creative, add_creative,
+    // narrow_placement, dayparting): floored at breakevenROAS instead of the
+    // raw observedROAS. Using observedROAS directly made the estimated ₹
+    // gain from fixing a metric scale DOWN with how bad the campaign
+    // currently is — the worse the ROAS, the smaller the "fix the CTR"
+    // payoff looked, which mechanically buried creative/placement actions
+    // under ROAS/budget actions exactly when they mattered most. The fix
+    // being scored recovers performance TOWARD breakeven, so breakeven is
+    // the right floor for "revenue per rupee after the fix" — and when the
+    // campaign is already healthy (observedROAS > breakeven), we still use
+    // the real observed number rather than overstating it.
+    const revenueROASProxy = Math.max(observedROAS, breakevenROAS);
 
     switch (type) {
       case 'pause_adset':
@@ -477,7 +682,7 @@ export class RecommendationEngine extends BaseEngine<
         // If clearly above breakeven, scaling grows profit — assume 20% budget lift
         // yields (impact*strength) ROAS in the new budget slice.
         if (observedROAS >= breakevenROAS * 1.2) {
-          const uplift = 0.2 * s.strength; // scaled by signal confidence
+          const uplift = 0.2 * combinedStrength; // scaled by corroborated signal confidence
           const newDailySpend = dailySpendVelocity * (1 + uplift);
           // Assume marginal ROAS is 90% of current (auction pushback)
           const marginalROAS = observedROAS * 0.9;
@@ -494,16 +699,26 @@ export class RecommendationEngine extends BaseEngine<
       case 'add_creative': {
         // Replacing tired creative typically recovers ~half the CTR drop.
         // Profit gain proportional to CTR recovery × current CVR × spend.
-        const ctrDrop = num(s.metricEvidence.dropPct) || 0.35;
+        const ctrDrop = num(metricEvidence.dropPct) || 0.35;
         const ctrRecovery = ctrDrop * 0.5;
         // Rough: 1pp CTR recovery adds roughly (spend / cpc) more clicks →
         // more purchases at current CVR → more revenue. Approximate:
         const revenueMultiplier = 1 + ctrRecovery;
-        const currentRevenue = observedROAS * observedSpend;
+        const currentRevenue = revenueROASProxy * observedSpend;
         const newRevenue = currentRevenue * revenueMultiplier;
         const revenueGain = newRevenue - currentRevenue;
         projectedProfitDelta7dINR = (revenueGain / Math.max(1, observedSpend)) * dailySpendVelocity * 7 * marginPct;
         mechanicsExplanation = `Fresh creative typically restores ~50% of observed CTR drop (${(ctrDrop * 100).toFixed(0)}%). At current CVR, that's ~₹${projectedProfitDelta7dINR.toFixed(0)} more contribution profit over 7 days.`;
+        // Account history — tells the operator WHAT to try, not just "make
+        // something new". winningHooks/losingHooks are real aggregate CTR
+        // stats across this account's own past ads, not a generic tip.
+        const hookName = (h: string) => h.split(' (')[0];
+        if (topWinningHooks.length > 0) {
+          mechanicsExplanation += ` This account's best-performing hook styles are ${topWinningHooks.map(hookName).join(' and ')} — worth trying first.`;
+        }
+        if (topLosingHooks.length > 0) {
+          mechanicsExplanation += ` ${topLosingHooks.map(hookName).join(' and ')} have historically underperformed here — avoid repeating those angles.`;
+        }
         impactMetric = 'ctr';
         deltaPct = Math.round(ctrRecovery * 100);
         break;
@@ -526,7 +741,7 @@ export class RecommendationEngine extends BaseEngine<
         // These trim CPM waste — typically 5-10% profit uplift on displayed spend.
         const uplift = 0.06;
         if (observedROAS > 0) {
-          const revenueGain = observedSpend * observedROAS * uplift;
+          const revenueGain = observedSpend * revenueROASProxy * uplift;
           projectedProfitDelta7dINR = (revenueGain / Math.max(1, observedSpend)) * dailySpendVelocity * 7 * marginPct;
         }
         mechanicsExplanation = `Focusing spend on the ${type === 'narrow_placement' ? 'best-performing placements' : 'best-performing hours'} typically frees ~6% of wasted spend. ~₹${projectedProfitDelta7dINR.toFixed(0)} added profit over 7 days.`;
@@ -548,10 +763,61 @@ export class RecommendationEngine extends BaseEngine<
       }
     }
 
-    // Score = |expected profit delta| discounted by risk. Ranks larger-impact
-    // low-risk actions above smaller-impact high-risk ones.
+    // ── Context multipliers — how confidently we RANK this action, layered
+    // on top of the mechanical ₹ estimate above. These never rewrite the ₹
+    // number itself (that stays an honest mechanical estimate); they decide
+    // how loudly this action competes against others for review priority,
+    // and they each add a line of genuine cross-engine reasoning.
+    const isCutAction = type === 'pause_adset' || type === 'pause_ad' || type === 'reduce_total_budget';
+    const isGrowthAction = type === 'scale_adset' || type === 'add_adset';
+
+    let diagnosisMult = 1;
+    let diagnosisLine = '';
+    if (matchingRootCause) {
+      diagnosisMult = 1 + matchingRootCause.confidence * 0.5;
+      diagnosisLine = `Diagnosis agrees: "${matchingRootCause.hypothesis}" (${Math.round(matchingRootCause.confidence * 100)}% confidence) points at the same ${matchingRootCause.suggestedFocus} root cause.`;
+    }
+
+    let forecastMult = 1;
+    let forecastLine = '';
+    if (isCutAction && forecastRecovering) {
+      forecastMult = 0.6;
+      forecastLine = `Caveat: the 7-day forecast shows ROAS trending toward ${forecastROAS7d.toFixed(2)}× — already recovering, so this may be premature.`;
+    }
+
+    let portfolioMult = 1;
+    let portfolioLine = '';
+    if (portfolioTier === 'D' || portfolioTier === 'C') {
+      if (isGrowthAction) {
+        portfolioMult = 0.7;
+        portfolioLine = `Portfolio context: this campaign ranks tier ${portfolioTier} account-wide — scaling a weak performer is lower priority than the ₹ number alone suggests.`;
+      } else if (isCutAction) {
+        portfolioMult = 1.15;
+        portfolioLine = `Portfolio context: this campaign ranks tier ${portfolioTier} account-wide, reinforcing the case to cut losses here.`;
+      }
+    } else if (portfolioTier === 'A' && isGrowthAction) {
+      portfolioMult = 1.15;
+      portfolioLine = `Portfolio context: this campaign ranks tier A account-wide — a strong candidate for incremental budget.`;
+    }
+
+    let memoryMult = 1;
+    let memoryLine = '';
+    if (recentlyWorsened) {
+      memoryMult = 0.85;
+      memoryLine = `Caution: a ${humanize(type)}-type action worsened outcomes elsewhere on this account recently — weighted down accordingly.`;
+    }
+
+    // Score = |expected profit delta| discounted by risk, scaled by how
+    // many signals corroborate it and by diagnosis/forecast/portfolio/
+    // memory context. This is the ranking signal — genuinely multi-
+    // parameter, not the single-metric ROAS-only ordering it used to be.
     const score = Math.round(
-      (Math.abs(projectedProfitDelta7dINR) / RISK_MULT[risk]) * s.strength,
+      (Math.abs(projectedProfitDelta7dINR) / RISK_MULT[risk]) *
+        combinedStrength *
+        diagnosisMult *
+        forecastMult *
+        portfolioMult *
+        memoryMult,
     );
 
     // Plain-English condition summary — works both when the campaign is
@@ -559,7 +825,7 @@ export class RecommendationEngine extends BaseEngine<
     // ("break-even zone — not making profit"). Subject varies by target
     // level so adset-level actions don't read as if the whole campaign is
     // failing.
-    const subject = s.targetType === 'adset'
+    const subject = targetType === 'adset'
       ? `The ad group in ${campaignName}`
       : campaignName;
     const roasGap = breakevenROAS - observedROAS;
@@ -576,12 +842,10 @@ export class RecommendationEngine extends BaseEngine<
       conditionLine = `${subject} is profitable — running at ${observedROAS.toFixed(2)}× ROAS above the ${breakevenROAS.toFixed(2)}× breakeven.`;
     }
 
-    // Evidence chain — plain-English, no engine jargon in the strings.
+    // Evidence chain — plain-English, no engine jargon in the strings. One
+    // entry per corroborating signal (previously always exactly one).
     const evidenceChain: RecommendedAction['evidenceChain'] = [
-      {
-        step: s.reasoning,
-        source: 'signal',
-      },
+      ...signals.map((sig) => ({ step: sig.reasoning, source: 'signal' })),
       {
         step: `Money: ${observedROAS.toFixed(2)}× ROAS observed, needs ${breakevenROAS.toFixed(2)}× to break even (contribution margin ${(marginPct * 100).toFixed(0)}%).`,
         source: 'revenue',
@@ -594,13 +858,41 @@ export class RecommendationEngine extends BaseEngine<
         step: `Root cause guess: ${diagnosisNarrative}`,
         source: 'diagnosis',
       },
+      ...(forecastLine ? [{ step: forecastLine, source: 'forecast' }] : []),
+      ...(portfolioLine ? [{ step: portfolioLine, source: 'portfolio' }] : []),
+      ...(memoryLine ? [{ step: memoryLine, source: 'memory' }] : []),
+      ...((type === 'replace_creative' || type === 'add_creative') &&
+      (topWinningHooks.length > 0 || topLosingHooks.length > 0)
+        ? [
+            {
+              step: [
+                topWinningHooks.length > 0 ? `Winning hooks on this account: ${topWinningHooks.join('; ')}.` : '',
+                topLosingHooks.length > 0 ? `Losing hooks: ${topLosingHooks.join('; ')}.` : '',
+              ]
+                .filter(Boolean)
+                .join(' '),
+              source: 'memory',
+            },
+          ]
+        : []),
     ];
 
-    // Reasoning — one plain-English paragraph. No markdown, no jargon.
+    // Reasoning — one plain-English paragraph. No markdown, no jargon. When
+    // more than one signal corroborates, say so up front instead of only
+    // ever citing a single cause.
+    const corroborationLine =
+      signals.length > 1
+        ? `${signals.length} independent signals agree here: ${signals.map((sig) => sig.kind.replace(/_/g, ' ')).join(', ')}.`
+        : '';
     const reasoning = [
       `${humanizeSentence(type, campaignName)}.`,
       conditionLine,
+      corroborationLine,
       mechanicsExplanation,
+      diagnosisLine,
+      forecastLine,
+      portfolioLine,
+      memoryLine,
     ]
       .filter(Boolean)
       .join(' ');
@@ -608,13 +900,13 @@ export class RecommendationEngine extends BaseEngine<
     return {
       actionId: randomUUID(),
       type,
-      targetType: s.targetType,
-      targetId: s.targetId,
+      targetType,
+      targetId,
       parameters: {},
       expectedImpact: {
         metric: impactMetric,
         deltaPct,
-        confidence: s.strength,
+        confidence: combinedStrength,
       },
       expectedProfitDeltaINR7d: Math.round(projectedProfitDelta7dINR),
       reasoning,
@@ -637,7 +929,7 @@ export class RecommendationEngine extends BaseEngine<
     adSetLevel: Record<string, Record<string, number>>;
     breakevenROAS: number;
     marginPct: number;
-    dailySpendVelocity: number;
+    ageDays: number;
     campaignName: string;
     diagnosisNarrative: string;
     blockedSet: Set<string>;
@@ -648,6 +940,7 @@ export class RecommendationEngine extends BaseEngine<
       adSetLevel,
       breakevenROAS,
       marginPct,
+      ageDays,
       campaignName,
       diagnosisNarrative,
       blockedSet,
@@ -687,7 +980,10 @@ export class RecommendationEngine extends BaseEngine<
     // - winner side: same rupees earning (winner.roas - breakeven) * margin,
     //   discounted 80% (marginal ROAS < average ROAS at scale).
     const shiftFraction = 0.3;
-    const loserDaily = loser.spend / 7;
+    // loser.spend is a lifetime total (Meta date_preset='maximum'), not a
+    // week's worth — same fix as elsewhere in this file, using campaign age
+    // as the best available proxy for this ad set's own age.
+    const loserDaily = loser.spend / ageDays;
     const shiftedDaily = loserDaily * shiftFraction;
     const lossAvoidedPerRupee = (breakevenROAS - loser.roas) * marginPct;
     const marginalWinnerROAS = winner.roas * 0.8;

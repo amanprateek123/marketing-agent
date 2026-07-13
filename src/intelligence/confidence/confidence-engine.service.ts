@@ -73,6 +73,21 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
     tenantId: string;
     campaignId: string;
   }): Promise<void> {
+    // Pre-check readiness before calling execute(): with 10 parallel
+    // dependencies firing in a non-deterministic order, up to 9 of these 10
+    // event deliveries per cycle are guaranteed to arrive before every dep
+    // is ready. execute() used to be called unconditionally and would throw
+    // MissingDependencyError for every one of those — harmless by design
+    // (the last dependency to land always succeeds) but NestJS logs every
+    // exception thrown inside an @OnEvent handler at ERROR severity, so a
+    // normal cycle produced up to 9 scary-looking "cannot run: missing X
+    // slice" ERROR lines that were never real failures. Checking readiness
+    // first (same idea as PortfolioEngine's 2-dep readyGate, generalized to
+    // 10 deps via a slice-existence count) makes the expected "still
+    // waiting" case a silent no-op instead of a thrown-and-logged error.
+    if (!(await this.sliceRepo.hasSlices(payload.cycleId, this.dependsOn))) {
+      return;
+    }
     this.identity.set(payload.cycleId, {
       tenantId: payload.tenantId,
       campaignId: payload.campaignId,
@@ -94,10 +109,22 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
       const slice = (deps as Record<string, { confidence?: number }>)[k];
       perEngine[k] = slice?.confidence ?? 0;
     }
-    const min = Math.min(...Object.values(perEngine));
     const meanConf = weightedConfidence(
       Object.values(perEngine).map((v) => ({ value: v, weight: 1 })),
     );
+
+    // Worst-of-core floor — scoped to the engines whose weakness genuinely
+    // means "we don't understand what's happening" (snapshot/revenue/
+    // signal/diagnosis). Previously this took the min across ALL 10 deps,
+    // including engines with a known, permanent, narrower scope by design
+    // (portfolio is explicitly single-campaign-scoped pending a future
+    // batch-orchestration feature; business/forecast are context, not
+    // action-justifying evidence). That meant one structurally-capped
+    // engine permanently dragged every decision's confidence down by up to
+    // 30 points, regardless of whether that engine's weakness had anything
+    // to do with the action being considered.
+    const CORE_ENGINES = ['snapshot', 'revenue', 'signal', 'diagnosis'] as const;
+    const minCore = Math.min(...CORE_ENGINES.map((k) => perEngine[k] ?? 0));
 
     const snap = deps.snapshot!.data as {
       freshnessSec?: number;
@@ -106,13 +133,32 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
     };
     const freshnessSec = snap.freshnessSec ?? 0;
     const snapshotCoverage = 1 - Math.min(1, (snap.missingFields?.length ?? 0) / 5);
+
+    // Statistical power: previously purchases-count alone, which ignores
+    // traffic volume entirely — a campaign can clear a purchases threshold
+    // on a tiny, noisy sample of impressions (CTR-based signals like
+    // ctr_decay/hook_burn/creative_fatigue would then be trusted on thin
+    // data) just as easily as on a well-trafficked one. Power is only as
+    // strong as its WEAKEST evidentiary leg, so this takes the min of the
+    // purchase-volume read (CVR/ROAS evidence) and the impression-volume
+    // read (CTR evidence) rather than either one alone.
     const purchases = (snap.metrics?.campaignLevel?.purchases as number) ?? 0;
-    const statisticalPower = Math.min(1, purchases / 25);
+    const impressions = (snap.metrics?.campaignLevel?.impressions as number) ?? 0;
+    const purchasePower = Math.min(1, purchases / 25);
+    const impressionPower = Math.min(1, impressions / 3000);
+    const statisticalPower = Math.min(purchasePower, impressionPower);
+
+    // Real history depth from the trend window (days of snapshot history
+    // actually available) — previously hardcoded to 0 always, itself a
+    // false-confidence stub inside the engine that's supposed to catch them.
+    const trend = deps.trend?.data;
+    const historyDepthDays =
+      trend?.perMetric.roas?.windowSize ?? trend?.perMetric.spend?.windowSize ?? 0;
 
     const quality = {
       dataFreshnessSec: freshnessSec,
       snapshotCoverage,
-      historyDepthDays: 0,
+      historyDepthDays,
       statisticalPower,
     };
     const qualityScore =
@@ -120,7 +166,7 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
       statisticalPower * 0.4 +
       (freshnessSec < 1800 ? 0.2 : freshnessSec < 3600 ? 0.1 : 0);
 
-    const overall = 0.3 * min + 0.4 * meanConf + 0.3 * qualityScore;
+    const overall = 0.3 * minCore + 0.4 * meanConf + 0.3 * qualityScore;
 
     const stage = deps.lifecycle!.data.stage;
     const stageForbidsExec = ['learning', 'launching', 'unknown', 'draft', 'pending_approval'].includes(

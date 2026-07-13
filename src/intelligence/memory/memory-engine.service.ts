@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
@@ -8,6 +8,7 @@ import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { MemoryData } from '../orchestrator/decision-context';
 import { CompaniesService } from '../../companies/companies.service';
+import { ActionOutcomeService } from '../../learning/action-outcome.service';
 
 @Injectable()
 export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
@@ -25,7 +26,13 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     sliceRepo: SliceRepository,
     eventBus: EngineEventBus,
     registry: EngineRegistry,
-    @Optional() private readonly companies: CompaniesService | null,
+    // Explicit @Inject() tokens — see BusinessEngine's constructor for why a
+    // bare `@Optional() x: Service | null` param is unreliable (the union
+    // with null can erase to `Object` in emitted design:paramtypes
+    // metadata, so @Optional() silently resolves to null even when the
+    // module correctly provides the service).
+    @Optional() @Inject(CompaniesService) private readonly companies: CompaniesService | null,
+    @Optional() @Inject(ActionOutcomeService) private readonly actionOutcomes: ActionOutcomeService | null,
   ) {
     super(sliceRepo, eventBus, registry);
   }
@@ -52,8 +59,12 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
   }
 
   protected async compute(deps: ComputeDeps<'memory'>): Promise<MemoryData> {
-    const ident = deps as unknown as { tenantId?: string };
-    const tenantId = ident.tenantId ?? '';
+    // deps carries only engine-slice outputs, never identity fields — the
+    // previous `deps as unknown as {tenantId}` cast always resolved to
+    // undefined, so tenantId was always '' and `company` (hence every real
+    // causalInsight/companyLearnings field below) never loaded.
+    const ident = this.identity.values().next().value;
+    const tenantId = ident?.tenantId ?? '';
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)
@@ -82,9 +93,34 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
       isolatedVariable: c.isolatedVariable ?? '',
     }));
 
+    // Real executed-action history from the older campaign-auditor system
+    // (executed_actions collection) — the only place actual outcome labels
+    // (improved/worsened/neutral) exist today, since the 16-engine cascade
+    // is shadow-mode only and has never applied anything itself. This was
+    // previously hardcoded to [], so RecommendationEngine's "don't repeat a
+    // proven-bad action type" dampening (recentlyWorsenedTypes) was dead
+    // code — it read a field that could never contain anything.
+    const recentExecuted = this.actionOutcomes && tenantId
+      ? await this.actionOutcomes.listRecent(tenantId, 30).catch(() => [])
+      : [];
+    const pastActions = recentExecuted
+      .filter((a) => a.outcomeLabel != null)
+      .map((a) => ({
+        actionType: a.action.type,
+        executedAt: a.executedAt,
+        outcomeLabel: a.outcomeLabel as 'improved' | 'worsened' | 'neutral' | 'inconclusive',
+        context: [
+          a.action.targetName ?? a.action.targetId,
+          a.context?.ageDays != null ? `day ${a.context.ageDays}` : null,
+          a.context?.audienceType,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+      }));
+
     const creative = co.learnings?.creative ?? {};
     return {
-      pastActions: [],
+      pastActions,
       causalInsights,
       similarPastCycles: [],
       companyLearnings: {
@@ -102,9 +138,10 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     _deps: ComputeDeps<'memory'>,
     data: MemoryData,
   ): number {
-    const hasInsights = data.causalInsights.length > 0 ? 0.4 : 0;
-    const hasExemplars = data.companyLearnings.winningExemplars.length > 0 ? 0.3 : 0;
-    return 0.3 + hasInsights + hasExemplars;
+    const hasInsights = data.causalInsights.length > 0 ? 0.3 : 0;
+    const hasExemplars = data.companyLearnings.winningExemplars.length > 0 ? 0.2 : 0;
+    const hasPastActions = data.pastActions.length > 0 ? 0.2 : 0;
+    return 0.3 + hasInsights + hasExemplars + hasPastActions;
   }
 
   protected buildEvidence(): Evidence[] {

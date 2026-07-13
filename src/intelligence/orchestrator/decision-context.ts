@@ -87,6 +87,11 @@ export interface RevenueData {
     isProfitable: boolean;
     daysSinceBreakeven: number;
   };
+  /** The profit GOAL, not just the loss-avoidance floor — derived as
+   *  breakeven.roas * 2, so it scales correctly per product margin instead
+   *  of being one flat number that's meaningless for low-margin products.
+   *  Winner detection and scale-up reasoning measure progress against this. */
+  targetROAS: number;
 }
 
 export type SignalKind =

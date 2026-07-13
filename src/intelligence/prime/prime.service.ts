@@ -102,7 +102,6 @@ export class PrimeService {
         );
       }
     }
-
     // ── 2. Pull active campaigns ──────────────────────────────────
     const activeCampaigns = await this.campaignModel
       .find({ tenantId, status: 'active' })
