@@ -10,6 +10,7 @@ import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative 
 import { SlackService } from '../../delivery/slack.service';
 import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
+import { getFormatSpec } from '../../common/creative/format-specs';
 
 export interface BriefData {
   topic: string;
@@ -27,6 +28,8 @@ export interface BriefData {
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
   explorationArm?: boolean;                 // when true, Creative Team skips winningHooks/winningExemplars injection (closed-loop drift mitigation)
+  /** Forces a specific carousel narrative pattern instead of letting the LLM pick. Only used when format === 'carousel'. */
+  carouselPattern?: 'auto' | 'sequential' | 'tier_reveal' | 'story_arc' | 'differentiator_stack' | 'qa' | 'catalog_grid';
   /**
    * Exploit-winner marker — when set, Creative Team looks up the matching
    * HotWinner (via metaAdId) on company.learnings.hotWinners and injects a
@@ -183,6 +186,10 @@ export class CreativeProducerService {
 
     this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId} targetLanguage=${brief.targetLanguage}`);
 
+    // Format-spec registry — drives video skip + image aspect ratio for both
+    // the Creative Team path and the fallback path below.
+    const spec = getFormatSpec(brief.format);
+
     try {
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
       let images: ImageCreative[] = [];
@@ -211,7 +218,7 @@ export class CreativeProducerService {
           this.logger.log(`Generating ${teamResult.carouselCards!.length} carousel card images: tenantId=${tenantId} briefId=${briefId}`);
           const cardResults = await Promise.allSettled(
             teamResult.carouselCards!.map((card) =>
-              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId),
+              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId, spec.aspectRatio),
             ),
           );
           carouselCards = teamResult.carouselCards!.map((card, i) => {
@@ -247,7 +254,7 @@ export class CreativeProducerService {
               const teamImagePrompt = teamResult.imagePrompts?.[i];
               if (teamImagePrompt) {
                 // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
-                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId);
+                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId, spec.aspectRatio);
               }
               // Fallback: generate image prompt from scratch for this variant
               return this.imageGenerator.generateForVariant(
@@ -256,6 +263,7 @@ export class CreativeProducerService {
                 i,
                 company,
                 runId,
+                spec.aspectRatio,
               );
             }),
           );
@@ -276,8 +284,8 @@ export class CreativeProducerService {
           ? teamResult.videoPrompt
           : JSON.stringify(teamResult.videoPrompt);
 
-        if (brief.format === 'meme') {
-          this.logger.log(`Video generation skipped — meme format uses static image only`);
+        if (spec.skipVideo) {
+          this.logger.log(`Video generation skipped — format '${brief.format}' is static-only`);
           video = null;
         } else
         try {
@@ -328,6 +336,7 @@ export class CreativeProducerService {
                 i,
                 company,
                 runId,
+                spec.aspectRatio,
               ),
             ),
           );
@@ -342,7 +351,7 @@ export class CreativeProducerService {
         } else {
           // No variants — generate one image from brief
           try {
-            const imgResult = await this.imageGenerator.generate(brief, company, runId);
+            const imgResult = await this.imageGenerator.generate(brief, company, runId, spec.aspectRatio);
             images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl }];
           } catch (imgErr: any) {
             this.logger.error(`Image generation failed: ${imgErr.message}`);
@@ -409,6 +418,11 @@ export class CreativeProducerService {
         { _id: pkg._id },
         {
           status,
+          // Stamped here (not at creation) so it reflects the ACTUAL
+          // resolved product/language, not just what the caller requested —
+          // brief.targetLanguage is resolved above if it wasn't explicit.
+          productName: brief.product ?? '',
+          targetLanguage: brief.targetLanguage ?? '',
           ...(copyPackage && {
             copyVariants: copyPackage.variants,
             selectedCopyIndex: copyPackage.selectedIndex,
@@ -462,7 +476,12 @@ export class CreativeProducerService {
     } catch (err: any) {
       await this.creativePackageModel.updateOne(
         { _id: pkg._id },
-        { status: 'failed', error: err.message },
+        {
+          status: 'failed',
+          error: err.message,
+          productName: brief.product ?? '',
+          targetLanguage: brief.targetLanguage ?? '',
+        },
       );
       this.logger.error(`Creative production failed: tenantId=${tenantId} briefId=${briefId} | ${err.message}`);
       throw err;

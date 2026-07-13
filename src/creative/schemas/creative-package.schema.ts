@@ -14,6 +14,7 @@ export interface ImageCreative {
   variantIndex: number;
   imagePrompt: string;
   imageUrl: string;
+  editInstructions?: string[];  // free-text tweaks applied via edit-image, most recent last
 }
 
 export interface VideoCreative {
@@ -54,6 +55,15 @@ export class CreativePackage {
 
   @Prop({ required: true, enum: ['pending', 'completed', 'failed'], default: 'pending' })
   status: string;
+
+  // Which product/language this package was generated for — stamped by
+  // CreativeProducerService.produce() from the resolved brief, so the
+  // creative library can be browsed/filtered without re-reading the brief.
+  @Prop({ default: '' })
+  productName?: string;
+
+  @Prop({ default: '' })
+  targetLanguage?: string;
 
   // Copy
   @Prop({ type: Array, default: [] })

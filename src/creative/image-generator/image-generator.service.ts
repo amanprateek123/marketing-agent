@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
-import { ClaudeService } from '../../claude/claude.service';
+import { OpenAIChatService } from '../../openai/openai-chat.service';
 import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
@@ -13,6 +13,7 @@ import {
   getScriptForLanguage,
   CanonicalLanguage,
 } from '../../common/creative/language-utils';
+import { AspectRatio } from '../../common/creative/format-specs';
 
 export interface ImageResult {
   imagePrompt: string;
@@ -24,7 +25,7 @@ export class ImageGeneratorService {
   private readonly logger = new Logger(ImageGeneratorService.name);
 
   constructor(
-    private readonly claudeService: ClaudeService,
+    private readonly openaiChat: OpenAIChatService,
     private readonly liveContextBuilder: LiveContextBuilder,
     private readonly configService: ConfigService,
     private readonly s3Service: S3Service,
@@ -47,6 +48,7 @@ export class ImageGeneratorService {
     variantIndex: number,
     company: CompanyDocument,
     runId: string,
+    aspectRatio: AspectRatio = '9:16',
   ): Promise<ImageResult> {
     const hookText = copyVariant.primaryText?.split('\n')[0] ?? '';
     const headline = copyVariant.headline ?? '';
@@ -54,12 +56,11 @@ export class ImageGeneratorService {
     const targetLanguage: CanonicalLanguage = brief.targetLanguage
       ?? resolveTargetLanguage({ productLanguages: activeProduct?.languages });
 
-    const promptResult = await this.claudeService.runAgent({
+    const promptResult = await this.openaiChat.runChat({
       tenantId: company.tenantId,
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt: '',
-      liveContext: this.liveContextBuilder.build(company, (brief as any)?.product),
+      systemPrompt: this.liveContextBuilder.build(company, (brief as any)?.product),
       userMessage: this.buildImagePromptUserMessage({
         company,
         brief,
@@ -68,8 +69,8 @@ export class ImageGeneratorService {
         headline,
         cta: copyVariant.cta,
         targetLanguage,
+        aspectRatio,
       }),
-      maxTurns: 2,
     });
 
     const imagePrompt = promptResult.content.trim();
@@ -77,7 +78,7 @@ export class ImageGeneratorService {
 
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio);
     } catch (err: any) {
       this.logger.error(`Image generation failed for variant ${variantIndex} (prompt saved): ${err.message}`);
     }
@@ -98,18 +99,18 @@ export class ImageGeneratorService {
     },
     company: CompanyDocument,
     runId: string,
+    aspectRatio: AspectRatio = '9:16',
   ): Promise<ImageResult> {
     const activeProduct = (company.products ?? []).find(p => p.active);
     const targetLanguage: CanonicalLanguage = brief.targetLanguage
       ?? resolveTargetLanguage({ productLanguages: activeProduct?.languages });
 
     // Step 1 — Claude writes the image prompt
-    const promptResult = await this.claudeService.runAgent({
+    const promptResult = await this.openaiChat.runChat({
       tenantId: company.tenantId,
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt: '',
-      liveContext: this.liveContextBuilder.build(company, (brief as any)?.product),
+      systemPrompt: this.liveContextBuilder.build(company, (brief as any)?.product),
       userMessage: this.buildImagePromptUserMessage({
         company,
         brief,
@@ -118,8 +119,8 @@ export class ImageGeneratorService {
         headline: brief.keyMessage,
         cta: '',
         targetLanguage,
+        aspectRatio,
       }),
-      maxTurns: 2,
     });
 
     const imagePrompt = promptResult.content.trim();
@@ -128,7 +129,7 @@ export class ImageGeneratorService {
     // Step 2 — Generate image via Nano Banana + upload to S3
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio);
     } catch (err: any) {
       this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
@@ -144,12 +145,13 @@ export class ImageGeneratorService {
     imagePrompt: string,
     company: CompanyDocument,
     runId: string,
+    aspectRatio: AspectRatio = '9:16',
   ): Promise<ImageResult> {
     this.logger.log(`Generating image from reviewed prompt: tenantId=${company.tenantId}`);
 
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio);
     } catch (err: any) {
       this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
@@ -182,8 +184,9 @@ export class ImageGeneratorService {
     headline: string;
     cta: string;
     targetLanguage: CanonicalLanguage;
+    aspectRatio: AspectRatio;
   }): string {
-    const { company, brief, hookStyle, hookText, headline, cta, targetLanguage } = args;
+    const { company, brief, hookStyle, hookText, headline, cta, targetLanguage, aspectRatio } = args;
     const vertical = resolveVertical(company.industry);
     const isSpiritual = vertical === 'spirituality';
     // Image overlays use Manglish/Tanglish/Hinglish convention: target-language
@@ -222,8 +225,21 @@ COMPOSITION (3-layer rule — not single-element domination):
   Layer 1 (50% of frame): subject from the centerpiece row above
   Layer 2 (25% of frame): one supporting symbol (deity glyph / chart / number / strikethrough / split-line)
   Layer 3 (15% of frame): product visible (book, certificate, phone showing report — anchor what they buy)
-  Layer 4 (~10% of frame total): text overlays — TOP "${hookText}" (≤3 words bold ${isManglishConvention ? `Latin-script ${targetLanguage}` : targetLanguage}), BOTTOM "${headline}"${cta ? ` + CTA "${cta}"` : ''} — never exceed 25% of frame on text combined
+  Layer 4 (~10% of frame total): text overlays — upper hook "${hookText}" (≤3 words bold ${isManglishConvention ? `Latin-script ${targetLanguage}` : targetLanguage}) placed in the upper part of the SAFE ZONE below, lower "${headline}"${cta ? ` + CTA "${cta}"` : ''} placed in the lower part of the SAFE ZONE — never exceed 25% of frame on text combined
 `.trim();
+
+    // This 9:16 asset also runs on Feed/Marketplace/Explore, which Meta crops
+    // to 4:5 and 1:1 by keeping only the center of the frame — a 1:1 crop
+    // discards the outer ~22% off both the top and bottom. Text/CTA placed at
+    // the true top/bottom edge (the old TOP/BOTTOM convention) was getting
+    // cut on every non-Stories/Reels placement. Center safe zone fixes this
+    // for every placement with a single image instead of a per-placement asset.
+    const safeZoneRule = aspectRatio === '9:16' ? `
+SAFE ZONE — CRITICAL, non-negotiable:
+This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements.
+- Keep ALL text overlays (hook, headline, CTA) and every element the viewer must see (product, face, key symbol) inside the CENTER 60% of the vertical frame — roughly from 20% to 80% of frame height.
+- The outer top 20% and outer bottom 20% may only hold background/atmosphere — no text, no CTA, no product, nothing critical.
+`.trim() : '';
 
     const avoidList = `
 AVOID (these are concrete Nano-Banana failure modes, not generic art-school negatives):
@@ -270,19 +286,147 @@ ${facialSpec}
 
 ${compositionRule}
 
+${safeZoneRule}
+
 ${avoidList}
 
-Format: Vertical 9:16. Length: 8-10 sentences — enough to specify centerpiece, all 3 composition layers, text overlays, subject demographics, and 2-3 specific AVOIDs that apply to THIS hookStyle.
+Format: ${aspectRatio === '9:16' ? 'Vertical 9:16' : aspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}. Length: 8-10 sentences — enough to specify centerpiece, all 3 composition layers, text overlays, subject demographics, and 2-3 specific AVOIDs that apply to THIS hookStyle.
 
 Return ONLY the image prompt, nothing else.
     `.trim();
   }
 
-  private async generateAndUpload(prompt: string, tenantId: string, runId: string): Promise<string> {
+  /**
+   * Edit an existing image with a free-text instruction ("change the headline
+   * to X", "make the background blue") instead of regenerating from scratch —
+   * feeds the CURRENT image back into the provider so most of the image
+   * (subject, composition, other text) stays intact.
+   */
+  async editImage(
+    currentImageUrl: string,
+    instruction: string,
+    tenantId: string,
+    runId: string,
+    aspectRatio: AspectRatio = '9:16',
+  ): Promise<ImageResult> {
+    const sourceBuffer = await this.downloadImageBuffer(currentImageUrl);
+    const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
+
+    const editedBuffer = provider === 'gpt_image'
+      ? await this.callGptImageEdit(sourceBuffer, instruction, tenantId, aspectRatio)
+      : await this.callNanoBananaEdit(sourceBuffer, instruction, tenantId, aspectRatio);
+
+    const key = `${tenantId}/images/${runId}-edit-${Date.now()}.png`;
+    const imageUrl = await this.uploadBufferToS3(editedBuffer, key);
+
+    this.logger.log(`Image edited: tenantId=${tenantId} provider=${provider} instruction="${instruction.slice(0, 80)}"`);
+    return { imagePrompt: instruction, imageUrl };
+  }
+
+  private async downloadImageBuffer(url: string): Promise<Buffer> {
+    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+    return Buffer.from(response.data);
+  }
+
+  private async callGptImageEdit(
+    imageBuffer: Buffer,
+    instruction: string,
+    tenantId: string,
+    aspectRatio: AspectRatio = '9:16',
+  ): Promise<Buffer> {
+    const apiKey = this.configService.get<string>('openai.apiKey');
+    const model = this.configService.get<string>('openai.imageModel') ?? 'gpt-image-2';
+
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY not configured');
+    }
+
+    this.logger.log(`Calling OpenAI image edit API: tenantId=${tenantId} model=${model} aspectRatio=${aspectRatio}`);
+
+    const size = aspectRatio === '9:16' ? '1024x1536' : aspectRatio === '1:1' ? '1024x1024' : '1024x1024';
+
+    const form = new FormData();
+    form.append('model', model);
+    form.append('image', new Blob([new Uint8Array(imageBuffer)], { type: 'image/png' }), 'source.png');
+    form.append('prompt', `Edit this ad image with ONLY this change, keeping everything else (composition, subject, other text, style) identical: ${instruction}`);
+    form.append('size', size);
+    form.append('n', '1');
+
+    const maxAttempts = 2;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await axios.post('https://api.openai.com/v1/images/edits', form, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          timeout: 240000,
+        });
+
+        const b64 = response.data?.data?.[0]?.b64_json;
+        if (!b64) {
+          throw new Error(`No image data in OpenAI edit response: ${JSON.stringify(response.data).slice(0, 300)}`);
+        }
+
+        this.logger.log(`OpenAI image edited: tenantId=${tenantId} attempt=${attempt}`);
+        return Buffer.from(b64, 'base64');
+      } catch (err) {
+        lastError = err;
+        const status = (err as any)?.response?.status;
+        const code = (err as any)?.code;
+        const retriable = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || (typeof status === 'number' && status >= 500);
+        if (!retriable || attempt === maxAttempts) throw err;
+        this.logger.warn(`OpenAI image edit attempt ${attempt} failed (code=${code} status=${status}); retrying`);
+      }
+    }
+    throw lastError;
+  }
+
+  private async callNanoBananaEdit(
+    imageBuffer: Buffer,
+    instruction: string,
+    tenantId: string,
+    aspectRatio: AspectRatio = '9:16',
+  ): Promise<Buffer> {
+    const apiKey = this.configService.get<string>('google.aiApiKey');
+
+    if (!apiKey) {
+      throw new Error('GOOGLE_AI_API_KEY not configured');
+    }
+
+    this.logger.log(`Calling Nano Banana image edit: tenantId=${tenantId} aspectRatio=${aspectRatio}`);
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-3.1-flash-image-preview',
+      generationConfig: {
+        responseModalities: ['IMAGE'] as any,
+        imageConfig: { aspectRatio } as any,
+      } as any,
+    });
+
+    const editPrompt = `Edit this ad image with ONLY this change, keeping everything else (composition, subject, background, other text, style) identical: ${instruction}`;
+
+    const result = await model.generateContent([
+      { inlineData: { mimeType: 'image/png', data: imageBuffer.toString('base64') } },
+      { text: editPrompt },
+    ] as any);
+    const response = result.response;
+    const parts = response.candidates?.[0]?.content?.parts ?? [];
+
+    const imagePart = parts.find((p: any) => p.inlineData?.mimeType?.startsWith('image/'));
+
+    if (!imagePart?.inlineData?.data) {
+      throw new Error(`No image data in Nano Banana edit response: ${JSON.stringify(parts.map((p: any) => p.text ?? '[image]')).slice(0, 300)}`);
+    }
+
+    this.logger.log(`Nano Banana image edited: tenantId=${tenantId}`);
+    return Buffer.from(imagePart.inlineData.data, 'base64');
+  }
+
+  private async generateAndUpload(prompt: string, tenantId: string, runId: string, aspectRatio: AspectRatio = '9:16'): Promise<string> {
     const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
     const imageBuffer = provider === 'gpt_image'
-      ? await this.callGptImage(prompt, tenantId)
-      : await this.callNanoBanana(prompt, tenantId);
+      ? await this.callGptImage(prompt, tenantId, aspectRatio)
+      : await this.callNanoBanana(prompt, tenantId, aspectRatio);
 
     // Upload to S3 — permanent URL
     const key = `${tenantId}/images/${runId}-${Date.now()}.png`;
@@ -292,7 +436,7 @@ Return ONLY the image prompt, nothing else.
     return s3Url;
   }
 
-  private async callGptImage(prompt: string, tenantId: string): Promise<Buffer> {
+  private async callGptImage(prompt: string, tenantId: string, aspectRatio: AspectRatio = '9:16'): Promise<Buffer> {
     const apiKey = this.configService.get<string>('openai.apiKey');
     const model = this.configService.get<string>('openai.imageModel') ?? 'gpt-image-2';
 
@@ -300,10 +444,14 @@ Return ONLY the image prompt, nothing else.
       throw new Error('OPENAI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling OpenAI image API: tenantId=${tenantId} model=${model}`);
+    this.logger.log(`Calling OpenAI image API: tenantId=${tenantId} model=${model} aspectRatio=${aspectRatio}`);
 
     // gpt-image-* expects the same photoreal prefix Nano Banana gets — keeps style parity across providers.
     const styledPrompt = `Photorealistic photograph. Real human faces, real skin textures, natural lighting. NOT illustration, NOT cartoon, NOT animated, NOT 3D render, NOT digital art. Shot on a professional camera.\n\n${prompt}`;
+
+    // OpenAI gpt-image only supports 1024x1024 / 1024x1536 / 1536x1024 — no
+    // native 4:5, so 4:5 requests snap to the closest supported size (square).
+    const size = aspectRatio === '9:16' ? '1024x1536' : aspectRatio === '1:1' ? '1024x1024' : '1024x1024';
 
     const maxAttempts = 2;
     let lastError: unknown;
@@ -314,7 +462,7 @@ Return ONLY the image prompt, nothing else.
           {
             model,
             prompt: styledPrompt,
-            size: '1024x1536', // closest supported 9:16 ratio
+            size,
             n: 1,
           },
           {
@@ -345,14 +493,14 @@ Return ONLY the image prompt, nothing else.
     throw lastError;
   }
 
-  private async callNanoBanana(prompt: string, tenantId: string): Promise<Buffer> {
+  private async callNanoBanana(prompt: string, tenantId: string, aspectRatio: AspectRatio = '9:16'): Promise<Buffer> {
     const apiKey = this.configService.get<string>('google.aiApiKey');
 
     if (!apiKey) {
       throw new Error('GOOGLE_AI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling Nano Banana (Gemini Image): tenantId=${tenantId}`);
+    this.logger.log(`Calling Nano Banana (Gemini Image): tenantId=${tenantId} aspectRatio=${aspectRatio}`);
 
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
@@ -360,7 +508,7 @@ Return ONLY the image prompt, nothing else.
       generationConfig: {
         responseModalities: ['IMAGE'] as any,
         imageConfig: {
-          aspectRatio: '9:16',
+          aspectRatio,
         } as any,
       } as any,
     });

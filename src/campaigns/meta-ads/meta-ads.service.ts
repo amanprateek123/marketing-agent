@@ -776,19 +776,23 @@ export class MetaAdsService {
     // auditor caught it. Meta's `narrowAdSetPlacements` helper can still expand
     // back to AN later if data warrants. Override only if config explicitly sets
     // publisher_platforms (some retargeting flows do want AN).
+    //
+    // Also restricted to native-9:16 surfaces (Stories/Reels) — every image/video
+    // asset this pipeline produces is 9:16 with text baked into the top/bottom
+    // ~15% margins. Feed, Marketplace, and Explore render 4:5/1:1 and Meta
+    // center-crops to fit, which was cutting the hook text and CTA off entirely
+    // (crop math: 9:16→1:1 drops the outer ~22% off both edges). The image-gen
+    // prompts now keep text inside a center safe zone too, but this default stays
+    // narrow so already-launched creative (generated before that fix) doesn't get
+    // cropped either. Override via config.publisherPlatforms once Feed/Marketplace
+    // reach is worth re-adding (Meta requires explicit positions per platform when
+    // publisher_platforms is overridden — see the else branch).
     if (!(config as any).publisherPlatforms) {
       targeting.publisher_platforms = ['facebook', 'instagram'];
-      // When publisher_platforms is set, Meta requires explicit positions per platform
       // 'video_feeds' was deprecated in v21.0 (subcode 2490562). Reels-style
       // surface lives under 'facebook_reels' now.
-      targeting.facebook_positions = [
-        'feed',
-        'facebook_reels',
-        'story',
-        'instream_video',
-        'marketplace',
-      ];
-      targeting.instagram_positions = ['stream', 'story', 'reels', 'explore'];
+      targeting.facebook_positions = ['facebook_reels', 'story'];
+      targeting.instagram_positions = ['story', 'reels'];
     } else {
       targeting.publisher_platforms = (config as any).publisherPlatforms;
     }

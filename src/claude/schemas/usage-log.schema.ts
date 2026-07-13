@@ -1,6 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
-import { AgentType, ClaudeModel } from '../claude.types';
+import { AgentType } from '../claude.types';
 
 export type UsageLogDocument = HydratedDocument<UsageLog>;
 
@@ -15,8 +15,10 @@ export class UsageLog {
   @Prop({ required: true, enum: AgentType })
   agent: AgentType;
 
+  // Field name is legacy (predates OpenAI usage) — holds whichever model
+  // string actually served the call, Claude or OpenAI.
   @Prop({ required: true })
-  claudeModel: ClaudeModel;
+  claudeModel: string;
 
   @Prop({ default: 0 })
   inputTokens: number;

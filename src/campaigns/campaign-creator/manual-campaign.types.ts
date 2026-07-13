@@ -52,9 +52,17 @@ export interface CreateManualCampaignDto {
   budget: number;
   objective?: string;
   adSets: ManualAdSetInput[];
-  creative: {
+  /**
+   * Exactly one of `creative` or `creativePackageId` must be set.
+   *   - `creative`: paste image/video URLs directly — builds a new,
+   *     single-use CreativePackage (briefId='manual').
+   *   - `creativePackageId`: reuse an existing, already-produced
+   *     CreativePackage from the creative library instead.
+   */
+  creative?: {
     copyVariants: ManualCopyVariant[];
     images?: ManualCreativeImage[];
     video?: ManualCreativeVideo | null;
   };
+  creativePackageId?: string;
 }

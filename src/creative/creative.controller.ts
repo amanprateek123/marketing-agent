@@ -11,6 +11,8 @@ import { AgentType } from '../claude/claude.types';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
 import { CreativePackage, CreativePackageDocument } from './schemas/creative-package.schema';
+import { CANONICAL_LANGUAGES } from '../common/creative/language-utils';
+import { listFormatSpecs } from '../common/creative/format-specs';
 
 @Controller('creative')
 export class CreativeController {
@@ -29,6 +31,130 @@ export class CreativeController {
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
   ) {}
+
+  /**
+   * GET /api/v1/creative/languages
+   * Static list of every canonical language the creative pipeline supports,
+   * for a dashboard language picker. Single source of truth stays backend-side.
+   */
+  @Get('languages')
+  getLanguages() {
+    return CANONICAL_LANGUAGES;
+  }
+
+  /**
+   * GET /api/v1/creative/formats
+   * Every creative format the pipeline supports, for the dashboard's category
+   * picker. Single source of truth stays backend-side (format-specs.ts) —
+   * only label/hint/group are exposed, not the prompt-internal fields.
+   */
+  @Get('formats')
+  getFormats() {
+    return listFormatSpecs().map(spec => ({
+      value: spec.id,
+      label: spec.label,
+      hint: spec.hint,
+      group: spec.group,
+    }));
+  }
+
+  /**
+   * GET /api/v1/creative/:tenantId/packages?productName=&targetLanguage=&status=&briefId=
+   * Browse the creative library for a tenant. Excludes one-off packages made
+   * by pasting URLs directly into a manual campaign (briefId==='manual') —
+   * those are single-use, not meant to be reused, and would just clutter a
+   * "reusable creative" library view.
+   */
+  @Get(':tenantId/packages')
+  async listPackages(
+    @Param('tenantId') tenantId: string,
+    @Query('productName') productName?: string,
+    @Query('targetLanguage') targetLanguage?: string,
+    @Query('status') status?: string,
+    @Query('briefId') briefId?: string,
+  ) {
+    const query: Record<string, unknown> = { tenantId, briefId: { $ne: 'manual' } };
+    if (productName) query.productName = productName;
+    if (targetLanguage) query.targetLanguage = targetLanguage;
+    if (status) query.status = status;
+    if (briefId) query.briefId = briefId;
+
+    return this.creativePackageModel
+      .find(query)
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean()
+      .exec();
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/product-creative
+   * Generate a standalone ad creative (copy + images/video) for a product,
+   * outside of any campaign — for the creative library. Same pattern as
+   * landingPageTest() below: synthesizes a lightweight BriefData directly
+   * from the product's own config, no pre-existing IntelligenceBrief needed.
+   *
+   * Body: { product: string (required), targetLanguage?, targetSegment?,
+   *   angle?, topic?, platform?, format?, audience?, hook?, keyMessage?,
+   *   conversionBridge?, audienceStage? }
+   */
+  @Post(':tenantId/product-creative')
+  async productCreative(
+    @Param('tenantId') tenantId: string,
+    @Body() body: {
+      product: string;
+      targetLanguage?: string;
+      targetSegment?: string;
+      angle?: string;
+      topic?: string;
+      platform?: string;
+      format?: string;
+      audience?: string;
+      hook?: string;
+      keyMessage?: string;
+      conversionBridge?: string;
+      audienceStage?: 'cold' | 'warm' | 'hot';
+      carouselPattern?: 'auto' | 'sequential' | 'tier_reveal' | 'story_arc' | 'differentiator_stack' | 'qa' | 'catalog_grid';
+    },
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    const product = (company.products ?? []).find(p => p.name === body.product);
+
+    if (!body.product || !product) {
+      throw new BadRequestException(`Product "${body.product}" not found for tenant ${tenantId}.`);
+    }
+
+    const briefId = `product-creative-${Date.now()}`;
+    const runId = briefId;
+
+    // Creative inputs — operator-supplied, with neutral fallbacks derived
+    // from the product (same fallback pattern as landingPageTest below).
+    const briefData: BriefData = {
+      product: product.name,
+      topic: body.topic ?? `Product creative: ${product.name}`,
+      angle: body.angle ?? 'Direct-response ad for this product',
+      platform: body.platform ?? 'facebook',
+      format: body.format ?? 'image',
+      audience: body.audience ?? product.audienceSegments?.[0]?.description ?? (product.description ?? '').slice(0, 120),
+      hook: body.hook ?? product.differentiators?.[0] ?? (product.description ?? '').split('.')[0],
+      keyMessage: body.keyMessage ?? (product.description ?? '').slice(0, 180),
+      conversionBridge: body.conversionBridge ?? 'Tap to learn more.',
+      audienceStage: body.audienceStage ?? 'cold',
+      targetSegment: body.targetSegment ?? product.audienceSegments?.[0]?.name,
+      targetLanguage: body.targetLanguage as any,
+      carouselPattern: body.carouselPattern,
+    };
+
+    this.logger.log(`Product creative requested: tenant=${tenantId} product=${product.name} briefId=${briefId}`);
+
+    // Fire and forget — returns immediately, production runs in background.
+    // Poll GET :tenantId/packages?briefId=... for the result.
+    this.creativeProducer.produce(
+      tenantId, briefId, runId, briefData, { forceRegenerate: true },
+    ).catch(() => {});
+
+    return { status: 'started', briefId, product: product.name };
+  }
 
   /**
    * GET /api/v1/creative/:tenantId/packages/:creativePackageId
@@ -57,14 +183,16 @@ export class CreativeController {
    */
   /**
    * PATCH /api/v1/creative/:tenantId/packages/:creativePackageId
-   * Manually update a specific variant's imageUrl or the video's videoUrl.
-   * Body: { variantIndex?: number, imageUrl?: string, videoUrl?: string }
+   * Manually update a specific variant's imageUrl, the video's videoUrl, or
+   * which variant is "selected" (the one launch() actually uses for video
+   * ad sets and the one shown as the primary thumbnail).
+   * Body: { variantIndex?: number, imageUrl?: string, videoUrl?: string, selectedCopyIndex?: number }
    */
   @Patch(':tenantId/packages/:creativePackageId')
   async updatePackage(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
-    @Body() body: { variantIndex?: number; imageUrl?: string; videoUrl?: string },
+    @Body() body: { variantIndex?: number; imageUrl?: string; videoUrl?: string; selectedCopyIndex?: number },
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
@@ -87,6 +215,14 @@ export class CreativeController {
     if (body.videoUrl !== undefined) {
       const currentVideo = (pkg as any).video ?? { variantIndex: 0, videoPrompt: '', videoThumbnailUrl: '' };
       update.video = { ...currentVideo, videoUrl: body.videoUrl };
+    }
+
+    if (body.selectedCopyIndex !== undefined) {
+      const variantCount = ((pkg as any).copyVariants ?? []).length;
+      if (body.selectedCopyIndex < 0 || body.selectedCopyIndex >= variantCount) {
+        throw new BadRequestException(`selectedCopyIndex ${body.selectedCopyIndex} is out of range (${variantCount} variants)`);
+      }
+      update.selectedCopyIndex = body.selectedCopyIndex;
     }
 
     await this.creativePackageModel.updateOne({ _id: creativePackageId, tenantId }, { $set: update });
@@ -272,8 +408,8 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
       ? `Product: ${product?.name ?? 'unknown'} (PRICE SUPPRESSED — do NOT mention any price, no ₹, no rupees)`
       : `Product: ${product?.name ?? 'unknown'} — ₹${product?.price ?? '???'}`;
     const bottomOverlayLine = hidePrice
-      ? `- TEXT OVERLAY — BOTTOM: "${product?.name ?? 'Product'}" + CTA in large text. DO NOT include any price (no ₹, no rupees).`
-      : `- TEXT OVERLAY — BOTTOM: "${product?.name ?? 'Product'} — ₹${product?.price ?? '???'}" + CTA in large text`;
+      ? `- TEXT OVERLAY — LOWER (inside the safe zone below): "${product?.name ?? 'Product'}" + CTA in large text. DO NOT include any price (no ₹, no rupees).`
+      : `- TEXT OVERLAY — LOWER (inside the safe zone below): "${product?.name ?? 'Product'} — ₹${product?.price ?? '???'}" + CTA in large text`;
     const buildImagePrompt = (hook: string) => `
 Write an image generation prompt for a Meta direct response ad. This image must make someone STOP scrolling and TAP the ad.
 
@@ -295,18 +431,20 @@ The centerpiece must be the LARGEST element (60% of the frame) — NOT a small d
 
 STEP 2 — BUILD AROUND THE CENTERPIECE:
 - VISUAL CENTERPIECE (dominant): The concept from Step 1, unmissable at phone size
-- TEXT OVERLAY — TOP: "${hook.slice(0, 80)}" in bold Hinglish, high contrast, readable
+- TEXT OVERLAY — UPPER (inside the safe zone below): "${hook.slice(0, 80)}" in bold Hinglish, high contrast, readable
 ${bottomOverlayLine}
 - PRODUCT VISIBLE — show ${product?.name ?? 'the product'} clearly
 - INDIAN CONTEXT — real Indian faces, settings, skin tones
 - HIGH CONTRAST — thumb-stopping colors, no muted/pastel
 
+SAFE ZONE — CRITICAL, non-negotiable: This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements. Keep BOTH text overlays (and the CTA) inside the CENTER 60% of the vertical frame (roughly 20%-80% of frame height). The outer top/bottom 20% may only hold background/atmosphere — no text, no CTA, nothing critical.
+
 ${visualInsights}
 
 Format: Vertical 9:16, photorealistic, 4-5 sentences.
-Describe: focal point, emotional tone, text overlay placement (exact words + position), product placement, colors, lighting.
+Describe: focal point, emotional tone, text overlay placement (exact words + position within the safe zone), product placement, colors, lighting.
 
-AVOID: generic lifestyle photos, text-free images, muted colors, stock photo look, cluttered composition.
+AVOID: generic lifestyle photos, text-free images, muted colors, stock photo look, cluttered composition, any text/CTA placed at the true top or bottom edge of the frame.
 
 Return ONLY the image prompt, nothing else.
     `.trim();
@@ -400,6 +538,58 @@ Return ONLY the image prompt, nothing else.
       .catch((err) => this.logger.error(`Image regeneration failed: ${err.message}`));
 
     return { status: 'started', creativePackageId, variantIndex, message: 'Image generation started. Poll GET /packages/:id for result.' };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/edit-image
+   * Edit the EXISTING image with a free-text instruction ("change the
+   * headline to X", "make the background blue") instead of regenerating from
+   * scratch — feeds the current image back into the provider so most of the
+   * image stays intact. Fire-and-forget — poll GET for result.
+   * Body: { variantIndex?: number, instruction: string }
+   */
+  @Post(':tenantId/packages/:creativePackageId/edit-image')
+  async editImage(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { variantIndex?: number; instruction?: string } = {},
+  ) {
+    const instruction = body.instruction?.trim();
+    if (!instruction) {
+      throw new BadRequestException('instruction is required');
+    }
+
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const variantIndex = body.variantIndex ?? (pkg as any).selectedCopyIndex ?? 0;
+    const images: any[] = (pkg as any).images ?? [];
+    const imageEntry = images.find((img: any) => img.variantIndex === variantIndex);
+
+    if (!imageEntry?.imageUrl) {
+      return { error: `No image exists yet for variant ${variantIndex} — generate one first` };
+    }
+
+    this.logger.log(`Editing image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId} instruction="${instruction.slice(0, 80)}"`);
+
+    // Fire and forget
+    this.imageGenerator.editImage(imageEntry.imageUrl, instruction, tenantId, (pkg as any).runId)
+      .then(async (result) => {
+        const updatedImages = [...images];
+        const idx = updatedImages.findIndex((img: any) => img.variantIndex === variantIndex);
+        if (idx >= 0) {
+          const editInstructions = [...(updatedImages[idx].editInstructions ?? []), instruction];
+          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, editInstructions };
+        }
+        await this.creativePackageModel.updateOne(
+          { _id: creativePackageId, tenantId },
+          { $set: { images: updatedImages } },
+        );
+        this.logger.log(`Image edited for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId}`);
+      })
+      .catch((err) => this.logger.error(`Image edit failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, variantIndex, message: 'Image edit started. Poll GET /packages/:id for result.' };
   }
 
   /**

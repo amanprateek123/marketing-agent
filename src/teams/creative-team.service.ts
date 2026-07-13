@@ -2,8 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { AgentType } from '../claude/claude.types';
-import { ClaudeService } from '../claude/claude.service';
-import { buildSkillBlock, skillsForAgent } from '../common/skills/agent-skill-map';
+import { OpenAIChatService } from '../openai/openai-chat.service';
+import { buildSkillBlock } from '../common/skills/agent-skill-map';
 import { LiveContextBuilder } from '../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../companies/schemas/company.schema';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
@@ -13,7 +13,7 @@ import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputDocument } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { resolveVertical } from '../common/benchmarks/vertical-benchmarks';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
-import { HOOK_STYLES_MEME, HOOK_STYLE_DESCRIPTIONS_MEME } from '../common/creative/hook-styles';
+import { getFormatSpec } from '../common/creative/format-specs';
 
 /**
  * Brief input to the Creative Team. winnerCloneOf is the exploit-winner
@@ -36,6 +36,8 @@ export interface CreativeTeamBriefInput {
   audienceStage?: 'cold' | 'warm' | 'hot';
   targetLanguage?: string;
   explorationArm?: boolean;
+  /** Forces a specific carousel narrative pattern instead of letting the LLM pick. Only used when format === 'carousel'. */
+  carouselPattern?: 'auto' | 'sequential' | 'tier_reveal' | 'story_arc' | 'differentiator_stack' | 'qa' | 'catalog_grid';
   winnerCloneOf?: {
     sourceCampaignId: string;
     sourceBriefId: string;
@@ -89,7 +91,7 @@ export class CreativeTeamService {
   private readonly logger = new Logger(CreativeTeamService.name);
 
   constructor(
-    private readonly claudeService: ClaudeService,
+    private readonly openaiChat: OpenAIChatService,
     private readonly liveContextBuilder: LiveContextBuilder,
     private readonly metaLearningImporter: MetaLearningImporterService,
     @InjectModel(UsageLog.name)
@@ -148,18 +150,14 @@ export class CreativeTeamService {
     // ── Call 1: Creative Director produces full creative package ────────────
     const call1Prompt = await this.buildCall1Prompt(brief, company, runId);
 
-    const call1 = await this.claudeService.runAgent({
+    const call1 = await this.openaiChat.runChat({
       tenantId, runId,
       agentType: AgentType.CREATIVE_TEAM_LEAD,
       // creativeTeamLead covers brand voice, hook quality, copy structure, visual direction
       // Falls back to campaignCreator (has same skills) until prompt generator is re-run
       systemPrompt: company.prompts?.creativeTeamLead ?? company.prompts?.campaignCreator ?? '',
-      // liveContext is already embedded in call1Prompt via buildCall1Prompt → buildPrompt
-      // passing it here would inject it twice (system prompt + user message)
-      liveContext: '',
       userMessage: call1Prompt,
-      maxTurns: 5,
-      skills: skillsForAgent('CREATIVE_TEAM'),   // ad-creative + copywriting + marketing-psychology + video + image
+      expectJson: true,
     });
 
     this.logger.log(`Creative Team sequential — Call 1 done (${call1.content.length} chars)`);
@@ -243,14 +241,12 @@ Return ONLY this JSON (no markdown, no explanation):
   ]
 }`;
 
-    const call2 = await this.claudeService.runAgent({
+    const call2 = await this.openaiChat.runChat({
       tenantId, runId,
       agentType: AgentType.CREATIVE_TEAM_LEAD,
       systemPrompt: `You are a Brand Compliance Reviewer specializing in Meta Ads for Indian brands. You ensure ads are policy-compliant, on-brand, and high-converting. Be specific about fixes — don't just flag, correct.`,
-      liveContext: '',
       userMessage: call2UserMessage,
-      maxTurns: 3,
-      skills: skillsForAgent('CREATIVE_TEAM'),
+      expectJson: true,
     });
 
     this.logger.log(`Creative Team sequential — Call 2 done | tenant: ${tenantId} | run: ${runId}`);
@@ -293,12 +289,13 @@ You must produce:
   2. carouselCards[] — 3-5 cards forming a COHERENT NARRATIVE. Each card has slotIndex, headline (≤25 char shown bold under the image), description (≤30 char fine print, optional), imagePrompt (visual brief for the card's image).
   3. imagePrompts[] — leave EMPTY ([]). Carousel uses per-card imagePrompts inside carouselCards, not the top-level array.
 
-CAROUSEL NARRATIVE PATTERNS (pick ONE that fits the brief's angle):
-  - Sequential process: "Step 1 → Step 2 → Step 3 → Step 4" (e.g. the 5-step booking flow)
-  - Tier reveal: "Starter → Standard → Complete" (multi-tier offer)
-  - Story arc: "Confusion → Discovery → Reading → Clarity" (transformation narrative)
-  - Differentiator stack: 4 unique selling points one per card
-  - Question → answer → answer → answer (curiosity opens, slides resolve)
+CAROUSEL NARRATIVE PATTERNS${brief.carouselPattern && brief.carouselPattern !== 'auto' ? ` — USE THIS ONE (forced by the request, do not pick a different one):` : ' (pick ONE that fits the brief\'s angle):'}
+  - Sequential process${brief.carouselPattern === 'sequential' ? ' ← USE THIS' : ''}: "Step 1 → Step 2 → Step 3 → Step 4" (e.g. the 5-step booking flow)
+  - Tier reveal${brief.carouselPattern === 'tier_reveal' ? ' ← USE THIS' : ''}: "Starter → Standard → Complete" (multi-tier offer)
+  - Story arc${brief.carouselPattern === 'story_arc' ? ' ← USE THIS' : ''}: "Confusion → Discovery → Reading → Clarity" (transformation narrative)
+  - Differentiator stack${brief.carouselPattern === 'differentiator_stack' ? ' ← USE THIS' : ''}: 4 unique selling points one per card (also the right pattern for a listicle / "reasons why" / feature-by-feature breakdown)
+  - Question → answer → answer → answer${brief.carouselPattern === 'qa' ? ' ← USE THIS' : ''} (curiosity opens, slides resolve)
+  - Catalog grid${brief.carouselPattern === 'catalog_grid' ? ' ← USE THIS' : ''}: each card is an INDEPENDENT product/variant/tier shown side by side — no narrative chaining required, headlines do NOT need to complete each other (overrides the "card cohesion" headline-chaining rule below for this pattern only)
 
 Card cohesion rules:
   - Each card's headline must complete the narrative of the previous card's headline. Read end-to-end, the headlines tell a clear story.
@@ -363,6 +360,10 @@ Return ONLY this JSON (no markdown, no explanation):
       ?? (company.products ?? []).find(p => p.active)
       ?? (company.products ?? [])[0]
       ?? null;
+
+    // Format-spec registry — single source of truth for format-specific prompt
+    // text, shared with copy-writer.service.ts's fallback path.
+    const spec = getFormatSpec(brief.format);
 
     // Guard: price must be set before building video/copy prompts
     if (brief.format !== 'meme' && resolvedProduct && !resolvedProduct.price) {
@@ -631,53 +632,25 @@ specific-but-invented every single time.
 CREATIVE SPECS
 ═══════════════════════════════════════════════════════
 
-${brief.format === 'meme'
-  ? `This is a MEME-FORMAT paid Meta ad riding a viral cultural moment. The viewer must instantly recognize the meme/trend and laugh or relate — THEN notice the brand tie-in.
-Your creative must: (1) nail the meme format exactly so it feels native, (2) tie in the product naturally — forced product insertion kills meme ads, (3) push to ONE action — tap the CTA button.`
-  : `This is a PAID Meta direct response ad. The user is scrolling and has NOT asked to see this.
-Your creative must: (1) stop the scroll in the FIRST LINE / FIRST 3 SECONDS, (2) make the value proposition crystal clear (product + benefit + price), (3) push to ONE action — tap the CTA button.`}
+${spec.framingText}
 
 ━━━ a) AD COPY VARIANTS ━━━
 
-${brief.format === 'meme' ? `Each variant needs:
-- primaryText: 1-2 lines MAX. Meme copy is short. Structure:
-  LINE 1 — THE MEME: The recognizable format/reference (e.g. "Nobody: / Me at 3am:"). Make it instantly relatable.
-  LINE 2 — THE TIE-IN: The product as the natural punchline or solution. Feels organic, not forced. MUST mention product name.
-- headline: 5-7 words. Can be the punchline or CTA.
-- cta: "Shop Now", "Order Now", "Buy Today"
-- hookStyle: one of "meme_relatable", "meme_punchline", "meme_self_aware" (each variant must use a DIFFERENT one). Follow each style's spec exactly:
-${HOOK_STYLES_MEME.map(h => `  - ${h}: ${HOOK_STYLE_DESCRIPTIONS_MEME[h]}`).join('\n')}
-
-MEME COPY RULES:
-- Short is everything — if it needs explaining, it's not a meme
-- The product is the natural punchline, not a forced insertion
-- Hinglish where natural for ${company.targetAudience}
-- Product name in EVERY variant` : `Each variant needs:
-- primaryText: full ad body (3-5 lines). Structure:
-  LINE 1 — THE HOOK: Scroll-stopper. First 90 chars shown before "See more".
-  LINE 2-3 — THE VALUE: Agitate pain OR amplify desire. Introduce product as solution. MUST mention product name.
-  ${resolvedProduct?.hidePriceInCreative
-    ? `LINE 4 — PROOF / AUTHORITY: Add social proof, lineage, or trust signal. DO NOT mention any price (no ₹, no rupees, no booking-fee amounts). Price suppression is active for this product.`
-    : `LINE 4 — PRICE + PROOF: State price (₹${resolvedProduct?.price ?? '[price]'}). Add social proof if available.`}
-  LINE 5 — CTA LINE: Create urgency. Push action TODAY.
-- headline: 5-7 words below the image/video. Lead with benefit${resolvedProduct?.hidePriceInCreative ? ' or authority' : ' or price'}.
-- cta: button text — "Shop Now", "Order Now", "Buy Today" (NOT "Learn More" unless considered purchase)
+Each variant needs:
+${spec.copyGuidance}
 - hookStyle: ${brief.forcedHookStyle
-    ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (this is a forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
+    ? `MUST be exactly "${brief.forcedHookStyle}" for ALL variants (this is a forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
     : 'one of the options below (each variant must use a DIFFERENT one)'}
 
-HOOK STYLES${brief.forcedHookStyle ? ` (locked to "${brief.forcedHookStyle}" — see rule above):` : ' (use one per variant — pick 4 different styles, one per variant):'}
-  "pain_point" — open with the audience's frustration
-  "bold_claim" — specific, provable promise
-  "price_shock" — lead with value proposition + price
-  "social_proof" — open with result or testimonial
-  "curiosity_gap" — make them need to know more
-  "before_after" — transformation (frame as aspiration, not guarantee)
-  "urgency" — time or stock scarcity${brief.avoidHookStyles && brief.avoidHookStyles.length > 0
+HOOK STYLES${brief.forcedHookStyle ? ` (locked to "${brief.forcedHookStyle}" — see rule above):` : ' (use one per variant — pick different styles, one per variant):'}
+${spec.hookStyles.map(h => `  "${h}" — ${spec.hookStyleDescriptions[h]}`).join('\n')}${brief.avoidHookStyles && brief.avoidHookStyles.length > 0
     ? `\n\n⚠ AVOID THESE HOOK STYLES (saturated on the target audience or recently failed):\n  ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}\nDo not generate variants with these hookStyles. The audience has been over-exposed.`
     : ''}
 
-COPY RULES:
+${spec.customCopyShape ? `FORMAT COPY RULES:
+- Follow the copy shape above exactly — do not default back to the standard hook/value/price/CTA structure
+- Hinglish where natural for ${company.targetAudience}
+- Product name mentioned somewhere in every variant` : `COPY RULES:
 - Hinglish where natural for ${company.targetAudience}
 - Specific beats vague — BUT every specific must trace to the FACT-ANCHOR sources above. If you cannot cite the source, use a generic relatable pain instead.
 - Product name in EVERY variant's primaryText
@@ -698,7 +671,7 @@ Write one image prompt per copy variant (4 total). Each image must be visually t
 
 Each image must make someone STOP scrolling and TAP the ad. It's not a brand photo — it's a direct response sales image.
 
-STEP 1 — IDENTIFY THE VISUAL CENTERPIECE per variant:
+${spec.imageSectionBody ? spec.imageSectionBody : `STEP 1 — IDENTIFY THE VISUAL CENTERPIECE per variant:
 Before writing each prompt, read that variant's hook and headline. Ask: "What is the ONE visual concept that makes THIS variant's hook different from the other two?"
 Each variant has a different hookStyle — the visual centerpiece must match it.
 
@@ -715,19 +688,20 @@ STEP 2 — BUILD THE IMAGE AROUND THE CENTERPIECE:
 
 IMAGE STRUCTURE (describe ALL of these):
 - VISUAL CENTERPIECE (60% of the frame): The one concept from Step 1. Make it LARGE, BOLD, unmissable. This is what the viewer sees first.
-- TEXT OVERLAY — TOP: The hook line in bold, high-contrast Hinglish text. Exact words from the copy. Must be READABLE at phone size.
-- TEXT OVERLAY — BOTTOM: ${resolvedProduct?.hidePriceInCreative ? `Product name "${resolvedProduct.name}" + CTA. NO price (no ₹, no rupees, no booking-fee amount). High contrast.` : `Product name + "₹${resolvedProduct?.price ?? '[price]'}" + CTA. High contrast.`}
+- TEXT OVERLAY — UPPER (inside the safe zone below): The hook line in bold, high-contrast Hinglish text. Exact words from the copy. Must be READABLE at phone size.
+- TEXT OVERLAY — LOWER (inside the safe zone below): ${resolvedProduct?.hidePriceInCreative ? `Product name "${resolvedProduct.name}" + CTA. NO price (no ₹, no rupees, no booking-fee amount). High contrast.` : `Product name + "₹${resolvedProduct?.price ?? '[price]'}" + CTA. High contrast.`}
 - PRODUCT PLACEMENT: Where the product appears — can be integrated with the centerpiece or alongside it.
 - SUPPORTING ELEMENTS: Background, people, colors that reinforce the centerpiece's emotion — but don't compete with it.
+${spec.aspectRatio === '9:16' ? `- SAFE ZONE — CRITICAL, non-negotiable: This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements. Keep BOTH text overlays and the CTA inside the CENTER 60% of the vertical frame (roughly 20%-80% of frame height). The outer top/bottom 20% may only hold background/atmosphere — no text, no CTA, nothing critical.` : ''}
 
 WHAT MAKES PEOPLE CLICK:
 1. The VISUAL CENTERPIECE creates instant recognition — "yeh toh mere baare me hai"
 2. TEXT OVERLAYS sell the message — hook + price, bold and readable
 3. PRODUCT is visible — the viewer knows what they're buying
 4. URGENCY or CURIOSITY in the composition — the viewer must feel "I need to tap NOW"
-5. INDIAN CONTEXT — real Indian faces, settings, cultural cues
+5. INDIAN CONTEXT — real Indian faces, settings, cultural cues`}
 
-FORMAT: Vertical 9:16, photorealistic, 5-6 sentences.
+FORMAT: ${spec.aspectRatio === '9:16' ? 'Vertical 9:16' : spec.aspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}, photorealistic, 5-6 sentences.
 
 PAST VISUAL LEARNINGS:
 ${visualLearnings}
@@ -745,7 +719,7 @@ AVOID:
 Write a CINEMATIC SCRIPT prompt for Heygen's AI Video Generator (V3 Video Agent API). This prompt is sent DIRECTLY to Heygen — write it as a natural-language film script that Heygen's AI can interpret and render. Cinematic b-roll visuals + on-screen text + off-screen voiceover (no avatars, no talking-head — voice is heard, no person shown speaking).
 
 FORMAT: Single flowing script. Describe visuals, text overlays, voiceover narration, and music as continuous cinematic direction. Do NOT use numbered scenes or brackets — write it like you're directing a short film.
-
+${spec.videoGuidance ? `\n═══ STEP 0: FORMAT-SPECIFIC STRUCTURE ═══\n\n${spec.videoGuidance}\n` : ''}
 ═══ STEP 1: PICK DURATION + STRUCTURE FROM SELECTED VARIANT'S hookStyle ═══
 
 The video is for the SELECTED copyVariant only. Pick duration and structure based on its hookStyle. This is mandatory — do not default to a generic 15s template:

@@ -34,8 +34,11 @@ import {
  *     human-entered budget silently exceed weeklyBudgetCap/maxBudgetPerCampaign.
  *  2. A CreativePackage row — launch() looks one up by creativePackageId and
  *     uploads its image/video URLs to Meta itself. There is no path to launch
- *     a campaign without one, so this always creates a minimal package
- *     (runId/briefId = 'manual') from the copy/images/video the form submits.
+ *     a campaign without one. Two ways to get one: paste image/video URLs
+ *     directly (creates a minimal one-off package, runId/briefId='manual'),
+ *     or pass an existing creativePackageId from the creative library
+ *     (src/creative — CreativeProducerService.produce()) instead. launch()
+ *     doesn't care which source it came from, only that it's status='completed'.
  *
  * campaignConfig intentionally omits briefId on the Campaign doc — launch()
  * skips its deterministic audience-targeting-resolver defaulting whenever
@@ -73,30 +76,55 @@ export class ManualCampaignService {
       company,
       this.campaignsService,
     );
+
+    // ── Resolve the creative source: an existing library package, or a
+    // fresh one-off built from pasted URLs. Everything downstream (ad set
+    // config, forbidden-topics check, the campaign doc itself) reads off
+    // whichever `creativePackage` this resolves to — it doesn't care which
+    // source it came from. ──────────────────────────────────────────────
+    let creativePackage: CreativePackageDocument;
+    if (dto.creativePackageId) {
+      const existing = await this.creativePackageModel
+        .findOne({ _id: dto.creativePackageId, tenantId })
+        .exec();
+      if (!existing) {
+        throw new Error(`Creative package ${dto.creativePackageId} not found`);
+      }
+      if (existing.status !== 'completed') {
+        throw new Error(
+          `Creative package ${dto.creativePackageId} is not ready yet (status: ${existing.status})`,
+        );
+      }
+      creativePackage = existing;
+    } else {
+      creativePackage = await this.creativePackageModel.create({
+        tenantId,
+        runId: 'manual',
+        briefId: 'manual',
+        status: 'completed',
+        copyVariants: dto.creative!.copyVariants,
+        selectedCopyIndex: 0,
+        images: dto.creative!.images ?? [],
+        video: dto.creative!.video ?? null,
+        carouselCards: [],
+        completedAt: new Date(),
+      });
+    }
+
     SafetyChecks.checkForbiddenTopics(
       {
         topic: dto.name,
-        hook: dto.creative.copyVariants[0]?.primaryText ?? '',
-        keyMessage: dto.creative.copyVariants.map((v) => v.headline).join(' '),
+        hook: creativePackage.copyVariants[0]?.primaryText ?? '',
+        keyMessage: creativePackage.copyVariants.map((v) => v.headline).join(' '),
       } as unknown as CreativeBrief,
       company,
     );
 
-    const product = this.resolveProduct(company, dto.productName);
-    const adSets = this.buildAdSetConfigs(dto);
-
-    const creativePackage = await this.creativePackageModel.create({
-      tenantId,
-      runId: 'manual',
-      briefId: 'manual',
-      status: 'completed',
-      copyVariants: dto.creative.copyVariants,
-      selectedCopyIndex: 0,
-      images: dto.creative.images ?? [],
-      video: dto.creative.video ?? null,
-      carouselCards: [],
-      completedAt: new Date(),
-    });
+    const product = this.resolveProduct(
+      company,
+      dto.productName || (creativePackage as unknown as { productName?: string }).productName,
+    );
+    const adSets = this.buildAdSetConfigs(dto, creativePackage);
 
     const objective = dto.objective?.trim() || 'OUTCOME_SALES';
     const campaignConfig = {
@@ -134,7 +162,23 @@ export class ManualCampaignService {
       throw new Error('Daily budget must be greater than 0');
     if (!dto.adSets || dto.adSets.length === 0)
       throw new Error('At least one ad set is required');
-    if (!dto.creative?.copyVariants?.length) {
+
+    if (dto.creativePackageId) {
+      if (dto.creative) {
+        throw new Error('Provide either creative or creativePackageId, not both');
+      }
+      // The package itself (exists? belongs to this tenant? completed?) is
+      // validated once it's actually fetched in create() — can't check that
+      // from the DTO alone.
+      return;
+    }
+
+    if (!dto.creative) {
+      throw new Error(
+        'Either creative (pasted URLs) or creativePackageId (from the creative library) is required',
+      );
+    }
+    if (!dto.creative.copyVariants?.length) {
       throw new Error(
         'At least one copy variant (primary text + headline) is required',
       );
@@ -176,9 +220,15 @@ export class ManualCampaignService {
     return products.find((p) => p.active !== false) ?? products[0];
   }
 
-  private buildAdSetConfigs(dto: CreateManualCampaignDto) {
-    const adIndices = dto.creative.copyVariants.map((_, i) => i);
-    const defaultFormat = dto.creative.video ? 'video' : 'image';
+  private buildAdSetConfigs(
+    dto: CreateManualCampaignDto,
+    creativePackage: CreativePackageDocument,
+  ) {
+    // Sourced from the resolved package, not dto.creative directly — this
+    // is identical whether the package was just built from pasted URLs or
+    // fetched pre-existing from the creative library.
+    const adIndices = creativePackage.copyVariants.map((_, i) => i);
+    const defaultFormat = creativePackage.video ? 'video' : 'image';
 
     if (dto.campaignType === 'advantage_plus') {
       const first = dto.adSets[0];

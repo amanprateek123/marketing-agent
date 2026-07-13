@@ -4,7 +4,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CampaignSyncService } from '../../campaigns/meta-ads/campaign-sync.service';
 import { CompaniesService } from '../../companies/companies.service';
-import { Campaign } from '../../campaigns/schemas/campaign.schema';
+import { Campaign, CampaignSource, isManagedCampaignSource } from '../../campaigns/schemas/campaign.schema';
 import { IntelligenceOrchestrator } from '../orchestrator/intelligence-orchestrator.service';
 import { SnapshotEngine } from '../snapshot/snapshot-engine.service';
 import { DecisionsService } from '../decisions/decisions.service';
@@ -103,8 +103,14 @@ export class PrimeService {
       }
     }
     // ── 2. Pull active campaigns ──────────────────────────────────
+    // Only run intelligence on campaigns this tool actually manages
+    // (source 'agent' = fully autonomous, 'human' = launched via this
+    // dashboard's manual-create form). Excludes 'manual' — campaigns a
+    // tenant created directly in Meta Ads Manager, synced in for visibility
+    // only — see isManagedCampaignSource() in campaign.schema.ts.
+    const managedSources = (['agent', 'manual', 'human'] as CampaignSource[]).filter(isManagedCampaignSource);
     const activeCampaigns = await this.campaignModel
-      .find({ tenantId, status: 'active' })
+      .find({ tenantId, status: 'active', source: { $in: managedSources } })
       .sort({ spend: -1 })
       .limit(maxCampaigns)
       .lean()
