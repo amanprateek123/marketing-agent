@@ -10,6 +10,7 @@ import {
 import { DecisionsService } from './decisions.service';
 import { DecisionStatus } from './intelligence-decision.schema';
 import { IntelligenceOrchestrator } from '../orchestrator/intelligence-orchestrator.service';
+import { CampaignsService } from '../../campaigns/campaigns.service';
 
 /**
  * GET /api/v1/intelligence/:tenantId/decisions
@@ -33,6 +34,7 @@ export class DecisionsController {
   constructor(
     private readonly service: DecisionsService,
     private readonly orchestrator: IntelligenceOrchestrator,
+    private readonly campaignsService: CampaignsService,
   ) {}
 
   @Get(':tenantId/decisions')
@@ -77,7 +79,18 @@ export class DecisionsController {
       campaignId,
       limit ? parseInt(limit, 10) : undefined,
     );
-    return { cycles, count: cycles.length };
+    // Cycle docs only carry campaignId/metaCampaignId — resolve names in one
+    // batch query so the "which campaign is this about" question the
+    // dashboard needs has an actual answer instead of a raw Mongo/Meta id.
+    const names = await this.campaignsService.findNamesByIds(
+      tenantId,
+      [...new Set(cycles.map((c) => c.campaignId))],
+    );
+    const enriched = cycles.map((c) => ({
+      ...c,
+      campaignName: names.get(c.campaignId) ?? '',
+    }));
+    return { cycles: enriched, count: enriched.length };
   }
 
   @Post(':tenantId/decisions/:decisionId/approve')

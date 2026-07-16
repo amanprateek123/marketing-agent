@@ -53,6 +53,22 @@ export class CampaignsService {
     return this.enrichWithTopics(tenantId, campaigns);
   }
 
+  /** Campaign name lookup for a batch of ids — no topic/creative enrichment, just names. */
+  async findNamesByIds(
+    tenantId: string,
+    ids: string[],
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (ids.length === 0) return out;
+    const campaigns = await this.campaignModel
+      .find({ tenantId, _id: { $in: ids } })
+      .select('name')
+      .lean()
+      .exec();
+    for (const c of campaigns) out.set(String(c._id), c.name ?? '');
+    return out;
+  }
+
   async findById(tenantId: string, id: string): Promise<any | null> {
     const campaign = await this.campaignModel
       .findOne({ tenantId, _id: id })

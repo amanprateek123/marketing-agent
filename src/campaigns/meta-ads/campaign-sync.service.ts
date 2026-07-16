@@ -836,13 +836,25 @@ export class CampaignSyncService {
 
           // Budget model — which budget levers exist on this campaign.
           // ASC: Advantage+ shopping. CBO: campaign owns the budget. ABO:
-          // budget lives on the adsets (campaign daily_budget absent).
-          const campaignBudget =
+          // budget lives on the adsets (campaign daily_budget absent) — sum
+          // each active ad set's own daily/lifetime budget instead, so
+          // `campaign.budget` reflects the real total rather than silently
+          // staying 0 forever. Signal detection, the audit-agent prompt, and
+          // scale_adset math all read campaign.budget directly and treated a
+          // stale 0 as "no budget" for every ABO campaign in this account.
+          const campaignLevelBudget =
             parseFloat(campaign.daily_budget ?? campaign.lifetime_budget ?? '0') / 100;
+          const activeAdSetBudgetSum = (metaAdSets as any[]).reduce(
+            (s: number, a: any) =>
+              a.status === 'active' ? s + (a.dailyBudget || a.lifetimeBudget || 0) : s,
+            0,
+          );
+          const campaignBudget =
+            campaignLevelBudget > 0 ? campaignLevelBudget : activeAdSetBudgetSum;
           const budgetModel =
             campaign.smart_promotion_type === 'AUTOMATED_SHOPPING_ADS'
               ? 'asc'
-              : campaignBudget > 0
+              : campaignLevelBudget > 0
                 ? 'cbo'
                 : 'abo';
 
