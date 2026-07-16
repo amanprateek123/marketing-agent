@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { DecisionsService } from './decisions.service';
 import { DecisionStatus } from './intelligence-decision.schema';
+import { IntelligenceOrchestrator } from '../orchestrator/intelligence-orchestrator.service';
 
 /**
  * GET /api/v1/intelligence/:tenantId/decisions
@@ -21,10 +22,18 @@ import { DecisionStatus } from './intelligence-decision.schema';
  *   Meta.
  * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/reject
  * GET /api/v1/intelligence/:tenantId/decisions/summary
+ * GET /api/v1/intelligence/:tenantId/cycles
+ *   Query params: campaignId, limit — recent cascade cycles for this
+ *   tenant, each carrying the diagnosis narrative even when the cycle
+ *   proposed zero decisions. This is the "why did nothing happen" trail —
+ *   see IntelligenceOrchestrator.listRecentCycles / LearningEngine.
  */
 @Controller('intelligence')
 export class DecisionsController {
-  constructor(private readonly service: DecisionsService) {}
+  constructor(
+    private readonly service: DecisionsService,
+    private readonly orchestrator: IntelligenceOrchestrator,
+  ) {}
 
   @Get(':tenantId/decisions')
   async list(
@@ -55,6 +64,20 @@ export class DecisionsController {
   @Get(':tenantId/decisions/summary')
   async summary(@Param('tenantId') tenantId: string) {
     return this.service.summary(tenantId);
+  }
+
+  @Get(':tenantId/cycles')
+  async cycles(
+    @Param('tenantId') tenantId: string,
+    @Query('campaignId') campaignId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const cycles = await this.orchestrator.listRecentCycles(
+      tenantId,
+      campaignId,
+      limit ? parseInt(limit, 10) : undefined,
+    );
+    return { cycles, count: cycles.length };
   }
 
   @Post(':tenantId/decisions/:decisionId/approve')

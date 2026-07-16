@@ -77,8 +77,18 @@ export class IntelligenceOrchestrator {
   /**
    * Mark cycle completed. Called when Learning Engine (or the last
    * engine wired in the current rollout phase) finishes.
+   *
+   * `summary` is optional, human-readable context for THIS cycle —
+   * typically the diagnosis narrative and decision count — persisted here
+   * so a "0 decisions proposed" cycle still leaves behind a readable
+   * explanation instead of nothing. See LearningEngine for what gets
+   * passed in.
    */
-  async closeCycle(cycleId: string, status: 'completed' | 'failed' = 'completed'): Promise<void> {
+  async closeCycle(
+    cycleId: string,
+    status: 'completed' | 'failed' = 'completed',
+    summary?: Record<string, unknown>,
+  ): Promise<void> {
     const doc = await this.cycleModel.findOne({ cycleId });
     if (!doc) {
       this.logger.warn(`closeCycle: cycle ${cycleId} not found`);
@@ -88,7 +98,7 @@ export class IntelligenceOrchestrator {
     const durationMs = doc.startedAt ? completedAt.getTime() - doc.startedAt.getTime() : undefined;
     await this.cycleModel.updateOne(
       { cycleId },
-      { $set: { completedAt, durationMs, status } },
+      { $set: { completedAt, durationMs, status, ...(summary ? { summary } : {}) } },
     );
     this.eventBus.emitCycleCompleted({
       cycleId,
@@ -97,6 +107,27 @@ export class IntelligenceOrchestrator {
       durationMs: durationMs ?? 0,
       at: completedAt,
     });
+  }
+
+  /**
+   * Recent cycles for a tenant (optionally scoped to one campaign),
+   * newest first — includes the `summary` closeCycle wrote, so callers
+   * get a readable "what did the AI conclude" trail even for cycles that
+   * produced zero decisions.
+   */
+  async listRecentCycles(
+    tenantId: string,
+    campaignId?: string,
+    limit = 20,
+  ): Promise<CampaignIntelligenceCycleDocument[]> {
+    const query: Record<string, unknown> = { tenantId };
+    if (campaignId) query.campaignId = campaignId;
+    return this.cycleModel
+      .find(query)
+      .sort({ startedAt: -1 })
+      .limit(Math.min(100, Math.max(1, limit)))
+      .lean()
+      .exec();
   }
 
   defaultFeatureFlags(): DecisionContext['featureFlags'] {

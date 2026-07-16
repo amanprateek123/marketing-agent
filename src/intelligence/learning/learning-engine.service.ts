@@ -42,8 +42,25 @@ export class LearningEngine extends BaseEngine<'learning', LearningData> {
     });
     try {
       await this.execute(payload.cycleId);
+
+      // Pull diagnosis + recommendation slices for a human-readable summary
+      // of THIS cycle — written to the cycle doc regardless of whether any
+      // decision was proposed, so "0 decisions" still leaves behind a real
+      // explanation ("frequency is normal, ROAS is above breakeven...")
+      // instead of silence.
+      const [diagnosis, recommendation] = await Promise.all([
+        this.sliceRepo.load(payload.cycleId, 'diagnosis'),
+        this.sliceRepo.load(payload.cycleId, 'recommendation'),
+      ]);
+      const summary = {
+        narrative: diagnosis?.data?.narrative ?? '',
+        leakDiagnosis: diagnosis?.data?.leakDiagnosis ?? 'none',
+        rootCauses: diagnosis?.data?.rootCauses ?? [],
+        decisionsProposed: recommendation?.data?.actions?.length ?? 0,
+      };
+
       // Close the cycle when Learning finishes (last engine in the pipeline).
-      await this.orchestrator.closeCycle(payload.cycleId, 'completed');
+      await this.orchestrator.closeCycle(payload.cycleId, 'completed', summary);
     } finally {
       this.identity.delete(payload.cycleId);
     }
