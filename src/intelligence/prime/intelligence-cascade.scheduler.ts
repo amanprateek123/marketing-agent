@@ -7,15 +7,17 @@ import { PrimeService } from './prime.service';
  * IntelligenceCascadeScheduler
  *
  * Runs the 16-engine intelligence cascade automatically for every tenant with
- * a Meta connection. Fires every 30 minutes — matches the pace at which Meta
- * insight data meaningfully changes, without hammering the Graph API.
+ * a Meta connection. Fires every 3 hours — matches the legacy audit loop's
+ * cadence and gives fresh signals (e.g. frequency-based fatigue) enough time
+ * to accumulate real reach/spend before being re-evaluated, instead of firing
+ * on campaigns that are still in Meta's first-hour learning-phase delivery.
  *
  * Sync is skipped here because CampaignSyncService already runs every 10 min
  * (see SchedulerService). So the cascade always operates on data that is at
  * most 10 min stale.
  *
  * OVERRIDE: set INTELLIGENCE_CASCADE_CRON to disable ('') or change cadence.
- * Default cron: `* /30 * * * *` — top of every 30-min mark.
+ * Default cron: `0 * /3 * * *` — top of every 3rd hour.
  */
 @Injectable()
 export class IntelligenceCascadeScheduler {
@@ -27,7 +29,7 @@ export class IntelligenceCascadeScheduler {
     private readonly prime: PrimeService,
   ) {}
 
-  @Cron(process.env.INTELLIGENCE_CASCADE_CRON || '*/30 * * * *')
+  @Cron(process.env.INTELLIGENCE_CASCADE_CRON || '0 */3 * * *')
   async runForAllTenants(): Promise<void> {
     if (this.running) {
       this.log.warn(

@@ -204,8 +204,16 @@ export interface ConfidenceData {
 }
 
 export interface MemoryData {
+  /**
+   * Scoped to THIS campaign only (see MemoryEngine.compute /
+   * ActionOutcomeService.listRecentForCampaign) — every entry also carries
+   * the Meta ad/adset/campaign id it targeted, so consumers can gate on
+   * "this exact ad set already tried this and it backfired," not just
+   * "this action type backfired somewhere in the account."
+   */
   pastActions: Array<{
     actionType: string;
+    targetId: string;
     executedAt: Date;
     outcomeLabel: 'improved' | 'worsened' | 'neutral' | 'inconclusive';
     context: string;

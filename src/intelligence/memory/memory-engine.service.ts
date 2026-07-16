@@ -65,6 +65,7 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     // causalInsight/companyLearnings field below) never loaded.
     const ident = this.identity.values().next().value;
     const tenantId = ident?.tenantId ?? '';
+    const campaignId = ident?.campaignId ?? '';
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)
@@ -93,20 +94,25 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
       isolatedVariable: c.isolatedVariable ?? '',
     }));
 
-    // Real executed-action history from the older campaign-auditor system
-    // (executed_actions collection) — the only place actual outcome labels
-    // (improved/worsened/neutral) exist today, since the 16-engine cascade
-    // is shadow-mode only and has never applied anything itself. This was
-    // previously hardcoded to [], so RecommendationEngine's "don't repeat a
-    // proven-bad action type" dampening (recentlyWorsenedTypes) was dead
-    // code — it read a field that could never contain anything.
-    const recentExecuted = this.actionOutcomes && tenantId
-      ? await this.actionOutcomes.listRecent(tenantId, 30).catch(() => [])
+    // Real executed-action history, SCOPED TO THIS CAMPAIGN — the only place
+    // actual outcome labels (improved/worsened/neutral) exist today. Each
+    // record carries the specific ad/adset/campaign targetId it acted on,
+    // so RecommendationEngine can gate on "this exact target already tried
+    // this and it backfired," not just "this action type backfired
+    // somewhere in the account" (previously listRecent(tenantId, 30) pulled
+    // account-wide, unscoped history — every campaign saw every other
+    // campaign's failures as equally relevant caution, and no per-target
+    // signal was available at all).
+    const recentExecuted = this.actionOutcomes && tenantId && campaignId
+      ? await this.actionOutcomes
+          .listRecentForCampaign(tenantId, campaignId, 30)
+          .catch(() => [])
       : [];
     const pastActions = recentExecuted
       .filter((a) => a.outcomeLabel != null)
       .map((a) => ({
         actionType: a.action.type,
+        targetId: a.action.targetId ?? '',
         executedAt: a.executedAt,
         outcomeLabel: a.outcomeLabel as 'improved' | 'worsened' | 'neutral' | 'inconclusive',
         context: [

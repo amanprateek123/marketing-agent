@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Param,
   Body,
   Query,
@@ -16,13 +17,17 @@ import { Model } from 'mongoose';
 import { CampaignsService } from './campaigns.service';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { ManualCampaignService } from './campaign-creator/manual-campaign.service';
-import { CreateManualCampaignDto } from './campaign-creator/manual-campaign.types';
+import {
+  CreateManualCampaignDto,
+  UpdateManualCampaignConfigDto,
+} from './campaign-creator/manual-campaign.types';
 import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
 import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
 import { MetaDeepSyncService } from './meta-ads/meta-deep-sync.service';
 import { AudienceOrchestrationService } from './audience-orchestration/audience-orchestration.service';
+import { META_LOCALE_IDS } from './campaign-creator/audience-targeting-resolver';
 import {
   AuditSnapshot,
   AuditSnapshotDocument,
@@ -144,6 +149,56 @@ export class CampaignsController {
   }
 
   /**
+   * GET /api/v1/campaigns/:tenantId/meta-account-audiences?accountId=act_X
+   * Live custom + lookalike audiences for ONE specific ad account — unlike
+   * meta-audiences above (which reads the saved, single-account snapshot on
+   * product.metaAudiences), this hits Meta directly so the Create Campaign
+   * form can show the audiences that actually exist in whichever account
+   * the campaign is being built for. Custom Audiences are account-scoped
+   * Meta objects; an audience created in one ad account isn't usable in
+   * another unless explicitly Business-Manager-shared.
+   * Same route-ordering requirement as meta-audiences/meta-interest-search
+   * above — must precede :tenantId/:campaignId.
+   */
+  @Get(':tenantId/meta-account-audiences')
+  async getMetaAccountAudiences(
+    @Param('tenantId') tenantId: string,
+    @Query('accountId') accountId?: string,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for this tenant');
+    }
+    if (!accountId) {
+      throw new BadRequestException('accountId query param is required');
+    }
+    try {
+      return await this.metaAdsService.listCustomAudiences(accountId, company.meta.accessToken);
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/meta-locales
+   * Verified Meta locale IDs for language targeting — the Create Campaign
+   * form's locale picker reads this instead of hardcoding IDs, so it can
+   * never drift from META_LOCALE_IDS the way a copy-pasted comment did
+   * (marathi was guessed as 84 instead of 81, hindi as 53 instead of 46 —
+   * both silently resolved to unrelated languages until caught before
+   * launch). Only VERIFIED entries are exposed; unverified guesses in that
+   * table are commented out and intentionally excluded here.
+   */
+  @Get(':tenantId/meta-locales')
+  getMetaLocales() {
+    return Object.entries(META_LOCALE_IDS).map(([name, id]) => ({
+      name: name.charAt(0).toUpperCase() + name.slice(1),
+      id,
+    }));
+  }
+
+  /**
    * GET /api/v1/campaigns/:tenantId/weekly-spend
    * The rolling-7-day spend estimate used to gate new campaign creation
    * (see SafetyChecks.checkWeeklyBudget / CampaignsService.getWeeklySpend) —
@@ -199,6 +254,40 @@ export class CampaignsController {
         success: true,
         campaignId: String(campaign._id),
         status: campaign.status,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * PATCH /api/v1/campaigns/:tenantId/:campaignId/config
+   * Edits a still-pending campaign's name/budget/objective/ad sets in place —
+   * the alternative to deleting and recreating the whole campaign for a
+   * targeting or budget fix. Only works while status is still
+   * pending_approval and no metaCampaignId exists yet (see
+   * ManualCampaignService.update). Creative content itself (copy text,
+   * image/video) is edited via PATCH /creative/:tenantId/packages/:id.
+   */
+  @Patch(':tenantId/:campaignId/config')
+  async updateConfig(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body() dto: UpdateManualCampaignConfigDto,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    try {
+      const campaign = await this.manualCampaignService.update(
+        tenantId,
+        campaignId,
+        company,
+        dto,
+      );
+      return {
+        success: true,
+        campaignId: String(campaign._id),
+        campaignConfig: campaign.campaignConfig,
       };
     } catch (err: any) {
       throw new BadRequestException(err.message);
@@ -677,6 +766,32 @@ export class CampaignsController {
       reason ?? 'Rejected by tenant',
     );
     return { success: true, message: 'Campaign rejected' };
+  }
+
+  /**
+   * DELETE /api/v1/campaigns/:tenantId/:campaignId
+   * Removes a pending_approval campaign entirely (not just marked rejected).
+   * Only for campaigns that never launched to Meta — CampaignsService.deleteCampaign
+   * refuses anything with a metaCampaignId to avoid orphaning a real ad.
+   */
+  @Delete(':tenantId/:campaignId')
+  async deleteCampaign(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if ((campaign as any).status !== 'pending_approval') {
+      throw new BadRequestException(
+        'Only pending_approval campaigns can be deleted this way — use reject/pause for launched campaigns',
+      );
+    }
+    try {
+      await this.campaignsService.deleteCampaign(tenantId, campaignId);
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+    return { success: true, message: 'Campaign deleted' };
   }
 
   /**

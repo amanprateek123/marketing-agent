@@ -14,6 +14,7 @@ import { SafetyChecks } from './safety-checks';
 import {
   CreateManualCampaignDto,
   ManualAdSetInput,
+  UpdateManualCampaignConfigDto,
 } from './manual-campaign.types';
 
 /**
@@ -105,7 +106,8 @@ export class ManualCampaignService {
         copyVariants: dto.creative!.copyVariants,
         selectedCopyIndex: 0,
         images: dto.creative!.images ?? [],
-        video: dto.creative!.video ?? null,
+        video: dto.creative!.videos?.length ? null : (dto.creative!.video ?? null),
+        videos: dto.creative!.videos ?? [],
         carouselCards: [],
         completedAt: new Date(),
       });
@@ -124,7 +126,7 @@ export class ManualCampaignService {
       company,
       dto.productName || (creativePackage as unknown as { productName?: string }).productName,
     );
-    const adSets = this.buildAdSetConfigs(dto, creativePackage);
+    const adSets = this.buildAdSetConfigs(dto, creativePackage, company);
 
     const objective = dto.objective?.trim() || 'OUTCOME_SALES';
     const campaignConfig = {
@@ -137,6 +139,7 @@ export class ManualCampaignService {
       pauseRules: '',
     };
 
+    const accountId = dto.accountId || company.meta?.accountId;
     const campaign = await this.campaignModel.create({
       tenantId,
       name: dto.name.trim(),
@@ -148,10 +151,163 @@ export class ManualCampaignService {
       objective,
       creativePackageId: String(creativePackage._id),
       campaignConfig,
+      // Pre-launch intent, not yet confirmed — /approve still requires an
+      // explicit accountId and will overwrite this with whatever was
+      // actually launched to. Set here only so the Approve screen can
+      // default to the SAME account the audiences above were picked for.
+      metaAccountId: accountId
+        ? accountId.startsWith('act_') ? accountId : `act_${accountId}`
+        : '',
     });
 
     this.logger.log(
       `[${tenantId}] manual campaign created: ${campaign._id} — "${dto.name}" (${dto.campaignType}, ${adSets.length} ad set(s), ₹${dto.budget}/day)`,
+    );
+    return campaign;
+  }
+
+  /**
+   * Edit a still-pending campaign's structure/targeting/budget in place,
+   * instead of the delete+recreate cycle that was the only option before
+   * (name/objective, budget, ad sets — including targeting, audiences,
+   * locales and per-ad-set creative split — all go through here; creative
+   * content itself is edited separately via
+   * PATCH /creative/:tenantId/packages/:creativePackageId).
+   *
+   * Reuses buildAdSetConfigs() so an edit gets the exact same union-coverage
+   * and purchaser-exclusion validation as a fresh create() — no separate,
+   * potentially-drifting validation path for edits vs. creation.
+   */
+  async update(
+    tenantId: string,
+    campaignId: string,
+    company: CompanyDocument,
+    dto: UpdateManualCampaignConfigDto,
+  ): Promise<CampaignDocument> {
+    const campaign = await this.campaignModel
+      .findOne({ tenantId, _id: campaignId })
+      .exec();
+    if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+    if (campaign.status !== 'pending_approval' || campaign.metaCampaignId) {
+      throw new Error(
+        'Only pending campaigns that have not launched to Meta yet can be edited — this one already has (or no longer has) a pending_approval status.',
+      );
+    }
+    if (
+      !dto.name &&
+      dto.budget === undefined &&
+      !dto.objective &&
+      !dto.campaignType &&
+      !dto.adSets
+    ) {
+      throw new Error('No changes provided');
+    }
+
+    const existingConfig = campaign.campaignConfig;
+    if (!existingConfig) {
+      throw new Error(`Campaign ${campaignId} has no campaignConfig to edit`);
+    }
+    const creativePackage = await this.creativePackageModel
+      .findOne({ _id: campaign.creativePackageId, tenantId })
+      .exec();
+    if (!creativePackage) {
+      throw new Error(
+        `Creative package ${campaign.creativePackageId} for this campaign no longer exists`,
+      );
+    }
+
+    const wasAdvantagePlus =
+      existingConfig.adSets.length === 1 &&
+      existingConfig.adSets[0].audienceType === 'advantage_plus';
+
+    const name = dto.name?.trim() || campaign.name;
+    const budget = dto.budget !== undefined ? dto.budget : campaign.budget;
+    const objective = dto.objective?.trim() || campaign.objective;
+    const campaignType: CreateManualCampaignDto['campaignType'] =
+      dto.campaignType || (wasAdvantagePlus ? 'advantage_plus' : 'custom');
+    const accountId = dto.accountId || campaign.metaAccountId;
+
+    // Reconstruct the ManualAdSetInput shape from the stored campaignConfig
+    // when the caller isn't replacing ad sets this edit (e.g. a budget-only
+    // change) — interests are stored as bare IDs on campaignConfig but
+    // ManualAdSetInput wants {id, name}; buildOneAdSet only reads `.id`, so
+    // the name copy here is a placeholder, not shown anywhere.
+    const adSets: ManualAdSetInput[] =
+      dto.adSets ??
+      existingConfig.adSets.map((a) => ({
+        name: a.name,
+        budgetPercent: a.budgetPercent,
+        audienceType: a.audienceType as ManualAdSetInput['audienceType'],
+        metaAudienceId: a.metaAudienceId,
+        excludeAudienceIds: a.excludeAudienceIds,
+        ageMin: a.ageMin,
+        ageMax: a.ageMax,
+        gender: a.gender as ManualAdSetInput['gender'],
+        geoLocations: a.geoLocations,
+        locales: (a as { locales?: number[] }).locales,
+        interests: (a.interests ?? []).map((id) => ({ id, name: id })),
+        optimizationGoal: a.optimizationGoal,
+        creativeFormat: a.creativeFormat as ManualAdSetInput['creativeFormat'],
+        ads: a.ads,
+      }));
+
+    if (!name) throw new Error('Campaign name is required');
+    if (!budget || budget <= 0)
+      throw new Error('Daily budget must be greater than 0');
+    if (!adSets.length) throw new Error('At least one ad set is required');
+
+    // Same safety rails as create() — a pending campaign contributes zero
+    // actual Meta spend, so re-running these against the edited budget can't
+    // double-count against getWeeklySpend() (which only sums live spend).
+    SafetyChecks.checkCampaignBudget(budget, company);
+    await SafetyChecks.checkWeeklyBudget(
+      tenantId,
+      budget,
+      company,
+      this.campaignsService,
+    );
+    SafetyChecks.checkForbiddenTopics(
+      {
+        topic: name,
+        hook: creativePackage.copyVariants[0]?.primaryText ?? '',
+        keyMessage: creativePackage.copyVariants.map((v) => v.headline).join(' '),
+      } as unknown as CreativeBrief,
+      company,
+    );
+
+    const rebuiltAdSets = this.buildAdSetConfigs(
+      { name, campaignType, adSets } as CreateManualCampaignDto,
+      creativePackage,
+      company,
+    );
+
+    // conversionEvent/conversionValue are intentionally carried over
+    // unchanged from existingConfig, not re-resolved from company.products —
+    // this DTO has no productName field, so re-resolving here would silently
+    // fall back to the tenant's default active product and could overwrite
+    // the value picked for a DIFFERENT product at create() time. Product
+    // reassignment isn't part of this edit surface.
+    campaign.name = name;
+    campaign.budget = budget;
+    campaign.objective = objective;
+    campaign.campaignConfig = {
+      budget,
+      objective,
+      conversionEvent: existingConfig.conversionEvent || 'Purchase',
+      conversionValue: existingConfig.conversionValue || 0,
+      adSets: rebuiltAdSets,
+      scaleRules: existingConfig.scaleRules || '',
+      pauseRules: existingConfig.pauseRules || '',
+    };
+    if (accountId) {
+      campaign.metaAccountId = accountId.startsWith('act_')
+        ? accountId
+        : `act_${accountId}`;
+    }
+
+    await campaign.save();
+    this.logger.log(
+      `[${tenantId}] manual campaign updated: ${campaign._id} — "${name}" (${rebuiltAdSets.length} ad set(s), ₹${budget}/day)`,
     );
     return campaign;
   }
@@ -184,7 +340,7 @@ export class ManualCampaignService {
       );
     }
     const hasImage = (dto.creative.images?.length ?? 0) > 0;
-    const hasVideo = !!dto.creative.video;
+    const hasVideo = !!dto.creative.video || (dto.creative.videos?.length ?? 0) > 0;
     if (!hasImage && !hasVideo) {
       throw new Error(
         'At least one image or a video is required to launch ads',
@@ -198,8 +354,7 @@ export class ManualCampaignService {
         );
       }
     }
-    if (dto.creative.video) {
-      const v = dto.creative.video;
+    for (const v of dto.creative.videos?.length ? dto.creative.videos : dto.creative.video ? [dto.creative.video] : []) {
       if (v.variantIndex < 0 || v.variantIndex >= variantCount) {
         throw new Error(
           `Video references copy variant ${v.variantIndex}, but only ${variantCount} exist`,
@@ -223,12 +378,16 @@ export class ManualCampaignService {
   private buildAdSetConfigs(
     dto: CreateManualCampaignDto,
     creativePackage: CreativePackageDocument,
+    company: CompanyDocument,
   ) {
     // Sourced from the resolved package, not dto.creative directly — this
     // is identical whether the package was just built from pasted URLs or
     // fetched pre-existing from the creative library.
     const adIndices = creativePackage.copyVariants.map((_, i) => i);
-    const defaultFormat = creativePackage.video ? 'video' : 'image';
+    const hasVideo = !!creativePackage.video || ((creativePackage as any).videos?.length ?? 0) > 0;
+    const defaultFormat = hasVideo ? 'video' : 'image';
+
+    let adSets: any[];
 
     if (dto.campaignType === 'advantage_plus') {
       const first = dto.adSets[0];
@@ -236,7 +395,7 @@ export class ManualCampaignService {
         throw new Error(
           'Advantage+ campaigns need one ad set (Meta handles targeting automatically)',
         );
-      return [
+      adSets = [
         {
           name: first.name?.trim() || `${dto.name.trim()} — Advantage+`,
           budgetPercent: 100,
@@ -249,19 +408,57 @@ export class ManualCampaignService {
           // audienceType='advantage_plus').
         },
       ];
-    }
+    } else {
+      // Custom: 1..N ad sets, each independently targeted.
+      const totalPct = dto.adSets.reduce((s, a) => s + (a.budgetPercent || 0), 0);
+      if (dto.adSets.length > 1 && Math.abs(totalPct - 100) > 1) {
+        throw new Error(
+          `Ad set budget percentages must sum to 100 (currently ${totalPct})`,
+        );
+      }
 
-    // Custom: 1..N ad sets, each independently targeted.
-    const totalPct = dto.adSets.reduce((s, a) => s + (a.budgetPercent || 0), 0);
-    if (dto.adSets.length > 1 && Math.abs(totalPct - 100) > 1) {
-      throw new Error(
-        `Ad set budget percentages must sum to 100 (currently ${totalPct})`,
+      adSets = dto.adSets.map((a, i) =>
+        this.buildOneAdSet(a, i, dto.adSets.length, adIndices, defaultFormat),
       );
     }
 
-    return dto.adSets.map((a, i) =>
-      this.buildOneAdSet(a, i, dto.adSets.length, adIndices, defaultFormat),
-    );
+    // Auto-exclude past purchasers from prospecting ad sets. The AI review
+    // team path (campaign-creator.service.ts) has done this for a while;
+    // manual campaigns never got it, so a human building a prospecting ad
+    // set here would silently spend part of the budget re-showing ads to
+    // people who already bought (industry baseline 5-15% wasted spend).
+    // Skipped for retargeting/custom ad sets, which DO want existing audiences.
+    const purchasersAudId = (company.products ?? [])
+      .flatMap((p: any) => p.metaAudiences ?? [])
+      .find((a: any) => /Purchasers?_/i.test(a?.name ?? ''))?.id;
+    if (purchasersAudId) {
+      const PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
+      for (const adSet of adSets as any[]) {
+        if (!PROSPECTING_TYPES.has(adSet.audienceType)) continue;
+        const existing = new Set(adSet.excludeAudienceIds ?? []);
+        existing.add(purchasersAudId);
+        adSet.excludeAudienceIds = Array.from(existing);
+      }
+    }
+
+    // Deliberate per-ad-set creative split — validate nothing gets silently
+    // dropped campaign-wide. An ad set that didn't specify `ads` already
+    // defaults to every variant (buildOneAdSet below), so this only ever
+    // fires when someone actually narrowed one ad set's selection without
+    // covering the rest elsewhere.
+    const union = new Set<number>();
+    for (const as of adSets) for (const v of as.ads) union.add(v);
+    const missing = adIndices.filter((v) => !union.has(v));
+    if (missing.length > 0) {
+      const labels = missing.map(
+        (v) => creativePackage.copyVariants[v]?.headline || `Variant ${v + 1}`,
+      );
+      throw new Error(
+        `Creative variant(s) not assigned to any ad set: ${labels.join(', ')}. Every variant must appear in at least one ad set or it never gets shown — add it to an ad set's selection, or leave a variant selection empty to include everything by default.`,
+      );
+    }
+
+    return adSets;
   }
 
   private buildOneAdSet(
@@ -294,6 +491,22 @@ export class ManualCampaignService {
       );
     }
 
+    // Explicit per-ad-set creative selection — lets a human distribute
+    // specific variants to specific ad sets instead of every ad set
+    // carrying the full pool. Omit (or leave empty) to default to all
+    // variants, unchanged from prior behavior. Coverage across all ad
+    // sets is validated by the caller (buildAdSetConfigs).
+    let ads = adIndices;
+    if (a.ads?.length) {
+      const inRange = a.ads.filter((v) => adIndices.includes(v));
+      if (inRange.length === 0) {
+        throw new Error(
+          `"${label}": selected creative variant(s) [${a.ads.join(',')}] are out of range (this package has ${adIndices.length} variant(s))`,
+        );
+      }
+      ads = inRange;
+    }
+
     return {
       name: label,
       budgetPercent: totalAdSets === 1 ? 100 : a.budgetPercent,
@@ -306,9 +519,10 @@ export class ManualCampaignService {
       ageMax: a.ageMax,
       gender: a.gender && a.gender !== 'all' ? a.gender : undefined,
       geoLocations: a.geoLocations?.length ? a.geoLocations : undefined,
+      locales: a.locales?.length ? a.locales : undefined,
       interests: a.interests?.length ? a.interests.map((x) => x.id) : undefined,
       optimizationGoal: a.optimizationGoal || 'OFFSITE_CONVERSIONS',
-      ads: adIndices,
+      ads,
       creativeFormat: a.creativeFormat || defaultFormat,
     };
   }

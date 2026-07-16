@@ -535,7 +535,24 @@ export class CampaignCreatorService {
     const copyVariants = creativePackage?.copyVariants ?? [];
     const images = (creativePackage as any)?.images ?? [];
     const video = (creativePackage as any)?.video ?? null;
-    const videoUrl = video?.videoUrl ?? '';
+    // `videos[]` (additive) groups by variantIndex exactly like `images[]`
+    // does — two entries can share a variantIndex (multiple SIZES of the
+    // same video) or carry different variantIndex values (genuinely
+    // DIFFERENT videos, each paired with its own copy variant / ad set).
+    // Takes priority over the legacy singular `video` field, which the
+    // Heygen/AI generation path still populates and which only ever
+    // produces one video at one size for variant 0.
+    const videoSourcesByVariant: Record<number, Array<{ videoUrl: string; aspectRatio?: string }>> = {};
+    const rawVideos = (creativePackage as any)?.videos as any[] | undefined;
+    if (rawVideos?.length) {
+      for (const v of rawVideos) {
+        if (!v.videoUrl) continue;
+        (videoSourcesByVariant[v.variantIndex] ??= []).push({ videoUrl: v.videoUrl, aspectRatio: v.aspectRatio });
+      }
+    } else if (video?.videoUrl) {
+      videoSourcesByVariant[video.variantIndex ?? 0] = [{ videoUrl: video.videoUrl, aspectRatio: video.aspectRatio }];
+    }
+    const videoUrl = Object.values(videoSourcesByVariant)[0]?.[0]?.videoUrl ?? '';
 
     // Pre-launch: validate the audience IDs we actually use, one by one.
     // Previous approach (GET /customaudiences?limit=200) silently truncated
@@ -800,14 +817,21 @@ export class CampaignCreatorService {
 
     // Enforce per-format variant rules:
     //   video  → MUST be only the selected variant (video was generated for that one only)
-    //   image  → MUST include EVERY variant that has an image available
+    //   image  → by default MUST include every available image variant, UNLESS the LLM
+    //            has deliberately split them across multiple image ad sets in this same
+    //            campaign — in which case each variant just needs to appear in at least
+    //            ONE image ad set (the UNION across all image ad sets must stay complete;
+    //            individual ad sets can each carry a subset).
     //   mixed  → handled upstream by the split logic; pass through here
     //
-    // The Campaign Review Team prompt instructs the LLM to set ads=[0,1,2,3] for
-    // image ad sets, but it has historically narrowed to a single variant
-    // (e.g. May 2026 KAAL_SARPA campaign launched with ads=[1] only → 1 ad on
-    // Meta instead of 4, wasted 75% of generated creative). Enforce in TS so
-    // LLM drift can't kill variant diversity.
+    // The union check still catches the original failure mode this guarded against
+    // (May 2026 KAAL_SARPA campaign launched with a single ad set at ads=[1] only →
+    // 1 ad on Meta instead of 4, wasted 75% of generated creative — with one ad set,
+    // its own list IS the union, so a narrowed single ad set is still caught and
+    // expanded below) while now allowing a genuine deliberate split across ad sets —
+    // e.g. a retargeting ad set running the social-proof variant and a cold-prospecting
+    // ad set running the price-anchor variant — as long as nothing is dropped
+    // campaign-wide.
     const selectedCopyIndex = (creativePackage as any)?.selectedCopyIndex ?? 0;
     const availableImageVariants: number[] = ((creativePackage as any)?.images ?? [])
       .map((img: any) => img?.variantIndex)
@@ -823,14 +847,40 @@ export class CampaignCreatorService {
           this.logger.warn(`Ad set "${adSet.name}": video format restricted to variant ${selectedCopyIndex} (was: [${adSet.ads}])`);
           adSet.ads = [selectedCopyIndex];
         }
-      } else if (adSet.creativeFormat === 'image' && allImageVariants.length > 0) {
-        const proposed = (adSet.ads ?? []).filter((v: number) => allImageVariants.includes(v));
-        // LLM narrowed below available — expand back to all available image variants.
-        if (proposed.length < allImageVariants.length) {
-          this.logger.warn(
-            `Ad set "${adSet.name}": image format had ads=[${adSet.ads}] — expanding to all available image variants [${allImageVariants.join(',')}] (${allImageVariants.length - proposed.length} variant(s) would otherwise be dropped)`,
+      }
+    }
+
+    if (allImageVariants.length > 0) {
+      const imageAdSets = (config.adSets as any[]).filter((as) => as.creativeFormat === 'image');
+      const union = new Set<number>();
+      for (const as of imageAdSets) {
+        for (const v of as.ads ?? []) if (allImageVariants.includes(v)) union.add(v);
+      }
+      const missing = allImageVariants.filter((v) => !union.has(v));
+
+      if (imageAdSets.length > 0 && missing.length === 0) {
+        // Every variant is covered by at least one image ad set — trust the
+        // LLM's split, just drop any stray/invalid indices and guard against
+        // an ad set ending up with zero ads.
+        for (const as of imageAdSets) {
+          as.ads = (as.ads ?? []).filter((v: number) => allImageVariants.includes(v));
+          if (as.ads.length === 0) as.ads = [...allImageVariants];
+        }
+        if (imageAdSets.length > 1) {
+          this.logger.log(
+            `Image variants split across ${imageAdSets.length} ad sets: ${imageAdSets.map((as) => `${as.name}=[${as.ads}]`).join(', ')}`,
           );
-          adSet.ads = [...allImageVariants];
+        }
+      } else if (imageAdSets.length > 0) {
+        // Not a valid split — some variant(s) are missing campaign-wide.
+        // Fall back to the safe behavior: every image ad set gets every variant.
+        for (const as of imageAdSets) {
+          if ((as.ads ?? []).length !== allImageVariants.length) {
+            this.logger.warn(
+              `Ad set "${as.name}": image ads=[${as.ads}] would leave variant(s) [${missing.join(',')}] uncovered campaign-wide — expanding to all available image variants [${allImageVariants.join(',')}]`,
+            );
+          }
+          as.ads = [...allImageVariants];
         }
       }
     }
@@ -852,6 +902,15 @@ export class CampaignCreatorService {
     // Anchor to the product's historical CPA so Meta uses bid_strategy=COST_CAP
     // and stops chasing junk clicks. Custom/retarget audiences keep
     // LOWEST_COST_WITHOUT_CAP (the audience itself is the quality gate).
+    //
+    // Only valid for conversion-optimized ad sets: histCPA is the historical
+    // cost per PURCHASE. Applying it as a COST_CAP bid to a LANDING_PAGE_VIEWS
+    // (or LINK_CLICKS/REACH/IMPRESSIONS) ad set caps a ~₹1-50 event at a
+    // ~₹1000+ bid — Meta essentially never spends, near-total underdelivery.
+    // Hit in production 2026-07-16 on a manual Traffic-objective campaign.
+    // Non-conversion goals stay LOWEST_COST_WITHOUT_CAP, which is the
+    // correct default for them anyway — they were never the junk-traffic
+    // failure mode this cap was built to prevent.
     const briefProductForBid = (creativeBrief as any)?.product;
     const productForBid = (company.products ?? []).find((p: any) => p.name === briefProductForBid)
       ?? (company.products ?? []).find((p: any) => p.active)
@@ -859,9 +918,11 @@ export class CampaignCreatorService {
     const histCPA = productForBid?.performance?.avgCPA;
     if (typeof histCPA === 'number' && histCPA > 0) {
       const COLD_PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
+      const CONVERSION_GOALS = new Set(['OFFSITE_CONVERSIONS', 'VALUE']);
       let bidCapped = 0;
       for (const adSet of config.adSets as any[]) {
         if (!COLD_PROSPECTING_TYPES.has(adSet.audienceType)) continue;
+        if (!CONVERSION_GOALS.has(adSet.optimizationGoal)) continue;
         if (typeof adSet.bidAmountInr === 'number' && adSet.bidAmountInr > 0) continue;
         adSet.bidAmountInr = Math.round(histCPA);
         bidCapped++;
@@ -1018,23 +1079,42 @@ export class CampaignCreatorService {
     ) ?? (company.products ?? [])[0];
     const landingUrl = product?.landingUrl ?? '';
 
+    // Prefer the human-given campaign name (manual campaigns always have a
+    // distinct one) over the topic-based scheme. The topic scheme collapses
+    // to "AGENT_CAMPAIGN_<date>" for every manual campaign launched the same
+    // day (manual campaigns have no `topic`), so two unrelated campaigns
+    // launched on the same date collide on the SAME Meta campaign name — the
+    // duplicate-launch idempotency guard then refuses the second one,
+    // reading it as a retry of the first. Hit in production 2026-07-16: a
+    // small test campaign's successful launch blocked the real campaign's
+    // launch right after. AI-pipeline campaigns keep the old topic-based
+    // name (their `name` field isn't reliably set), unchanged.
+    const dateSuffix = new Date().toISOString().split('T')[0];
+    const humanName = ((campaign as any).name ?? '').trim();
     const topicSlug = ((campaign as any).topic ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
-    const campaignName = `AGENT_${topicSlug || 'CAMPAIGN'}_${new Date().toISOString().split('T')[0]}`;
+    const campaignName = humanName
+      ? `${humanName}_${dateSuffix}`
+      : `AGENT_${topicSlug || 'CAMPAIGN'}_${dateSuffix}`;
 
-    // Upload one image per variant to Meta
-    const imageHashes: Record<number, string> = {};
+    // Upload every image to Meta — usually one per variant, but a variant can
+    // carry several (a human creative team's pre-made sizes, or a library
+    // package edited to add one): meta-ads.service.ts switches to placement
+    // asset customization (asset_feed_spec) whenever a variant resolves to
+    // more than one distinct hash, and falls back to the plain single-image
+    // path otherwise — so this loop doesn't need to know which case it's in.
+    const imageHashes: Record<number, { hash: string; aspectRatio?: string }[]> = {};
     for (const img of images) {
       if (img.imageUrl) {
         try {
           const hash = await this.metaAdsService.uploadImage(img.imageUrl, accountId, company.meta.accessToken);
-          imageHashes[img.variantIndex] = hash;
-          this.logger.log(`Image uploaded for variant ${img.variantIndex}: hash=${hash}`);
+          (imageHashes[img.variantIndex] ??= []).push({ hash, aspectRatio: img.aspectRatio });
+          this.logger.log(`Image uploaded for variant ${img.variantIndex} (${img.aspectRatio ?? 'default'}): hash=${hash}`);
         } catch (err: any) {
-          this.logger.warn(`Image upload failed for variant ${img.variantIndex}: ${err.message}`);
+          this.logger.warn(`Image upload failed for variant ${img.variantIndex} (${img.aspectRatio ?? 'default'}): ${err.message}`);
         }
       }
     }
-    this.logger.log(`imageHashes: ${JSON.stringify(Object.keys(imageHashes).map(k => `v${k}=${imageHashes[Number(k)].slice(0, 8)}...`))}`);
+    this.logger.log(`imageHashes: ${JSON.stringify(Object.fromEntries(Object.entries(imageHashes).map(([k, v]) => [k, v.map(a => `${a.aspectRatio ?? 'default'}:${a.hash.slice(0, 8)}...`)])))}`);
 
     // Carousel path — if any ad set is creativeFormat=carousel, upload each
     // card image and build the carouselCards payload Meta needs at ad-creation
@@ -1079,25 +1159,70 @@ export class CampaignCreatorService {
       }
     }
 
-    // Upload video to Meta if available and any ad set needs it
+    // Upload every video (every size of every distinct video) to Meta if any
+    // ad set needs video — grouped by variantIndex so a variant with 2+
+    // distinct videoIds gets placement asset customization (same as images),
+    // while DIFFERENT variantIndexes stay entirely separate ads.
     const needsVideo = (config.adSets ?? []).some(
-      (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both',
+      (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both' || as.creativeFormat === 'mixed',
     );
-    let videoId: string | undefined;
-    let videoThumbnailHash: string | undefined;
-    if (needsVideo && videoUrl) {
+    const videoAssets: Record<number, Array<{ videoId: string; thumbnailHash?: string; aspectRatio?: string }>> = {};
+    if (needsVideo) {
+      for (const [variantIndexStr, sources] of Object.entries(videoSourcesByVariant)) {
+        const variantIndex = Number(variantIndexStr);
+        for (const src of sources) {
+          try {
+            const videoId = await this.metaAdsService.uploadVideo(
+              src.videoUrl, accountId, company.meta.accessToken,
+            );
+            this.logger.log(`Video uploaded for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): videoId=${videoId}`);
+            // Get thumbnail from video — required for video ad creatives
+            const thumbnailHash = await this.metaAdsService.getVideoThumbnailHash(
+              videoId, accountId, company.meta.accessToken,
+            );
+            this.logger.log(`Video thumbnail hash for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): ${thumbnailHash ?? 'NONE — will use imageHash'}`);
+            (videoAssets[variantIndex] ??= []).push({ videoId, thumbnailHash, aspectRatio: src.aspectRatio });
+          } catch (err: any) {
+            this.logger.warn(`Video upload failed for variant ${variantIndex} (${src.aspectRatio ?? 'default'}, proceeding without it): ${err.message}`);
+          }
+        }
+      }
+    }
+
+    // Pre-launch: validate product.customConversionId against the ACCOUNT
+    // actually being launched to — it's saved once on the product (tenant-
+    // global), but custom conversions are account-scoped in Meta, same
+    // failure shape as product.metaAudiences (see the purchaser-exclusion
+    // account-scoping note above). Unlike a bad audience ID, Meta does NOT
+    // reject ad-set creation for an inaccessible custom_conversion_id — the
+    // ad set is created, reports "Active", and simply never delivers any
+    // impressions, surfacing only as a "delivery error" in Meta's UI, not
+    // an exception this code can catch and roll back on. Hit in production
+    // 2026-07-16: a fully "launched" 18-ad campaign sat at 0 impressions
+    // indefinitely with no error anywhere in our own logs. Validate up
+    // front and fall back to plain pixel+event tracking (works everywhere
+    // the pixel is installed, no account-scoping issue) rather than trust
+    // the saved ID blindly.
+    let validatedCustomConversionId = product?.customConversionId;
+    if (validatedCustomConversionId) {
       try {
-        videoId = await this.metaAdsService.uploadVideo(
-          videoUrl, accountId, company.meta.accessToken,
+        const res = await axios.get(
+          `https://graph.facebook.com/v21.0/act_${accountId.replace(/^act_/, '')}/customconversions`,
+          {
+            params: { fields: 'id', limit: 200, access_token: company.meta.accessToken },
+            timeout: 10000,
+          },
         );
-        this.logger.log(`Video uploaded to Meta: videoId=${videoId}`);
-        // Get thumbnail from video — required for video ad creatives
-        videoThumbnailHash = await this.metaAdsService.getVideoThumbnailHash(
-          videoId, accountId, company.meta.accessToken,
-        );
-        this.logger.log(`Video thumbnail hash: ${videoThumbnailHash ?? 'NONE — will use imageHash'}`);
+        const available = new Set((res.data?.data ?? []).map((c: any) => c.id));
+        if (!available.has(validatedCustomConversionId)) {
+          this.logger.warn(
+            `Custom conversion ${validatedCustomConversionId} not available on ${accountId} — falling back to plain pixel+event tracking instead of a promoted_object that would silently never deliver.`,
+          );
+          validatedCustomConversionId = undefined;
+        }
       } catch (err: any) {
-        this.logger.warn(`Video upload failed (proceeding without video): ${err.message}`);
+        this.logger.warn(`Custom conversion validation failed (falling back to plain pixel+event): ${err.message}`);
+        validatedCustomConversionId = undefined;
       }
     }
 
@@ -1118,14 +1243,13 @@ export class CampaignCreatorService {
         objective: config.objective ?? 'OUTCOME_SALES',
         conversionEvent: config.conversionEvent ?? 'Purchase',
         customEventName: product?.customEventName,
-        customConversionId: product?.customConversionId,
+        customConversionId: validatedCustomConversionId,
         adSets: config.adSets,
         copyVariants: copyVariants.length > 0 ? copyVariants : [
           { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
         ],
         imageHashes,
-        videoThumbnailHash,
-        videoId,
+        videoAssets,
         selectedCopyIndex,
         landingUrl,
         declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],

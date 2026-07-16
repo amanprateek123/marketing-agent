@@ -232,12 +232,30 @@ export class CampaignSyncService {
         const activeMetaIdSet = new Set(campaigns.map(c => c.id));
         const staleActiveDocs = await this.campaignModel
           .find({ tenantId, status: 'active', metaCampaignId: { $nin: ['', null] } })
-          .select('metaCampaignId')
+          .select('metaCampaignId metaAccountId')
           .lean()
           .exec();
         const staleIds = staleActiveDocs
-          .map(d => d.metaCampaignId)
-          .filter((id): id is string => !!id && !activeMetaIdSet.has(id));
+          .filter((d) => {
+            if (!d.metaCampaignId || activeMetaIdSet.has(d.metaCampaignId)) return false;
+            // Multi-account tenants: a doc tagged with a DIFFERENT account's
+            // id is never "stale relative to this account" — it simply
+            // doesn't belong here. Without this guard, every other account's
+            // still-active campaigns look like they fell out of THIS
+            // account's active set, and since the reconcile re-fetch below
+            // is also scoped to this account's own /campaigns edge, it can
+            // never find them there and marks them 'completed' via the
+            // "missing = assume deleted" fallback below. Hit 2026-07-15:
+            // syncing 2 accounts sequentially flipped 6 genuinely-ACTIVE
+            // campaigns on the first account to 'completed' during the
+            // second account's reconcile pass. Untagged legacy docs (synced
+            // before metaAccountId was backfilled here) fall through to the
+            // old tenant-wide check since we can't tell which account they
+            // belong to.
+            if (accountIds.length > 1 && d.metaAccountId && d.metaAccountId !== accountId) return false;
+            return true;
+          })
+          .map((d) => d.metaCampaignId as string);
 
         if (staleIds.length > 0) {
           const reconcileRes = await this.fetchAllPagesChunked(
@@ -831,6 +849,13 @@ export class CampaignSyncService {
           const setDoc: Record<string, unknown> = {
             name: campaign.name ?? '',
             status: internalStatus,
+            // Written here (not just $setOnInsert) so pre-existing docs that
+            // predate this field, or were synced before it was wired up,
+            // get backfilled on their next sync too — not just new inserts.
+            // Matches the act_-prefixed format campaign-creator.service.ts
+            // already writes at launch time (accountId is normalizeAccountId'd
+            // above, before this loop starts).
+            metaAccountId: accountId,
             spend,
             impressions,
             clicks,

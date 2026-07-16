@@ -13,7 +13,7 @@ import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning
 import { MetaAdsLibraryOutput, MetaAdsLibraryOutputDocument } from '../pipeline/schemas/meta-ads-library-output.schema';
 import { resolveVertical } from '../common/benchmarks/vertical-benchmarks';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
-import { getFormatSpec } from '../common/creative/format-specs';
+import { getFormatSpec, AspectRatio } from '../common/creative/format-specs';
 
 /**
  * Brief input to the Creative Team. winnerCloneOf is the exploit-winner
@@ -38,6 +38,8 @@ export interface CreativeTeamBriefInput {
   explorationArm?: boolean;
   /** Forces a specific carousel narrative pattern instead of letting the LLM pick. Only used when format === 'carousel'. */
   carouselPattern?: 'auto' | 'sequential' | 'tier_reveal' | 'story_arc' | 'differentiator_stack' | 'qa' | 'catalog_grid';
+  /** Overrides the format's default image aspect ratio when the operator picks one explicitly. */
+  aspectRatio?: AspectRatio;
   winnerCloneOf?: {
     sourceCampaignId: string;
     sourceBriefId: string;
@@ -364,6 +366,11 @@ Return ONLY this JSON (no markdown, no explanation):
     // Format-spec registry — single source of truth for format-specific prompt
     // text, shared with copy-writer.service.ts's fallback path.
     const spec = getFormatSpec(brief.format);
+    // Operator's explicit aspect-ratio pick (if any) must win here too — this
+    // prompt text (safe-zone rules, "FORMAT:" line) has to match the actual
+    // pixel dimensions image-generator.service.ts requests from the provider,
+    // or the composition Claude describes won't match the canvas it's rendered on.
+    const resolvedAspectRatio = brief.aspectRatio ?? spec.aspectRatio;
 
     // Guard: price must be set before building video/copy prompts
     if (brief.format !== 'meme' && resolvedProduct && !resolvedProduct.price) {
@@ -692,7 +699,7 @@ IMAGE STRUCTURE (describe ALL of these):
 - TEXT OVERLAY — LOWER (inside the safe zone below): ${resolvedProduct?.hidePriceInCreative ? `Product name "${resolvedProduct.name}" + CTA. NO price (no ₹, no rupees, no booking-fee amount). High contrast.` : `Product name + "₹${resolvedProduct?.price ?? '[price]'}" + CTA. High contrast.`}
 - PRODUCT PLACEMENT: Where the product appears — can be integrated with the centerpiece or alongside it.
 - SUPPORTING ELEMENTS: Background, people, colors that reinforce the centerpiece's emotion — but don't compete with it.
-${spec.aspectRatio === '9:16' ? `- SAFE ZONE — CRITICAL, non-negotiable: This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements. Keep BOTH text overlays and the CTA inside the CENTER 60% of the vertical frame (roughly 20%-80% of frame height). The outer top/bottom 20% may only hold background/atmosphere — no text, no CTA, nothing critical.` : ''}
+${resolvedAspectRatio === '9:16' ? `- SAFE ZONE — CRITICAL, non-negotiable: This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements. Keep BOTH text overlays and the CTA inside the CENTER 60% of the vertical frame (roughly 20%-80% of frame height). The outer top/bottom 20% may only hold background/atmosphere — no text, no CTA, nothing critical.` : ''}
 
 WHAT MAKES PEOPLE CLICK:
 1. The VISUAL CENTERPIECE creates instant recognition — "yeh toh mere baare me hai"
@@ -701,7 +708,7 @@ WHAT MAKES PEOPLE CLICK:
 4. URGENCY or CURIOSITY in the composition — the viewer must feel "I need to tap NOW"
 5. INDIAN CONTEXT — real Indian faces, settings, cultural cues`}
 
-FORMAT: ${spec.aspectRatio === '9:16' ? 'Vertical 9:16' : spec.aspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}, photorealistic, 5-6 sentences.
+FORMAT: ${resolvedAspectRatio === '9:16' ? 'Vertical 9:16' : resolvedAspectRatio === '16:9' ? 'Landscape 16:9' : resolvedAspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}, photorealistic, 5-6 sentences.
 
 PAST VISUAL LEARNINGS:
 ${visualLearnings}

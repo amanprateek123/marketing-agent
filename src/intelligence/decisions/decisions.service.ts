@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { RecommendedAction } from '../orchestrator/decision-context';
+import { CampaignAuditorService } from '../../campaigns/campaign-auditor/campaign-auditor.service';
 import {
   DecisionStatus,
   IntelligenceDecision,
@@ -17,6 +18,7 @@ export class DecisionsService {
   constructor(
     @InjectModel(IntelligenceDecision.name)
     private readonly model: Model<IntelligenceDecisionDocument>,
+    private readonly campaignAuditor: CampaignAuditorService,
   ) {}
 
   /**
@@ -142,6 +144,57 @@ export class DecisionsService {
     if (notes) doc.humanReviewNotes = notes;
     await doc.save();
     return doc.toObject();
+  }
+
+  /**
+   * Actually apply an approved decision to the live Meta campaign. Separate
+   * from approve() so a decision can be marked "approved" even if the Meta
+   * call fails — the human's judgment call and the execution outcome are
+   * two different facts. Uses the decision's OWN stored tenantId (not a
+   * caller-supplied one) so this can only ever touch the campaign the
+   * decision was actually generated for.
+   */
+  async executeApprovedDecision(decisionId: string): Promise<{
+    executed: boolean;
+    error?: string;
+  }> {
+    const doc = await this.model.findById(decisionId).exec();
+    if (!doc) throw new NotFoundException(`decision ${decisionId} not found`);
+    if (!doc.campaignId) {
+      doc.executionError = 'Decision has no campaignId — cannot execute';
+      await doc.save();
+      return { executed: false, error: doc.executionError };
+    }
+
+    try {
+      await this.campaignAuditor.executeExternalAction(
+        doc.tenantId,
+        doc.campaignId,
+        {
+          actionId: doc.actionId,
+          type: doc.actionType,
+          targetId: doc.targetId,
+          targetName: doc.campaignName || doc.targetId,
+          reason: doc.reasoning,
+          metrics: (doc.parameters ?? {}) as Record<string, unknown>,
+        },
+      );
+      doc.executedAt = new Date();
+      doc.executionError = undefined;
+      doc.shadowModeOnly = false;
+      await doc.save();
+      this.log.log(
+        `Executed decision ${decisionId} (${doc.actionType} on ${doc.targetId}) for tenant=${doc.tenantId}`,
+      );
+      return { executed: true };
+    } catch (err) {
+      doc.executionError = (err as Error).message;
+      await doc.save();
+      this.log.error(
+        `Execution failed for decision ${decisionId}: ${doc.executionError}`,
+      );
+      return { executed: false, error: doc.executionError };
+    }
   }
 
   async reject(

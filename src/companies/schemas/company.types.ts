@@ -135,6 +135,16 @@ export interface MetaAdsConfig {
   accessToken: string;    // Meta Ads API access token (per tenant)
   accountId: string;      // Primary Meta Ads account ID (e.g. act_123456)
   accountIds?: string[];  // All Meta Ads account IDs — importer pulls from all of them
+  /**
+   * Meta Business Manager ID (the "business portfolio" a token's ad accounts
+   * live under). When set, ad-account discovery (GET /:tenantId/meta-accounts)
+   * scopes to this business's owned + client ad accounts instead of every
+   * account the raw access token can see via /me/adaccounts — which spans
+   * every Business Manager the token's identity belongs to, including other
+   * tenants' unrelated accounts if the same token/agency manages multiple
+   * brands.
+   */
+  businessId?: string;
   pixelId?: string;       // Meta Pixel for conversion tracking (shared across accounts)
   pageId?: string;        // Facebook Page ID for ad identity
   /**

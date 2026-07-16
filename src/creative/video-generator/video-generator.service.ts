@@ -29,8 +29,10 @@ export class VideoGeneratorService {
     tenantId: string,
     runId: string,
     onVideoIdReady?: (videoId: string) => Promise<void>,
+    aspectRatio: string = '9:16',
+    resolution: string = '1080p',
   ): Promise<VideoResult> {
-    this.logger.log(`Video generation starting: tenantId=${tenantId} runId=${runId}`);
+    this.logger.log(`Video generation starting: tenantId=${tenantId} runId=${runId} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     if (!videoPrompt?.trim()) {
       throw new Error('Video prompt is empty');
@@ -39,6 +41,8 @@ export class VideoGeneratorService {
     const { videoUrl: heygenUrl, thumbnailUrl } = await this.heygenService.generateVideoFromPrompt(
       videoPrompt.trim(),
       onVideoIdReady,
+      aspectRatio,
+      resolution,
     );
 
     return this.uploadToS3(videoPrompt, heygenUrl, thumbnailUrl, tenantId, runId);

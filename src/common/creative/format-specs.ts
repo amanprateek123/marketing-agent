@@ -29,7 +29,16 @@ import {
 } from './hook-styles';
 
 export type FormatGroup = 'image' | 'carousel' | 'native' | 'video';
-export type AspectRatio = '9:16' | '1:1' | '4:5';
+/** Shared aspect-ratio set — same 4 options for both images and video. */
+export type AspectRatio = '9:16' | '16:9' | '1:1' | '4:5';
+/** @deprecated use AspectRatio — kept as an alias so existing imports don't break. */
+export type VideoAspectRatio = AspectRatio;
+
+/** Gemini imageConfig.imageSize / rough OpenAI quality tier for still images. */
+export type ImageResolution = '1K' | '2K' | '4K';
+
+/** Heygen's real resolution enum for /v3/video-agents. */
+export type VideoResolution = '720p' | '1080p' | '4k';
 
 export interface FormatSpec {
   id: string;

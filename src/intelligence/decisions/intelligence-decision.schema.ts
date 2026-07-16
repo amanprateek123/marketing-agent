@@ -7,15 +7,21 @@ export type DecisionStatus = 'shadow_review' | 'approved' | 'rejected' | 'expire
 
 /**
  * intelligence_decisions — one document per proposed action from the
- * intelligence pipeline. Local only. Nothing here ever writes to Meta.
+ * intelligence pipeline.
  *
  * Lifecycle:
  *   shadow_review (created) → approved / rejected (human review) → expired (>48h)
  *
- * When the operator approves a decision, this collection ONLY updates
- * its `status` and `humanReviewedAt`. The actual Meta write (if ever
- * enabled) happens in the Execution Engine — which is currently in
- * shadow_mode_only and defers everything.
+ * The AUTOMATIC cascade (IntelligenceCascadeScheduler → ExecutionEngine)
+ * never writes to Meta — every action it generates is unconditionally
+ * deferred with shadowModeOnly=true, cascade-wide, no exceptions.
+ *
+ * A HUMAN approving a specific decision via POST .../approve is a separate,
+ * deliberate path: DecisionsController calls executeApprovedDecision, which
+ * DOES call Meta for that one decision (via CampaignAuditorService's
+ * already-proven pendingActions execution pipeline) and records the result
+ * in executedAt/executionError. See executeApprovedDecision for the only
+ * code path in this system that ever mutates a live campaign.
  */
 @Schema({ collection: 'intelligence_decisions', timestamps: true })
 export class IntelligenceDecision {
@@ -75,10 +81,20 @@ export class IntelligenceDecision {
 
   /**
    * Explicit safety flag — the pipeline sets this true when writing.
-   * The Execution Engine reads it before doing anything. Any decision
-   * with shadowModeOnly=true is guaranteed to never touch Meta.
+   * The (automatic) Execution Engine reads it before doing anything and
+   * always defers while it's true. A human approving this specific decision
+   * via POST /approve is a separate, deliberate override path (see
+   * DecisionsService.executeApprovedDecision) — it flips this to false
+   * and performs the real Meta call. shadowModeOnly=true here documents
+   * "the automatic cascade never touched this"; it does not mean "this
+   * decision can never be executed by a human."
    */
   @Prop({ required: true, default: true }) shadowModeOnly!: boolean;
+
+  /** Set once executeApprovedDecision successfully applies this to Meta. */
+  @Prop() executedAt?: Date;
+  /** Error message from the last failed execution attempt, if any. */
+  @Prop() executionError?: string;
 }
 
 export const IntelligenceDecisionSchema =

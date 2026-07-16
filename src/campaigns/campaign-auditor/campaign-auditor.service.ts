@@ -165,6 +165,68 @@ export class CampaignAuditorService {
     await this.executePendingActions(freshCampaign, company);
   }
 
+  /**
+   * Execute a single action that originated OUTSIDE this audit loop's own
+   * recommend → grace-period pipeline — specifically, an IntelligenceDecision
+   * a human approved in the newer intelligence cascade (Meridian). That system
+   * has its own review gate (shadow_review → approved), so this intentionally
+   * skips createPendingAction's dedup/oscillation-cooldown checks (those guard
+   * THIS loop's own repeated proposals, not a one-off external approval) and
+   * pushes a pre-approved entry straight onto pendingActions. From there it
+   * rides the exact same executeAction → executeApprovedAction →
+   * executePendingActions path every other approved action uses, so it gets
+   * the same real Meta-call logic, retries, and optimizer-level safety guards.
+   * Throws on failure — callers persist the error onto their own record.
+   */
+  async executeExternalAction(
+    tenantId: string,
+    campaignId: string,
+    action: {
+      actionId: string;
+      type: string;
+      targetId: string;
+      targetName: string;
+      reason: string;
+      metrics: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    const campaign = await this.campaignModel
+      .findOne({ tenantId, _id: campaignId })
+      .exec();
+    if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new Error('No Meta access token configured for this tenant');
+    }
+
+    const pendingActions = (campaign as any).pendingActions ?? [];
+    if (!pendingActions.some((a: any) => a.actionId === action.actionId)) {
+      const now = new Date();
+      pendingActions.push({
+        actionId: action.actionId,
+        type: action.type,
+        targetId: action.targetId,
+        targetName: action.targetName,
+        reason: action.reason,
+        metrics: action.metrics,
+        recommendedAt: now,
+        executeAt: now,
+        status: 'pending',
+      });
+      await this.campaignModel.updateOne(
+        { tenantId, _id: campaignId },
+        { pendingActions },
+      );
+    }
+
+    await this.campaignsService.executeAction(
+      tenantId,
+      campaignId,
+      action.actionId,
+    );
+    await this.executeApprovedAction(campaign, company, action.actionId);
+  }
+
   async audit(tenantId: string): Promise<AuditResult> {
     const company = await this.companiesService.findByTenantId(tenantId);
     const activeCampaigns = await this.campaignsService.findActive(tenantId);

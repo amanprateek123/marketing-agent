@@ -14,6 +14,64 @@ const RETRYABLE_ERROR_CODES = [2, 17, 341, 368];
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 2000, 4000]; // exponential backoff
 
+// https://developers.facebook.com/docs/marketing-api/reference/ad-account/#fields — account_status
+const META_ACCOUNT_STATUS: Record<number, MetaAdAccountSummary['status']> = {
+  1: 'active',
+  2: 'disabled',
+  3: 'unsettled',
+  7: 'pending_review',
+  8: 'pending_review',
+  9: 'in_grace_period',
+  100: 'pending_closure',
+  101: 'pending_closure',
+};
+
+export interface MetaAdAccountSummary {
+  id: string; // "act_123456"
+  name: string;
+  status: 'active' | 'disabled' | 'unsettled' | 'pending_review' | 'in_grace_period' | 'pending_closure' | 'other';
+  currency: string;
+  timezoneName: string;
+}
+
+export interface MetaCustomAudience {
+  id: string;
+  name: string;
+  type: 'custom' | 'lookalike';
+  subtype?: string;
+  approxSizeLower?: number;
+  approxSizeUpper?: number;
+  deliveryStatus?: string;
+}
+
+/**
+ * One uploaded image for a copy variant. Most variants have exactly one
+ * (aspectRatio undefined/whatever the format defaulted to) — createAd() uses
+ * the plain single-image_hash path in that case, unchanged from before.
+ * When a variant has 2+ entries with distinct aspectRatios (a human creative
+ * team supplying pre-made sizes, or a library package edited to add one),
+ * createAd() switches to Meta's asset_feed_spec so each placement gets the
+ * asset actually composed for it instead of an auto-crop of one image.
+ */
+export interface MetaImageAsset {
+  hash: string;
+  aspectRatio?: string; // '9:16' | '1:1' | '4:5' | '16:9'
+}
+
+/**
+ * One uploaded video, with its own thumbnail. Unlike images (per-variant),
+ * a package has a single set of video sizes shared across every ad that
+ * ships as a video ad, regardless of which copy variant it's paired with —
+ * mirrors how the legacy singular video field worked (one video, reused
+ * across variants). 2+ distinct videoIds triggers placement asset
+ * customization in createVideoAd(), same pattern as MetaImageAsset.
+ */
+export interface MetaVideoAsset {
+  videoId: string;
+  thumbnailHash?: string;
+  aspectRatio?: string; // '9:16' | '1:1' | '4:5' | '16:9'
+}
+
 export interface MetaLaunchResult {
   campaignId: string;
   adSets: {
@@ -47,8 +105,9 @@ export interface MetaAdSetConfig {
   geoLocations?: string[]; // ISO country codes (e.g. ['IN'])
   geoStates?: string[]; // Meta region keys (e.g. ['480'] for Maharashtra)
   geoCities?: string[]; // Meta city keys (e.g. ['2295411'] for Mumbai)
-  // Meta locale IDs (e.g. [84] = Marathi, [53] = Hindi). Filters delivery to users
-  // whose platform language matches. Populated by audience-targeting-resolver from
+  // Meta locale IDs (e.g. [81] = Marathi, [46] = Hindi — verified 2026-07-16 via
+  // /search?type=adlocale; see META_LOCALE_IDS, the source of truth). Filters
+  // delivery to users whose platform language matches. Populated by audience-targeting-resolver from
   // segment.languages or product.languages (canonical names → IDs via META_LOCALE_IDS).
   locales?: number[];
   interests?: string[]; // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
@@ -83,9 +142,21 @@ export interface MetaCampaignConfig {
   customConversionId?: string; // Meta Custom Conversion ID — takes priority over conversionEvent
   adSets: MetaAdSetConfig[];
   copyVariants: { primaryText: string; headline: string; cta: string }[];
-  imageHashes?: Record<number, string>; // per-variant image hashes (variantIndex → hash)
-  videoThumbnailHash?: string; // thumbnail extracted from video (used only in video ads)
-  videoId?: string; // Meta video ID (uploaded before launch)
+  /**
+   * Per-variant uploaded image(s) — variantIndex → all sizes uploaded for
+   * that variant. Almost always length 1; length >1 triggers placement
+   * asset customization in createAd() (see MetaImageAsset).
+   */
+  imageHashes?: Record<number, MetaImageAsset[]>;
+  /**
+   * Per-variant uploaded video(s), each already uploaded + thumbnailed —
+   * variantIndex → every size of that variant's video. Mirrors imageHashes:
+   * multiple entries under one variantIndex (different sizes of the SAME
+   * video) trigger placement asset customization in createVideoAd(); entries
+   * under DIFFERENT variantIndexes are entirely separate videos, each its
+   * own ad. A variantIndex with no video here simply doesn't get a video ad.
+   */
+  videoAssets?: Record<number, MetaVideoAsset[]>;
   selectedCopyIndex?: number; // which copy variant the video matches (for 'mixed' format)
   landingUrl: string;
   declaredSpecialAdCategories?: string[]; // for safety check on regulated copy
@@ -436,15 +507,21 @@ export class MetaAdsService {
             : '';
           const adName = `${adSetConfig.name} — Variant ${variantIndex + 1}${hookStyle}`;
 
-          // Resolve per-variant image hash
-          const variantImageHash = config.imageHashes?.[variantIndex];
+          // Resolve per-variant image asset(s) — usually one; multiple sizes
+          // trigger placement customization in createAd(). variantImageHash
+          // stays the "primary" (first) hash for callers that only ever need
+          // one (video-ad thumbnail, the mixed/video branch's still fallback).
+          const variantImages = config.imageHashes?.[variantIndex] ?? [];
+          const variantImageHash = variantImages[0]?.hash;
+          // Per-variant, like images — a variantIndex with no video here
+          // just doesn't get a video ad (see MetaCampaignConfig.videoAssets).
+          const videoAssets = config.videoAssets?.[variantIndex] ?? [];
 
-          // 'mixed': only the selected variant gets video; rest get image ads
-          //   -> single video ad (matched to its hookStyle) competes with N image ads in one bucket
-          //   -> Meta optimizes across both formats inside the same ad set
+          // 'mixed': each variant ships as video (if it has one) or image,
+          // never both — that's what distinguishes it from 'both'.
+          //   -> N video/image ads compete in one bucket, Meta optimizes across formats
           if (creativeFormat === 'mixed') {
-            const isSelected = variantIndex === selectedCopyIndex;
-            if (isSelected && config.videoId) {
+            if (videoAssets.length > 0) {
               const videoAdName = `${adName} (video)`;
               const { adId, creativeId } = await this.createVideoAd(
                 config.accountId,
@@ -452,10 +529,10 @@ export class MetaAdsService {
                 adSetId,
                 videoAdName,
                 variant,
-                config.videoId,
+                videoAssets,
                 config.pageId!,
                 buildLandingUrl(videoAdName),
-                config.videoThumbnailHash ?? variantImageHash,
+                variantImageHash, // fallback thumbnail for any video asset missing its own
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
@@ -472,7 +549,7 @@ export class MetaAdsService {
                 adSetId,
                 adName,
                 variant,
-                variantImageHash,
+                variantImages,
                 config.pageId ?? '',
                 buildLandingUrl(adName),
               );
@@ -488,10 +565,10 @@ export class MetaAdsService {
             continue;
           }
 
-          // video-only or both → create video ad if videoId available
+          // video-only or both → create video ad if any video asset available
           if (
             (creativeFormat === 'video' || creativeFormat === 'both') &&
-            config.videoId
+            videoAssets.length > 0
           ) {
             const videoAdName = `${adName} (video)`;
             const { adId, creativeId } = await this.createVideoAd(
@@ -500,10 +577,10 @@ export class MetaAdsService {
               adSetId,
               videoAdName,
               variant,
-              config.videoId,
+              videoAssets,
               config.pageId!,
               buildLandingUrl(videoAdName),
-              config.videoThumbnailHash ?? variantImageHash, // thumbnail for video ads only
+              variantImageHash, // fallback thumbnail for any video asset missing its own
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
@@ -528,7 +605,7 @@ export class MetaAdsService {
               adSetId,
               adName2,
               variant,
-              variantImageHash,
+              variantImages,
               config.pageId ?? '',
               buildLandingUrl(adName2),
             );
@@ -757,7 +834,8 @@ export class MetaAdsService {
       ];
     }
 
-    // Locale targeting — filters delivery by platform language (e.g. 84=Marathi).
+    // Locale targeting — filters delivery by platform language (e.g. 81=Marathi,
+    // per META_LOCALE_IDS — verified via /search?type=adlocale, never guessed).
     // Empty array means no filter; resolver only populates when segment/product
     // specifies languages. Compatible with all audienceTypes including advantage_plus.
     if (Array.isArray(config.locales) && config.locales.length > 0) {
@@ -841,24 +919,45 @@ export class MetaAdsService {
     // Attribution: 7-day click + 1-day view — view-through captures 15-25% more
     // attributed conversions for video-heavy creative. Click-only under-counts
     // video performance and biases the audit loop's format-comparison toward image.
+    // Only confirmed safe for OFFSITE_CONVERSIONS, the goal every AI-generated
+    // campaign uses and the one this spec was tuned against.
     //
-    // EXCEPT for VALUE optimization (VBB) on OUTCOME_SALES: Meta restricts the
-    // allowed attribution windows to (CLICK_THROUGH 1, 0) or (CLICK_THROUGH 7, 0)
-    // — NO view-through accepted. Including a VIEW_THROUGH entry returns
-    // subcode 1885501 "View-through attribution window is invalid" and the
-    // whole launch fails. Drop view-through when optimizationGoal === 'VALUE'.
-    if (isValueOptimization) {
+    // Every other optimization_goal has its OWN, narrower, largely undocumented
+    // set of valid click/view window combinations — e.g. VALUE (VBB) accepts
+    // only (CLICK_THROUGH 1, 0) or (CLICK_THROUGH 7, 0); LANDING_PAGE_VIEWS hit
+    // subcode 1885501 "View-through attribution window is invalid" in production
+    // (2026-07-16) demanding (CLICK_THROUGH 1, 0) instead — a THIRD combination,
+    // not one of the two already handled. Rather than special-case every goal
+    // Meta might reject differently, fall back to the one window nearly every
+    // goal accepts (CLICK_THROUGH, 1 day) for anything other than
+    // OFFSITE_CONVERSIONS. This matters in practice because the manual
+    // campaign form lets a human pick objective/optimizationGoal freely — the
+    // AI path only ever produces OFFSITE_CONVERSIONS, so this branch protects
+    // exactly the surface most likely to hit an unvalidated combination.
+    if (optimizationGoal === 'OFFSITE_CONVERSIONS') {
+      adSetData.attribution_spec = [
+        { event_type: 'CLICK_THROUGH', window_days: 7 },
+        { event_type: 'VIEW_THROUGH', window_days: 1 },
+      ];
+    } else if (isValueOptimization) {
       adSetData.attribution_spec = [
         { event_type: 'CLICK_THROUGH', window_days: 7 },
       ];
     } else {
       adSetData.attribution_spec = [
-        { event_type: 'CLICK_THROUGH', window_days: 7 },
-        { event_type: 'VIEW_THROUGH', window_days: 1 },
+        { event_type: 'CLICK_THROUGH', window_days: 1 },
       ];
     }
 
-    // Pixel for conversion optimization
+    // Pixel for conversion optimization — only wired up for goals that
+    // actually optimize toward a conversion event. Traffic-style goals
+    // (LANDING_PAGE_VIEWS, LINK_CLICKS, REACH, IMPRESSIONS) don't optimize
+    // toward conversions at all; attaching a Purchase custom_conversion_id
+    // to one of those ad sets is a real config bug, not just unnecessary —
+    // it points Meta at a promoted_object the chosen optimization_goal
+    // can't act on. Hit in production 2026-07-16 on a LANDING_PAGE_VIEWS
+    // ad set that had inherited the Purchase-tracking promoted_object meant
+    // for the OFFSITE_CONVERSIONS path.
     //
     // The promoted_object shape depends on optimization_goal:
     //   - OFFSITE_CONVERSIONS + customConversionId: just custom_conversion_id.
@@ -870,7 +969,18 @@ export class MetaAdsService {
     //     Meta doesn't accept the implicit-pixel derivation for VBB. Hit on
     //     Nadi Leaf launch 2026-06-09.
     //   - No customConversionId: standard pixel+event path.
-    if (customConversionId) {
+    //   - Traffic-style goals (LANDING_PAGE_VIEWS/LINK_CLICKS/REACH/
+    //     IMPRESSIONS): NO promoted_object at all — confirmed by Meta
+    //     rejecting even a bare `{pixel_id}` with subcode 1885014 ("invalid
+    //     combination of parameters") in production 2026-07-16. These goals
+    //     aren't tied to a conversion event, so Meta doesn't want a
+    //     promoted_object for them; pixel-based reporting still works via
+    //     the account's pixel without declaring it here.
+    const isConversionGoal =
+      optimizationGoal === 'OFFSITE_CONVERSIONS' || isValueOptimization;
+    if (!isConversionGoal) {
+      // Intentionally no promoted_object.
+    } else if (customConversionId) {
       if (isValueOptimization && pixelId) {
         adSetData.promoted_object = {
           pixel_id: pixelId,
@@ -918,42 +1028,74 @@ export class MetaAdsService {
       this.logger.log(`Ad set created: ${adSetId}`);
       return adSetId;
     } catch (err: any) {
-      // Custom audience expired/deleted — retry as advantage_plus
-      // Catch audience errors — Meta returns "Invalid parameter" with error_subcode 1359207 for expired audiences
-      // We only retry if we actually set custom_audiences in targeting
-      const hasAnyAudiences =
-        targeting.custom_audiences || targeting.excluded_custom_audiences;
-      // Match on Meta error subcode 1359207 (expired audience) or code 100 with audiences present
-      const isAudienceError =
-        hasAnyAudiences &&
-        (err.message?.includes('subcode: 1359207') ||
-          err.message?.includes('subcode: 3858504') ||
-          (err.message?.includes('code: 100') &&
-            err.message?.includes('Invalid parameter')));
-      if (isAudienceError) {
-        this.logger.warn(
-          `Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}, excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without audiences.`,
-        );
-        delete targeting.custom_audiences;
-        delete targeting.excluded_custom_audiences;
-        targeting.targeting_automation = { advantage_audience: 1 };
-        delete targeting.age_min;
-        delete targeting.age_max;
-        delete targeting.genders;
-        adSetData.targeting = targeting;
+      // Custom audience expired/deleted/wrong-account — Meta returns
+      // "Invalid parameter" with error_subcode 1359207 for expired
+      // audiences, 3858504 for some deletions, or a bare code:100 "Invalid
+      // parameter" for others (e.g. an audience saved against a DIFFERENT
+      // ad account than the one being launched to — hit in production
+      // 2026-07-16, an auto-added Purchasers-exclusion audience that only
+      // existed on the tenant's default account).
+      const isAudienceError = (e: any) =>
+        e.message?.includes('subcode: 1359207') ||
+        e.message?.includes('subcode: 3858504') ||
+        (e.message?.includes('code: 100') &&
+          e.message?.includes('Invalid parameter'));
+      const hasIncludes = !!targeting.custom_audiences;
+      const hasExcludes = !!targeting.excluded_custom_audiences;
+      if (!isAudienceError(err) || (!hasIncludes && !hasExcludes)) throw err;
 
-        const retryResponse = await this.metaApiCall(
-          'POST',
-          `${META_API_BASE}/${accountId}/adsets`,
-          adSetData,
+      // Stage 1: drop ONLY the exclusion list first, keeping the
+      // deliberately-chosen include audience and age/gender targeting
+      // intact. An exclude-audience problem (the common case — a saved
+      // Purchasers audience invalid on this account) shouldn't cost the
+      // whole ad set's precise targeting; only fall back further if the
+      // chosen audience itself also turns out to be bad.
+      if (hasExcludes) {
+        this.logger.warn(
+          `Excluded audience unavailable for "${config.name}" (excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without exclusions, keeping chosen audience/age/gender intact.`,
         );
-        const adSetId = retryResponse.data?.id;
-        if (!adSetId)
-          throw new Error(`No ad set ID in retry response for ${config.name}`);
-        this.logger.log(`Ad set created (advantage_plus fallback): ${adSetId}`);
-        return adSetId;
+        delete targeting.excluded_custom_audiences;
+        adSetData.targeting = targeting;
+        try {
+          const retryResponse = await this.metaApiCall(
+            'POST',
+            `${META_API_BASE}/${accountId}/adsets`,
+            adSetData,
+          );
+          const adSetId = retryResponse.data?.id;
+          if (!adSetId)
+            throw new Error(`No ad set ID in retry response for ${config.name}`);
+          this.logger.log(`Ad set created (exclusion dropped): ${adSetId}`);
+          return adSetId;
+        } catch (err2: any) {
+          if (!isAudienceError(err2)) throw err2;
+          // Falls through to Stage 2 — the chosen audience is bad too.
+        }
       }
-      throw err;
+
+      // Stage 2: chosen audience itself unavailable — last resort, fall
+      // back to Advantage+ broad targeting (loses precise targeting).
+      this.logger.warn(
+        `Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}) — retrying as Advantage+ broad targeting.`,
+      );
+      delete targeting.custom_audiences;
+      delete targeting.excluded_custom_audiences;
+      targeting.targeting_automation = { advantage_audience: 1 };
+      delete targeting.age_min;
+      delete targeting.age_max;
+      delete targeting.genders;
+      adSetData.targeting = targeting;
+
+      const retryResponse = await this.metaApiCall(
+        'POST',
+        `${META_API_BASE}/${accountId}/adsets`,
+        adSetData,
+      );
+      const adSetId = retryResponse.data?.id;
+      if (!adSetId)
+        throw new Error(`No ad set ID in retry response for ${config.name}`);
+      this.logger.log(`Ad set created (advantage_plus fallback): ${adSetId}`);
+      return adSetId;
     }
   }
 
@@ -963,15 +1105,26 @@ export class MetaAdsService {
     adSetId: string,
     adName: string,
     copy: { primaryText: string; headline: string; cta: string },
-    imageHash: string | undefined,
+    images: MetaImageAsset[],
     pageId: string,
     landingUrl: string,
   ): Promise<{ adId: string; creativeId: string }> {
+    // Dedup by hash — a variant tagged with the same hash under two aspect
+    // ratios (shouldn't normally happen, but campaign-creator.service.ts
+    // doesn't guarantee it) must not turn into a pointless 1-rule asset_feed_spec.
+    const distinctImages = images.filter(
+      (img, i) => img.hash && images.findIndex((o) => o.hash === img.hash) === i,
+    );
+
     // Step 1: Create ad creative
     const creativeData: any = {
       name: `Creative — ${adName}`,
       object_story_spec: {
         page_id: pageId,
+        // link_data stays populated even in the multi-size branch below — it's
+        // what Meta uses for the creative preview / any placement not covered
+        // by asset_customization_rules, so it must carry the same copy/CTA
+        // asset_feed_spec does, not be left as a bare fallback.
         link_data: {
           link: landingUrl,
           message: copy.primaryText,
@@ -985,8 +1138,21 @@ export class MetaAdsService {
       access_token: accessToken,
     };
 
-    if (imageHash) {
-      creativeData.object_story_spec.link_data.image_hash = imageHash;
+    // asset_customization_rules (Placement Asset Customization) is DISABLED
+    // as of 2026-07-16 — Meta rejected it outright with subcode 1885896
+    // ("The asset customisation rules field is not supported in asset
+    // feed"), a feature-availability error, not a payload-shape bug. Most
+    // likely requires is_dynamic_creative=true on the ad set, which is a
+    // bigger, untested change with its own behavioral implications (Meta
+    // then auto-mixes creative elements per user rather than deterministic
+    // placement routing). After 4 failed real launch attempts chasing this,
+    // reliability wins: fall back to the single best size — the same
+    // plain image_hash path proven working all session — rather than keep
+    // iterating on an unverified feature. buildImageAssetFeedSpec is kept
+    // for when Dynamic Creative support is added properly.
+    const primaryImage = this.pickPrimaryImageSize(distinctImages);
+    if (primaryImage?.hash) {
+      creativeData.object_story_spec.link_data.image_hash = primaryImage.hash;
     }
 
     const creativeResponse = await this.metaApiCall(
@@ -1023,19 +1189,132 @@ export class MetaAdsService {
     return { adId, creativeId };
   }
 
+  /**
+   * Picks the single best size when placement customization isn't in play
+   * (currently always — see buildImageAssetFeedSpec) — prefers 4:5 (Meta's
+   * own Feed default, typically the plurality of impressions across
+   * placements) over 1:1, then 16:9, then vertical 9:16 last, then whatever
+   * else is available. Same preference order buildImageAssetFeedSpec used
+   * for its "default" bucket, kept consistent in case placement
+   * customization is re-enabled later.
+   */
+  private pickPrimaryImageSize(images: MetaImageAsset[]): MetaImageAsset | undefined {
+    return (
+      images.find((img) => img.aspectRatio === '4:5') ??
+      images.find((img) => img.aspectRatio === '1:1') ??
+      images.find((img) => img.aspectRatio === '16:9') ??
+      images.find((img) => img.aspectRatio === '9:16') ??
+      images[0]
+    );
+  }
+
+  /**
+   * Meta Placement Asset Customization (asset_feed_spec) — DISABLED as of
+   * 2026-07-16 (see createAd/createVideoAd, which call pickPrimaryImageSize
+   * instead). Meta rejected asset_customization_rules outright with subcode
+   * 1885896 ("The asset customisation rules field is not supported in
+   * asset feed") — a feature-availability error, not a payload-shape bug;
+   * most likely requires is_dynamic_creative=true on the ad set, untested.
+   * Kept here, unused, so re-enabling later (once Dynamic Creative support
+   * is added and verified) doesn't mean rebuilding this from scratch.
+   *
+   * Routes a vertical (9:16) image to Instagram Stories/Reels; every other
+   * placement falls back to the non-vertical (4:5 preferred, else
+   * 1:1/16:9/whatever else was given) image automatically, since it's
+   * listed FIRST in `images[]` — Meta uses the first asset in the array as
+   * the default for any placement not matched by a rule. Deliberately no
+   * explicit catch-all rule (an `asset_customization_rules` entry with no
+   * `customization_spec`, meant to mean "match anything else") —
+   * undocumented whether Meta's API actually accepts that shape.
+   *
+   * Deliberately just two buckets, not a full per-placement mapping — Meta's
+   * exact position enums for Audience Network / Facebook Reels / Messenger
+   * drift across API versions, and a wrong guess fails the WHOLE ad creative
+   * at launch time (this call is inside the sequential ad-set build loop, so
+   * one bad request can abort the rest of the campaign launch). Instagram
+   * Stories + Reels position values ('story', 'reels') are long-stable,
+   * heavily-documented Meta constants — the highest-value, lowest-risk split.
+   *
+   * bodies/titles/link_urls are single-entry (no adlabels needed — Meta uses
+   * the sole entry as the default when there's only one) since only the
+   * IMAGE is being customized per placement here, not copy. call_to_actions
+   * omits `value.link` — link_urls already supplies the destination, and
+   * duplicating it there is unverified and unnecessary.
+   */
+  private buildImageAssetFeedSpec(
+    images: MetaImageAsset[],
+    copy: { primaryText: string; headline: string; cta: string },
+    landingUrl: string,
+  ): any {
+    const vertical = images.find((img) => img.aspectRatio === '9:16');
+    const nonVertical =
+      images.find((img) => img.aspectRatio === '4:5') ??
+      images.find((img) => img.aspectRatio === '1:1') ??
+      images.find((img) => img.aspectRatio === '16:9') ??
+      images.find((img) => img.hash !== vertical?.hash) ??
+      images[0];
+
+    const assetImages: Array<{ hash: string; adlabels: { name: string }[] }> = [];
+    const rules: any[] = [];
+
+    if (vertical && nonVertical && vertical.hash !== nonVertical.hash) {
+      // Default/fallback asset listed FIRST.
+      assetImages.push({ hash: nonVertical.hash, adlabels: [{ name: 'default' }] });
+      assetImages.push({ hash: vertical.hash, adlabels: [{ name: 'vertical' }] });
+      rules.push({
+        customization_spec: {
+          publisher_platforms: ['instagram'],
+          instagram_positions: ['story', 'reels'],
+        },
+        image_label: { name: 'vertical' },
+        priority: 1,
+      });
+    } else {
+      // Callers only reach this method with >1 distinct hash, but if they
+      // somehow all resolve to the same bucket, still emit a valid
+      // single-image spec rather than an empty/malformed one.
+      const only = nonVertical ?? vertical ?? images[0];
+      assetImages.push({ hash: only.hash, adlabels: [{ name: 'default' }] });
+    }
+
+    return {
+      images: assetImages,
+      bodies: [{ text: copy.primaryText }],
+      titles: [{ text: copy.headline }],
+      link_urls: [{ website_url: landingUrl }],
+      call_to_actions: [{ type: this.mapCta(copy.cta) }],
+      ad_formats: ['SINGLE_IMAGE'],
+      ...(rules.length > 0 ? { asset_customization_rules: rules } : {}),
+    };
+  }
+
   private async createVideoAd(
     accountId: string,
     accessToken: string,
     adSetId: string,
     adName: string,
     copy: { primaryText: string; headline: string; cta: string },
-    videoId: string,
+    videos: MetaVideoAsset[],
     pageId: string,
     landingUrl: string,
-    imageHash?: string,
+    fallbackThumbnailHash?: string,
   ): Promise<{ adId: string; creativeId: string }> {
+    // Dedup by videoId — see createAd()'s identical guard for why.
+    const distinctVideos = videos.filter(
+      (v, i) => v.videoId && videos.findIndex((o) => o.videoId === v.videoId) === i,
+    );
+    // asset_customization_rules disabled as of 2026-07-16 — see
+    // buildImageAssetFeedSpec for why. Pick the single best size instead of
+    // routing per-placement, same as createAd().
+    const primary =
+      distinctVideos.find((v) => v.aspectRatio === '4:5') ??
+      distinctVideos.find((v) => v.aspectRatio === '1:1') ??
+      distinctVideos.find((v) => v.aspectRatio === '16:9') ??
+      distinctVideos.find((v) => v.aspectRatio === '9:16') ??
+      distinctVideos[0];
+
     const videoData: any = {
-      video_id: videoId,
+      video_id: primary?.videoId,
       message: copy.primaryText,
       call_to_action: {
         type: this.mapCta(copy.cta),
@@ -1045,8 +1324,9 @@ export class MetaAdsService {
     };
 
     // Thumbnail is required by Meta for video ads
-    if (imageHash) {
-      videoData.image_hash = imageHash;
+    const thumbnailHash = primary?.thumbnailHash ?? fallbackThumbnailHash;
+    if (thumbnailHash) {
+      videoData.image_hash = thumbnailHash;
     }
 
     const creativeData: any = {
@@ -1091,6 +1371,68 @@ export class MetaAdsService {
 
     this.logger.log(`Video ad created: ${adId} (${adName})`);
     return { adId, creativeId };
+  }
+
+  /**
+   * Video counterpart of buildImageAssetFeedSpec — same vertical-vs-default
+   * two-bucket placement split (Instagram Stories/Reels get the 9:16 cut,
+   * everything else falls back to the non-vertical size by being listed
+   * FIRST in `videos[]`, no explicit catch-all rule), just videos[] with a
+   * required thumbnail per entry instead of images[]. See
+   * buildImageAssetFeedSpec for why only two buckets and why no catch-all
+   * rule (that shape — a rule with no customization_spec — is unconfirmed
+   * against live Meta and is the leading suspect for a 2026-07-16 opaque
+   * ad-creative-creation failure, subcode 1487390).
+   */
+  private buildVideoAssetFeedSpec(
+    videos: MetaVideoAsset[],
+    copy: { primaryText: string; headline: string; cta: string },
+    landingUrl: string,
+    fallbackThumbnailHash?: string,
+  ): any {
+    const vertical = videos.find((v) => v.aspectRatio === '9:16');
+    const nonVertical =
+      videos.find((v) => v.aspectRatio === '4:5') ??
+      videos.find((v) => v.aspectRatio === '1:1') ??
+      videos.find((v) => v.aspectRatio === '16:9') ??
+      videos.find((v) => v.videoId !== vertical?.videoId) ??
+      videos[0];
+
+    const assetVideos: Array<{ video_id: string; thumbnail_hash?: string; adlabels: { name: string }[] }> = [];
+    const rules: any[] = [];
+
+    const toAsset = (v: MetaVideoAsset, label: string) => ({
+      video_id: v.videoId,
+      thumbnail_hash: v.thumbnailHash ?? fallbackThumbnailHash,
+      adlabels: [{ name: label }],
+    });
+
+    if (vertical && nonVertical && vertical.videoId !== nonVertical.videoId) {
+      // Default/fallback asset listed FIRST.
+      assetVideos.push(toAsset(nonVertical, 'default'));
+      assetVideos.push(toAsset(vertical, 'vertical'));
+      rules.push({
+        customization_spec: {
+          publisher_platforms: ['instagram'],
+          instagram_positions: ['story', 'reels'],
+        },
+        video_label: { name: 'vertical' },
+        priority: 1,
+      });
+    } else {
+      const only = nonVertical ?? vertical ?? videos[0];
+      assetVideos.push(toAsset(only, 'default'));
+    }
+
+    return {
+      videos: assetVideos,
+      bodies: [{ text: copy.primaryText }],
+      titles: [{ text: copy.headline }],
+      link_urls: [{ website_url: landingUrl }],
+      call_to_actions: [{ type: this.mapCta(copy.cta) }],
+      ad_formats: ['SINGLE_VIDEO'],
+      ...(rules.length > 0 ? { asset_customization_rules: rules } : {}),
+    };
   }
 
   /**
@@ -1327,6 +1669,33 @@ export class MetaAdsService {
   }
 
   /**
+   * List custom + lookalike audiences that live in ONE specific ad account.
+   * Custom Audiences are account-scoped Meta objects — an audience created
+   * under act_A is a different object from anything in act_B, even with an
+   * identical name, unless explicitly Business-Manager-shared. Used by the
+   * Create Campaign form's audience picker so the list always matches
+   * whichever account the campaign is actually being built for.
+   */
+  async listCustomAudiences(accountId: string, accessToken: string): Promise<MetaCustomAudience[]> {
+    const acctRef = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/${acctRef}/customaudiences`, {
+      fields: 'id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,delivery_status',
+      limit: 200,
+      access_token: accessToken,
+    });
+    const rows: any[] = res?.data?.data ?? [];
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      type: r.subtype === 'LOOKALIKE' ? 'lookalike' : 'custom',
+      subtype: r.subtype,
+      approxSizeLower: r.approximate_count_lower_bound ?? undefined,
+      approxSizeUpper: r.approximate_count_upper_bound ?? undefined,
+      deliveryStatus: r.delivery_status?.description ?? undefined,
+    }));
+  }
+
+  /**
    * Pause an entire campaign on Meta.
    */
   async pauseCampaign(campaignId: string, accessToken: string): Promise<void> {
@@ -1420,7 +1789,7 @@ export class MetaAdsService {
       adSetId,
       adName,
       copy,
-      imageHash,
+      [{ hash: imageHash }],
       pageId,
       landingUrl,
     );
@@ -1902,6 +2271,70 @@ export class MetaAdsService {
   }
 
   /**
+   * List ad accounts visible to the access token. Without `businessId`, hits
+   * /me/adaccounts — every ad account the token's identity (user or system
+   * user) can touch, across EVERY Business Manager it belongs to. For a
+   * token shared by an agency managing multiple unrelated brands, that pulls
+   * in every other brand's accounts too. Passing `businessId` scopes the
+   * call to one Business Manager's owned_ad_accounts + client_ad_accounts
+   * instead, matching what a human sees under that one business portfolio.
+   */
+  async listAdAccounts(accessToken: string, businessId?: string): Promise<MetaAdAccountSummary[]> {
+    const fields = 'id,name,account_status,currency,timezone_name';
+    let rows: any[];
+    if (businessId) {
+      const bizRef = businessId.trim();
+      const [owned, client] = await Promise.all([
+        this.metaApiCall('GET', `${META_API_BASE}/${bizRef}/owned_ad_accounts`, {
+          fields, access_token: accessToken, limit: 200,
+        }),
+        // client_ad_accounts = accounts other businesses shared INTO this one
+        // (agency-managed clients). Own permission scope can lack visibility
+        // here even when owned_ad_accounts works — don't let that 403 kill discovery.
+        this.metaApiCall('GET', `${META_API_BASE}/${bizRef}/client_ad_accounts`, {
+          fields, access_token: accessToken, limit: 200,
+        }).catch((err: any) => {
+          this.logger.warn(`client_ad_accounts fetch failed for business ${bizRef}: ${err.message}`);
+          return { data: { data: [] } };
+        }),
+      ]);
+      const seen = new Set<string>();
+      rows = [...(owned?.data?.data ?? []), ...(client?.data?.data ?? [])].filter((r) => {
+        if (seen.has(r.id)) return false;
+        seen.add(r.id);
+        return true;
+      });
+    } else {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/me/adaccounts`, {
+        fields, access_token: accessToken, limit: 200,
+      });
+      rows = res?.data?.data ?? [];
+    }
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      status: META_ACCOUNT_STATUS[r.account_status] ?? 'other',
+      currency: r.currency,
+      timezoneName: r.timezone_name,
+    }));
+  }
+
+  /**
+   * List every Business Manager ("business portfolio") the access token's
+   * identity belongs to. Used to help a tenant find their Business ID for
+   * company.meta.businessId, rather than digging through Meta's own UI.
+   */
+  async listBusinesses(accessToken: string): Promise<{ id: string; name: string }[]> {
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/me/businesses`, {
+      fields: 'id,name',
+      access_token: accessToken,
+      limit: 200,
+    });
+    const rows: any[] = res?.data?.data ?? [];
+    return rows.map((r) => ({ id: r.id, name: r.name }));
+  }
+
+  /**
    * Get the ad account's configured timezone (e.g. "Asia/Kolkata", "America/Los_Angeles").
    * Used to gate dayparting — schedules are interpreted in this TZ, not UTC.
    */
@@ -1943,16 +2376,35 @@ export class MetaAdsService {
           return await axios.delete(url, { params: data, timeout: 30000 });
         }
       } catch (err: any) {
+        const hasNoResponse = !(err as AxiosError)?.response;
         const metaErrorCode = (err as AxiosError)?.response?.data
           ? (err as AxiosError<any>).response!.data.error?.code
           : undefined;
-        const isRetryable = RETRYABLE_ERROR_CODES.includes(metaErrorCode);
+        // A request that never got a Meta response at all — timeout,
+        // connection reset/refused, DNS failure — is just as transient as
+        // Meta's own retryable error codes and was previously NOT retried
+        // (RETRYABLE_ERROR_CODES only matches codes Meta actually returned
+        // in a response body; a bare network failure has none, so
+        // `metaErrorCode` was always undefined and the whole request
+        // aborted on the first attempt). Hit in production 2026-07-16: a
+        // plain `timeout of 30000ms exceeded` on ad-set creation rolled
+        // back and failed an entire otherwise-correct campaign launch.
+        const isNetworkError =
+          hasNoResponse &&
+          (err.code === 'ECONNABORTED' ||
+            err.code === 'ETIMEDOUT' ||
+            err.code === 'ECONNRESET' ||
+            err.code === 'ECONNREFUSED' ||
+            err.code === 'ENOTFOUND' ||
+            /timeout/i.test(err.message ?? ''));
+        const isRetryable =
+          RETRYABLE_ERROR_CODES.includes(metaErrorCode) || isNetworkError;
         const isLastAttempt = attempt === MAX_RETRIES;
 
         if (isRetryable && !isLastAttempt) {
           const delay = RETRY_DELAYS[attempt - 1] ?? 4000;
           this.logger.warn(
-            `Meta API error (code ${metaErrorCode}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
+            `Meta API ${isNetworkError ? `network error (${err.code ?? err.message})` : `error (code ${metaErrorCode})`}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`,
           );
           await new Promise((r) => setTimeout(r, delay));
           continue;

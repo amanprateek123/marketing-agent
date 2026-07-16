@@ -240,6 +240,28 @@ export class ActionOutcomeService {
   }
 
   /**
+   * Same as listRecent, scoped to one campaign — every executed action
+   * still carries the specific ad/adset/campaign Meta id it targeted
+   * (action.targetId), so callers get real campaign-level AND ad-level
+   * history instead of a flat account-wide list. Used by MemoryEngine so
+   * the recommendation engine can see "has THIS ad set already had THIS
+   * action tried on it, and what happened" — not just "did this action
+   * type backfire somewhere in the account."
+   */
+  async listRecentForCampaign(
+    tenantId: string,
+    campaignId: string,
+    limit: number = 50,
+  ): Promise<ExecutedAction[]> {
+    return this.executedModel
+      .find({ tenantId, campaignId })
+      .sort({ executedAt: -1 })
+      .limit(Math.min(limit, 200))
+      .lean()
+      .exec() as Promise<ExecutedAction[]>;
+  }
+
+  /**
    * Prompt block for the audit agent. Empty string until ≥3 finalized
    * outcomes exist — a track record of 1 would anchor the model on noise.
    */

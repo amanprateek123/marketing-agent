@@ -14,10 +14,13 @@ import { DecisionStatus } from './intelligence-decision.schema';
  * GET /api/v1/intelligence/:tenantId/decisions
  *   Query params: status, campaignId, limit, since
  * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/approve
+ *   Approves AND immediately executes the action on the live Meta campaign
+ *   (see DecisionsService.executeApprovedDecision). The automatic 30-min/
+ *   3-hour cascade itself never does this — shadowModeOnly stays enforced
+ *   there. Only an explicit human approval through this endpoint reaches
+ *   Meta.
  * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/reject
  * GET /api/v1/intelligence/:tenantId/decisions/summary
- *
- * ALL WRITES ARE LOCAL. Meta is never touched by these endpoints.
  */
 @Controller('intelligence')
 export class DecisionsController {
@@ -65,10 +68,14 @@ export class DecisionsController {
       body?.reviewer,
       body?.notes,
     );
+    const result = await this.service.executeApprovedDecision(decisionId);
     return {
       ok: true,
-      message:
-        'Decision approved locally. Nothing has been sent to Meta — shadow mode is still on.',
+      message: result.executed
+        ? 'Decision approved and applied to the live Meta campaign.'
+        : `Decision approved locally, but the Meta call failed: ${result.error}`,
+      executed: result.executed,
+      executionError: result.error,
       decision: doc,
     };
   }

@@ -20,6 +20,8 @@ import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CompaniesService } from './companies.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
+import { MetaAdsService } from '../campaigns/meta-ads/meta-ads.service';
+import { CampaignSyncService } from '../campaigns/meta-ads/campaign-sync.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
@@ -32,6 +34,8 @@ export class CompaniesController {
     private readonly companiesService: CompaniesService,
     private readonly promptGenerator: PromptGeneratorService,
     private readonly metaLearningImporter: MetaLearningImporterService,
+    private readonly metaAdsService: MetaAdsService,
+    private readonly campaignSyncService: CampaignSyncService,
     @Inject(forwardRef(() => SchedulerService))
     private readonly schedulerService: SchedulerService,
     @InjectModel(UsageLog.name)
@@ -130,6 +134,104 @@ export class CompaniesController {
         runFrequency: c.runFrequency,
       },
       pipeline: c.pipelineConfig,
+    };
+  }
+
+  /**
+   * GET /api/v1/companies/:tenantId/meta-accounts
+   * Discover ad accounts visible to the tenant's stored Meta access token —
+   * for the settings UI to pick which accounts to sync, instead of hand-typing
+   * account IDs into company.meta.accountIds. Active only by default; pass
+   * ?all=true to include disabled/pending accounts too.
+   */
+  @Get(':tenantId/meta-accounts')
+  async listMetaAccounts(
+    @Param('tenantId') tenantId: string,
+    @Query('all') all?: string,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for this tenant');
+    }
+
+    const accounts = await this.metaAdsService.listAdAccounts(company.meta.accessToken, company.meta.businessId);
+    const filtered = all === 'true' ? accounts : accounts.filter((a) => a.status === 'active');
+    // Stored accountIds are bare ("123456"); Meta's API always returns the
+    // "act_"-prefixed form — normalize both sides or every account reads as
+    // not-synced even when it is.
+    const normalize = (id: string) => (id.startsWith('act_') ? id : `act_${id}`);
+    const activeIds = new Set(
+      (company.meta.accountIds ?? [company.meta.accountId]).map(normalize),
+    );
+
+    return {
+      accounts: filtered.map((a) => ({ ...a, currentlySynced: activeIds.has(a.id) })),
+      total: accounts.length,
+      active: accounts.filter((a) => a.status === 'active').length,
+    };
+  }
+
+  /**
+   * GET /api/v1/companies/:tenantId/meta-businesses
+   * Lists Business Managers the tenant's Meta access token belongs to — lets
+   * the settings UI offer a picker for company.meta.businessId instead of
+   * the tenant hunting for it in Meta's own Business Settings pages.
+   */
+  @Get(':tenantId/meta-businesses')
+  async listMetaBusinesses(@Param('tenantId') tenantId: string) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for this tenant');
+    }
+    const businesses = await this.metaAdsService.listBusinesses(company.meta.accessToken);
+    return { businesses };
+  }
+
+  /**
+   * POST /api/v1/companies/:tenantId/meta-accounts/sync
+   * Sets which ad accounts CampaignSyncService pulls campaigns from, then
+   * kicks off a sync in the background. Body: { accountIds?: string[] } —
+   * omit to auto-select every currently-active account from Meta.
+   * Fire-and-forget for the same reason as POST /campaigns/:tenantId/sync
+   * (multi-minute Meta calls would blow the ALB's 60s timeout).
+   */
+  @Post(':tenantId/meta-accounts/sync')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async syncMetaAccounts(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { accountIds?: string[] },
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for this tenant');
+    }
+
+    let accountIds = body.accountIds;
+    if (!accountIds?.length) {
+      const accounts = await this.metaAdsService.listAdAccounts(company.meta.accessToken, company.meta.businessId);
+      accountIds = accounts.filter((a) => a.status === 'active').map((a) => a.id);
+    }
+    if (!accountIds.length) {
+      throw new BadRequestException('No active Meta ad accounts found for this tenant');
+    }
+
+    const { company: updated } = await this.companiesService.update(tenantId, {
+      meta: {
+        ...company.meta,
+        accountId: company.meta.accountId ?? accountIds[0],
+        accountIds,
+      },
+    } as any);
+
+    this.campaignSyncService.syncActiveCampaigns(updated).catch((err: any) => {
+      this.logger.error(`Background campaign sync failed for ${tenantId}: ${err.message}`);
+    });
+
+    return {
+      success: true,
+      status: 'started',
+      accountIds,
+      message: `Syncing campaigns across ${accountIds.length} ad account(s) in the background — poll GET /:tenantId shortly for updated data.`,
     };
   }
 

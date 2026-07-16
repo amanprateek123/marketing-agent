@@ -187,6 +187,40 @@ export class CampaignsService {
     );
   }
 
+  /**
+   * Hard-delete a campaign that never touched Meta. Refuses anything with a
+   * metaCampaignId — that means a real object exists on Meta, and deleting
+   * our record would just orphan it (still running, no longer tracked).
+   * Also drops the linked creative package, but ONLY when it's the one-off
+   * package ManualCampaignService builds from pasted URLs (briefId/runId
+   * both 'manual') — never a reusable package from the creative library,
+   * which other campaigns may still reference.
+   */
+  async deleteCampaign(tenantId: string, campaignId: string): Promise<void> {
+    const campaign = await this.campaignModel
+      .findOne({ tenantId, _id: campaignId })
+      .lean()
+      .exec();
+    if (!campaign) throw new Error('Campaign not found');
+    if (campaign.metaCampaignId) {
+      throw new Error(
+        'This campaign already launched to Meta and has a live metaCampaignId — deleting it here would orphan the real ad. Pause/archive it on Meta, or use reject if you just want it hidden.',
+      );
+    }
+
+    await this.campaignModel.deleteOne({ tenantId, _id: campaignId });
+
+    if (
+      campaign.creativePackageId &&
+      (campaign as any).runId === 'manual' &&
+      (campaign as any).briefId === 'manual'
+    ) {
+      await this.creativePackageModel
+        .deleteOne({ _id: campaign.creativePackageId, tenantId })
+        .exec();
+    }
+  }
+
   async pause(
     tenantId: string,
     campaignId: string,

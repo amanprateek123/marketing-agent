@@ -313,13 +313,22 @@ export class RecommendationEngine extends BaseEngine<
       Number.isFinite(weeklyCapRemainingINR) &&
       weeklyCapRemainingINR <= dailySpendVelocity * 0.5;
 
-    // Action types that recently "worsened" the account somewhere (memory
-    // doesn't yet carry per-target history — see MemoryEngine stub audit —
-    // so this is a soft, account-wide caution, not a hard per-target gate).
+    // memory.pastActions is scoped to THIS campaign and carries targetId per
+    // entry (see MemoryEngine). Two tiers:
+    //   - same exact target + action type worsened before → hard gate, this
+    //     candidate is dropped outright (don't repeat the identical mistake
+    //     on the identical ad/adset).
+    //   - action type worsened SOMEWHERE ELSE in this campaign → soft
+    //     caution, just dampens the score (buildAction's recentlyWorsened
+    //     multiplier below).
+    const worsenedActions = (memory.pastActions ?? []).filter(
+      (p) => p.outcomeLabel === 'worsened',
+    );
+    const recentlyWorsenedSameTarget = new Set(
+      worsenedActions.map((p) => `${p.targetId}::${p.actionType}`),
+    );
     const recentlyWorsenedTypes = new Set(
-      (memory.pastActions ?? [])
-        .filter((p) => p.outcomeLabel === 'worsened')
-        .map((p) => p.actionType),
+      worsenedActions.map((p) => p.actionType),
     );
 
     // Account-wide creative history — which hook styles have actually
@@ -388,6 +397,8 @@ export class RecommendationEngine extends BaseEngine<
           (type === 'scale_adset' || type === 'add_adset')
         )
           gatedBy.push('business:weekly_cap_exhausted');
+        if (recentlyWorsenedSameTarget.has(`${targetId}::${type}`))
+          gatedBy.push('memory:same_target_recently_worsened');
 
         // For adset-level targets, use the adset's own metrics in the
         // reasoning + profit math — not the campaign's aggregate, which
@@ -804,7 +815,7 @@ export class RecommendationEngine extends BaseEngine<
     let memoryLine = '';
     if (recentlyWorsened) {
       memoryMult = 0.85;
-      memoryLine = `Caution: a ${humanize(type)}-type action worsened outcomes elsewhere on this account recently — weighted down accordingly.`;
+      memoryLine = `Caution: a ${humanize(type)}-type action worsened outcomes on another ad/adset in this campaign recently — weighted down accordingly.`;
     }
 
     // Score = |expected profit delta| discounted by risk, scaled by how

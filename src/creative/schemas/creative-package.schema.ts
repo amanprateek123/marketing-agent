@@ -15,6 +15,8 @@ export interface ImageCreative {
   imagePrompt: string;
   imageUrl: string;
   editInstructions?: string[];  // free-text tweaks applied via edit-image, most recent last
+  aspectRatio?: string;   // '9:16' | '1:1' | '4:5' — what was requested at generation time
+  resolution?: string;    // '1K' | '2K' | '4K'
 }
 
 export interface VideoCreative {
@@ -22,6 +24,8 @@ export interface VideoCreative {
   videoPrompt: string;
   videoUrl: string;
   videoThumbnailUrl: string;
+  aspectRatio?: string;   // '9:16' | '16:9' | '1:1' | '4:5' — what was requested at generation time
+  resolution?: string;    // '720p' | '1080p' | '4k'
 }
 
 /**
@@ -75,13 +79,32 @@ export class CreativePackage {
   @Prop({ default: '' })
   copySelectionReason: string;
 
-  // Images — one per copy variant (variantIndex matches copyVariants index)
+  // Images — usually one per copy variant (variantIndex matches copyVariants
+  // index), but a variant MAY carry more than one entry when tagged with
+  // different aspectRatio values — e.g. a human creative team supplying
+  // both a 9:16 and a 4:5 size for the same variant. launch() (via
+  // MetaAdsService.buildImageAssetFeedSpec) uses Meta's placement asset
+  // customization in that case instead of auto-cropping a single image.
   @Prop({ type: Array, default: [] })
   images: ImageCreative[];
 
-  // Video — one, generated for the selected copy variant
+  // Video — one, generated for the selected copy variant. Still the only
+  // field the Heygen/AI generation path ever writes.
   @Prop({ type: Object, default: null })
   video: VideoCreative | null;
+
+  /**
+   * Additive to `video` — multiple pre-made sizes of the SAME video (e.g. a
+   * human creative team supplying both a 9:16 and a 1:1 cut). When non-empty,
+   * launch() uses these instead of `video` and, if 2+ distinct sizes upload
+   * successfully, ships them via Meta's placement asset customization
+   * (MetaAdsService.buildVideoAssetFeedSpec) instead of one auto-cropped
+   * video. Global to the package, not per-variant — matches how `video`
+   * already worked (one video, reused across whichever variants ship as
+   * video ads).
+   */
+  @Prop({ type: Array, default: [] })
+  videos: VideoCreative[];
 
   /**
    * Carousel cards — only populated when brief.format === 'carousel'. Empty

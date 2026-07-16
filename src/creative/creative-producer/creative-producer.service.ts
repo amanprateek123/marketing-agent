@@ -10,7 +10,7 @@ import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative 
 import { SlackService } from '../../delivery/slack.service';
 import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
-import { getFormatSpec } from '../../common/creative/format-specs';
+import { getFormatSpec, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../../common/creative/format-specs';
 
 export interface BriefData {
   topic: string;
@@ -53,6 +53,14 @@ export interface BriefData {
   // creative-producer resolves from segment.languages → product.languages → 'hinglish'.
   // Drives copy text, image overlay text, and (when language video lands) VO script.
   targetLanguage?: CanonicalLanguage;
+  /** Overrides the format's default image aspect ratio when the operator picks one explicitly. */
+  aspectRatio?: AspectRatio;
+  /** Image resolution/quality tier — defaults to '1K' inside ImageGeneratorService when omitted. */
+  imageResolution?: ImageResolution;
+  /** Video aspect ratio — defaults to '9:16' inside VideoGeneratorService when omitted. */
+  videoAspectRatio?: VideoAspectRatio;
+  /** Video resolution — defaults to '1080p' inside VideoGeneratorService when omitted. */
+  videoResolution?: VideoResolution;
 }
 
 @Injectable()
@@ -189,6 +197,13 @@ export class CreativeProducerService {
     // Format-spec registry — drives video skip + image aspect ratio for both
     // the Creative Team path and the fallback path below.
     const spec = getFormatSpec(brief.format);
+    // Operator-chosen overrides win over the format's default aspect ratio;
+    // resolution/video params have no format-level default, just the
+    // generator services' own ('1K' images, 9:16/1080p video).
+    const resolvedAspectRatio = brief.aspectRatio ?? spec.aspectRatio;
+    const resolvedImageResolution = brief.imageResolution ?? '1K';
+    const resolvedVideoAspectRatio = brief.videoAspectRatio ?? '9:16';
+    const resolvedVideoResolution = brief.videoResolution ?? '1080p';
 
     try {
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
@@ -218,7 +233,7 @@ export class CreativeProducerService {
           this.logger.log(`Generating ${teamResult.carouselCards!.length} carousel card images: tenantId=${tenantId} briefId=${briefId}`);
           const cardResults = await Promise.allSettled(
             teamResult.carouselCards!.map((card) =>
-              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId, spec.aspectRatio),
+              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId, resolvedAspectRatio, resolvedImageResolution),
             ),
           );
           carouselCards = teamResult.carouselCards!.map((card, i) => {
@@ -254,7 +269,7 @@ export class CreativeProducerService {
               const teamImagePrompt = teamResult.imagePrompts?.[i];
               if (teamImagePrompt) {
                 // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
-                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId, spec.aspectRatio);
+                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId, resolvedAspectRatio, resolvedImageResolution);
               }
               // Fallback: generate image prompt from scratch for this variant
               return this.imageGenerator.generateForVariant(
@@ -263,7 +278,8 @@ export class CreativeProducerService {
                 i,
                 company,
                 runId,
-                spec.aspectRatio,
+                resolvedAspectRatio,
+                resolvedImageResolution,
               );
             }),
           );
@@ -271,10 +287,10 @@ export class CreativeProducerService {
           images = teamResult.variants.map((_: any, i: number) => {
             const result = imageResults[i];
             if (result.status === 'fulfilled') {
-              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
             }
             this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
-            return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '' };
+            return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '', aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
           });
         }
 
@@ -296,20 +312,24 @@ export class CreativeProducerService {
             async (videoId: string) => {
               await this.creativePackageModel.updateOne(
                 { _id: pkg._id },
-                { heygenVideoId: videoId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '' } },
+                { heygenVideoId: videoId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution } },
               );
               this.logger.log(`Heygen videoId persisted: ${videoId} for briefId=${briefId}`);
             },
+            resolvedVideoAspectRatio,
+            resolvedVideoResolution,
           );
           video = {
             variantIndex: selectedIndex,
             videoPrompt: videoPromptStr,
             videoUrl: videoResult.videoUrl,
             videoThumbnailUrl: videoResult.videoThumbnailUrl,
+            aspectRatio: resolvedVideoAspectRatio,
+            resolution: resolvedVideoResolution,
           };
         } catch (videoErr: any) {
           this.logger.error(`Video generation failed (prompt saved): ${videoErr.message}`);
-          video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '' };
+          video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution };
         }
 
         this.logger.log(
@@ -336,23 +356,24 @@ export class CreativeProducerService {
                 i,
                 company,
                 runId,
-                spec.aspectRatio,
+                resolvedAspectRatio,
+                resolvedImageResolution,
               ),
             ),
           );
           images = copyPackage.variants.map((_: any, i: number) => {
             const result = imageResults[i];
             if (result.status === 'fulfilled') {
-              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
             }
             this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
-            return { variantIndex: i, imagePrompt: '', imageUrl: '' };
+            return { variantIndex: i, imagePrompt: '', imageUrl: '', aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
           });
         } else {
           // No variants — generate one image from brief
           try {
-            const imgResult = await this.imageGenerator.generate(brief, company, runId, spec.aspectRatio);
-            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl }];
+            const imgResult = await this.imageGenerator.generate(brief, company, runId, resolvedAspectRatio, resolvedImageResolution);
+            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution }];
           } catch (imgErr: any) {
             this.logger.error(`Image generation failed: ${imgErr.message}`);
           }

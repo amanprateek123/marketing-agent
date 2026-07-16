@@ -12,7 +12,8 @@ import { LiveContextBuilder } from '../companies/prompt-generator/live-context.b
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
 import { CreativePackage, CreativePackageDocument } from './schemas/creative-package.schema';
 import { CANONICAL_LANGUAGES } from '../common/creative/language-utils';
-import { listFormatSpecs } from '../common/creative/format-specs';
+import { listFormatSpecs, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../common/creative/format-specs';
+import { S3Service } from '../common/storage/s3.service';
 
 @Controller('creative')
 export class CreativeController {
@@ -30,7 +31,25 @@ export class CreativeController {
     private readonly intelligenceBriefModel: Model<IntelligenceBriefDocument>,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
+    private readonly s3Service: S3Service,
   ) {}
+
+  /**
+   * Resolves which sized image entry a regenerate/edit call targets — exact
+   * (variantIndex, aspectRatio) match when aspectRatio is given and such an
+   * entry exists, else the first entry for that variantIndex (the untagged
+   * "primary" size — the only entry at all for packages with one image per
+   * variant, which is still the common case). Without this, a variant
+   * carrying multiple sizes would have regenerate/edit blindly grab
+   * whichever entry happens to be first, silently mutating the wrong size.
+   */
+  private resolveImageEntry(images: any[], variantIndex: number, aspectRatio?: string): any {
+    if (aspectRatio) {
+      const exact = images.find((img) => img.variantIndex === variantIndex && img.aspectRatio === aspectRatio);
+      if (exact) return exact;
+    }
+    return images.find((img) => img.variantIndex === variantIndex);
+  }
 
   /**
    * GET /api/v1/creative/languages
@@ -55,6 +74,7 @@ export class CreativeController {
       label: spec.label,
       hint: spec.hint,
       group: spec.group,
+      skipVideo: spec.skipVideo,
     }));
   }
 
@@ -115,6 +135,10 @@ export class CreativeController {
       conversionBridge?: string;
       audienceStage?: 'cold' | 'warm' | 'hot';
       carouselPattern?: 'auto' | 'sequential' | 'tier_reveal' | 'story_arc' | 'differentiator_stack' | 'qa' | 'catalog_grid';
+      aspectRatio?: AspectRatio;
+      imageResolution?: ImageResolution;
+      videoAspectRatio?: VideoAspectRatio;
+      videoResolution?: VideoResolution;
     },
   ) {
     const company = await this.companiesService.findByTenantId(tenantId);
@@ -143,9 +167,13 @@ export class CreativeController {
       targetSegment: body.targetSegment ?? product.audienceSegments?.[0]?.name,
       targetLanguage: body.targetLanguage as any,
       carouselPattern: body.carouselPattern,
+      aspectRatio: body.aspectRatio,
+      imageResolution: body.imageResolution,
+      videoAspectRatio: body.videoAspectRatio,
+      videoResolution: body.videoResolution,
     };
 
-    this.logger.log(`Product creative requested: tenant=${tenantId} product=${product.name} briefId=${briefId}`);
+    this.logger.log(`Product creative requested: tenant=${tenantId} product=${product.name} briefId=${briefId} aspectRatio=${body.aspectRatio ?? 'format-default'} imageResolution=${body.imageResolution ?? '1K'} videoAspectRatio=${body.videoAspectRatio ?? '9:16'} videoResolution=${body.videoResolution ?? '1080p'}`);
 
     // Fire and forget — returns immediately, production runs in background.
     // Poll GET :tenantId/packages?briefId=... for the result.
@@ -178,21 +206,76 @@ export class CreativeController {
   }
 
   /**
+   * POST /api/v1/creative/:tenantId/rehost-media
+   * Re-host an externally-hosted video/image (e.g. a Higgsfield-generated
+   * video URL) into our own S3 bucket, so it doesn't depend on the
+   * third-party host staying up or the URL staying unsigned/permanent.
+   * Returns a permanent S3 URL — paste it into a package's imageUrl/videoUrl
+   * via the PATCH endpoint below (or use it directly on a landing page etc).
+   * Body: { sourceUrl: string, mediaType?: 'video' | 'image' }
+   */
+  @Post(':tenantId/rehost-media')
+  async rehostMedia(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { sourceUrl?: string; mediaType?: 'video' | 'image' },
+  ) {
+    const sourceUrl = body.sourceUrl?.trim();
+    if (!sourceUrl) {
+      throw new BadRequestException('sourceUrl is required');
+    }
+
+    const mediaType = body.mediaType === 'image' ? 'image' : 'video';
+    const ext = mediaType === 'image' ? 'png' : 'mp4';
+    const contentType = mediaType === 'image' ? 'image/png' : 'video/mp4';
+    const key = `${tenantId}/uploads/${Date.now()}.${ext}`;
+
+    this.logger.log(`Re-hosting external ${mediaType} to S3: tenantId=${tenantId} sourceUrl=${sourceUrl}`);
+
+    const url = await this.s3Service.uploadFromUrl(sourceUrl, key, contentType);
+    return { url };
+  }
+
+  /**
    * PATCH /api/v1/creative/:tenantId/packages/:creativePackageId
    * Manually update imageUrl and/or videoUrl on a creative package.
    */
   /**
    * PATCH /api/v1/creative/:tenantId/packages/:creativePackageId
-   * Manually update a specific variant's imageUrl, the video's videoUrl, or
+   * Manually update a specific variant's imageUrl, the video's videoUrl,
    * which variant is "selected" (the one launch() actually uses for video
-   * ad sets and the one shown as the primary thumbnail).
-   * Body: { variantIndex?: number, imageUrl?: string, videoUrl?: string, selectedCopyIndex?: number }
+   * ad sets and the one shown as the primary thumbnail), or the copy text
+   * itself (headline/primaryText/cta/hookStyle) — added so a pending
+   * campaign's ad copy can be corrected in place instead of deleting and
+   * recreating the whole campaign for a wording fix.
+   * Body: { variantIndex?: number, imageUrl?: string, aspectRatio?: string,
+   *         videoUrl?: string, selectedCopyIndex?: number,
+   *         copy?: { headline?, primaryText?, cta?, hookStyle? } }
+   * aspectRatio ('9:16' | '1:1' | '4:5' | '16:9') tags which SIZE imageUrl
+   * (or videoUrl) is — a variant/video can carry more than one (a human
+   * creative team's pre-made sizes); omit it to edit/replace the untagged
+   * "primary" size, unchanged from before. A tagged videoUrl goes into the
+   * additive `videos[]` array (not the legacy singular `video` field) so a
+   * second size doesn't overwrite the first — see
+   * MetaAdsService.buildImageAssetFeedSpec / buildVideoAssetFeedSpec for how
+   * launch() uses them.
+   * NOTE: this package may be shared/reused via the creative library (picked
+   * by creativePackageId on a different campaign) — editing copy here
+   * changes it everywhere that package is referenced, same as editing
+   * imageUrl/videoUrl already does. Not scoped to "manual, one-off" packages
+   * only, for consistency with the rest of this endpoint.
    */
   @Patch(':tenantId/packages/:creativePackageId')
   async updatePackage(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
-    @Body() body: { variantIndex?: number; imageUrl?: string; videoUrl?: string; selectedCopyIndex?: number },
+    @Body() body: {
+      variantIndex?: number;
+      imageUrl?: string;
+      aspectRatio?: string;
+      videoUrl?: string;
+      selectedCopyIndex?: number;
+      copy?: { headline?: string; primaryText?: string; cta?: string; hookStyle?: string };
+    },
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
@@ -201,20 +284,41 @@ export class CreativeController {
 
     if (body.imageUrl !== undefined) {
       const variantIndex = body.variantIndex ?? 0;
-      // Update or push the image entry for this variant
+      // Update or push the image entry for this (variantIndex, aspectRatio)
+      // pair — NOT variantIndex alone, or supplying a second size for the
+      // same variant would silently overwrite the first instead of adding to it.
       const images: any[] = (pkg as any).images ?? [];
-      const existing = images.find((img: any) => img.variantIndex === variantIndex);
+      const existing = images.find(
+        (img: any) => img.variantIndex === variantIndex && (img.aspectRatio ?? undefined) === body.aspectRatio,
+      );
       if (existing) {
         existing.imageUrl = body.imageUrl;
       } else {
-        images.push({ variantIndex, imagePrompt: '', imageUrl: body.imageUrl });
+        images.push({ variantIndex, imagePrompt: '', imageUrl: body.imageUrl, aspectRatio: body.aspectRatio });
       }
       update.images = images;
     }
 
     if (body.videoUrl !== undefined) {
-      const currentVideo = (pkg as any).video ?? { variantIndex: 0, videoPrompt: '', videoThumbnailUrl: '' };
-      update.video = { ...currentVideo, videoUrl: body.videoUrl };
+      if (body.aspectRatio) {
+        // A tagged size — goes into videos[] (additive, multi-size), not the
+        // legacy singular `video` field, and matched by (variantIndex,
+        // aspectRatio) same as images so a second size doesn't clobber the first.
+        const variantIndex = body.variantIndex ?? (pkg as any).video?.variantIndex ?? 0;
+        const videos: any[] = (pkg as any).videos ?? [];
+        const existing = videos.find(
+          (v: any) => v.variantIndex === variantIndex && v.aspectRatio === body.aspectRatio,
+        );
+        if (existing) {
+          existing.videoUrl = body.videoUrl;
+        } else {
+          videos.push({ variantIndex, videoPrompt: '', videoUrl: body.videoUrl, videoThumbnailUrl: '', aspectRatio: body.aspectRatio });
+        }
+        update.videos = videos;
+      } else {
+        const currentVideo = (pkg as any).video ?? { variantIndex: 0, videoPrompt: '', videoThumbnailUrl: '' };
+        update.video = { ...currentVideo, videoUrl: body.videoUrl };
+      }
     }
 
     if (body.selectedCopyIndex !== undefined) {
@@ -223,6 +327,28 @@ export class CreativeController {
         throw new BadRequestException(`selectedCopyIndex ${body.selectedCopyIndex} is out of range (${variantCount} variants)`);
       }
       update.selectedCopyIndex = body.selectedCopyIndex;
+    }
+
+    if (body.copy) {
+      const variantIndex = body.variantIndex;
+      if (variantIndex === undefined) {
+        throw new BadRequestException('variantIndex is required when editing copy');
+      }
+      const copyVariants: any[] = [...((pkg as any).copyVariants ?? [])];
+      if (variantIndex < 0 || variantIndex >= copyVariants.length) {
+        throw new BadRequestException(`variantIndex ${variantIndex} is out of range (${copyVariants.length} variants)`);
+      }
+      const company = await this.companiesService.findByTenantId(tenantId);
+      const merged = { ...copyVariants[variantIndex], ...body.copy };
+      if (company?.forbiddenTopics?.length) {
+        const text = `${merged.headline ?? ''} ${merged.primaryText ?? ''}`.toLowerCase();
+        const forbidden = company.forbiddenTopics.find((t) => text.includes(t.toLowerCase()));
+        if (forbidden) {
+          throw new BadRequestException(`Copy matches forbidden topic "${forbidden}" — not saved`);
+        }
+      }
+      copyVariants[variantIndex] = merged;
+      update.copyVariants = copyVariants;
     }
 
     await this.creativePackageModel.updateOne({ _id: creativePackageId, tenantId }, { $set: update });
@@ -238,9 +364,14 @@ export class CreativeController {
   async regenerateVideoPrompt(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { aspectRatio?: AspectRatio; resolution?: VideoResolution } = {},
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const aspectRatio: AspectRatio = body.aspectRatio ?? ((pkg as any).video?.aspectRatio as AspectRatio) ?? '9:16';
+    const resolution: VideoResolution = body.resolution ?? (pkg as any).video?.resolution ?? '1080p';
+    const orientationWord = aspectRatio === '9:16' ? 'vertical' : aspectRatio === '16:9' ? 'landscape' : aspectRatio === '1:1' ? 'square' : 'portrait';
 
     const company = await this.companiesService.findByTenantId(tenantId);
 
@@ -285,7 +416,7 @@ export class CreativeController {
         systemPrompt: '',
         liveContext: this.liveContextBuilder.build(company, product?.name),
         userMessage: `
-Write a detailed Heygen Video Agent prompt that will be submitted directly to Heygen's API to generate a 15-second 9:16 vertical Meta conversion ad video.
+Write a detailed Heygen Video Agent prompt that will be submitted directly to Heygen's API to generate a 15-second ${aspectRatio} ${orientationWord} Meta conversion ad video.
 
 The video format: cinematic b-roll visuals with text overlays + off-screen Hindi voiceover narration + Indian instrumental background music. No avatar/talking head visible on screen — voice is heard but no person is shown speaking.
 
@@ -304,7 +435,7 @@ ${ctaInsights}
 ${hidePrice ? '\nPRICE SUPPRESSION ACTIVE: Do NOT include any price (no ₹, no rupees, no booking-fee amounts) in the script, text overlays, or voiceover. Lead with trust signals, lineage, and discovery framing instead.\n' : ''}
 Write the Heygen prompt (180-220 words) covering ALL of these elements:
 
-1. VIDEO CONCEPT: 15-second 9:16 vertical Meta ad for ${company.name}, cinematic b-roll with text overlays and off-screen Hindi voiceover narration. No visible person speaking.
+1. VIDEO CONCEPT: 15-second ${aspectRatio} ${orientationWord} Meta ad for ${company.name}, cinematic b-roll with text overlays and off-screen Hindi voiceover narration. No visible person speaking.
 
 2. TEXT OVERLAYS (exact Hindi/Hinglish words for each moment):
    - 0-3s HOOK: [exact words from the winning hook — make the viewer say "yeh toh mere baare mein hai"]
@@ -330,7 +461,7 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
 
       await this.creativePackageModel.updateOne(
         { _id: creativePackageId, tenantId },
-        { $set: { video: { ...currentVideo, videoPrompt: newVideoPrompt } } },
+        { $set: { video: { ...currentVideo, videoPrompt: newVideoPrompt, aspectRatio, resolution } } },
       );
 
       // Generate video
@@ -346,11 +477,13 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
             );
             this.logger.log(`Heygen videoId persisted on prompt regenerate: ${videoId} packageId=${creativePackageId}`);
           },
+          aspectRatio,
+          resolution,
         );
         const currentVideo = (pkg as any).video ?? { variantIndex: (pkg as any).selectedCopyIndex ?? 0, videoThumbnailUrl: '' };
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
-          { $set: { video: { ...currentVideo, videoPrompt: newVideoPrompt, videoUrl: videoResult.videoUrl, videoThumbnailUrl: videoResult.videoThumbnailUrl } } },
+          { $set: { video: { ...currentVideo, videoPrompt: newVideoPrompt, videoUrl: videoResult.videoUrl, videoThumbnailUrl: videoResult.videoThumbnailUrl, aspectRatio, resolution } } },
         );
         this.logger.log(`Video prompt regenerated + video generated: tenantId=${tenantId} packageId=${creativePackageId}`);
       } catch (videoErr: any) {
@@ -370,10 +503,17 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
   async regenerateImagePrompt(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
-    @Body() body: { variantIndex?: number } = {},
+    @Body() body: { variantIndex?: number; aspectRatio?: AspectRatio; resolution?: ImageResolution } = {},
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const existingImages: any[] = (pkg as any).images ?? [];
+    const existingForTarget = body.variantIndex !== undefined
+      ? this.resolveImageEntry(existingImages, body.variantIndex, body.aspectRatio)
+      : undefined;
+    const aspectRatio: AspectRatio = body.aspectRatio ?? existingForTarget?.aspectRatio ?? '9:16';
+    const resolution: ImageResolution = body.resolution ?? existingForTarget?.resolution ?? '1K';
 
     const company = await this.companiesService.findByTenantId(tenantId);
 
@@ -437,11 +577,11 @@ ${bottomOverlayLine}
 - INDIAN CONTEXT — real Indian faces, settings, skin tones
 - HIGH CONTRAST — thumb-stopping colors, no muted/pastel
 
-SAFE ZONE — CRITICAL, non-negotiable: This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements. Keep BOTH text overlays (and the CTA) inside the CENTER 60% of the vertical frame (roughly 20%-80% of frame height). The outer top/bottom 20% may only hold background/atmosphere — no text, no CTA, nothing critical.
+${aspectRatio === '9:16' ? `SAFE ZONE — CRITICAL, non-negotiable: This vertical image also runs on Feed/Marketplace/Explore placements, which crop it down to 4:5 and 1:1 by keeping only the CENTER of the frame — the outer ~20% at the top and outer ~20% at the bottom get CUT OFF on those placements. Keep BOTH text overlays (and the CTA) inside the CENTER 60% of the vertical frame (roughly 20%-80% of frame height). The outer top/bottom 20% may only hold background/atmosphere — no text, no CTA, nothing critical.` : ''}
 
 ${visualInsights}
 
-Format: Vertical 9:16, photorealistic, 4-5 sentences.
+Format: ${aspectRatio === '9:16' ? 'Vertical 9:16' : aspectRatio === '16:9' ? 'Landscape 16:9' : aspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}, photorealistic, 4-5 sentences.
 Describe: focal point, emotional tone, text overlay placement (exact words + position within the safe zone), product placement, colors, lighting.
 
 AVOID: generic lifestyle photos, text-free images, muted colors, stock photo look, cluttered composition, any text/CTA placed at the true top or bottom edge of the frame.
@@ -469,12 +609,18 @@ Return ONLY the image prompt, nothing else.
               maxTurns: 2,
             });
             const newImagePrompt = result.content.trim();
-            const imageResult = await this.imageGenerator.generateFromPrompt(newImagePrompt, company, (pkg as any).runId);
-            const existingIdx = images.findIndex((img: any) => img.variantIndex === i);
+            const imageResult = await this.imageGenerator.generateFromPrompt(newImagePrompt, company, (pkg as any).runId, aspectRatio, resolution);
+            const existingEntry = this.resolveImageEntry(images, i, body.aspectRatio);
+            const existingIdx = existingEntry ? images.indexOf(existingEntry) : -1;
+            // Keep the resolved entry's own size tag (its exact tag when
+            // matched by aspectRatio, or its pre-existing tag on a fallback
+            // match) rather than body.aspectRatio, or a fallback match on an
+            // untagged/differently-tagged entry would silently relabel it.
+            const resolvedAspectRatio = existingEntry?.aspectRatio ?? body.aspectRatio;
             if (existingIdx >= 0) {
-              images[existingIdx] = { variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl };
+              images[existingIdx] = { variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution };
             } else {
-              images.push({ variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl });
+              images.push({ variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution });
             }
             this.logger.log(`Image prompt regenerated for variant ${i}: tenantId=${tenantId}`);
           } catch (err: any) {
@@ -507,28 +653,31 @@ Return ONLY the image prompt, nothing else.
   async regenerateImage(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
-    @Body() body: { variantIndex?: number } = {},
+    @Body() body: { variantIndex?: number; aspectRatio?: AspectRatio; resolution?: ImageResolution } = {},
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
 
     const variantIndex = body.variantIndex ?? (pkg as any).selectedCopyIndex ?? 0;
     const images: any[] = (pkg as any).images ?? [];
-    const imageEntry = images.find((img: any) => img.variantIndex === variantIndex);
+    const imageEntry = this.resolveImageEntry(images, variantIndex, body.aspectRatio);
 
     if (!imageEntry?.imagePrompt) {
       return { error: `No imagePrompt saved for variant ${variantIndex} — run full creative production first` };
     }
 
+    const aspectRatio: AspectRatio = body.aspectRatio ?? imageEntry.aspectRatio ?? '9:16';
+    const resolution: ImageResolution = body.resolution ?? imageEntry.resolution ?? '1K';
+
     const company = await this.companiesService.findByTenantId(tenantId);
-    this.logger.log(`Regenerating image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId}`);
+    this.logger.log(`Regenerating image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     // Fire and forget
-    this.imageGenerator.generateFromPrompt(imageEntry.imagePrompt, company, (pkg as any).runId)
+    this.imageGenerator.generateFromPrompt(imageEntry.imagePrompt, company, (pkg as any).runId, aspectRatio, resolution)
       .then(async (result) => {
         const updatedImages = [...images];
-        const idx = updatedImages.findIndex((img: any) => img.variantIndex === variantIndex);
-        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl };
+        const idx = updatedImages.indexOf(imageEntry);
+        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, aspectRatio, resolution };
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
           { $set: { images: updatedImages } },
@@ -552,7 +701,7 @@ Return ONLY the image prompt, nothing else.
   async editImage(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
-    @Body() body: { variantIndex?: number; instruction?: string } = {},
+    @Body() body: { variantIndex?: number; instruction?: string; aspectRatio?: AspectRatio; resolution?: ImageResolution } = {},
   ) {
     const instruction = body.instruction?.trim();
     if (!instruction) {
@@ -564,22 +713,25 @@ Return ONLY the image prompt, nothing else.
 
     const variantIndex = body.variantIndex ?? (pkg as any).selectedCopyIndex ?? 0;
     const images: any[] = (pkg as any).images ?? [];
-    const imageEntry = images.find((img: any) => img.variantIndex === variantIndex);
+    const imageEntry = this.resolveImageEntry(images, variantIndex, body.aspectRatio);
 
     if (!imageEntry?.imageUrl) {
       return { error: `No image exists yet for variant ${variantIndex} — generate one first` };
     }
 
-    this.logger.log(`Editing image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId} instruction="${instruction.slice(0, 80)}"`);
+    const aspectRatio: AspectRatio = body.aspectRatio ?? imageEntry.aspectRatio ?? '9:16';
+    const resolution: ImageResolution = body.resolution ?? imageEntry.resolution ?? '1K';
+
+    this.logger.log(`Editing image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId} instruction="${instruction.slice(0, 80)}" aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     // Fire and forget
-    this.imageGenerator.editImage(imageEntry.imageUrl, instruction, tenantId, (pkg as any).runId)
+    this.imageGenerator.editImage(imageEntry.imageUrl, instruction, tenantId, (pkg as any).runId, aspectRatio, resolution)
       .then(async (result) => {
         const updatedImages = [...images];
-        const idx = updatedImages.findIndex((img: any) => img.variantIndex === variantIndex);
+        const idx = updatedImages.indexOf(imageEntry);
         if (idx >= 0) {
           const editInstructions = [...(updatedImages[idx].editInstructions ?? []), instruction];
-          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, editInstructions };
+          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, editInstructions, aspectRatio, resolution };
         }
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
@@ -600,6 +752,7 @@ Return ONLY the image prompt, nothing else.
   async regenerateVideo(
     @Param('tenantId') tenantId: string,
     @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { aspectRatio?: AspectRatio; resolution?: VideoResolution } = {},
   ) {
     const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
@@ -607,7 +760,10 @@ Return ONLY the image prompt, nothing else.
     const video = (pkg as any).video;
     if (!video?.videoPrompt) return { error: 'No videoPrompt saved — run full creative production first' };
 
-    this.logger.log(`Regenerating video: tenantId=${tenantId} packageId=${creativePackageId}`);
+    const aspectRatio: AspectRatio = body.aspectRatio ?? video.aspectRatio ?? '9:16';
+    const resolution: VideoResolution = body.resolution ?? video.resolution ?? '1080p';
+
+    this.logger.log(`Regenerating video: tenantId=${tenantId} packageId=${creativePackageId} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     // Fire and forget
     (async () => {
@@ -622,10 +778,12 @@ Return ONLY the image prompt, nothing else.
           );
           this.logger.log(`Heygen videoId persisted on regenerate: ${videoId} packageId=${creativePackageId}`);
         },
+        aspectRatio,
+        resolution,
       );
       await this.creativePackageModel.updateOne(
         { _id: creativePackageId, tenantId },
-        { $set: { video: { ...video, videoUrl: result.videoUrl, videoThumbnailUrl: result.videoThumbnailUrl } } },
+        { $set: { video: { ...video, videoUrl: result.videoUrl, videoThumbnailUrl: result.videoThumbnailUrl, aspectRatio, resolution } } },
       );
       this.logger.log(`Video regenerated: tenantId=${tenantId} packageId=${creativePackageId}`);
     })().catch((err) => this.logger.error(`Video regeneration failed: ${err.message}`));

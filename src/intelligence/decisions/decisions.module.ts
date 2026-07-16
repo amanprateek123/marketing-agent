@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { DecisionsController } from './decisions.controller';
 import { DecisionsService } from './decisions.service';
+import { CampaignsModule } from '../../campaigns/campaigns.module';
 import {
   IntelligenceDecision,
   IntelligenceDecisionSchema,
@@ -13,6 +14,9 @@ import {
     MongooseModule.forFeature([
       { name: IntelligenceDecision.name, schema: IntelligenceDecisionSchema },
     ]),
+    // For executeApprovedDecision — the real Meta-executing bridge lives on
+    // CampaignAuditorService (already-proven pendingActions execution path).
+    CampaignsModule,
   ],
   controllers: [DecisionsController],
   providers: [DecisionsService],

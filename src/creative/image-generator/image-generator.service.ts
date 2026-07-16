@@ -13,7 +13,14 @@ import {
   getScriptForLanguage,
   CanonicalLanguage,
 } from '../../common/creative/language-utils';
-import { AspectRatio } from '../../common/creative/format-specs';
+import { AspectRatio, ImageResolution } from '../../common/creative/format-specs';
+
+/** Gemini's real imageConfig.imageSize values, keyed by our ImageResolution tier. */
+const GEMINI_IMAGE_SIZE: Record<ImageResolution, string> = { '1K': '1K', '2K': '2K', '4K': '4K' };
+
+/** OpenAI gpt-image's real quality enum — the only meaningful "resolution" lever
+ * that keeps the existing (verified-valid) size grid unchanged. */
+const GPT_IMAGE_QUALITY: Record<ImageResolution, 'low' | 'medium' | 'high'> = { '1K': 'low', '2K': 'medium', '4K': 'high' };
 
 export interface ImageResult {
   imagePrompt: string;
@@ -49,6 +56,7 @@ export class ImageGeneratorService {
     company: CompanyDocument,
     runId: string,
     aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
   ): Promise<ImageResult> {
     const hookText = copyVariant.primaryText?.split('\n')[0] ?? '';
     const headline = copyVariant.headline ?? '';
@@ -78,7 +86,7 @@ export class ImageGeneratorService {
 
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio, resolution);
     } catch (err: any) {
       this.logger.error(`Image generation failed for variant ${variantIndex} (prompt saved): ${err.message}`);
     }
@@ -100,6 +108,7 @@ export class ImageGeneratorService {
     company: CompanyDocument,
     runId: string,
     aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
   ): Promise<ImageResult> {
     const activeProduct = (company.products ?? []).find(p => p.active);
     const targetLanguage: CanonicalLanguage = brief.targetLanguage
@@ -129,7 +138,7 @@ export class ImageGeneratorService {
     // Step 2 — Generate image via Nano Banana + upload to S3
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio, resolution);
     } catch (err: any) {
       this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
@@ -146,12 +155,13 @@ export class ImageGeneratorService {
     company: CompanyDocument,
     runId: string,
     aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
   ): Promise<ImageResult> {
     this.logger.log(`Generating image from reviewed prompt: tenantId=${company.tenantId}`);
 
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio);
+      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio, resolution);
     } catch (err: any) {
       this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
@@ -290,7 +300,7 @@ ${safeZoneRule}
 
 ${avoidList}
 
-Format: ${aspectRatio === '9:16' ? 'Vertical 9:16' : aspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}. Length: 8-10 sentences — enough to specify centerpiece, all 3 composition layers, text overlays, subject demographics, and 2-3 specific AVOIDs that apply to THIS hookStyle.
+Format: ${aspectRatio === '9:16' ? 'Vertical 9:16' : aspectRatio === '16:9' ? 'Landscape 16:9' : aspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}. Length: 8-10 sentences — enough to specify centerpiece, all 3 composition layers, text overlays, subject demographics, and 2-3 specific AVOIDs that apply to THIS hookStyle.
 
 Return ONLY the image prompt, nothing else.
     `.trim();
@@ -308,13 +318,14 @@ Return ONLY the image prompt, nothing else.
     tenantId: string,
     runId: string,
     aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
   ): Promise<ImageResult> {
     const sourceBuffer = await this.downloadImageBuffer(currentImageUrl);
     const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
 
     const editedBuffer = provider === 'gpt_image'
-      ? await this.callGptImageEdit(sourceBuffer, instruction, tenantId, aspectRatio)
-      : await this.callNanoBananaEdit(sourceBuffer, instruction, tenantId, aspectRatio);
+      ? await this.callGptImageEdit(sourceBuffer, instruction, tenantId, aspectRatio, resolution)
+      : await this.callNanoBananaEdit(sourceBuffer, instruction, tenantId, aspectRatio, resolution);
 
     const key = `${tenantId}/images/${runId}-edit-${Date.now()}.png`;
     const imageUrl = await this.uploadBufferToS3(editedBuffer, key);
@@ -333,6 +344,7 @@ Return ONLY the image prompt, nothing else.
     instruction: string,
     tenantId: string,
     aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
   ): Promise<Buffer> {
     const apiKey = this.configService.get<string>('openai.apiKey');
     const model = this.configService.get<string>('openai.imageModel') ?? 'gpt-image-2';
@@ -341,15 +353,17 @@ Return ONLY the image prompt, nothing else.
       throw new Error('OPENAI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling OpenAI image edit API: tenantId=${tenantId} model=${model} aspectRatio=${aspectRatio}`);
+    this.logger.log(`Calling OpenAI image edit API: tenantId=${tenantId} model=${model} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
-    const size = aspectRatio === '9:16' ? '1024x1536' : aspectRatio === '1:1' ? '1024x1024' : '1024x1024';
+    const size = aspectRatio === '9:16' ? '1024x1536' : aspectRatio === '16:9' ? '1536x1024' : '1024x1024';
+    const quality = GPT_IMAGE_QUALITY[resolution];
 
     const form = new FormData();
     form.append('model', model);
     form.append('image', new Blob([new Uint8Array(imageBuffer)], { type: 'image/png' }), 'source.png');
     form.append('prompt', `Edit this ad image with ONLY this change, keeping everything else (composition, subject, other text, style) identical: ${instruction}`);
     form.append('size', size);
+    form.append('quality', quality);
     form.append('n', '1');
 
     const maxAttempts = 2;
@@ -385,6 +399,7 @@ Return ONLY the image prompt, nothing else.
     instruction: string,
     tenantId: string,
     aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
   ): Promise<Buffer> {
     const apiKey = this.configService.get<string>('google.aiApiKey');
 
@@ -392,14 +407,14 @@ Return ONLY the image prompt, nothing else.
       throw new Error('GOOGLE_AI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling Nano Banana image edit: tenantId=${tenantId} aspectRatio=${aspectRatio}`);
+    this.logger.log(`Calling Nano Banana image edit: tenantId=${tenantId} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: 'gemini-3.1-flash-image-preview',
       generationConfig: {
         responseModalities: ['IMAGE'] as any,
-        imageConfig: { aspectRatio } as any,
+        imageConfig: { aspectRatio, imageSize: GEMINI_IMAGE_SIZE[resolution] } as any,
       } as any,
     });
 
@@ -422,11 +437,11 @@ Return ONLY the image prompt, nothing else.
     return Buffer.from(imagePart.inlineData.data, 'base64');
   }
 
-  private async generateAndUpload(prompt: string, tenantId: string, runId: string, aspectRatio: AspectRatio = '9:16'): Promise<string> {
+  private async generateAndUpload(prompt: string, tenantId: string, runId: string, aspectRatio: AspectRatio = '9:16', resolution: ImageResolution = '1K'): Promise<string> {
     const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
     const imageBuffer = provider === 'gpt_image'
-      ? await this.callGptImage(prompt, tenantId, aspectRatio)
-      : await this.callNanoBanana(prompt, tenantId, aspectRatio);
+      ? await this.callGptImage(prompt, tenantId, aspectRatio, resolution)
+      : await this.callNanoBanana(prompt, tenantId, aspectRatio, resolution);
 
     // Upload to S3 — permanent URL
     const key = `${tenantId}/images/${runId}-${Date.now()}.png`;
@@ -436,7 +451,7 @@ Return ONLY the image prompt, nothing else.
     return s3Url;
   }
 
-  private async callGptImage(prompt: string, tenantId: string, aspectRatio: AspectRatio = '9:16'): Promise<Buffer> {
+  private async callGptImage(prompt: string, tenantId: string, aspectRatio: AspectRatio = '9:16', resolution: ImageResolution = '1K'): Promise<Buffer> {
     const apiKey = this.configService.get<string>('openai.apiKey');
     const model = this.configService.get<string>('openai.imageModel') ?? 'gpt-image-2';
 
@@ -444,14 +459,19 @@ Return ONLY the image prompt, nothing else.
       throw new Error('OPENAI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling OpenAI image API: tenantId=${tenantId} model=${model} aspectRatio=${aspectRatio}`);
+    this.logger.log(`Calling OpenAI image API: tenantId=${tenantId} model=${model} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     // gpt-image-* expects the same photoreal prefix Nano Banana gets — keeps style parity across providers.
     const styledPrompt = `Photorealistic photograph. Real human faces, real skin textures, natural lighting. NOT illustration, NOT cartoon, NOT animated, NOT 3D render, NOT digital art. Shot on a professional camera.\n\n${prompt}`;
 
     // OpenAI gpt-image only supports 1024x1024 / 1024x1536 / 1536x1024 — no
     // native 4:5, so 4:5 requests snap to the closest supported size (square).
-    const size = aspectRatio === '9:16' ? '1024x1536' : aspectRatio === '1:1' ? '1024x1024' : '1024x1024';
+    // Resolution tier maps to `quality` (sharper detail/text at the same pixel
+    // grid) rather than `size` — gpt-image's size grid needs care to keep
+    // divisible-by-16 + valid aspect ratio, and quality is the real, documented
+    // "more detail" lever (low/medium/high).
+    const size = aspectRatio === '9:16' ? '1024x1536' : aspectRatio === '16:9' ? '1536x1024' : '1024x1024';
+    const quality = GPT_IMAGE_QUALITY[resolution];
 
     const maxAttempts = 2;
     let lastError: unknown;
@@ -463,6 +483,7 @@ Return ONLY the image prompt, nothing else.
             model,
             prompt: styledPrompt,
             size,
+            quality,
             n: 1,
           },
           {
@@ -493,14 +514,14 @@ Return ONLY the image prompt, nothing else.
     throw lastError;
   }
 
-  private async callNanoBanana(prompt: string, tenantId: string, aspectRatio: AspectRatio = '9:16'): Promise<Buffer> {
+  private async callNanoBanana(prompt: string, tenantId: string, aspectRatio: AspectRatio = '9:16', resolution: ImageResolution = '1K'): Promise<Buffer> {
     const apiKey = this.configService.get<string>('google.aiApiKey');
 
     if (!apiKey) {
       throw new Error('GOOGLE_AI_API_KEY not configured');
     }
 
-    this.logger.log(`Calling Nano Banana (Gemini Image): tenantId=${tenantId} aspectRatio=${aspectRatio}`);
+    this.logger.log(`Calling Nano Banana (Gemini Image): tenantId=${tenantId} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
@@ -509,6 +530,12 @@ Return ONLY the image prompt, nothing else.
         responseModalities: ['IMAGE'] as any,
         imageConfig: {
           aspectRatio,
+          // NOTE: gemini-3.1-flash-image-preview is documented to ignore
+          // imageSize and always return ~1K regardless of this value — sent
+          // anyway so it takes effect the moment Google fixes/updates this,
+          // and so switching IMAGE_PROVIDER config to a imageSize-respecting
+          // model (e.g. gemini-3-pro-image-preview) works with no code change.
+          imageSize: GEMINI_IMAGE_SIZE[resolution],
         } as any,
       } as any,
     });
