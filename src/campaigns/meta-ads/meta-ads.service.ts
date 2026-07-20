@@ -9,10 +9,13 @@ import { withUtmParams } from './meta-utm.util';
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
 
-// Meta error codes that are safe to retry
-const RETRYABLE_ERROR_CODES = [2, 17, 341, 368];
-const MAX_RETRIES = 3;
-const RETRY_DELAYS = [1000, 2000, 4000]; // exponential backoff
+// Meta error codes that are safe to retry. 4/17/32/613/80004 are rate-limit
+// codes (app/user/page/custom/ad-account level) — 80004 ("too many calls to
+// this ad-account") hit production 2026-07-20 and was NOT in this list, so
+// it failed on the first attempt instead of backing off.
+const RETRYABLE_ERROR_CODES = [2, 4, 17, 32, 341, 368, 613, 80004];
+const MAX_RETRIES = 4;
+const RETRY_DELAYS = [1000, 3000, 10000, 25000]; // exponential backoff — rate-limit codes need longer waits than the network-blip case this was originally tuned for
 
 // https://developers.facebook.com/docs/marketing-api/reference/ad-account/#fields — account_status
 const META_ACCOUNT_STATUS: Record<number, MetaAdAccountSummary['status']> = {
