@@ -590,7 +590,18 @@ export class RecommendationEngine extends BaseEngine<
       }
     }
 
-    return { actions: filtered };
+    const gateReasonCounts: Record<string, number> = {};
+    for (const c of candidates) {
+      for (const reason of c.gatedBy) {
+        gateReasonCounts[reason] = (gateReasonCounts[reason] ?? 0) + 1;
+      }
+    }
+
+    return {
+      actions: filtered,
+      candidatesConsidered: candidates.length,
+      gateReasonCounts,
+    };
   }
 
   private buildAction(input: {

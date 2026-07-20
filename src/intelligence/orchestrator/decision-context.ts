@@ -263,6 +263,14 @@ export interface RecommendedAction {
 
 export interface RecommendationData {
   actions: RecommendedAction[];
+  /**
+   * Debug/observability only — never used to gate anything downstream.
+   * Lets a "0 decisions proposed" cycle answer "because no signal fired" vs.
+   * "because N candidates were gated" without re-deriving it from scratch.
+   */
+  candidatesConsidered?: number;
+  /** Tally of each gatedBy tag across all candidates before filtering. */
+  gateReasonCounts?: Record<string, number>;
 }
 
 export interface ExplainabilityData {

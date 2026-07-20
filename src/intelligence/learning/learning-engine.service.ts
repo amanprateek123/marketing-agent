@@ -48,15 +48,24 @@ export class LearningEngine extends BaseEngine<'learning', LearningData> {
       // decision was proposed, so "0 decisions" still leaves behind a real
       // explanation ("frequency is normal, ROAS is above breakeven...")
       // instead of silence.
-      const [diagnosis, recommendation] = await Promise.all([
+      const [diagnosis, recommendation, confidence] = await Promise.all([
         this.sliceRepo.load(payload.cycleId, 'diagnosis'),
         this.sliceRepo.load(payload.cycleId, 'recommendation'),
+        this.sliceRepo.load(payload.cycleId, 'confidence'),
       ]);
       const summary = {
         narrative: diagnosis?.data?.narrative ?? '',
         leakDiagnosis: diagnosis?.data?.leakDiagnosis ?? 'none',
         rootCauses: diagnosis?.data?.rootCauses ?? [],
         decisionsProposed: recommendation?.data?.actions?.length ?? 0,
+        // Debug-only — answers "why 0 decisions" without re-deriving it:
+        // candidatesConsidered=0 means no signal fired at all; a nonzero
+        // gateReasonCounts means candidates existed but were gated (e.g.
+        // confidence:not_okToRecommend, lifecycle:<stage>).
+        candidatesConsidered: recommendation?.data?.candidatesConsidered ?? 0,
+        gateReasonCounts: recommendation?.data?.gateReasonCounts ?? {},
+        confidenceOverall: confidence?.data?.overall ?? null,
+        confidenceReasonsBlocked: confidence?.data?.gates?.reasonsBlocked ?? [],
       };
 
       // Close the cycle when Learning finishes (last engine in the pipeline).
