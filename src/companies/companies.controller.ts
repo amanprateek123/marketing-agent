@@ -206,10 +206,14 @@ export class CompaniesController {
       throw new BadRequestException('No Meta access token configured for this tenant');
     }
 
-    let accountIds = body.accountIds;
+    // Stored accountIds must be bare ("123456"), not "act_"-prefixed — see
+    // the normalize() comment above. Strip whatever format arrives so this
+    // endpoint can't write mixed-format entries into company.meta.accountIds.
+    const stripPrefix = (id: string) => (id.startsWith('act_') ? id.slice(4) : id);
+    let accountIds = body.accountIds?.map(stripPrefix);
     if (!accountIds?.length) {
       const accounts = await this.metaAdsService.listAdAccounts(company.meta.accessToken, company.meta.businessId);
-      accountIds = accounts.filter((a) => a.status === 'active').map((a) => a.id);
+      accountIds = accounts.filter((a) => a.status === 'active').map((a) => stripPrefix(a.id));
     }
     if (!accountIds.length) {
       throw new BadRequestException('No active Meta ad accounts found for this tenant');

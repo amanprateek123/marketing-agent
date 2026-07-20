@@ -322,7 +322,13 @@ export class CampaignsController {
           `accountId must start with "act_" (e.g. act_549390260260950). Got: "${accountId}"`,
         );
       }
-      if (!allowedIds.includes(accountId.substring(4))) {
+      // Tolerate legacy/mixed-format entries in company.meta.accountIds
+      // (some were stored "act_"-prefixed before the sync endpoint normalized
+      // on write) by comparing bare IDs on both sides instead of trusting
+      // the stored format.
+      const stripPrefix = (id: string) => (id.startsWith('act_') ? id.slice(4) : id);
+      const normalizedAllowed = new Set(allowedIds.map(stripPrefix));
+      if (!normalizedAllowed.has(stripPrefix(accountId))) {
         throw new Error(
           `accountId "${accountId}" is not in your Meta account list. Available: ${allowedIds.join(', ')}`,
         );
