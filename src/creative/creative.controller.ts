@@ -28,6 +28,14 @@ interface UploadCreativeItem {
   productName?: string;
   targetLanguage?: string;
   topic?: string;
+  /**
+   * When set, the asset(s) go straight into THIS existing Gallery sheet
+   * instead of the resolved topic's "Unsorted" sheet — used by the Gallery
+   * topic page's own upload form, so an upload made from within a specific
+   * sheet lands there directly rather than needing a manual move
+   * afterward. Takes priority over `topic` when both are set.
+   */
+  sheetId?: string;
   copy?: { headline?: string; primaryText?: string; cta?: string };
   assetType?: 'image' | 'video';
   sourceUrl?: string;
@@ -374,14 +382,18 @@ export class CreativeController {
     });
 
     try {
-      await this.galleryService.autoPopulate(
-        tenantId,
-        body.topic || body.productName || 'Uploaded creatives',
-        pkg._id.toString(),
-        images as any,
-        video as any,
-        [],
-      );
+      if (body.sheetId) {
+        await this.galleryService.populateSheet(tenantId, body.sheetId, pkg._id.toString(), images as any, video as any, []);
+      } else {
+        await this.galleryService.autoPopulate(
+          tenantId,
+          body.topic || body.productName || 'Uploaded creatives',
+          pkg._id.toString(),
+          images as any,
+          video as any,
+          [],
+        );
+      }
     } catch (galleryErr: any) {
       this.logger.error(`Gallery auto-populate failed for uploaded package ${pkg._id}: ${galleryErr.message}`);
     }

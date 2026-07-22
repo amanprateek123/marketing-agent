@@ -1,5 +1,6 @@
 import { Controller, Get, Post, Patch, Delete, Param, Body, BadRequestException } from '@nestjs/common';
 import { GalleryService } from './gallery.service';
+import { GalleryAssetType } from './schemas/gallery-asset.schema';
 
 @Controller('gallery')
 export class GalleryController {
@@ -53,6 +54,31 @@ export class GalleryController {
   @Get(':tenantId/sheets/:sheetId/assets')
   async listSheetAssets(@Param('tenantId') tenantId: string, @Param('sheetId') sheetId: string) {
     return this.galleryService.listSheetAssets(tenantId, sheetId);
+  }
+
+  /**
+   * Files existing creatives (picked from the whole Creatives library via
+   * the "Add creative" bottom sheet) directly into this sheet — not
+   * restricted to assets already tracked by the Gallery, since some
+   * packages predate this feature or never got auto-populated.
+   * Body: { items: [{ packageId, assetType, variantIndex }] }
+   */
+  @Post(':tenantId/sheets/:sheetId/assets/add')
+  async addExistingAssets(
+    @Param('tenantId') tenantId: string,
+    @Param('sheetId') sheetId: string,
+    @Body() body: { items?: Array<{ packageId?: string; assetType?: GalleryAssetType; variantIndex?: number }> },
+  ) {
+    if (!body.items?.length) throw new BadRequestException('items is required');
+    const items = body.items.map(item => {
+      if (!item.packageId) throw new BadRequestException('packageId is required on every item');
+      if (item.assetType !== 'image' && item.assetType !== 'video' && item.assetType !== 'carousel_card') {
+        throw new BadRequestException('assetType must be "image", "video", or "carousel_card"');
+      }
+      if (item.variantIndex == null) throw new BadRequestException('variantIndex is required on every item');
+      return { sourcePackageId: item.packageId, assetType: item.assetType, variantIndex: item.variantIndex };
+    });
+    return this.galleryService.addExistingAssets(tenantId, sheetId, items);
   }
 
   // Declared BEFORE :assetId below — a literal-segment route must come first

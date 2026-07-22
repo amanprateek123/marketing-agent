@@ -54,6 +54,46 @@ export class GalleryService {
     video: VideoCreative | null,
     carouselCards: Array<{ slotIndex: number; imageUrl: string }>,
   ): Promise<void> {
+    const toCreate = await this.findUntrackedAssets(tenantId, sourcePackageId, images, video, carouselCards);
+    if (toCreate.length === 0) return;
+
+    const topic = await this.findOrCreateTopic(tenantId, topicName);
+    const sheet = await this.findOrCreateSheet(tenantId, topic._id.toString(), UNSORTED_SHEET_NAME);
+    await this.insertAssets(tenantId, sheet._id.toString(), sourcePackageId, toCreate);
+    this.logger.log(`Gallery auto-populated: tenantId=${tenantId} topic="${topicName}" packageId=${sourcePackageId} added=${toCreate.length}`);
+  }
+
+  /**
+   * Same as autoPopulate, but targets an EXISTING sheet directly instead of
+   * resolving/creating a topic's "Unsorted" sheet — used when uploading a
+   * creative straight into a specific sheet (e.g. from the Gallery topic
+   * page's own upload form) so it doesn't need a manual move afterward.
+   */
+  async populateSheet(
+    tenantId: string,
+    sheetId: string,
+    sourcePackageId: string,
+    images: ImageCreative[],
+    video: VideoCreative | null,
+    carouselCards: Array<{ slotIndex: number; imageUrl: string }>,
+  ): Promise<void> {
+    const sheet = await this.sheetModel.findOne({ _id: sheetId, tenantId }).lean().exec();
+    if (!sheet) throw new NotFoundException(`Gallery sheet ${sheetId} not found`);
+
+    const toCreate = await this.findUntrackedAssets(tenantId, sourcePackageId, images, video, carouselCards);
+    if (toCreate.length === 0) return;
+
+    await this.insertAssets(tenantId, sheetId, sourcePackageId, toCreate);
+    this.logger.log(`Gallery populated directly into sheet: tenantId=${tenantId} sheetId=${sheetId} packageId=${sourcePackageId} added=${toCreate.length}`);
+  }
+
+  private async findUntrackedAssets(
+    tenantId: string,
+    sourcePackageId: string,
+    images: ImageCreative[],
+    video: VideoCreative | null,
+    carouselCards: Array<{ slotIndex: number; imageUrl: string }>,
+  ): Promise<Array<{ assetType: GalleryAssetType; variantIndex: number }>> {
     const existing = await this.assetModel
       .find({ tenantId, sourcePackageId })
       .select('assetType variantIndex')
@@ -75,21 +115,24 @@ export class GalleryService {
         toCreate.push({ assetType: 'carousel_card', variantIndex: card.slotIndex });
       }
     }
-    if (toCreate.length === 0) return;
+    return toCreate;
+  }
 
-    const topic = await this.findOrCreateTopic(tenantId, topicName);
-    const sheet = await this.findOrCreateSheet(tenantId, topic._id.toString(), UNSORTED_SHEET_NAME);
-
+  private async insertAssets(
+    tenantId: string,
+    sheetId: string,
+    sourcePackageId: string,
+    toCreate: Array<{ assetType: GalleryAssetType; variantIndex: number }>,
+  ): Promise<void> {
     await this.assetModel.insertMany(
       toCreate.map(a => ({
         tenantId,
-        sheetId: sheet._id.toString(),
+        sheetId,
         assetType: a.assetType,
         sourcePackageId,
         variantIndex: a.variantIndex,
       })),
     );
-    this.logger.log(`Gallery auto-populated: tenantId=${tenantId} topic="${topicName}" packageId=${sourcePackageId} added=${toCreate.length}`);
   }
 
   private async findOrCreateTopic(tenantId: string, name: string): Promise<GalleryTopicDocument> {
@@ -258,6 +301,56 @@ export class GalleryService {
       { $set: { sheetId: targetSheetId } },
     );
     return { movedCount: result.modifiedCount, sheetId: targetSheetId };
+  }
+
+  /**
+   * Files existing creatives (picked from the whole Creatives library, not
+   * just already-tracked GalleryAssets) directly into a sheet — powers the
+   * Gallery's "Add creative" -> pick-from-existing bottom sheet. Each item
+   * identifies one image variant / the video / one carousel card on an
+   * already-completed CreativePackage. Some packages predate the Gallery
+   * feature (or their auto-populate call failed) and so have NO GalleryAsset
+   * pointer anywhere yet — those get a brand new pointer created directly in
+   * the target sheet. Ones that already have a pointer elsewhere get that
+   * pointer's sheetId updated instead (same effect as a move), so an asset
+   * is never tracked twice.
+   */
+  async addExistingAssets(
+    tenantId: string,
+    targetSheetId: string,
+    items: Array<{ sourcePackageId: string; assetType: GalleryAssetType; variantIndex: number }>,
+  ) {
+    const targetSheet = await this.sheetModel.findOne({ _id: targetSheetId, tenantId }).lean().exec();
+    if (!targetSheet) throw new NotFoundException(`Gallery sheet ${targetSheetId} not found`);
+
+    let addedCount = 0;
+    let movedCount = 0;
+    for (const item of items) {
+      const existing = await this.assetModel.findOne({
+        tenantId,
+        sourcePackageId: item.sourcePackageId,
+        assetType: item.assetType,
+        variantIndex: item.variantIndex,
+      }).exec();
+      if (existing) {
+        if (existing.sheetId !== targetSheetId) {
+          existing.sheetId = targetSheetId;
+          await existing.save();
+          movedCount++;
+        }
+      } else {
+        await this.assetModel.create({
+          tenantId,
+          sheetId: targetSheetId,
+          assetType: item.assetType,
+          sourcePackageId: item.sourcePackageId,
+          variantIndex: item.variantIndex,
+        });
+        addedCount++;
+      }
+    }
+    this.logger.log(`Existing creatives filed into sheet: tenantId=${tenantId} sheetId=${targetSheetId} added=${addedCount} movedExisting=${movedCount}`);
+    return { addedCount, movedCount };
   }
 
   /** Powers the "in gallery: Topic / Sheet" line on the package detail page. */
