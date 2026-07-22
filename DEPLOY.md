@@ -90,19 +90,35 @@ login flow there (there's no browser on the server anyway).
 
 On your local machine (where you've already run `higgsfield auth login`):
 ```bash
-ls ~/.config/higgsfield/          # config.json, credentials.json, credentials.json.lock
-scp ~/.config/higgsfield/config.json ~/.config/higgsfield/credentials.json \
-  <server-user>@<server-host>:/opt/apps/marketing-agent/higgsfield-config/
+cat ~/.config/higgsfield/config.json ~/.config/higgsfield/credentials.json
+```
+Paste their contents into matching files on the server (or `scp` them if you
+prefer) at `higgsfield-config/config.json` and `higgsfield-config/credentials.json`
+— a directory that must be a **sibling** of this repo, same level as
+`../Marketing-Agent-Dashboard`, e.g.:
+```
+/opt/apps/
+├── marketing-agent/            <- this repo
+├── Marketing-Agent-Dashboard/  <- frontend repo
+└── higgsfield-config/          <- credentials, NOT nested inside either repo
 ```
 (Skip `credentials.json.lock` — a 0-byte lock file the CLI recreates itself.)
 
-On the server, before first `docker compose up`:
+On the server, before first `docker compose up`, the container (uid 1001,
+user `nestjs`) needs read-write access to that directory:
 ```bash
-cd /opt/apps/marketing-agent
+cd /opt/apps
 mkdir -p higgsfield-config
-# files should already be here from the scp above
-chown -R 1001:1001 higgsfield-config   # container runs as uid 1001 (nestjs)
+chown -R 1001:1001 higgsfield-config
 ```
+If the deploy user has no permission to `chown` to an arbitrary uid (common —
+`chown` requires root, unlike `chmod`), fall back to opening up permissions
+instead, which only requires owning the files:
+```bash
+chmod 777 higgsfield-config
+chmod 666 higgsfield-config/config.json higgsfield-config/credentials.json
+```
+
 `docker-compose.yml` bind-mounts this directory to `/home/nestjs/.config/higgsfield`
 inside the container — read-write, not read-only, because the CLI rewrites
 `credentials.json` in place when it refreshes the access token using the

@@ -26,15 +26,20 @@ services:
       - "8082:8082"
     volumes:
       # Higgsfield CLI auth — file-based, no API-key/headless login exists.
-      # ./higgsfield-config on the host must contain config.json +
-      # credentials.json copied from a machine where `higgsfield auth login`
-      # was already run in a browser (see DEPLOY.md). Mounted read-write
-      # (not :ro) because the CLI rewrites credentials.json in place on
-      # token refresh — a read-only mount would work until the access token
-      # expires, then start failing. Container runs as uid 1001 (nestjs),
-      # whose $HOME is /home/nestjs (verified empirically against this same
-      # node:22-alpine base) — chown the host dir to 1001:1001 before first run.
-      - ./higgsfield-config:/home/nestjs/.config/higgsfield
+      # ../higgsfield-config (a SIBLING of this repo, same level as
+      # ../Marketing-Agent-Dashboard — not nested inside this repo, to keep
+      # live secrets clearly outside any git-tracked directory) must contain
+      # config.json + credentials.json copied from a machine where
+      # `higgsfield auth login` was already run in a browser (see DEPLOY.md).
+      # Mounted read-write (not :ro) because the CLI rewrites credentials.json
+      # in place on token refresh — a read-only mount would work until the
+      # access token expires, then start failing. Container runs as uid 1001
+      # (nestjs), whose $HOME is /home/nestjs (verified empirically against
+      # this same node:22-alpine base). If the host dir isn't owned by
+      # 1001:1001 (e.g. the deploy user has no chown permission), chmod 777
+      # the dir and 666 the two files instead — ownership doesn't need to
+      # match for the container's uid to read/write them, just permissions.
+      - ../higgsfield-config:/home/nestjs/.config/higgsfield
     depends_on:
       - mongo
       - redis
