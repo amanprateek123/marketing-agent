@@ -5,8 +5,10 @@ import { CompaniesService } from '../../companies/companies.service';
 import { CopyWriterService } from '../copy-writer/copy-writer.service';
 import { ImageGeneratorService } from '../image-generator/image-generator.service';
 import { VideoGeneratorService } from '../video-generator/video-generator.service';
+import { HiggsfieldService } from '../video-generator/higgsfield.service';
 import { CreativeTeamService } from '../../teams/creative-team.service';
 import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../schemas/creative-package.schema';
+import { CreativeQaFailure, CreativeQaFailureDocument } from '../schemas/creative-qa-failure.schema';
 import { SlackService } from '../../delivery/slack.service';
 import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
@@ -25,6 +27,8 @@ export interface BriefData {
   targetSegment?: string;
   referenceVideoPrompt?: string;  // Original video prompt to replicate style for creative replacements
   forcedHookStyle?: string;        // when set, ALL variants must use this hookStyle (replace_creative path)
+  /** Explicit per-variant hookStyle plan (operator-picked from the dashboard) — overrides both the format's default variant count (becomes this array's length) and forcedHookStyle when set. Variant i MUST use hookStyles[i], in order. */
+  hookStyles?: string[];
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
   explorationArm?: boolean;                 // when true, Creative Team skips winningHooks/winningExemplars injection (closed-loop drift mitigation)
@@ -61,6 +65,10 @@ export interface BriefData {
   videoAspectRatio?: VideoAspectRatio;
   /** Video resolution — defaults to '1080p' inside VideoGeneratorService when omitted. */
   videoResolution?: VideoResolution;
+  /** Which engine renders the video — defaults to 'heygen' (the original/only path) when omitted. */
+  videoProvider?: 'heygen' | 'higgsfield';
+  /** Higgsfield model job_type (e.g. 'seedance_2_0') — only used when videoProvider === 'higgsfield'. Defaults to 'seedance_2_0'. */
+  higgsfieldJobType?: string;
 }
 
 @Injectable()
@@ -72,11 +80,14 @@ export class CreativeProducerService {
     private readonly copyWriter: CopyWriterService,
     private readonly imageGenerator: ImageGeneratorService,
     private readonly videoGenerator: VideoGeneratorService,
+    private readonly higgsfieldService: HiggsfieldService,
     private readonly creativeTeam: CreativeTeamService,
     private readonly creativeQa: CreativeQaService,
     private readonly slackService: SlackService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
+    @InjectModel(CreativeQaFailure.name)
+    private readonly creativeQaFailureModel: Model<CreativeQaFailureDocument>,
   ) {}
 
   async findByBriefId(tenantId: string, briefId: string): Promise<CreativePackageDocument | null> {
@@ -287,7 +298,7 @@ export class CreativeProducerService {
           images = teamResult.variants.map((_: any, i: number) => {
             const result = imageResults[i];
             if (result.status === 'fulfilled') {
-              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, originalImageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
             }
             this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
             return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '', aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
@@ -303,6 +314,36 @@ export class CreativeProducerService {
         if (spec.skipVideo) {
           this.logger.log(`Video generation skipped — format '${brief.format}' is static-only`);
           video = null;
+        } else if (brief.videoProvider === 'higgsfield') {
+          const jobType = brief.higgsfieldJobType ?? 'seedance_2_0';
+          // Higgsfield's aspect_ratio enum has no 4:5 — closest portrait ratio it accepts is 3:4.
+          const higgsfieldAspectRatio = resolvedVideoAspectRatio === '4:5' ? '3:4' : resolvedVideoAspectRatio;
+          try {
+            const videoResult = await this.higgsfieldService.generateVideo(
+              jobType,
+              { prompt: videoPromptStr, aspect_ratio: higgsfieldAspectRatio, resolution: resolvedVideoResolution, duration: 5 },
+              async (jobId: string) => {
+                await this.creativePackageModel.updateOne(
+                  { _id: pkg._id },
+                  { higgsfieldJobId: jobId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution, provider: 'higgsfield', providerModel: jobType } },
+                );
+                this.logger.log(`Higgsfield jobId persisted: ${jobId} for briefId=${briefId}`);
+              },
+            );
+            video = {
+              variantIndex: selectedIndex,
+              videoPrompt: videoPromptStr,
+              videoUrl: videoResult.videoUrl,
+              videoThumbnailUrl: videoResult.thumbnailUrl,
+              aspectRatio: resolvedVideoAspectRatio,
+              resolution: resolvedVideoResolution,
+              provider: 'higgsfield',
+              providerModel: jobType,
+            };
+          } catch (videoErr: any) {
+            this.logger.error(`Higgsfield video generation failed (prompt saved): ${videoErr.message}`);
+            video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution, provider: 'higgsfield', providerModel: jobType };
+          }
         } else
         try {
           const videoResult = await this.videoGenerator.generateFromScript(
@@ -364,7 +405,7 @@ export class CreativeProducerService {
           images = copyPackage.variants.map((_: any, i: number) => {
             const result = imageResults[i];
             if (result.status === 'fulfilled') {
-              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, originalImageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
             }
             this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
             return { variantIndex: i, imagePrompt: '', imageUrl: '', aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
@@ -373,7 +414,7 @@ export class CreativeProducerService {
           // No variants — generate one image from brief
           try {
             const imgResult = await this.imageGenerator.generate(brief, company, runId, resolvedAspectRatio, resolvedImageResolution);
-            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution }];
+            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl, originalImageUrl: imgResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution }];
           } catch (imgErr: any) {
             this.logger.error(`Image generation failed: ${imgErr.message}`);
           }
@@ -404,6 +445,11 @@ export class CreativeProducerService {
         });
         if (!qa.pass) {
           this.logger.warn(`Image QA dropped ${label}: ${qa.issues.join(' | ')} — prompt kept for regeneration`);
+          void this.creativeQaFailureModel.create({
+            tenantId, packageId: pkg._id.toString(), runId,
+            imageUrl: item.imageUrl, hookStyle, productName: brief.product ?? '',
+            issues: qa.issues, label,
+          }).catch((err: any) => this.logger.error(`Failed to log QA failure: ${err.message}`));
           item.imageUrl = '';
         }
       };

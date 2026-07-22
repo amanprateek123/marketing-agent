@@ -37,8 +37,15 @@ export type VideoAspectRatio = AspectRatio;
 /** Gemini imageConfig.imageSize / rough OpenAI quality tier for still images. */
 export type ImageResolution = '1K' | '2K' | '4K';
 
-/** Heygen's real resolution enum for /v3/video-agents. */
-export type VideoResolution = '720p' | '1080p' | '4k';
+/**
+ * Shared across both video engines. Heygen's /v3/video-agents only accepts
+ * '720p' | '1080p' | '4k' — '480p' is Higgsfield-only (several of its models,
+ * e.g. seedance_2_0/seedance_2_0_mini, support it as their cheapest tier).
+ * The dashboard is responsible for never offering '480p' when Heygen is the
+ * selected engine — there's no backend-side rejection of it for Heygen, so
+ * don't add a UI path that could send it there.
+ */
+export type VideoResolution = '480p' | '720p' | '1080p' | '4k';
 
 export interface FormatSpec {
   id: string;

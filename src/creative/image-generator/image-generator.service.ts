@@ -251,6 +251,23 @@ This vertical image also runs on Feed/Marketplace/Explore placements, which crop
 - The outer top 20% and outer bottom 20% may only hold background/atmosphere — no text, no CTA, no product, nothing critical.
 `.trim() : '';
 
+    // Recurring Nano-Banana failure mode, generalized beyond screens: it
+    // renders objects however is most legible/flattering to the CAMERA
+    // without checking whether that's consistent with how the depicted
+    // person is actually holding/using/looking at them — sometimes subtly
+    // (a hand angled slightly wrong), sometimes absurdly (a phone screen
+    // facing 180° away from the face, into the person's own palm). Kept as
+    // its own rule rather than folded into AVOID since it's a positive
+    // physical/spatial instruction, not a negative.
+    const devicePlausibilityRule = `
+PHYSICAL PLAUSIBILITY (real-world object/body interactions — check every held or interacted-with object in frame):
+- SCREENS: a lit phone/laptop/tablet screen must face the EYES of whoever is depicted looking at or using it — not the camera for the viewer's convenience. If the camera can read the screen, the person must be positioned so they plausibly could too (shot over their shoulder or at their eye-line), never on the opposite side or with the screen angled away from their face.
+- GRIP: hands must contact objects at a real, weight-bearing point (fingers wrap around a handle/edge, not float near it or clip through it) — a held object needs a grip that could actually support it.
+- SUPPORT: nothing rests, leans, or floats without a physically real contact point with the ground/table/hand beneath it.
+- GAZE: if a person is depicted looking AT something (a screen, a paper, another person, a mirror), their eye-line must plausibly reach that object given the camera angle and their head position — don't render "looking down at X" with eyes/head pointed somewhere else.
+- Never sacrifice physical plausibility for camera-facing legibility — a screen, page, or object staged purely so the VIEWER can read it, at the cost of making the depicted person's interaction with it impossible, is a FAIL even when the object itself renders perfectly.
+`.trim();
+
     const avoidList = `
 AVOID (these are concrete Nano-Banana failure modes, not generic art-school negatives):
 ${isManglishConvention
@@ -296,6 +313,8 @@ ${facialSpec}
 
 ${compositionRule}
 
+${devicePlausibilityRule}
+
 ${safeZoneRule}
 
 ${avoidList}
@@ -307,31 +326,48 @@ Return ONLY the image prompt, nothing else.
   }
 
   /**
-   * Edit an existing image with a free-text instruction ("change the headline
-   * to X", "make the background blue") instead of regenerating from scratch —
-   * feeds the CURRENT image back into the provider so most of the image
-   * (subject, composition, other text) stays intact.
+   * Edit an image with free-text instructions ("change the headline to X",
+   * "make the background blue") instead of regenerating from scratch.
+   *
+   * ALWAYS pass the TRUE ORIGINAL image url (before any edits), and the FULL
+   * list of edit instructions accumulated so far (oldest first) — this
+   * applies every requested change to the original in a single pass, rather
+   * than the caller looping N separate edit-image calls each feeding the
+   * previous call's output back in. Neither image-edit provider does true
+   * masked/region-only inpainting here (no mask is passed), so every pixel
+   * gets reinterpreted by the model on each call — chaining edit-of-edit-of-edit
+   * compounds that reinterpretation error round after round and visibly
+   * degrades fine detail (hands, faces, fabric texture) within 2-3 rounds.
+   * One pass against the original, restating every requested change, avoids
+   * that compounding entirely.
    */
   async editImage(
-    currentImageUrl: string,
-    instruction: string,
+    originalImageUrl: string,
+    instructions: string[],
     tenantId: string,
     runId: string,
     aspectRatio: AspectRatio = '9:16',
     resolution: ImageResolution = '1K',
   ): Promise<ImageResult> {
-    const sourceBuffer = await this.downloadImageBuffer(currentImageUrl);
+    const sourceBuffer = await this.downloadImageBuffer(originalImageUrl);
     const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
+    const combinedInstruction = this.formatEditInstructions(instructions);
 
     const editedBuffer = provider === 'gpt_image'
-      ? await this.callGptImageEdit(sourceBuffer, instruction, tenantId, aspectRatio, resolution)
-      : await this.callNanoBananaEdit(sourceBuffer, instruction, tenantId, aspectRatio, resolution);
+      ? await this.callGptImageEdit(sourceBuffer, combinedInstruction, tenantId, aspectRatio, resolution)
+      : await this.callNanoBananaEdit(sourceBuffer, combinedInstruction, tenantId, aspectRatio, resolution);
 
     const key = `${tenantId}/images/${runId}-edit-${Date.now()}.png`;
     const imageUrl = await this.uploadBufferToS3(editedBuffer, key);
 
-    this.logger.log(`Image edited: tenantId=${tenantId} provider=${provider} instruction="${instruction.slice(0, 80)}"`);
-    return { imagePrompt: instruction, imageUrl };
+    this.logger.log(`Image edited: tenantId=${tenantId} provider=${provider} rounds=${instructions.length}`);
+    return { imagePrompt: combinedInstruction, imageUrl };
+  }
+
+  private formatEditInstructions(instructions: string[]): string {
+    return instructions.length <= 1
+      ? (instructions[0] ?? '')
+      : instructions.map((ins, i) => `${i + 1}) ${ins}`).join('  ');
   }
 
   private async downloadImageBuffer(url: string): Promise<Buffer> {
@@ -361,7 +397,7 @@ Return ONLY the image prompt, nothing else.
     const form = new FormData();
     form.append('model', model);
     form.append('image', new Blob([new Uint8Array(imageBuffer)], { type: 'image/png' }), 'source.png');
-    form.append('prompt', `Edit this ad image with ONLY this change, keeping everything else (composition, subject, other text, style) identical: ${instruction}`);
+    form.append('prompt', `Edit this ad image with ONLY the following change(s), applied together in a single pass: ${instruction}\n\nKeep absolutely everything else pixel-identical to the source — composition, subject, faces, hands/fingers, skin texture, fabric texture, background, and any other text not mentioned above. Do not resharpen, resmooth, or otherwise regenerate untouched areas.`);
     form.append('size', size);
     form.append('quality', quality);
     form.append('n', '1');
@@ -418,7 +454,7 @@ Return ONLY the image prompt, nothing else.
       } as any,
     });
 
-    const editPrompt = `Edit this ad image with ONLY this change, keeping everything else (composition, subject, background, other text, style) identical: ${instruction}`;
+    const editPrompt = `Edit this ad image with ONLY the following change(s), applied together in a single pass: ${instruction}\n\nKeep absolutely everything else pixel-identical to the source — composition, subject, faces, hands/fingers, skin texture, fabric texture, background, and any other text not mentioned above. Do not resharpen, resmooth, or otherwise regenerate untouched areas.`;
 
     const result = await model.generateContent([
       { inlineData: { mimeType: 'image/png', data: imageBuffer.toString('base64') } },

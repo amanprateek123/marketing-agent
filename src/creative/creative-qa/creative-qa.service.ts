@@ -71,6 +71,7 @@ export class CreativeQaService {
         centerpiece ? `2. CENTERPIECE: The dominant visual must be ${centerpiece}.` : '2. CENTERPIECE: The image must have ONE clear dominant subject (not a cluttered collage).',
         `3. ARTIFACTS: No malformed hands/fingers/eyes/teeth, no warped faces, no watermarks or stock-photo overlays, no half-rendered objects.`,
         `4. AD-READINESS: Looks like a deliberate paid social ad (clear subject, readable at thumbnail size) — not an accidental render.`,
+        `5. PHYSICAL PLAUSIBILITY: check every held/interacted-with object. Screens (phone/laptop/tablet) must face the EYES of whoever is depicted looking at/using them, not just the camera — the person must be positioned so they could plausibly see it themselves. Held objects need a real weight-bearing grip (fingers actually wrap the object, don't float near it). Nothing rests/leans/floats without a real contact point with a hand/table/ground. If someone is depicted looking AT something, their eye-line must plausibly reach it given head position and camera angle. This is a FAIL even when subtle (not just blatantly backwards/floating) and even when the object itself renders with no visible artifacts. Not applicable if no such object/interaction is in frame.`,
       ].join('\n');
 
       const result = await this.claudeService.runAgent({

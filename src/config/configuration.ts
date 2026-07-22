@@ -41,6 +41,10 @@ export default () => ({
   heygen: {
     apiKey: process.env.HEYGEN_API_KEY ?? '',
   },
+  cartesia: {
+    apiKey: process.env.CARTESIA_API_KEY ?? '',
+    hindiVoiceId: process.env.CARTESIA_HINDI_VOICE_ID ?? '',
+  },
   youtube: {
     apiKey: process.env.YOUTUBE_API_KEY ?? '',
   },

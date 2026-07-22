@@ -4,6 +4,8 @@ import { Model } from 'mongoose';
 import { CreativeProducerService, BriefData } from './creative-producer/creative-producer.service';
 import { ImageGeneratorService } from './image-generator/image-generator.service';
 import { VideoGeneratorService } from './video-generator/video-generator.service';
+import { HiggsfieldService } from './video-generator/higgsfield.service';
+import { CartesiaService } from './video-generator/cartesia.service';
 import { CampaignCreatorService } from '../campaigns/campaign-creator/campaign-creator.service';
 import { CompaniesService } from '../companies/companies.service';
 import { ClaudeService } from '../claude/claude.service';
@@ -14,6 +16,11 @@ import { CreativePackage, CreativePackageDocument } from './schemas/creative-pac
 import { CANONICAL_LANGUAGES } from '../common/creative/language-utils';
 import { listFormatSpecs, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../common/creative/format-specs';
 import { S3Service } from '../common/storage/s3.service';
+import { parseRobustJson } from '../common/llm/robust-json-parser.util';
+import {
+  HOOK_STYLES_DR, HOOK_STYLES_MEME, HOOK_STYLES_SCREENSHOT, HOOK_STYLES_POLL,
+  HOOK_STYLE_DESCRIPTIONS, HOOK_STYLE_DESCRIPTIONS_MEME, HOOK_STYLE_DESCRIPTIONS_SCREENSHOT, HOOK_STYLE_DESCRIPTIONS_POLL,
+} from '../common/creative/hook-styles';
 
 @Controller('creative')
 export class CreativeController {
@@ -23,6 +30,8 @@ export class CreativeController {
     private readonly creativeProducer: CreativeProducerService,
     private readonly imageGenerator: ImageGeneratorService,
     private readonly videoGenerator: VideoGeneratorService,
+    private readonly higgsfieldService: HiggsfieldService,
+    private readonly cartesiaService: CartesiaService,
     private readonly campaignCreator: CampaignCreatorService,
     private readonly companiesService: CompaniesService,
     private readonly claudeService: ClaudeService,
@@ -76,6 +85,24 @@ export class CreativeController {
       group: spec.group,
       skipVideo: spec.skipVideo,
     }));
+  }
+
+  /**
+   * GET /api/v1/creative/hook-styles
+   * Every hookStyle the pipeline supports, grouped by which format they apply
+   * to (the DR 7 apply to image/video/carousel/native; meme/screenshot/poll
+   * have their own small sets) — lets a dashboard picker force a specific
+   * hookStyle instead of letting the Creative Team auto-pick one per variant.
+   * Single source of truth stays backend-side (hook-styles.ts).
+   */
+  @Get('hook-styles')
+  getHookStyles() {
+    return {
+      dr: HOOK_STYLES_DR.map(value => ({ value, description: HOOK_STYLE_DESCRIPTIONS[value] })),
+      meme: HOOK_STYLES_MEME.map(value => ({ value, description: HOOK_STYLE_DESCRIPTIONS_MEME[value] })),
+      screenshot: HOOK_STYLES_SCREENSHOT.map(value => ({ value, description: HOOK_STYLE_DESCRIPTIONS_SCREENSHOT[value] })),
+      poll: HOOK_STYLES_POLL.map(value => ({ value, description: HOOK_STYLE_DESCRIPTIONS_POLL[value] })),
+    };
   }
 
   /**
@@ -139,6 +166,14 @@ export class CreativeController {
       imageResolution?: ImageResolution;
       videoAspectRatio?: VideoAspectRatio;
       videoResolution?: VideoResolution;
+      /** Forces every copy variant (and its matching image prompt) to this one hookStyle instead of the Creative Team auto-picking one per variant. Ignored when hookStyles[] is also set. */
+      forcedHookStyle?: string;
+      /** Explicit per-variant hookStyle plan, operator-picked from the dashboard — its length becomes the variant count, and variant i is locked to hookStyles[i]. Overrides forcedHookStyle when both are set. */
+      hookStyles?: string[];
+      /** Which engine renders the video — defaults to 'heygen' when omitted. */
+      videoProvider?: 'heygen' | 'higgsfield';
+      /** Higgsfield model job_type (e.g. 'seedance_2_0') — only used when videoProvider === 'higgsfield'. */
+      higgsfieldJobType?: string;
     },
   ) {
     const company = await this.companiesService.findByTenantId(tenantId);
@@ -171,6 +206,10 @@ export class CreativeController {
       imageResolution: body.imageResolution,
       videoAspectRatio: body.videoAspectRatio,
       videoResolution: body.videoResolution,
+      forcedHookStyle: body.forcedHookStyle,
+      hookStyles: body.hookStyles,
+      videoProvider: body.videoProvider,
+      higgsfieldJobType: body.higgsfieldJobType,
     };
 
     this.logger.log(`Product creative requested: tenant=${tenantId} product=${product.name} briefId=${briefId} aspectRatio=${body.aspectRatio ?? 'format-default'} imageResolution=${body.imageResolution ?? '1K'} videoAspectRatio=${body.videoAspectRatio ?? '9:16'} videoResolution=${body.videoResolution ?? '1080p'}`);
@@ -617,10 +656,11 @@ Return ONLY the image prompt, nothing else.
             // match) rather than body.aspectRatio, or a fallback match on an
             // untagged/differently-tagged entry would silently relabel it.
             const resolvedAspectRatio = existingEntry?.aspectRatio ?? body.aspectRatio;
+            // Fresh generation — new base image, so any prior edit chain no longer applies.
             if (existingIdx >= 0) {
-              images[existingIdx] = { variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution };
+              images[existingIdx] = { variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, originalImageUrl: imageResult.imageUrl, editInstructions: [], aspectRatio: resolvedAspectRatio, resolution };
             } else {
-              images.push({ variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution });
+              images.push({ variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, originalImageUrl: imageResult.imageUrl, editInstructions: [], aspectRatio: resolvedAspectRatio, resolution });
             }
             this.logger.log(`Image prompt regenerated for variant ${i}: tenantId=${tenantId}`);
           } catch (err: any) {
@@ -677,7 +717,8 @@ Return ONLY the image prompt, nothing else.
       .then(async (result) => {
         const updatedImages = [...images];
         const idx = updatedImages.indexOf(imageEntry);
-        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, aspectRatio, resolution };
+        // Fresh generation — new base image, so any prior edit chain no longer applies.
+        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, originalImageUrl: result.imageUrl, editInstructions: [], aspectRatio, resolution };
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
           { $set: { images: updatedImages } },
@@ -722,16 +763,23 @@ Return ONLY the image prompt, nothing else.
     const aspectRatio: AspectRatio = body.aspectRatio ?? imageEntry.aspectRatio ?? '9:16';
     const resolution: ImageResolution = body.resolution ?? imageEntry.resolution ?? '1K';
 
-    this.logger.log(`Editing image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId} instruction="${instruction.slice(0, 80)}" aspectRatio=${aspectRatio} resolution=${resolution}`);
+    // Lock in the TRUE original the first time this variant is edited — every
+    // edit call (this one and all future ones) re-applies the FULL
+    // instruction list to this same source image, never to a previous edit's
+    // output, so quality doesn't compound-degrade across rounds. See
+    // ImageGeneratorService.editImage for why.
+    const originalImageUrl = imageEntry.originalImageUrl ?? imageEntry.imageUrl;
+    const allInstructions = [...(imageEntry.editInstructions ?? []), instruction];
+
+    this.logger.log(`Editing image for variant ${variantIndex}: tenantId=${tenantId} packageId=${creativePackageId} rounds=${allInstructions.length} instruction="${instruction.slice(0, 80)}" aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     // Fire and forget
-    this.imageGenerator.editImage(imageEntry.imageUrl, instruction, tenantId, (pkg as any).runId, aspectRatio, resolution)
+    this.imageGenerator.editImage(originalImageUrl, allInstructions, tenantId, (pkg as any).runId, aspectRatio, resolution)
       .then(async (result) => {
         const updatedImages = [...images];
         const idx = updatedImages.indexOf(imageEntry);
         if (idx >= 0) {
-          const editInstructions = [...(updatedImages[idx].editInstructions ?? []), instruction];
-          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, editInstructions, aspectRatio, resolution };
+          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, originalImageUrl, editInstructions: allInstructions, aspectRatio, resolution };
         }
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
@@ -789,6 +837,538 @@ Return ONLY the image prompt, nothing else.
     })().catch((err) => this.logger.error(`Video regeneration failed: ${err.message}`));
 
     return { status: 'started', creativePackageId, message: 'Video generation started. Poll GET /packages/:id for result.' };
+  }
+
+  /**
+   * GET /api/v1/creative/higgsfield/models
+   * Video models available through the Higgsfield CLI (Seedance, Kling, Veo,
+   * Wan, Hailuo, ...) — proxied live from `higgsfield model list --video`,
+   * not a hardcoded list, so new models show up without a redeploy.
+   */
+  @Get('higgsfield/models')
+  async getHiggsfieldModels() {
+    return this.higgsfieldService.listVideoModels();
+  }
+
+  /**
+   * GET /api/v1/creative/higgsfield/models/:jobType
+   * Full accepted-params schema for one Higgsfield model (name/type/default/
+   * enum/required) — drives the dashboard's generation form so each model
+   * shows its own real params instead of a one-size-fits-all form.
+   */
+  @Get('higgsfield/models/:jobType')
+  async getHiggsfieldModel(@Param('jobType') jobType: string) {
+    return this.higgsfieldService.getModel(jobType);
+  }
+
+  /**
+   * POST /api/v1/creative/higgsfield/cost
+   * Dry-run credit estimate for a given model + params — no job is created.
+   * Body: { jobType: string, params: Record<string, unknown> }
+   */
+  @Post('higgsfield/cost')
+  async getHiggsfieldCost(@Body() body: { jobType?: string; params?: Record<string, unknown> }) {
+    if (!body.jobType) throw new BadRequestException('jobType is required');
+    const credits = await this.higgsfieldService.estimateCost(body.jobType, body.params ?? {});
+    return { credits };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/higgsfield-write-prompt
+   * Expands a topic into a detailed Higgsfield/Seedance-style video prompt —
+   * pure cinematic scene description (subject, action, camera, lighting,
+   * lens, mood), deliberately NO text overlays/CTA/typography, unlike the
+   * Heygen "Video Agent" path — Higgsfield's models render straight b-roll
+   * footage, not a text-overlay ad renderer. Synchronous (an LLM call, not a
+   * video render) — returns the prompt text directly so it can be reviewed
+   * and edited before spending real Higgsfield credits on generation.
+   * Body: { topic: string, jobType?: string, duration?: number }
+   */
+  @Post(':tenantId/packages/:creativePackageId/higgsfield-write-prompt')
+  async writeHiggsfieldPrompt(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { topic?: string; jobType?: string; duration?: number },
+  ) {
+    const topic = body.topic?.trim();
+    if (!topic) throw new BadRequestException('topic is required');
+
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    const brief = (pkg as any).briefId
+      ? await this.intelligenceBriefModel.findOne({ tenantId, briefId: (pkg as any).briefId }).lean().exec()
+      : null;
+    const product = (company.products ?? []).find(p => p.name === (brief as any)?.product)
+      ?? (company.products ?? []).find(p => p.active)
+      ?? (company.products ?? [])[0];
+
+    const duration = body.duration ?? 5;
+    const hidePrice = !!product?.hidePriceInCreative;
+
+    this.logger.log(`Writing Higgsfield prompt: tenantId=${tenantId} packageId=${creativePackageId} topic="${topic.slice(0, 60)}"`);
+
+    const result = await this.claudeService.runAgent({
+      tenantId,
+      runId: (pkg as any).runId,
+      agentType: AgentType.CREATIVE_PRODUCER,
+      systemPrompt: '',
+      liveContext: this.liveContextBuilder.build(company, product?.name),
+      userMessage: `
+Write a single detailed video-generation prompt for Higgsfield's Seedance model, to produce a ${duration}-second continuous cinematic shot.
+
+TOPIC: ${topic}
+Brand: ${company.name}
+${product ? `Product: ${product.name}${hidePrice ? ' (do not mention price)' : ` — ₹${product.price ?? '???'}`}` : ''}
+
+This is a text-to-video model, NOT a text-overlay ad renderer — do NOT write any on-screen text, captions, CTA, price, or typography instructions. Describe pure b-roll/cinematic footage only: who/what is in frame, the setting, the action taking place, camera movement (e.g. slow dolly out, static, handheld), lighting (e.g. soft golden hour, warm interior), lens/technical detail (e.g. 50mm shallow depth of field, Sony FX3 style), and mood/genre. Keep the action simple enough to read clearly in ${duration} seconds — one continuous beat, not a multi-scene story.
+
+Return ONLY the prompt text. No explanation, no JSON, no labels, no quotes around it.
+      `.trim(),
+      maxTurns: 2,
+    });
+
+    return { prompt: result.content.trim() };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/generate-higgsfield
+   * Generate a video via any Higgsfield model (Seedance/Kling/Veo/...) for this
+   * package. Additive — appends to `videos[]` tagged with provider/providerModel
+   * rather than overwriting the existing (Heygen) `video` field, so a Higgsfield
+   * test doesn't destroy what's already there. Fire-and-forget — poll GET
+   * /packages/:id for the result.
+   * Body: { jobType: string, params: Record<string, unknown>, variantIndex?: number }
+   *   `params` should include `prompt` plus whatever that model's schema
+   *   accepts (aspect_ratio, resolution, duration, mode, ...) — see
+   *   GET /higgsfield/models/:jobType for the real shape.
+   */
+  @Post(':tenantId/packages/:creativePackageId/generate-higgsfield')
+  async generateHiggsfieldVideo(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { jobType?: string; params?: Record<string, unknown>; variantIndex?: number },
+  ) {
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+    if (!body.jobType) throw new BadRequestException('jobType is required');
+    if (!body.params?.prompt) throw new BadRequestException('params.prompt is required');
+
+    const jobType = body.jobType;
+    const params = body.params;
+    const variantIndex = body.variantIndex ?? (pkg as any).selectedCopyIndex ?? 0;
+
+    this.logger.log(`Generating Higgsfield video: tenantId=${tenantId} packageId=${creativePackageId} jobType=${jobType}`);
+
+    // Fire and forget
+    (async () => {
+      const result = await this.higgsfieldService.generateVideo(
+        jobType,
+        params,
+        async (jobId: string) => {
+          await this.creativePackageModel.updateOne(
+            { _id: creativePackageId, tenantId },
+            { $set: { higgsfieldJobId: jobId } },
+          );
+          this.logger.log(`Higgsfield jobId persisted: ${jobId} packageId=${creativePackageId}`);
+        },
+      );
+      await this.creativePackageModel.updateOne(
+        { _id: creativePackageId, tenantId },
+        {
+          $push: {
+            videos: {
+              variantIndex,
+              videoPrompt: String(params.prompt),
+              videoUrl: result.videoUrl,
+              videoThumbnailUrl: result.thumbnailUrl,
+              aspectRatio: params.aspect_ratio,
+              resolution: params.resolution,
+              provider: 'higgsfield',
+              providerModel: jobType,
+            },
+          },
+        },
+      );
+      this.logger.log(`Higgsfield video generated: tenantId=${tenantId} packageId=${creativePackageId}`);
+    })().catch((err) => this.logger.error(`Higgsfield video generation failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, message: 'Higgsfield video generation started. Poll GET /packages/:id for result.' };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/higgsfield-scenes/plan
+   * Plans a scene-by-scene Higgsfield video build: splits totalDurationSeconds
+   * into N scenes at jobType's verified minimum chunk size (only
+   * seedance_2_0/seedance_2_0_mini are supported — see
+   * HiggsfieldService.VERIFIED_SCENE_MODEL_FLOORS), then writes N distinct
+   * cinematic, no-text-overlay prompts forming a hook -> development -> payoff
+   * arc around the topic. Each scene is framed as an independent, discrete
+   * shot (hard cuts, no continuity) since there's no frame-conditioning
+   * between separately-generated clips. Synchronous (LLM-only, nothing
+   * generated yet) so the plan can be reviewed/edited before any spend.
+   * Overwrites any existing videoScenes on this package.
+   * Body: { topic: string, jobType: string, totalDurationSeconds: number,
+   *   aspectRatio?: string, resolution?: string }
+   */
+  @Post(':tenantId/packages/:creativePackageId/higgsfield-scenes/plan')
+  async planHiggsfieldScenes(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { topic?: string; jobType?: string; totalDurationSeconds?: number; aspectRatio?: string; resolution?: string },
+  ) {
+    const topic = body.topic?.trim();
+    if (!topic) throw new BadRequestException('topic is required');
+    if (!body.jobType) throw new BadRequestException('jobType is required');
+    if (!body.totalDurationSeconds) throw new BadRequestException('totalDurationSeconds is required');
+
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const jobType = body.jobType;
+    const aspectRatio = body.aspectRatio ?? '9:16';
+    const resolution = body.resolution ?? '480p';
+
+    let durations: number[];
+    try {
+      durations = this.higgsfieldService.planSceneDurations(body.totalDurationSeconds, jobType);
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    const brief = (pkg as any).briefId
+      ? await this.intelligenceBriefModel.findOne({ tenantId, briefId: (pkg as any).briefId }).lean().exec()
+      : null;
+    const product = (company.products ?? []).find(p => p.name === (brief as any)?.product)
+      ?? (company.products ?? []).find(p => p.active)
+      ?? (company.products ?? [])[0];
+    const hidePrice = !!product?.hidePriceInCreative;
+
+    this.logger.log(`Planning Higgsfield scenes: tenantId=${tenantId} packageId=${creativePackageId} scenes=${durations.length} topic="${topic.slice(0, 60)}"`);
+
+    const result = await this.claudeService.runAgent({
+      tenantId,
+      runId: (pkg as any).runId,
+      agentType: AgentType.CREATIVE_PRODUCER,
+      systemPrompt: '',
+      liveContext: this.liveContextBuilder.build(company, product?.name),
+      userMessage: `
+Write ${durations.length} short video-generation prompts for Higgsfield's Seedance model, one per scene, that together form a coherent mini narrative arc (hook -> development -> payoff) around this topic — built to actually attract and hold attention, not generic filler. Each scene is rendered as an INDEPENDENT, DISCRETE shot with no frame-conditioning from the others — hard cuts between scenes, not continuous camera motion — so do NOT write anything like "continuing from the previous shot".
+
+TOPIC: ${topic}
+Brand: ${company.name}
+${product ? `Product: ${product.name}${hidePrice ? ' (do not mention price)' : ` — ₹${product.price ?? '???'}`}` : ''}
+
+Scene durations (seconds), in order: ${durations.join(', ')}
+
+This is a text-to-video model, NOT a text-overlay ad renderer — do NOT write any on-screen text, captions, CTA, price, or typography instructions in ANY scene. Each scene prompt describes pure b-roll/cinematic footage only: who/what is in frame, the setting, the action taking place, camera movement, lighting, lens/technical detail, and mood/genre — sized to that scene's own duration (a 4-second scene needs ONE simple, clearly-readable action, not a sequence of events).
+
+CHARACTER CONSISTENCY (critical — each scene is generated independently with NO shared reference image or frame-conditioning between them, so the model has nothing to anchor "same person" on except your own wording): if the same character (protagonist, reader, any recurring person) appears in more than one scene, you MUST repeat their EXACT physical description verbatim in every scene they appear in — same age, gender, skin tone, hair (style/color/length), and exact clothing (garment + color) every single time. Do not vary the wording ("a person" in scene 1 vs "the person" in scene 3 is NOT enough) — literally copy-paste the same descriptive phrase for that character into each scene's prompt. Decide each recurring character's full physical description BEFORE writing scene 1, then reuse it identically.
+
+Return ONLY this JSON (no markdown, no explanation):
+{"scenes": ["prompt for scene 1", "prompt for scene 2", ...]}
+The array MUST have exactly ${durations.length} entries, in order.
+      `.trim(),
+      maxTurns: 2,
+    });
+
+    const parsed = parseRobustJson<{ scenes?: string[] }>(result.content);
+    const scenePrompts = parsed.scenes;
+    if (!Array.isArray(scenePrompts) || scenePrompts.length !== durations.length) {
+      throw new Error(`Scene plan mismatch: expected ${durations.length} scenes, got ${scenePrompts?.length ?? 0}`);
+    }
+
+    const videoScenes = durations.map((durationSeconds, sceneIndex) => ({
+      sceneIndex,
+      prompt: scenePrompts[sceneIndex],
+      durationSeconds,
+      aspectRatio,
+      resolution,
+      videoUrl: '',
+      status: 'pending' as const,
+      provider: 'higgsfield' as const,
+      providerModel: jobType,
+      higgsfieldJobId: null,
+    }));
+
+    await this.creativePackageModel.updateOne(
+      { _id: creativePackageId, tenantId },
+      { $set: { videoScenes, videoTotalDurationSeconds: body.totalDurationSeconds } },
+    );
+
+    return { videoScenes };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/higgsfield-scenes/generate
+   * Generates every pending/failed scene in videoScenes, SEQUENTIALLY —
+   * Higgsfield/the CLI's rate limits are unverified and this module has no
+   * queue, so scenes are generated one at a time, not in parallel. Persists
+   * each scene's result via a positional update as soon as it completes, so
+   * the frontend can poll and show progress scene-by-scene instead of
+   * all-or-nothing. Fire-and-forget.
+   */
+  @Post(':tenantId/packages/:creativePackageId/higgsfield-scenes/generate')
+  async generateHiggsfieldScenes(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+  ) {
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+    const scenes = ((pkg as any).videoScenes ?? []) as any[];
+    if (scenes.length === 0) throw new BadRequestException('No scenes planned — call higgsfield-scenes/plan first');
+
+    this.logger.log(`Generating Higgsfield scenes: tenantId=${tenantId} packageId=${creativePackageId} count=${scenes.length}`);
+
+    // Fire and forget — sequential, one scene at a time
+    (async () => {
+      for (const scene of scenes) {
+        if (scene.status === 'completed') continue;
+        try {
+          const result = await this.higgsfieldService.generateVideo(
+            scene.providerModel,
+            { prompt: scene.prompt, duration: scene.durationSeconds, aspect_ratio: scene.aspectRatio, resolution: scene.resolution },
+            async (jobId: string) => {
+              await this.creativePackageModel.updateOne(
+                { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': scene.sceneIndex },
+                { $set: { 'videoScenes.$.higgsfieldJobId': jobId } },
+              );
+            },
+          );
+          await this.creativePackageModel.updateOne(
+            { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': scene.sceneIndex },
+            { $set: { 'videoScenes.$.videoUrl': result.videoUrl, 'videoScenes.$.status': 'completed', 'videoScenes.$.error': '' } },
+          );
+          this.logger.log(`Scene generated: packageId=${creativePackageId} sceneIndex=${scene.sceneIndex}`);
+        } catch (err: any) {
+          await this.creativePackageModel.updateOne(
+            { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': scene.sceneIndex },
+            { $set: { 'videoScenes.$.status': 'failed', 'videoScenes.$.error': err.message } },
+          );
+          this.logger.error(`Scene generation failed: packageId=${creativePackageId} sceneIndex=${scene.sceneIndex} | ${err.message}`);
+        }
+      }
+    })().catch((err) => this.logger.error(`Scene generation loop failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, sceneCount: scenes.length };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/higgsfield-scenes/:sceneIndex/regenerate
+   * Regenerates a single scene in place — the whole point of chunked
+   * generation is not having to redo the entire video for one bad clip.
+   * Body: { prompt?: string } — optional edited prompt; falls back to the
+   * scene's currently-stored prompt if omitted.
+   */
+  @Post(':tenantId/packages/:creativePackageId/higgsfield-scenes/:sceneIndex/regenerate')
+  async regenerateHiggsfieldScene(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Param('sceneIndex') sceneIndexParam: string,
+    @Body() body: { prompt?: string },
+  ) {
+    const sceneIndex = Number(sceneIndexParam);
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+    const scene = ((pkg as any).videoScenes ?? []).find((s: any) => s.sceneIndex === sceneIndex);
+    if (!scene) throw new NotFoundException(`Scene ${sceneIndex} not found on package ${creativePackageId}`);
+
+    const prompt = body.prompt?.trim() || scene.prompt;
+
+    this.logger.log(`Regenerating Higgsfield scene: tenantId=${tenantId} packageId=${creativePackageId} sceneIndex=${sceneIndex}`);
+
+    await this.creativePackageModel.updateOne(
+      { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': sceneIndex },
+      { $set: { 'videoScenes.$.prompt': prompt, 'videoScenes.$.status': 'pending', 'videoScenes.$.videoUrl': '', 'videoScenes.$.error': '' } },
+    );
+
+    // Fire and forget
+    (async () => {
+      try {
+        const result = await this.higgsfieldService.generateVideo(
+          scene.providerModel,
+          { prompt, duration: scene.durationSeconds, aspect_ratio: scene.aspectRatio, resolution: scene.resolution },
+          async (jobId: string) => {
+            await this.creativePackageModel.updateOne(
+              { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': sceneIndex },
+              { $set: { 'videoScenes.$.higgsfieldJobId': jobId } },
+            );
+          },
+        );
+        await this.creativePackageModel.updateOne(
+          { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': sceneIndex },
+          { $set: { 'videoScenes.$.videoUrl': result.videoUrl, 'videoScenes.$.status': 'completed', 'videoScenes.$.error': '' } },
+        );
+        this.logger.log(`Scene regenerated: packageId=${creativePackageId} sceneIndex=${sceneIndex}`);
+      } catch (err: any) {
+        await this.creativePackageModel.updateOne(
+          { _id: creativePackageId, tenantId, 'videoScenes.sceneIndex': sceneIndex },
+          { $set: { 'videoScenes.$.status': 'failed', 'videoScenes.$.error': err.message } },
+        );
+        this.logger.error(`Scene regeneration failed: packageId=${creativePackageId} sceneIndex=${sceneIndex} | ${err.message}`);
+      }
+    })().catch((err) => this.logger.error(`Scene regeneration failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, sceneIndex };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/higgsfield-scenes/merge
+   * Merges every completed scene (in sceneIndex order) into one final video
+   * via ffmpeg, uploads it to S3, and sets it as this package's `video`.
+   * Requires every scene to have status='completed' first. Fire-and-forget —
+   * poll GET /packages/:id and watch for video.videoUrl to populate.
+   */
+  @Post(':tenantId/packages/:creativePackageId/higgsfield-scenes/merge')
+  async mergeHiggsfieldScenes(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+  ) {
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+    const scenes = (((pkg as any).videoScenes ?? []) as any[]).sort((a, b) => a.sceneIndex - b.sceneIndex);
+    if (scenes.length === 0) throw new BadRequestException('No scenes planned — call higgsfield-scenes/plan first');
+    const notReady = scenes.filter(s => s.status !== 'completed');
+    if (notReady.length > 0) {
+      throw new BadRequestException(`${notReady.length} scene(s) not completed yet: ${notReady.map(s => s.sceneIndex).join(', ')}`);
+    }
+
+    this.logger.log(`Merging Higgsfield scenes: tenantId=${tenantId} packageId=${creativePackageId} count=${scenes.length}`);
+
+    const selectedIndex = (pkg as any).selectedCopyIndex ?? 0;
+    const first = scenes[0];
+
+    // Fire and forget
+    (async () => {
+      try {
+        const { videoUrl } = await this.higgsfieldService.mergeVideos(scenes.map(s => s.videoUrl), tenantId);
+        await this.creativePackageModel.updateOne(
+          { _id: creativePackageId, tenantId },
+          {
+            $set: {
+              video: {
+                variantIndex: selectedIndex,
+                videoPrompt: scenes.map(s => s.prompt).join('\n\n'),
+                videoUrl,
+                videoThumbnailUrl: '',
+                aspectRatio: first.aspectRatio,
+                resolution: first.resolution,
+                provider: 'higgsfield',
+                providerModel: first.providerModel,
+              },
+            },
+          },
+        );
+        this.logger.log(`Scenes merged: packageId=${creativePackageId} url=${videoUrl}`);
+      } catch (err: any) {
+        this.logger.error(`Scene merge failed: packageId=${creativePackageId} | ${err.message}`);
+      }
+    })().catch((err) => this.logger.error(`Scene merge failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId };
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/higgsfield-scenes/add-voiceover
+   * Adds a Cartesia-narrated Hindi/English voiceover to a COPY of this
+   * package's video — the original `video.videoUrl` (and `videoScenes[].videoUrl`)
+   * is never touched or overwritten. Requires `video.videoUrl` to already
+   * exist (single-shot Heygen/Higgsfield render, or a merged scene build).
+   * Does NOT call Higgsfield's generation API — only Claude (script), Cartesia
+   * (TTS) and ffmpeg (mux), per the standing rule that video generation is
+   * manual-only. Fire-and-forget — poll GET /packages/:id and watch for
+   * videoWithVoiceoverUrl to populate.
+   * Body: { script?: string, keepBackgroundAudio?: boolean } — pass a script
+   * to skip LLM generation and use it verbatim (must already be in proper
+   * Devanagari for Hindi portions). keepBackgroundAudio (default true) ducks
+   * the video's own generated ambient audio under the narration instead of
+   * discarding it.
+   */
+  @Post(':tenantId/packages/:creativePackageId/higgsfield-scenes/add-voiceover')
+  async addHiggsfieldVoiceover(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { script?: string; keepBackgroundAudio?: boolean },
+  ) {
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).lean().exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+    const videoUrl = (pkg as any).video?.videoUrl;
+    if (!videoUrl) throw new BadRequestException('This package has no video.videoUrl yet — generate/merge a video first');
+
+    const durationSeconds = (pkg as any).videoTotalDurationSeconds || 15;
+    const scenes = (((pkg as any).videoScenes ?? []) as any[]).sort((a, b) => a.sceneIndex - b.sceneIndex);
+    const sceneSummary = scenes.length > 0
+      ? scenes.map(s => `Scene ${s.sceneIndex + 1} (${s.durationSeconds}s): ${s.prompt}`).join('\n')
+      : ((pkg as any).video?.videoPrompt ?? '');
+
+    let script = body.script?.trim();
+    if (!script) {
+      const company = await this.companiesService.findByTenantId(tenantId);
+      const brief = (pkg as any).briefId
+        ? await this.intelligenceBriefModel.findOne({ tenantId, briefId: (pkg as any).briefId }).lean().exec()
+        : null;
+      const product = (company.products ?? []).find(p => p.name === (brief as any)?.product)
+        ?? (company.products ?? []).find(p => p.active)
+        ?? (company.products ?? [])[0];
+      const hidePrice = !!product?.hidePriceInCreative;
+
+      this.logger.log(`Writing voiceover script: tenantId=${tenantId} packageId=${creativePackageId} duration=${durationSeconds}s`);
+
+      const result = await this.claudeService.runAgent({
+        tenantId,
+        runId: (pkg as any).runId,
+        agentType: AgentType.CREATIVE_PRODUCER,
+        systemPrompt: '',
+        liveContext: this.liveContextBuilder.build(company, product?.name),
+        userMessage: `
+Write a natural voiceover narration script for this ${durationSeconds}-second video ad, timed to match its visual arc scene-by-scene:
+
+${sceneSummary}
+
+Brand: ${company.name}
+${product ? `Product: ${product.name}${hidePrice ? ' (do not mention price)' : ` — ₹${product.price ?? '???'}`}` : ''}
+
+LANGUAGE: Write natural, spoken Hindi-English code-switched narration (the way an Indian speaker naturally mixes languages), matching this brand's tone. This is DIFFERENT from on-screen text conventions elsewhere — this script is fed directly to a text-to-speech engine, so:
+- Write every Hindi word/phrase in proper DEVANAGARI script (नाड़ी, विश्लेषण, etc) — NEVER in Latin/Hinglish transliteration. Transliteration causes mispronunciation (e.g. an ambiguous romanization of a word can come out wrong).
+- Common English words a Hindi speaker would naturally say in English (brand name, "report", "call now", technical terms) may stay in Latin script — that's normal code-switching, not a pronunciation risk.
+- CRITICAL: this brand's product involves "Nadi" in the pulse/energy-channel sense — always render it as नाड़ी (never नदी, which means river).
+
+PACING: Aim for the narration to take approximately ${durationSeconds} seconds to speak aloud at a natural, unhurried pace (roughly 2-2.2 words per second for mixed Hindi-English speech). Err SHORTER rather than longer — if the narration runs long it gets abruptly cut off to match the video length.
+
+Return ONLY this JSON (no markdown, no explanation):
+{"script": "the full narration text"}
+        `.trim(),
+        maxTurns: 2,
+      });
+
+      const parsed = parseRobustJson<{ script?: string }>(result.content);
+      script = parsed.script?.trim();
+      if (!script) throw new Error('Voiceover script generation returned empty script');
+    }
+
+    this.logger.log(`Adding voiceover: tenantId=${tenantId} packageId=${creativePackageId} chars=${script.length}`);
+    const finalScript = script;
+
+    // Fire and forget
+    (async () => {
+      try {
+        const narration = await this.cartesiaService.synthesizeSpeech(finalScript);
+        const { videoUrl: withVoiceoverUrl } = await this.higgsfieldService.addVoiceover(videoUrl, narration, tenantId, {
+          keepBackgroundAudio: body.keepBackgroundAudio,
+        });
+        await this.creativePackageModel.updateOne(
+          { _id: creativePackageId, tenantId },
+          { $set: { videoWithVoiceoverUrl: withVoiceoverUrl, voiceoverScript: finalScript } },
+        );
+        this.logger.log(`Voiceover added: packageId=${creativePackageId} url=${withVoiceoverUrl}`);
+      } catch (err: any) {
+        this.logger.error(`Adding voiceover failed: packageId=${creativePackageId} | ${err.message}`);
+      }
+    })().catch((err) => this.logger.error(`Adding voiceover failed: ${err.message}`));
+
+    return { status: 'started', creativePackageId, script: finalScript };
   }
 
   /**

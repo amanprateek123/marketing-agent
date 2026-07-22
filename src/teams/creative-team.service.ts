@@ -32,6 +32,8 @@ export interface CreativeTeamBriefInput {
   product?: string;
   targetSegment?: string;
   forcedHookStyle?: string;       // when set, ALL variants must use this hookStyle (used by replace_creative)
+  /** Explicit per-variant hookStyle plan (operator-picked from the dashboard) — overrides both variantCount (becomes this array's length) and forcedHookStyle when set. Variant i MUST use hookStyles[i], in order. */
+  hookStyles?: string[];
   avoidHookStyles?: string[];      // hookStyles the generator must not use (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';
   targetLanguage?: string;
@@ -366,6 +368,12 @@ Return ONLY this JSON (no markdown, no explanation):
     // Format-spec registry — single source of truth for format-specific prompt
     // text, shared with copy-writer.service.ts's fallback path.
     const spec = getFormatSpec(brief.format);
+    // Operator-picked per-variant hookStyle plan (dashboard) overrides the
+    // format's default variant count — same override as copy-writer.service.ts's fallback path.
+    const variantCount = brief.hookStyles?.length || spec.variantCount;
+    const hookStylePlanBlock = brief.hookStyles && brief.hookStyles.length > 0
+      ? `Follow this EXACT per-variant plan (non-negotiable, operator-picked) — variant N (1-indexed, in this order) MUST use exactly this hookStyle:\n${brief.hookStyles.map((h, i) => `  Variant ${i + 1}: "${h}"${spec.hookStyleDescriptions[h] ? ` — ${spec.hookStyleDescriptions[h]}` : ''}`).join('\n')}`
+      : null;
     // Operator's explicit aspect-ratio pick (if any) must win here too — this
     // prompt text (safe-zone rules, "FORMAT:" line) has to match the actual
     // pixel dimensions image-generator.service.ts requests from the provider,
@@ -641,16 +649,18 @@ CREATIVE SPECS
 
 ${spec.framingText}
 
-━━━ a) AD COPY VARIANTS ━━━
+━━━ a) AD COPY VARIANTS — write exactly ${variantCount} variants ━━━
 
 Each variant needs:
 ${spec.copyGuidance}
-- hookStyle: ${brief.forcedHookStyle
-    ? `MUST be exactly "${brief.forcedHookStyle}" for ALL variants (this is a forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
-    : 'one of the options below (each variant must use a DIFFERENT one)'}
+- hookStyle: ${hookStylePlanBlock
+    ? 'see EXACT per-variant plan below — non-negotiable, do not deviate'
+    : brief.forcedHookStyle
+      ? `MUST be exactly "${brief.forcedHookStyle}" for ALL variants (this is a forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle).`
+      : 'one of the options below (each variant must use a DIFFERENT one)'}
 
-HOOK STYLES${brief.forcedHookStyle ? ` (locked to "${brief.forcedHookStyle}" — see rule above):` : ' (use one per variant — pick different styles, one per variant):'}
-${spec.hookStyles.map(h => `  "${h}" — ${spec.hookStyleDescriptions[h]}`).join('\n')}${brief.avoidHookStyles && brief.avoidHookStyles.length > 0
+${hookStylePlanBlock ? `${hookStylePlanBlock}\n` : `HOOK STYLES${brief.forcedHookStyle ? ` (locked to "${brief.forcedHookStyle}" — see rule above):` : ' (use one per variant — pick different styles, one per variant):'}
+${spec.hookStyles.map(h => `  "${h}" — ${spec.hookStyleDescriptions[h]}`).join('\n')}`}${brief.avoidHookStyles && brief.avoidHookStyles.length > 0
     ? `\n\n⚠ AVOID THESE HOOK STYLES (saturated on the target audience or recently failed):\n  ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}\nDo not generate variants with these hookStyles. The audience has been over-exposed.`
     : ''}
 
@@ -674,7 +684,7 @@ ${resolvedProduct
 
 ━━━ b) IMAGE PROMPTS — one per copy variant, for Nano Banana (Gemini Image) ━━━
 
-Write one image prompt per copy variant (4 total). Each image must be visually tailored to its variant's specific hook and headline, not a generic image that could work for any variant.
+Write one image prompt per copy variant (${variantCount} total). Each image must be visually tailored to its variant's specific hook and headline, not a generic image that could work for any variant.
 
 Each image must make someone STOP scrolling and TAP the ad. It's not a brand photo — it's a direct response sales image.
 
@@ -707,6 +717,13 @@ WHAT MAKES PEOPLE CLICK:
 3. PRODUCT is visible — the viewer knows what they're buying
 4. URGENCY or CURIOSITY in the composition — the viewer must feel "I need to tap NOW"
 5. INDIAN CONTEXT — real Indian faces, settings, cultural cues`}
+
+PHYSICAL PLAUSIBILITY (applies to every format — check every held or interacted-with object in ANY variant's image):
+- SCREENS: a lit phone/laptop/tablet screen must face the EYES of whoever is depicted looking at or using it — not the camera for the viewer's convenience. If the camera can read the screen, the person must be positioned so they plausibly could too (shot over their shoulder or at their eye-line), never on the opposite side or with the screen angled away from their face.
+- GRIP: hands must contact objects at a real, weight-bearing point (fingers wrap around a handle/edge, not float near it or clip through it).
+- SUPPORT: nothing rests, leans, or floats without a physically real contact point with the ground/table/hand beneath it.
+- GAZE: if a person is depicted looking AT something (screen, paper, another person, mirror), their eye-line must plausibly reach it given the camera angle and head position.
+- Never sacrifice physical plausibility for camera-facing legibility — an object staged purely so the VIEWER can read/see it, at the cost of making the depicted person's interaction with it impossible, is a FAIL even when the object itself renders perfectly. This is a recurring Nano Banana failure mode.
 
 FORMAT: ${resolvedAspectRatio === '9:16' ? 'Vertical 9:16' : resolvedAspectRatio === '16:9' ? 'Landscape 16:9' : resolvedAspectRatio === '1:1' ? 'Square 1:1' : 'Portrait 4:5'}, photorealistic, 5-6 sentences.
 
@@ -823,9 +840,11 @@ RULES
 ═══════════════════════════════════════════════════════
 
 - These are META DIRECT RESPONSE ADS — optimise for tap-through rate, not likes or comments
-- ${brief.forcedHookStyle
-    ? `All 4 variants MUST use hookStyle "${brief.forcedHookStyle}" — differentiate by emotional position, voicing, and example, NOT by hookStyle (this is a forced replacement; the AD COPY VARIANTS section already states this — restating here so the rule is unambiguous)`
-    : `All 4 copy variants must use a DIFFERENT hookStyle — 4 completely different opening strategies`}
+- ${hookStylePlanBlock
+    ? `Follow the EXACT per-variant hookStyle plan stated in the AD COPY VARIANTS section above, in order — do not deviate or reassign (restating here so the rule is unambiguous)`
+    : brief.forcedHookStyle
+      ? `All ${variantCount} variants MUST use hookStyle "${brief.forcedHookStyle}" — differentiate by emotional position, voicing, and example, NOT by hookStyle (this is a forced replacement; the AD COPY VARIANTS section already states this — restating here so the rule is unambiguous)`
+      : `All ${variantCount} copy variants must use a DIFFERENT hookStyle — ${variantCount} completely different opening strategies`}
 - Image and video prompts must visually reinforce the brief's hook and key message
 - Do NOT pick the winning variant before compliance review — the review may change the best choice
 - If a variant gets flagged and cannot be fixed without gutting the message, replace it entirely
@@ -864,7 +883,7 @@ STEP 2: Spawn the Brand Compliance Reviewer via Agent tool:
     - When everything passes, send a final message: {type: 'approved', notes: 'summary of what was fixed'} via SendMessage(to: 'team-lead').
     - When you receive a shutdown_request: reply with {type: 'shutdown_confirmed'} via SendMessage(to: 'team-lead') then stop."
 
-STEP 3: Create the full creative package (4 copy variants + 4 image prompts + video prompt) using the brief and specs above.
+STEP 3: Create the full creative package (${variantCount} copy variants + ${variantCount} image prompts + video prompt) using the brief and specs above.
 
 Send the full package to the Compliance Reviewer via SendMessage(to: "compliance"). Label as "ROUND 1".
 CRITICAL: After SendMessage, do NOT output any text. Immediately call TaskCreate with name "round-1-pending" and body "waiting for compliance response". Do not produce any output until you receive their message.
@@ -882,7 +901,7 @@ STEP 5: Once the reviewer approves:
   4. Only after receiving confirmation: call TeamDelete.
   If TeamDelete fails after receiving confirmation, SKIP IT — cleanup is automatic. Proceed to output.
 
-STEP 6: Return ONLY this JSON (no markdown, no explanation):
+STEP 6: Return ONLY this JSON (no markdown, no explanation). "variants" and "imagePrompts" MUST each have EXACTLY ${variantCount} entries, in matching order (variants[i] pairs with imagePrompts[i]) — the example below shows the shape, not the count:
 {
   "variants": [
     {

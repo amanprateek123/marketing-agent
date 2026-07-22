@@ -42,6 +42,8 @@ export class CopyWriterService {
       conversionBridge: string;
       product?: string;                          // resolved to product entry below
       forcedHookStyle?: string;
+      /** Explicit per-variant hookStyle plan (operator-picked from the dashboard) — overrides both variantCount (becomes this array's length) and forcedHookStyle when set. Variant i MUST use hookStyles[i], in order. */
+      hookStyles?: string[];
       avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';   // cold = prospecting, warm = retarget, hot = cart-recovery
       targetLanguage?: CanonicalLanguage;        // pre-resolved by creative-producer; we re-resolve if missing
@@ -89,9 +91,20 @@ LOSING PATTERNS (avoid these):
     // generic 4-variant DR ad regardless of brief.format.
     const spec = getFormatSpec(brief.format);
     const hookSpecBlock = spec.hookStyles.map(h => `  - ${h}: ${spec.hookStyleDescriptions[h]}`).join('\n');
-    const hookStyleRule = brief.forcedHookStyle
-      ? `MUST be exactly "${brief.forcedHookStyle}" for ALL ${spec.variantCount} variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle). Follow this spec exactly:\n  ${spec.hookStyleDescriptions[brief.forcedHookStyle] ?? 'see allowed list above'}`
-      : `one of [${spec.hookStyles.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle. Specs:\n${hookSpecBlock}`;
+    // Operator-picked per-variant plan (dashboard) overrides both count and
+    // the forced-single-style path — variantCount becomes the plan's length.
+    const variantCount = brief.hookStyles?.length || spec.variantCount;
+    const hookStyleRule = brief.hookStyles && brief.hookStyles.length > 0
+      ? `Follow this EXACT per-variant plan (non-negotiable, operator-picked) — variant N (1-indexed, in this order) MUST use exactly this hookStyle:\n${brief.hookStyles.map((h, i) => `  Variant ${i + 1}: "${h}"${spec.hookStyleDescriptions[h] ? ` — ${spec.hookStyleDescriptions[h]}` : ''}`).join('\n')}`
+      : brief.forcedHookStyle
+        ? `MUST be exactly "${brief.forcedHookStyle}" for ALL ${variantCount} variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle). Follow this spec exactly:\n  ${spec.hookStyleDescriptions[brief.forcedHookStyle] ?? 'see allowed list above'}`
+        : `one of [${spec.hookStyles.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle. Specs:\n${hookSpecBlock}`;
+    // Shared "COPY RULES" bullet reminder — same 3-way branch as hookStyleRule, worded as a rule reminder rather than a spec.
+    const variantCountRule = brief.hookStyles && brief.hookStyles.length > 0
+      ? `Follow the EXACT per-variant hookStyle plan above, in order — do not deviate or reassign.`
+      : brief.forcedHookStyle
+        ? `All ${variantCount} variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.`
+        : `${variantCount} variants must use DIFFERENT hookStyles from the allowed list.`;
     const avoidBlock = brief.avoidHookStyles && brief.avoidHookStyles.length > 0
       ? `\n⚠ AVOID THESE HOOK STYLES (saturated/fatigued — do NOT generate variants with these): ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}`
       : '';
@@ -155,7 +168,7 @@ LOSING PATTERNS (avoid these):
       expectJson: true,
       userMessage: `
 ${buildSkillBlock('CREATIVE_TEAM')}
-Write ${spec.variantCount} ad copy variants for ${company.name} for the following content brief.
+Write ${variantCount} ad copy variants for ${company.name} for the following content brief.
 
 BRIEF:
 Topic: ${brief.topic}
@@ -196,7 +209,7 @@ All primaryText/headline output MUST be in ${targetLanguage}.
 FORMAT COPY RULES:
 - Follow the copy shape above exactly
 - Specific beats vague — BUT every specific must trace to BRIEF FACTS. If not cite-able, use a generic relatable pain.
-- ${brief.forcedHookStyle ? `All ${spec.variantCount} variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.` : `${spec.variantCount} variants must use DIFFERENT hookStyles from the allowed list.`}` : `For each variant write:
+- ${variantCountRule}` : `For each variant write:
 - primaryText: the main ad body copy in ${targetLanguage}. Length: 3-5 sentences for cold, 4-5 sentences for warm-high-AOV, 1-2 sentences for hot. ${brief.audienceStage === 'hot' ? 'For hot stage, price line is OPTIONAL — omit if urgency reads stronger without it.' : `MUST mention product name AND price (${priceTag}).`}
 - headline: short punchy headline in ${targetLanguage} (5-7 words max)
 - cta: call to action button text — ${ctaWhitelist}
@@ -207,7 +220,7 @@ COPY RULES:
 - No generic phrases ("best quality", "amazing", "don't miss out")
 - ${brief.audienceStage === 'hot' ? 'Hot stage: price OPTIONAL per variant (buyer already knows it). Focus on urgency + deadline.' : `Price (${priceTag}) in EVERY variant — no exceptions`}
 - Hook → body → offer → CTA must form a logical chain. Headline's promise = what body delivers. No bait-and-switch.
-- ${brief.forcedHookStyle ? `All ${spec.variantCount} variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.` : `${spec.variantCount} variants must use DIFFERENT hookStyles from the allowed list.`}`}
+- ${variantCountRule}`}
 
 Also pick which variant is best for this brief and why — pick the one with the strongest coherent hook→body→CTA chain, not just the loudest hook.
 

@@ -14,6 +14,14 @@ export interface ImageCreative {
   variantIndex: number;
   imagePrompt: string;
   imageUrl: string;
+  // Every edit-image call re-applies ALL editInstructions to THIS image in one
+  // pass, rather than chaining edit-of-edit-of-edit — repeatedly feeding an
+  // already-edited image back into the model compounds generative drift each
+  // round (degrades hands/faces/fine texture first). Set once, at whatever
+  // imageUrl existed the first time this variant was edited; untouched by
+  // later edits. A fresh regenerate-image/regenerate-image-prompt call resets
+  // this back to the new imageUrl (new base, old edit chain no longer applies).
+  originalImageUrl?: string;
   editInstructions?: string[];  // free-text tweaks applied via edit-image, most recent last
   aspectRatio?: string;   // '9:16' | '1:1' | '4:5' — what was requested at generation time
   resolution?: string;    // '1K' | '2K' | '4K'
@@ -26,6 +34,31 @@ export interface VideoCreative {
   videoThumbnailUrl: string;
   aspectRatio?: string;   // '9:16' | '16:9' | '1:1' | '4:5' — what was requested at generation time
   resolution?: string;    // '720p' | '1080p' | '4k'
+  provider?: 'heygen' | 'higgsfield';  // which engine rendered this — undefined means 'heygen' (the original default)
+  providerModel?: string;             // Higgsfield job_type when provider === 'higgsfield', e.g. 'seedance_2_0', 'kling3_0_turbo'
+}
+
+/**
+ * One scene of a scene-by-scene Higgsfield video build. Each scene is an
+ * independently-generated, short (model-minimum-duration) clip with no text
+ * overlay, reviewed/regenerated individually before being merged (via ffmpeg)
+ * into the final `video`. This is a separate, manual, human-in-the-loop
+ * workflow — distinct from the single-shot Heygen/Higgsfield `video` path,
+ * which stays untouched. See HiggsfieldService.VERIFIED_SCENE_MODEL_FLOORS
+ * for which models/durations this actually supports.
+ */
+export interface VideoSceneChunk {
+  sceneIndex: number;
+  prompt: string;
+  durationSeconds: number;
+  aspectRatio: string;             // shared across all scenes in a package (they get merged into one video)
+  resolution: string;
+  videoUrl: string;               // '' until generated
+  status: 'pending' | 'completed' | 'failed';
+  provider: 'higgsfield';
+  providerModel: string;          // jobType, restricted to the verified allowlist
+  higgsfieldJobId?: string | null;
+  error?: string;
 }
 
 /**
@@ -117,6 +150,33 @@ export class CreativePackage {
   // Heygen video ID — persisted as soon as rendering starts so polling can resume if it times out
   @Prop({ type: String, default: null })
   heygenVideoId: string | null;
+
+  // Higgsfield job ID — same resume purpose as heygenVideoId, for the Higgsfield (Seedance/Kling/Veo/...) video path
+  @Prop({ type: String, default: null })
+  higgsfieldJobId: string | null;
+
+  /**
+   * Scene-by-scene Higgsfield build (plan → generate per-scene → regenerate
+   * individual scenes → merge into `video`). Empty unless that manual
+   * workflow was used for this package.
+   */
+  @Prop({ type: Array, default: [] })
+  videoScenes: VideoSceneChunk[];
+
+  // Total duration the scene plan was built for — kept for reference/re-planning.
+  @Prop({ default: 0 })
+  videoTotalDurationSeconds: number;
+
+  /**
+   * Cartesia-narrated COPY of `video.videoUrl` (or the merged scene video) —
+   * the original is never overwritten. '' until a voiceover has been added.
+   */
+  @Prop({ default: '' })
+  videoWithVoiceoverUrl: string;
+
+  // Devanagari narration script last used to generate videoWithVoiceoverUrl — kept for reference/regeneration.
+  @Prop({ default: '' })
+  voiceoverScript: string;
 
   @Prop()
   error?: string;

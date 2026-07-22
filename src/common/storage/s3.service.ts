@@ -30,8 +30,14 @@ export class S3Service {
     this.logger.log(`Downloading from URL for S3 upload: key=${key}`);
 
     const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
-    const buffer = Buffer.from(response.data);
+    return this.uploadBuffer(Buffer.from(response.data), key, contentType);
+  }
 
+  /**
+   * Upload an already-in-memory buffer (e.g. a locally-produced ffmpeg merge
+   * output) to S3. Returns the permanent public S3 URL.
+   */
+  async uploadBuffer(buffer: Buffer, key: string, contentType: string): Promise<string> {
     await this.s3.send(new PutObjectCommand({
       Bucket: this.bucket,
       Key: key,
