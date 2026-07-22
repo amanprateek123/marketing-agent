@@ -1,0 +1,350 @@
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { GalleryTopic, GalleryTopicDocument } from './schemas/gallery-topic.schema';
+import { GallerySheet, GallerySheetDocument } from './schemas/gallery-sheet.schema';
+import { GalleryAsset, GalleryAssetDocument, GalleryAssetType } from './schemas/gallery-asset.schema';
+import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../creative/schemas/creative-package.schema';
+
+const UNSORTED_SHEET_NAME = 'Unsorted';
+
+export interface ResolvedGalleryAsset {
+  _id: string;
+  assetType: GalleryAssetType;
+  variantIndex: number;
+  sourcePackageId: string;
+  assetUrl: string;
+  aspectRatio?: string;
+  resolution?: string;
+}
+
+/**
+ * Organizes creatives into Topic -> Sheet -> Asset (mirrors the user's
+ * Google Sheets workflow: one workbook per topic, tabs for segments,
+ * movable rows). Deliberately does NOT touch CreativePackage or any
+ * campaign/launch code — GalleryAsset is just a movable pointer, resolved
+ * live against the source package on every read. See
+ * gallery-asset.schema.ts for why there's no denormalized URL cache.
+ */
+@Injectable()
+export class GalleryService {
+  private readonly logger = new Logger(GalleryService.name);
+
+  constructor(
+    @InjectModel(GalleryTopic.name) private readonly topicModel: Model<GalleryTopicDocument>,
+    @InjectModel(GallerySheet.name) private readonly sheetModel: Model<GallerySheetDocument>,
+    @InjectModel(GalleryAsset.name) private readonly assetModel: Model<GalleryAssetDocument>,
+    @InjectModel(CreativePackage.name) private readonly packageModel: Model<CreativePackageDocument>,
+  ) {}
+
+  /**
+   * Called right after a CreativePackage finishes generating successfully
+   * (CreativeProducerService.produce(), inside the `!allFailed` branch).
+   * Find-or-creates the topic + its "Unsorted" sheet, then adds one
+   * GalleryAsset per usable image/video/carousel card. Safe to call
+   * multiple times for the same package (e.g. on a regenerate run) — it
+   * only adds pointers for variants that don't already have one, so it
+   * never duplicates or resets a variant a user already moved elsewhere.
+   */
+  async autoPopulate(
+    tenantId: string,
+    topicName: string,
+    sourcePackageId: string,
+    images: ImageCreative[],
+    video: VideoCreative | null,
+    carouselCards: Array<{ slotIndex: number; imageUrl: string }>,
+  ): Promise<void> {
+    const existing = await this.assetModel
+      .find({ tenantId, sourcePackageId })
+      .select('assetType variantIndex')
+      .lean()
+      .exec();
+    const alreadyTracked = new Set(existing.map(a => `${a.assetType}-${a.variantIndex}`));
+
+    const toCreate: Array<{ assetType: GalleryAssetType; variantIndex: number }> = [];
+    for (const img of images) {
+      if (img.imageUrl && !alreadyTracked.has(`image-${img.variantIndex}`)) {
+        toCreate.push({ assetType: 'image', variantIndex: img.variantIndex });
+      }
+    }
+    if (video?.videoUrl && !alreadyTracked.has('video-0')) {
+      toCreate.push({ assetType: 'video', variantIndex: 0 });
+    }
+    for (const card of carouselCards) {
+      if (card.imageUrl && !alreadyTracked.has(`carousel_card-${card.slotIndex}`)) {
+        toCreate.push({ assetType: 'carousel_card', variantIndex: card.slotIndex });
+      }
+    }
+    if (toCreate.length === 0) return;
+
+    const topic = await this.findOrCreateTopic(tenantId, topicName);
+    const sheet = await this.findOrCreateSheet(tenantId, topic._id.toString(), UNSORTED_SHEET_NAME);
+
+    await this.assetModel.insertMany(
+      toCreate.map(a => ({
+        tenantId,
+        sheetId: sheet._id.toString(),
+        assetType: a.assetType,
+        sourcePackageId,
+        variantIndex: a.variantIndex,
+      })),
+    );
+    this.logger.log(`Gallery auto-populated: tenantId=${tenantId} topic="${topicName}" packageId=${sourcePackageId} added=${toCreate.length}`);
+  }
+
+  private async findOrCreateTopic(tenantId: string, name: string): Promise<GalleryTopicDocument> {
+    const existing = await this.topicModel.findOne({ tenantId, name }).exec();
+    if (existing) return existing;
+    return this.topicModel.create({ tenantId, name });
+  }
+
+  private async findOrCreateSheet(tenantId: string, topicId: string, name: string): Promise<GallerySheetDocument> {
+    const existing = await this.sheetModel.findOne({ tenantId, topicId, name }).exec();
+    if (existing) return existing;
+    return this.sheetModel.create({ tenantId, topicId, name });
+  }
+
+  async listTopics(tenantId: string) {
+    const topics = await this.topicModel.find({ tenantId }).sort({ createdAt: -1 }).lean().exec();
+    const sheets = await this.sheetModel.find({ tenantId }).lean().exec();
+    // sheetId is stored as a plain string, not an ObjectId ref, so the topic
+    // rollup is done in JS rather than a $lookup aggregation join.
+    const sheetIdToTopicId = new Map(sheets.map(s => [s._id.toString(), s.topicId]));
+    const assetCountByTopic = new Map<string, number>();
+    const allAssets = await this.assetModel.find({ tenantId }).select('sheetId').lean().exec();
+    for (const asset of allAssets) {
+      const topicId = sheetIdToTopicId.get(asset.sheetId);
+      if (!topicId) continue;
+      assetCountByTopic.set(topicId, (assetCountByTopic.get(topicId) ?? 0) + 1);
+    }
+    const sheetCountByTopic = new Map<string, number>();
+    for (const s of sheets) {
+      sheetCountByTopic.set(s.topicId, (sheetCountByTopic.get(s.topicId) ?? 0) + 1);
+    }
+    return topics.map(t => ({
+      _id: t._id.toString(),
+      name: t.name,
+      sheetCount: sheetCountByTopic.get(t._id.toString()) ?? 0,
+      assetCount: assetCountByTopic.get(t._id.toString()) ?? 0,
+    }));
+  }
+
+  async createTopic(tenantId: string, name: string) {
+    const topic = await this.findOrCreateTopic(tenantId, name);
+    await this.findOrCreateSheet(tenantId, topic._id.toString(), UNSORTED_SHEET_NAME);
+    return { _id: topic._id.toString(), name: topic.name };
+  }
+
+  async renameTopic(tenantId: string, topicId: string, name: string) {
+    const topic = await this.topicModel.findOneAndUpdate({ _id: topicId, tenantId }, { $set: { name } }, { new: true }).lean().exec();
+    if (!topic) throw new NotFoundException(`Gallery topic ${topicId} not found`);
+    return { _id: topic._id.toString(), name: topic.name };
+  }
+
+  async listSheets(tenantId: string, topicId: string) {
+    const topic = await this.topicModel.findOne({ _id: topicId, tenantId }).lean().exec();
+    if (!topic) throw new NotFoundException(`Gallery topic ${topicId} not found`);
+    const sheets = await this.sheetModel.find({ tenantId, topicId }).sort({ createdAt: 1 }).lean().exec();
+    const counts = await this.assetModel.aggregate<{ _id: string; count: number }>([
+      { $match: { tenantId, sheetId: { $in: sheets.map(s => s._id.toString()) } } },
+      { $group: { _id: '$sheetId', count: { $sum: 1 } } },
+    ]);
+    const countBySheet = new Map(counts.map(c => [c._id, c.count]));
+    return sheets.map(s => ({
+      _id: s._id.toString(),
+      name: s.name,
+      assetCount: countBySheet.get(s._id.toString()) ?? 0,
+    }));
+  }
+
+  async createSheet(tenantId: string, topicId: string, name: string) {
+    const topic = await this.topicModel.findOne({ _id: topicId, tenantId }).lean().exec();
+    if (!topic) throw new NotFoundException(`Gallery topic ${topicId} not found`);
+    const sheet = await this.findOrCreateSheet(tenantId, topicId, name);
+    return { _id: sheet._id.toString(), name: sheet.name };
+  }
+
+  async renameSheet(tenantId: string, sheetId: string, name: string) {
+    const sheet = await this.sheetModel.findOneAndUpdate({ _id: sheetId, tenantId }, { $set: { name } }, { new: true }).lean().exec();
+    if (!sheet) throw new NotFoundException(`Gallery sheet ${sheetId} not found`);
+    return { _id: sheet._id.toString(), name: sheet.name };
+  }
+
+  /** Every "Topic / Sheet" pair for the tenant — powers the move-asset destination picker. */
+  async listAllSheetsWithTopics(tenantId: string) {
+    const topics = await this.topicModel.find({ tenantId }).lean().exec();
+    const sheets = await this.sheetModel.find({ tenantId }).lean().exec();
+    const topicById = new Map(topics.map(t => [t._id.toString(), t.name]));
+    return sheets
+      .map(s => ({
+        sheetId: s._id.toString(),
+        sheetName: s.name,
+        topicId: s.topicId,
+        topicName: topicById.get(s.topicId) ?? '(unknown topic)',
+      }))
+      .filter(s => topicById.has(s.topicId));
+  }
+
+  async listSheetAssets(tenantId: string, sheetId: string): Promise<ResolvedGalleryAsset[]> {
+    const sheet = await this.sheetModel.findOne({ _id: sheetId, tenantId }).lean().exec();
+    if (!sheet) throw new NotFoundException(`Gallery sheet ${sheetId} not found`);
+    const assets = await this.assetModel.find({ tenantId, sheetId }).sort({ createdAt: 1 }).lean().exec();
+    return this.resolveAssets(assets);
+  }
+
+  private async resolveAssets(assets: GalleryAssetDocument[] | any[]): Promise<ResolvedGalleryAsset[]> {
+    if (assets.length === 0) return [];
+    const packageIds = [...new Set(assets.map(a => a.sourcePackageId))];
+    const packages = await this.packageModel.find({ _id: { $in: packageIds } }).lean().exec();
+    const packageById = new Map(packages.map(p => [p._id.toString(), p]));
+
+    const resolved: ResolvedGalleryAsset[] = [];
+    for (const asset of assets) {
+      const pkg = packageById.get(asset.sourcePackageId);
+      if (!pkg) continue; // source package deleted — silently drop, no reconciliation needed
+
+      let assetUrl = '';
+      let aspectRatio: string | undefined;
+      let resolution: string | undefined;
+
+      if (asset.assetType === 'image') {
+        const img = (pkg.images ?? []).find((i: any) => i.variantIndex === asset.variantIndex);
+        if (!img?.imageUrl || img.rejected) continue; // rejected — hidden from its sheet until restored, pointer untouched
+        assetUrl = img.imageUrl;
+        aspectRatio = img.aspectRatio;
+        resolution = img.resolution;
+      } else if (asset.assetType === 'video') {
+        if (!pkg.video?.videoUrl || pkg.video.rejected) continue;
+        assetUrl = pkg.video.videoUrl;
+        aspectRatio = pkg.video.aspectRatio;
+        resolution = pkg.video.resolution;
+      } else {
+        const card = (pkg.carouselCards ?? []).find((c: any) => c.slotIndex === asset.variantIndex);
+        if (!card?.imageUrl) continue;
+        assetUrl = card.imageUrl;
+      }
+
+      resolved.push({
+        _id: asset._id.toString(),
+        assetType: asset.assetType,
+        variantIndex: asset.variantIndex,
+        sourcePackageId: asset.sourcePackageId,
+        assetUrl,
+        aspectRatio,
+        resolution,
+      });
+    }
+    return resolved;
+  }
+
+  async moveAsset(tenantId: string, assetId: string, targetSheetId: string) {
+    const [asset, targetSheet] = await Promise.all([
+      this.assetModel.findOne({ _id: assetId, tenantId }).exec(),
+      this.sheetModel.findOne({ _id: targetSheetId, tenantId }).lean().exec(),
+    ]);
+    if (!asset) throw new NotFoundException(`Gallery asset ${assetId} not found`);
+    if (!targetSheet) throw new NotFoundException(`Gallery sheet ${targetSheetId} not found`);
+    asset.sheetId = targetSheetId;
+    await asset.save();
+    return { _id: asset._id.toString(), sheetId: asset.sheetId };
+  }
+
+  /** Bulk version of moveAsset — same semantics, one query instead of N. */
+  async moveAssets(tenantId: string, assetIds: string[], targetSheetId: string) {
+    const targetSheet = await this.sheetModel.findOne({ _id: targetSheetId, tenantId }).lean().exec();
+    if (!targetSheet) throw new NotFoundException(`Gallery sheet ${targetSheetId} not found`);
+    const result = await this.assetModel.updateMany(
+      { _id: { $in: assetIds }, tenantId },
+      { $set: { sheetId: targetSheetId } },
+    );
+    return { movedCount: result.modifiedCount, sheetId: targetSheetId };
+  }
+
+  /** Powers the "in gallery: Topic / Sheet" line on the package detail page. */
+  async getPackageAssetLocations(tenantId: string, packageId: string) {
+    const assets = await this.assetModel.find({ tenantId, sourcePackageId: packageId }).lean().exec();
+    if (assets.length === 0) return {};
+    const sheetIds = [...new Set(assets.map(a => a.sheetId))];
+    const sheets = await this.sheetModel.find({ _id: { $in: sheetIds } }).lean().exec();
+    const sheetById = new Map(sheets.map(s => [s._id.toString(), s]));
+    const topicIds = [...new Set(sheets.map(s => s.topicId))];
+    const topics = await this.topicModel.find({ _id: { $in: topicIds } }).lean().exec();
+    const topicById = new Map(topics.map(t => [t._id.toString(), t]));
+    const pkg = await this.packageModel.findOne({ _id: packageId, tenantId }).lean().exec();
+
+    const result: Record<string, { topicId: string; topicName: string; sheetId: string; sheetName: string; rejected: boolean }> = {};
+    for (const asset of assets) {
+      const sheet = sheetById.get(asset.sheetId);
+      if (!sheet) continue;
+      const topic = topicById.get(sheet.topicId);
+      if (!topic) continue;
+      const rejected = asset.assetType === 'video'
+        ? !!(pkg as any)?.video?.rejected
+        : !!(pkg as any)?.images?.find((i: any) => i.variantIndex === asset.variantIndex)?.rejected;
+      result[`${asset.assetType}-${asset.variantIndex}`] = {
+        topicId: topic._id.toString(),
+        topicName: topic.name,
+        sheetId: sheet._id.toString(),
+        sheetName: sheet.name,
+        rejected,
+      };
+    }
+    return result;
+  }
+
+  /** Bulk-deletes GalleryAsset pointers only — the source CreativePackage is never touched. */
+  async removeAssets(tenantId: string, assetIds: string[]) {
+    const result = await this.assetModel.deleteMany({ _id: { $in: assetIds }, tenantId });
+    return { removedCount: result.deletedCount };
+  }
+
+  /**
+   * Bulk-reject by gallery-asset-id — resolves each to its source package
+   * and sets `rejected: true` there (same effect as
+   * CreativeController.rejectAsset, just reachable from the Gallery's
+   * selection bar which only has GalleryAsset ids, possibly spanning
+   * several different source packages in one call).
+   */
+  async rejectAssets(tenantId: string, assetIds: string[]) {
+    const assets = await this.assetModel.find({ _id: { $in: assetIds }, tenantId }).lean().exec();
+    let rejectedCount = 0;
+    for (const asset of assets) {
+      const pkg = await this.packageModel.findOne({ _id: asset.sourcePackageId, tenantId }).exec();
+      if (!pkg) continue;
+      if (asset.assetType === 'video') {
+        if (!pkg.video) continue;
+        await this.packageModel.updateOne({ _id: pkg._id, tenantId }, { $set: { 'video.rejected': true } });
+        rejectedCount++;
+      } else if (asset.assetType === 'image') {
+        const images = [...(pkg.images ?? [])];
+        const idx = images.findIndex((i: any) => i.variantIndex === asset.variantIndex);
+        if (idx < 0) continue;
+        images[idx] = { ...images[idx], rejected: true } as any;
+        await this.packageModel.updateOne({ _id: pkg._id, tenantId }, { $set: { images } });
+        rejectedCount++;
+      }
+    }
+    return { rejectedCount };
+  }
+
+  /** Cascade-deletes a sheet's GalleryAssets, then the sheet. Source packages are never touched. */
+  async deleteSheet(tenantId: string, sheetId: string) {
+    const sheet = await this.sheetModel.findOne({ _id: sheetId, tenantId }).lean().exec();
+    if (!sheet) throw new NotFoundException(`Gallery sheet ${sheetId} not found`);
+    await this.assetModel.deleteMany({ tenantId, sheetId });
+    await this.sheetModel.deleteOne({ _id: sheetId, tenantId });
+    return { _id: sheetId };
+  }
+
+  /** Cascade-deletes every sheet in a topic (and their assets), then the topic. */
+  async deleteTopic(tenantId: string, topicId: string) {
+    const topic = await this.topicModel.findOne({ _id: topicId, tenantId }).lean().exec();
+    if (!topic) throw new NotFoundException(`Gallery topic ${topicId} not found`);
+    const sheets = await this.sheetModel.find({ tenantId, topicId }).lean().exec();
+    const sheetIds = sheets.map(s => s._id.toString());
+    await this.assetModel.deleteMany({ tenantId, sheetId: { $in: sheetIds } });
+    await this.sheetModel.deleteMany({ tenantId, topicId });
+    await this.topicModel.deleteOne({ _id: topicId, tenantId });
+    return { _id: topicId };
+  }
+}

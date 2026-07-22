@@ -20,6 +20,11 @@ import { HeygenService } from './video-generator/heygen.service';
 import { HiggsfieldService } from './video-generator/higgsfield.service';
 import { CartesiaService } from './video-generator/cartesia.service';
 import { CreativeQaService } from './creative-qa/creative-qa.service';
+import { GalleryTopic, GalleryTopicSchema } from '../gallery/schemas/gallery-topic.schema';
+import { GallerySheet, GallerySheetSchema } from '../gallery/schemas/gallery-sheet.schema';
+import { GalleryAsset, GalleryAssetSchema } from '../gallery/schemas/gallery-asset.schema';
+import { GalleryService } from '../gallery/gallery.service';
+import { GalleryController } from '../gallery/gallery.controller';
 
 @Module({
   imports: [
@@ -29,13 +34,16 @@ import { CreativeQaService } from './creative-qa/creative-qa.service';
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: UsageLog.name, schema: UsageLogSchema },
       { name: MetaAdsLibraryOutput.name, schema: MetaAdsLibraryOutputSchema },
+      { name: GalleryTopic.name, schema: GalleryTopicSchema },
+      { name: GallerySheet.name, schema: GallerySheetSchema },
+      { name: GalleryAsset.name, schema: GalleryAssetSchema },
     ]),
     ClaudeModule,
     forwardRef(()=> CompaniesModule),
     CampaignsModule,
     DeliveryModule,
   ],
-  controllers: [CreativeController],
+  controllers: [CreativeController, GalleryController],
   providers: [
     S3Service,
     CopyWriterService,
@@ -47,6 +55,7 @@ import { CreativeQaService } from './creative-qa/creative-qa.service';
     CreativeTeamService,
     CreativeQaService,
     CreativeProducerService,
+    GalleryService,
   ],
   exports: [CreativeProducerService],
 })

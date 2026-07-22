@@ -25,6 +25,12 @@ export interface ImageCreative {
   editInstructions?: string[];  // free-text tweaks applied via edit-image, most recent last
   aspectRatio?: string;   // '9:16' | '1:1' | '4:5' — what was requested at generation time
   resolution?: string;    // '1K' | '2K' | '4K'
+  // Soft-delete, reversible — never read by campaign launch code, so a
+  // rejected-but-still-referenced-by-a-campaign asset stays fully launchable.
+  // GalleryService's live-resolve join skips rejected assets, so this alone
+  // hides it from its Gallery sheet without touching the GalleryAsset
+  // pointer — restoring makes it reappear in the exact same sheet.
+  rejected?: boolean;
 }
 
 export interface VideoCreative {
@@ -36,6 +42,8 @@ export interface VideoCreative {
   resolution?: string;    // '720p' | '1080p' | '4k'
   provider?: 'heygen' | 'higgsfield';  // which engine rendered this — undefined means 'heygen' (the original default)
   providerModel?: string;             // Higgsfield job_type when provider === 'higgsfield', e.g. 'seedance_2_0', 'kling3_0_turbo'
+  // Soft-delete, reversible — see ImageCreative.rejected for the full rationale.
+  rejected?: boolean;
 }
 
 /**

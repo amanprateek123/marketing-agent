@@ -13,6 +13,7 @@ import { SlackService } from '../../delivery/slack.service';
 import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
 import { getFormatSpec, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../../common/creative/format-specs';
+import { GalleryService } from '../../gallery/gallery.service';
 
 export interface BriefData {
   topic: string;
@@ -84,6 +85,7 @@ export class CreativeProducerService {
     private readonly creativeTeam: CreativeTeamService,
     private readonly creativeQa: CreativeQaService,
     private readonly slackService: SlackService,
+    private readonly galleryService: GalleryService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
     @InjectModel(CreativeQaFailure.name)
@@ -508,6 +510,12 @@ export class CreativeProducerService {
       );
 
       if (!allFailed) {
+        try {
+          await this.galleryService.autoPopulate(tenantId, brief.topic, pkg._id.toString(), images, video, carouselCards);
+        } catch (galleryErr: any) {
+          this.logger.error(`Gallery auto-populate failed for package ${pkg._id} — package saved: ${galleryErr.message}`);
+        }
+
         const slackWebhook = company.delivery?.slackWebhook;
         if (slackWebhook) {
           try {
