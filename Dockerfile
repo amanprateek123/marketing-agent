@@ -26,6 +26,14 @@ RUN npm ci --omit=dev --legacy-peer-deps
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+# ffmpeg: merges Higgsfield scene chunks into one final video (creative.controller.ts's
+# higgsfield-scenes/merge route). @higgsfield/cli: the only way this backend talks to
+# Higgsfield (no public REST API) — both the single-shot and scene-chunk video paths
+# shell out to it. NOTE: the CLI still needs ~/.config/higgsfield/credentials.json +
+# config.json present at runtime (minted once via `higgsfield auth login` on a machine
+# with a browser — see higgsfield.service.ts's class comment) — that's a deploy-time
+# secret-provisioning step, not something this Dockerfile can do.
+RUN apk add --no-cache ffmpeg && npm install -g @higgsfield/cli
 RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

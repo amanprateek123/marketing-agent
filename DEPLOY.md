@@ -79,6 +79,41 @@ build arg in `docker-compose.yml` — it's baked into the frontend's client
 bundle at build time, so a rebuild (`docker compose build frontend`) is
 required after any change.
 
+## 4b. Higgsfield CLI credentials (video generation)
+
+The backend shells out to the `higgsfield` CLI for all video generation
+(single-shot and scene-chunk). It has **no API key / headless login** — auth
+is a browser OAuth flow (`higgsfield auth login`) that writes
+`~/.config/higgsfield/credentials.json` + `config.json` on whatever machine
+ran it. This step gets those files onto the server without ever running that
+login flow there (there's no browser on the server anyway).
+
+On your local machine (where you've already run `higgsfield auth login`):
+```bash
+ls ~/.config/higgsfield/          # config.json, credentials.json, credentials.json.lock
+scp ~/.config/higgsfield/config.json ~/.config/higgsfield/credentials.json \
+  <server-user>@<server-host>:/opt/apps/marketing-agent/higgsfield-config/
+```
+(Skip `credentials.json.lock` — a 0-byte lock file the CLI recreates itself.)
+
+On the server, before first `docker compose up`:
+```bash
+cd /opt/apps/marketing-agent
+mkdir -p higgsfield-config
+# files should already be here from the scp above
+chown -R 1001:1001 higgsfield-config   # container runs as uid 1001 (nestjs)
+```
+`docker-compose.yml` bind-mounts this directory to `/home/nestjs/.config/higgsfield`
+inside the container — read-write, not read-only, because the CLI rewrites
+`credentials.json` in place when it refreshes the access token using the
+refresh token. If that mount is ever read-only, video generation will keep
+working until the token expires, then fail with an auth error.
+
+**If the refresh token itself ever expires/gets revoked:** re-run
+`higgsfield auth login` locally and re-copy both files to the server the same
+way — there's no in-container remediation for that, since there's no browser
+in the container.
+
 ## 5. Build and start
 
 ```bash

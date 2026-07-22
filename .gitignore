@@ -37,6 +37,10 @@ data/
 # Redis dump
 dump.rdb
 
+# Higgsfield CLI credentials — bind-mounted into the backend container at
+# deploy time (see docker-compose.yml + DEPLOY.md), never committed
+higgsfield-config/
+
 # Claude Code session data — contains auth tokens
 .claude/settings.local.json
 docs
