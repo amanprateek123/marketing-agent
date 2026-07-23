@@ -3,8 +3,23 @@ export default () => ({
     port: parseInt(process.env.APP_PORT ?? '3000', 10),
     env: process.env.APP_ENV ?? 'development',
   },
+  auth: {
+    email: process.env.AUTH_EMAIL ?? '',
+    password: process.env.AUTH_PASSWORD ?? '',
+    jwtSecret: process.env.AUTH_JWT_SECRET ?? '',
+    // How long an issued token stays valid, in seconds. Plain seconds (not
+    // a '7d'-style string) to avoid @nestjs/jwt's stricter expiresIn type
+    // and keep the env value unambiguous. Default 604800 = 7 days —
+    // single-operator dashboard, not worth forcing frequent re-logins for.
+    tokenTtlSeconds: parseInt(
+      process.env.AUTH_TOKEN_TTL_SECONDS ?? '604800',
+      10,
+    ),
+  },
   mongo: {
-    uri: process.env.MONGO_URI ?? 'mongodb://localhost:27017/autonomous-marketing-agent',
+    uri:
+      process.env.MONGO_URI ??
+      'mongodb://localhost:27017/autonomous-marketing-agent',
   },
   redis: {
     url: process.env.REDIS_URL ?? 'redis://localhost:6379',

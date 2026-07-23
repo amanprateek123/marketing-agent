@@ -13,6 +13,7 @@ import { CreativeModule } from './creative/creative.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { LearningModule } from './learning/learning.module';
 import { IntelligenceModule } from './intelligence/intelligence.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
     }),
     ScheduleModule.forRoot(),
     DatabaseModule,
+    AuthModule,
     ClaudeModule,
     CompaniesModule,
     PipelineModule,
