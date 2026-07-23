@@ -420,7 +420,7 @@ export class MetaLearningImporterService {
     }
 
     // Sync all enriched campaigns to campaigns collection
-    const syncResult = await this.campaignSync.syncFromEnrichedData(tenantId, enrichedCampaigns, conversionTypes);
+    const syncResult = await this.campaignSync.syncFromEnrichedData(tenantId, enrichedCampaigns, conversionTypes, company.products);
     this.logger.log(`Campaign sync: ${syncResult.synced} updated, ${syncResult.created} new manual campaigns`);
 
     // Clear old case studies upfront so frontend sees fresh data as it streams in

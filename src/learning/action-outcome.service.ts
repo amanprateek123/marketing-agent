@@ -3,9 +3,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { ExecutedAction, ExecutedActionDocument } from './schemas/executed-action.schema';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
-import { MetaMetricsService } from '../campaigns/meta-ads/meta-metrics.service';
+import { buildFullMetricsFromPersisted } from '../campaigns/meta-ads/persisted-metrics.util';
 import { CompaniesService } from '../companies/companies.service';
-import { getEffectiveConversionValue } from '../common/conversion-value.util';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -36,18 +35,17 @@ export class ActionOutcomeService {
     private readonly executedModel: Model<ExecutedActionDocument>,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
-    private readonly metaMetrics: MetaMetricsService,
     private readonly companiesService: CompaniesService,
   ) {}
 
   /**
    * Persist an executed-action record with a fresh metrics anchor.
    *
-   * Fetches live metrics itself (rather than trusting caller-passed campaign
-   * doc fields) because execution can happen hours after the audit fetched
-   * metrics — a human-approved scale runs on whatever stale numbers the doc
-   * holds, and the +72h delta would be measured against the wrong baseline.
-   * Falls back to campaign-doc fields if the Meta fetch fails.
+   * Re-reads the campaign doc itself (rather than trusting caller-passed
+   * fields) because execution can happen hours after the audit ran — a
+   * human-approved scale runs on whatever numbers the doc holds by then, and
+   * the +72h delta would be measured against the wrong baseline. Falls back
+   * to caller-supplied fallbackMetrics if the campaign doc can't be read.
    */
   async recordExecuted(input: {
     tenantId: string;
@@ -61,7 +59,7 @@ export class ActionOutcomeService {
     try {
       const now = new Date();
       const metricsAtT =
-        (await this.fetchCurrentMetrics(input.tenantId, input.campaignId, input.metaCampaignId))
+        (await this.fetchCurrentMetrics(input.campaignId))
         ?? {
           spend: input.fallbackMetrics?.spend ?? 0,
           impressions: input.fallbackMetrics?.impressions ?? 0,
@@ -112,7 +110,7 @@ export class ActionOutcomeService {
 
     for (const rec of due24h) {
       try {
-        const metrics = await this.fetchCurrentMetrics(rec.tenantId, rec.campaignId, rec.metaCampaignId);
+        const metrics = await this.fetchCurrentMetrics(rec.campaignId);
         if (!metrics) continue;
         await this.executedModel.updateOne(
           { _id: rec._id },
@@ -132,7 +130,7 @@ export class ActionOutcomeService {
 
     for (const rec of due72h) {
       try {
-        const metrics = await this.fetchCurrentMetrics(rec.tenantId, rec.campaignId, rec.metaCampaignId);
+        const metrics = await this.fetchCurrentMetrics(rec.campaignId);
         if (!metrics) continue;
         const outcomeLabel = this.computeOutcomeLabel(rec, metrics);
         await this.executedModel.updateOne(
@@ -295,31 +293,50 @@ ${worsenedLines ? `Recent actions that backfired:\n${worsenedLines}\n` : ''}  RU
 
   // ──────────────────────────────────────────────────────────────────────────
 
+  // [SUPERSEDED 2026-07-23] Was a live MetaMetricsService.fetchFullMetrics
+  // call, resolving a product/conversionValue/conversionEvent from
+  // company.products first. campaign-sync.service.ts (10-min cadence) is now
+  // the sole Meta fetcher — its persisted output is already refund-haircut
+  // corrected (Phase 0), same basis this live fetch used. Kept here,
+  // commented, for reference — persisted-read implementation follows.
+  //
+  // private async fetchCurrentMetrics(
+  //   tenantId: string, campaignId: string, metaCampaignId: string,
+  // ): Promise<ExecutedAction['metricsAtT'] | null> {
+  //   try {
+  //     const campaign = await this.campaignModel.findOne({ _id: campaignId }).lean().exec();
+  //     if (!campaign) return null;
+  //     const company = await this.companiesService.findByTenantId(tenantId);
+  //     if (!company?.meta?.accessToken) return null;
+  //     const product = (company.products ?? []).find((p: any) => p.active);
+  //     const conversionValue = getEffectiveConversionValue(product);
+  //     const conversionEvent = product?.conversionEvent ?? 'Purchase';
+  //     const full = await this.metaMetrics.fetchFullMetrics(
+  //       metaCampaignId, company.meta.accessToken, conversionValue,
+  //       conversionEvent, product?.customConversionId, product?.refundRatePercent,
+  //     );
+  //     const c = full.campaign;
+  //     return {
+  //       spend: c.spend, impressions: c.impressions, clicks: c.clicks, conversions: c.conversions,
+  //       ctr: c.ctr, cpc: c.cpc, cpa: c.cpa, roas: c.roas, frequency: c.frequency,
+  //       adSets: full.adSets.map(as => ({
+  //         adSetId: as.adSetId, spend: as.spend, clicks: as.clicks,
+  //         conversions: as.conversions, ctr: as.ctr, cpa: as.cpa,
+  //       })),
+  //     };
+  //   } catch (err: any) {
+  //     this.logger.warn(`Action-outcome fetchCurrentMetrics failed: ${err.message}`);
+  //     return null;
+  //   }
+  // }
+
   private async fetchCurrentMetrics(
-    tenantId: string,
     campaignId: string,
-    metaCampaignId: string,
   ): Promise<ExecutedAction['metricsAtT'] | null> {
     try {
       const campaign = await this.campaignModel.findOne({ _id: campaignId }).lean().exec();
       if (!campaign) return null;
-      const company = await this.companiesService.findByTenantId(tenantId);
-      if (!company?.meta?.accessToken) return null;
-      const product = (company.products ?? []).find((p: any) => p.active);
-      // Net of refunds — outcome labels compare CPA/ROAS deltas, so the anchor
-      // and the +72h read must use the same refund-adjusted basis as the audit.
-      const conversionValue = getEffectiveConversionValue(product);
-      const conversionEvent = product?.conversionEvent ?? 'Purchase';
-      const full = await this.metaMetrics.fetchFullMetrics(
-        metaCampaignId,
-        company.meta.accessToken,
-        conversionValue,
-        conversionEvent,
-        // Custom Conversion ID required or custom-conversion products read 0
-        // conversions and every outcome label goes 'inconclusive'.
-        product?.customConversionId,
-        product?.refundRatePercent,
-      );
+      const full = buildFullMetricsFromPersisted(campaign);
       const c = full.campaign;
       return {
         spend: c.spend, impressions: c.impressions, clicks: c.clicks, conversions: c.conversions,

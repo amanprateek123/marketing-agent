@@ -282,6 +282,22 @@ export class CampaignsService {
     );
   }
 
+  /**
+   * Records that the audit loop ran, without re-writing top-line metrics.
+   * Before the Meta-fetch consolidation, the audit loop re-fetched metrics
+   * live and wrote them back via updateMetrics() as an independent refresh
+   * path. Now that the audit reads campaign-sync's already-persisted data
+   * (the sole Meta fetcher), that write would just be echoing the same
+   * values back onto the document they came from — this only updates the
+   * one field that genuinely changed: the audit ran.
+   */
+  async touchLastAudited(tenantId: string, campaignId: string): Promise<void> {
+    await this.campaignModel.updateOne(
+      { tenantId, _id: campaignId },
+      { lastAuditedAt: new Date() },
+    );
+  }
+
   async executeAction(
     tenantId: string,
     campaignId: string,

@@ -27,6 +27,16 @@ import {
   MetaMetricsService,
   FullCampaignMetrics,
 } from '../meta-ads/meta-metrics.service';
+import { buildFullMetricsFromPersisted } from '../meta-ads/persisted-metrics.util';
+import {
+  readPlacementBreakdown,
+  readHourlyBreakdown,
+  readDayOfWeekBreakdown,
+} from '../meta-ads/breakdown-reader.util';
+import {
+  BreakdownSnapshot,
+  BreakdownSnapshotDocument,
+} from '../schemas/breakdown-snapshot.schema';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { withUtmParams } from '../meta-ads/meta-utm.util';
 import { SlackService } from '../../delivery/slack.service';
@@ -139,6 +149,8 @@ export class CampaignAuditorService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
+    @InjectModel(BreakdownSnapshot.name)
+    private readonly breakdownModel: Model<BreakdownSnapshotDocument>,
     @InjectQueue(QUEUES.CREATIVE_PRODUCTION)
     private readonly creativeQueue: Queue,
   ) {}
@@ -389,7 +401,33 @@ export class CampaignAuditorService {
       }
     }
 
-    // ── Fetch live metrics from Meta ──────────────────────────────────────────
+    // ── Read persisted metrics ────────────────────────────────────────────────
+    // [CONSOLIDATED 2026-07-23] Was 4 live Meta API calls per audit cycle
+    // (fetchFullMetrics + 3 breakdown fetches, every ~3h per campaign).
+    // campaign-sync.service.ts (10-min cadence) and meta-deep-sync.service.ts
+    // (hourly) are now the sole Meta fetchers — read their persisted output
+    // instead. buildFullMetricsFromPersisted is synchronous (campaign is
+    // already loaded); the breakdown reads are the only I/O left here.
+    //
+    // Old live-fetch block, kept for reference:
+    //   const [full, byPlacement, byHour, byDayOfWeek] = await Promise.all([
+    //     this.metaMetrics.fetchFullMetrics(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionValue,
+    //       conversionEvent, customConversionId, product?.refundRatePercent,
+    //     ),
+    //     this.metaMetrics.fetchPlacementBreakdown(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionEvent, customConversionId,
+    //     ),
+    //     this.metaMetrics.fetchHourlyBreakdown(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionEvent, customConversionId,
+    //     ),
+    //     this.metaMetrics.fetchDayOfWeekBreakdown(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionEvent, customConversionId,
+    //     ),
+    //   ]);
+    // (conversionEvent/customConversionId were derived from `product` right below,
+    // same as they still are — only used by the live fetch, so no longer declared.)
+
     // Match product to the one this campaign is actually selling
     const brief = campaign.briefId
       ? await this.briefModel
@@ -408,36 +446,12 @@ export class CampaignAuditorService {
     // NET of refunds — every ROAS downstream of this line (verdicts, winner
     // detection, ad-set ROAS at line ~387) judges net revenue, not bookings.
     const conversionValue = getEffectiveConversionValue(product);
-    const conversionEvent = product?.conversionEvent ?? 'Purchase';
-    const customConversionId = product?.customConversionId;
 
-    const [full, byPlacement, byHour, byDayOfWeek] = await Promise.all([
-      this.metaMetrics.fetchFullMetrics(
-        campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionValue,
-        conversionEvent,
-        customConversionId,
-        product?.refundRatePercent,
-      ),
-      this.metaMetrics.fetchPlacementBreakdown(
-        campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionEvent,
-        customConversionId,
-      ),
-      this.metaMetrics.fetchHourlyBreakdown(
-        campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionEvent,
-        customConversionId,
-      ),
-      this.metaMetrics.fetchDayOfWeekBreakdown(
-        campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionEvent,
-        customConversionId,
-      ),
+    const full = buildFullMetricsFromPersisted(campaign);
+    const [byPlacement, byHour, byDayOfWeek] = await Promise.all([
+      readPlacementBreakdown(this.breakdownModel, company.tenantId, campaign.metaCampaignId),
+      readHourlyBreakdown(this.breakdownModel, company.tenantId, campaign.metaCampaignId),
+      readDayOfWeekBreakdown(this.breakdownModel, company.tenantId, campaign.metaCampaignId),
     ]);
 
     // ── Data-staleness gate ───────────────────────────────────────────────────
@@ -446,12 +460,17 @@ export class CampaignAuditorService {
     //   1. Meta's reporting pipeline lags — insights date_stop falls >48h
     //      behind. Pausing/scaling on a 2-day-old picture is how the auditor
     //      killed campaigns whose conversions had already landed.
-    //   2. The fetch silently returns an empty row (rate limit, truncation —
-    //      see the 449-campaign filter-URL bug) while the DB knows the
-    //      campaign has real spend. Zero-spend on a spending campaign is an
-    //      API failure, not a metric.
-    // Skip the whole audit cycle; the 6h cron retries with fresh data. DB
-    // metrics are NOT updated from a suspect fetch — that would poison sync.
+    //   2. campaign-sync itself has stopped refreshing this campaign — the
+    //      old check here was "did the live fetch we just made return ₹0
+    //      spend while the DB shows real spend" (a silent-API-failure
+    //      proxy). Now that we read Mongo directly, full.campaign.spend IS
+    //      campaign.spend — that comparison would always be false. The
+    //      equivalent signal is campaign.syncedAt going stale: campaign-sync
+    //      runs every ~10 min (Phase 0 also added a preserve-prior-value
+    //      guard there so a single rate-limited tick no longer zeroes
+    //      anything) — if syncedAt hasn't moved in 3x the audit cadence, the
+    //      sync pipeline itself is stalled and this data shouldn't be acted on.
+    // Skip the whole audit cycle; the next tick retries with fresh data.
     const STALE_DATA_HOURS = 48;
     const dataAsOfMs = full.campaign.dataAsOf
       ? new Date(full.campaign.dataAsOf).getTime()
@@ -465,12 +484,16 @@ export class CampaignAuditorService {
     const reportingStale =
       reportingLagMs !== null &&
       reportingLagMs > STALE_DATA_HOURS * 60 * 60 * 1000;
-    const emptyFetchOnSpendingCampaign =
-      full.campaign.spend === 0 && (campaign.spend ?? 0) > 500;
-    if (reportingStale || emptyFetchOnSpendingCampaign) {
+    const SYNC_STALE_HOURS = 9; // 3x the 3h audit cadence
+    const syncAgeMs = campaign.syncedAt
+      ? Date.now() - new Date(campaign.syncedAt).getTime()
+      : null;
+    const syncStale =
+      syncAgeMs === null || syncAgeMs > SYNC_STALE_HOURS * 60 * 60 * 1000;
+    if (reportingStale || syncStale) {
       const why = reportingStale
         ? `insights date_stop=${full.campaign.dataAsOf} is >${STALE_DATA_HOURS}h behind`
-        : `fetch returned ₹0 spend but DB shows ₹${(campaign.spend ?? 0).toFixed(0)} — likely silent API failure`;
+        : `campaign-sync hasn't refreshed this campaign in >${SYNC_STALE_HOURS}h (syncedAt=${campaign.syncedAt?.toISOString() ?? 'never'}) — sync pipeline may be stalled`;
       this.logger.warn(
         `Audit skipped for ${campaign.metaCampaignId}: stale/suspect Meta data (${why})`,
       );
@@ -496,19 +519,12 @@ export class CampaignAuditorService {
     // Save ad-level metrics to campaign document
     await this.saveAdLevelMetrics(campaign, full);
 
-    // Update campaign-level live metrics
-    await this.campaignsService.updateMetrics(
+    // Record that the audit ran. Top-line metrics no longer get written back
+    // here — full.campaign.* came from this same campaign doc, so re-writing
+    // it would just echo unchanged values (see touchLastAudited's doc comment).
+    await this.campaignsService.touchLastAudited(
       company.tenantId,
       campaign._id.toString(),
-      {
-        spend: full.campaign.spend,
-        impressions: full.campaign.impressions,
-        clicks: full.campaign.clicks,
-        conversions: full.campaign.conversions,
-        roas: full.campaign.roas,
-        ctr: full.campaign.ctr,
-        cpc: full.campaign.cpc,
-      },
     );
 
     // Execute any expired pending actions (agent campaigns only)
@@ -549,11 +565,9 @@ export class CampaignAuditorService {
     // lifetime placement spend and re-fires the same narrow_placement recommendation
     // for already-restricted placements every cycle (the 6-consecutive-recommendations
     // loop on 91astro). Stale lifetime data lies; this filter tells the LLM the truth.
-    const taggedByPlacement = await this.tagByPlacementWithActiveTargeting(
+    const taggedByPlacement = this.tagByPlacementWithActiveTargeting(
       campaign,
-      full,
       byPlacement,
-      company.meta.accessToken,
     );
 
     const signals = this.signalDetector.detect(
@@ -1083,65 +1097,102 @@ export class CampaignAuditorService {
    * Naming note: insights returns 'feed','instagram_reels','instagram_stories'
    * etc. while targeting uses 'feed','reels','story' — we normalize via a map.
    */
-  private async tagByPlacementWithActiveTargeting(
+  // [SUPERSEDED 2026-07-23] Was a live per-adset Meta call
+  // (this.metaAds.getAdSetTargeting) inside the loop below — redundant with
+  // campaign.metaAdSets[].rawTargeting, which campaign-sync.service.ts
+  // already persists every 10 min from the exact same underlying field
+  // (fields:'targeting' on the same /adsets endpoint). Kept here, commented,
+  // for reference — persisted-read implementation follows.
+  //
+  // private async tagByPlacementWithActiveTargeting(
+  //   campaign: CampaignDocument,
+  //   full: FullCampaignMetrics,
+  //   byPlacement: any[],
+  //   accessToken: string,
+  // ): Promise<any[]> {
+  //   if (!byPlacement?.length) return byPlacement;
+  //   const activeKeys = new Set<string>();
+  //   let allOpen = false;
+  //   try {
+  //     for (const adSet of full.adSets ?? []) {
+  //       const targeting = await this.metaAds.getAdSetTargeting(adSet.adSetId, accessToken);
+  //       if (!targeting) continue;
+  //       const platforms: string[] | null = targeting.publisher_platforms ?? null;
+  //       if (!platforms || platforms.length === 0) { allOpen = true; break; }
+  //       for (const p of platforms) {
+  //         const positions: string[] | null =
+  //           p === 'facebook' ? targeting.facebook_positions
+  //           : p === 'instagram' ? targeting.instagram_positions
+  //           : p === 'audience_network' ? targeting.audience_network_positions
+  //           : p === 'messenger' ? targeting.messenger_positions
+  //           : null;
+  //         if (!positions || positions.length === 0) {
+  //           for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) activeKeys.add(`${p}|${ip}`);
+  //         } else {
+  //           for (const pos of positions) {
+  //             const insightsPos = TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
+  //             activeKeys.add(`${p}|${insightsPos}`);
+  //           }
+  //         }
+  //       }
+  //     }
+  //   } catch (err: any) {
+  //     this.logger.warn(`Active-targeting fetch failed: ${err.message} — proceeding without byPlacement filter`);
+  //     return byPlacement;
+  //   }
+  //   return byPlacement.map((row) => ({
+  //     ...row,
+  //     excludedFromTargeting: allOpen ? false : !activeKeys.has(`${row.publisherPlatform}|${row.platformPosition}`),
+  //   }));
+  // }
+
+  private tagByPlacementWithActiveTargeting(
     campaign: CampaignDocument,
-    full: FullCampaignMetrics,
     byPlacement: any[],
-    accessToken: string,
-  ): Promise<any[]> {
+  ): any[] {
     if (!byPlacement?.length) return byPlacement;
 
     // Build the set of (platform, insights-position) combos currently active across
     // all ad sets in this campaign. Union — if ANY ad set delivers a placement,
-    // it's "active" at the campaign level.
+    // it's "active" at the campaign level. Reads campaign.metaAdSets[].rawTargeting
+    // (persisted by campaign-sync every 10 min) instead of a live per-adset fetch.
     const activeKeys = new Set<string>();
     let allOpen = false; // any ad set with null targeting = all-placements-active
 
-    try {
-      for (const adSet of full.adSets ?? []) {
-        const targeting = await this.metaAds.getAdSetTargeting(
-          adSet.adSetId,
-          accessToken,
-        );
-        if (!targeting) continue;
-        const platforms: string[] | null =
-          targeting.publisher_platforms ?? null;
-        if (!platforms || platforms.length === 0) {
-          // null publisher_platforms = Meta Advantage+ Placements = all active
-          allOpen = true;
-          break;
-        }
-        for (const p of platforms) {
-          const positions: string[] | null =
-            p === 'facebook'
-              ? targeting.facebook_positions
-              : p === 'instagram'
-                ? targeting.instagram_positions
-                : p === 'audience_network'
-                  ? targeting.audience_network_positions
-                  : p === 'messenger'
-                    ? targeting.messenger_positions
-                    : null;
-          if (!positions || positions.length === 0) {
-            // null positions for a platform = all positions within that platform
-            // Mark every insights-position for that platform as active.
-            for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) {
-              activeKeys.add(`${p}|${ip}`);
-            }
-          } else {
-            for (const pos of positions) {
-              const insightsPos =
-                TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
-              activeKeys.add(`${p}|${insightsPos}`);
-            }
+    for (const adSet of ((campaign as any).metaAdSets ?? []) as any[]) {
+      const targeting = adSet.rawTargeting;
+      if (!targeting) continue;
+      const platforms: string[] | null = targeting.publisher_platforms ?? null;
+      if (!platforms || platforms.length === 0) {
+        // null publisher_platforms = Meta Advantage+ Placements = all active
+        allOpen = true;
+        break;
+      }
+      for (const p of platforms) {
+        const positions: string[] | null =
+          p === 'facebook'
+            ? targeting.facebook_positions
+            : p === 'instagram'
+              ? targeting.instagram_positions
+              : p === 'audience_network'
+                ? targeting.audience_network_positions
+                : p === 'messenger'
+                  ? targeting.messenger_positions
+                  : null;
+        if (!positions || positions.length === 0) {
+          // null positions for a platform = all positions within that platform
+          // Mark every insights-position for that platform as active.
+          for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) {
+            activeKeys.add(`${p}|${ip}`);
+          }
+        } else {
+          for (const pos of positions) {
+            const insightsPos =
+              TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
+            activeKeys.add(`${p}|${insightsPos}`);
           }
         }
       }
-    } catch (err: any) {
-      this.logger.warn(
-        `Active-targeting fetch failed: ${err.message} — proceeding without byPlacement filter`,
-      );
-      return byPlacement;
     }
 
     return byPlacement.map((row) => ({

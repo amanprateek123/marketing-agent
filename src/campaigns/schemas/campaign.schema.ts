@@ -148,7 +148,7 @@ export class Campaign {
   @Prop({ default: 0 })
   roas: number;
 
-  /** Meta action_values sum (or fallback: conversions × product.conversionValue). ₹. */
+  /** Meta action_values sum (or fallback: conversions × product.conversionValue), NET of refund haircut. ₹. */
   @Prop({ default: 0 })
   revenue: number;
 
@@ -157,6 +157,29 @@ export class Campaign {
 
   @Prop({ default: 0 })
   cpc: number;
+
+  @Prop({ default: 0 })
+  reach: number;
+
+  @Prop({ default: 0 })
+  cpm: number;
+
+  /** Average frequency across the campaign's lifetime window — feeds runSafetyRails' hard fatigue pause. */
+  @Prop({ default: 0 })
+  frequency: number;
+
+  /**
+   * `date_stop` of the campaign-level insights row — the last day Meta's
+   * reporting pipeline actually covers. Feeds the audit staleness gate
+   * (detects Meta's own reporting lag, distinct from our own sync recency —
+   * see `syncedAt`). null = no insights row returned on the last sync.
+   */
+  @Prop({ type: String, default: null })
+  dataAsOf?: string | null;
+
+  /** Raw Meta effective_status (e.g. ADSET_PAUSED, WITH_ISSUES) — distinct from the internally-mapped `status` above. */
+  @Prop({ default: '' })
+  effectiveStatus?: string;
 
   @Prop()
   lastAuditedAt?: Date;
@@ -213,7 +236,15 @@ export class Campaign {
     pauseRules: string;
   };
 
-  // Raw Meta adsets + ads — populated during sync, shown on dashboard
+  /**
+   * Raw Meta adsets + ads — populated by CampaignSyncService.syncActiveCampaigns
+   * every 10 min, shown on dashboard. This is the canonical per-adset/per-ad
+   * dataset the old audit loop and the intelligence cascade are being
+   * consolidated onto (see campaign-sync.service.ts:720-792 for adsets,
+   * :578-648 for ads — the object-literal construction there is ground
+   * truth; this interface is documentation only, Mongoose stores it as
+   * Mixed/[Object] so it isn't enforced).
+   */
   @Prop({ type: [Object], default: [] })
   metaAdSets: {
     id: string;
@@ -223,34 +254,133 @@ export class Campaign {
     dailyBudget: number;
     lifetimeBudget: number;
     optimizationGoal: string;
+    // Money
     spend: number;
-    impressions: number;
-    reach: number;
-    clicks: number;
-    conversions: number;
     revenue: number;
     roas: number;
-    ctr: number;
     cpc: number;
     cpm: number;
     cpa: number;
+    aov: number;
+    // Reach / delivery
+    impressions: number;
+    reach: number;
     frequency: number;
+    clicks: number;
+    ctr: number;
+    // Funnel
+    conversions: number;
+    addToCart: number;
+    initiateCheckout: number;
+    landingPageView: number;
+    cvr: number;
+    // Video watch counts + %
+    videoP25: number;
+    videoP50: number;
+    videoP75: number;
+    videoP100: number;
+    videoP25Pct: number;
+    videoP50Pct: number;
+    videoP75Pct: number;
+    videoP100Pct: number;
+    // Rankings — Meta only computes these over a rolling 7d window; UNKNOWN
+    // (any value outside ABOVE_AVERAGE/AVERAGE/BELOW_AVERAGE) comes through as undefined
+    qualityRanking?: string;
+    engagementRanking?: string;
+    conversionRanking?: string;
+    // Delivery insight
+    learningStage: string;
+    effectiveStatus: string;
+    // Bidding / delivery config
+    bidAmount: number;
+    bidStrategy: string;
+    billingEvent: string;
+    attributionSpec?: unknown;
+    promotedObject?: unknown;
+    startTime: string;
+    endTime: string;
+    // Targeting — legacy summary strings (dashboard)
+    age: string;
+    gender: string;
+    placement: string;
+    audienceSize?: number;
+    interests: string[];
+    geo: string;
+    // Full structured targeting (custom audiences, exclusions, regions/cities,
+    // locales, Advantage flags) — see structureTargeting() in campaign-sync.service.ts
+    targetingDetail?: Record<string, unknown>;
+    rawTargeting?: Record<string, unknown>;
+    dateStart: string;
+    dateStop: string;
     ads: {
       id: string;
       name: string;
+      status: string;
+      effectiveStatus: string;
       hookStyle: string;
       format: string;
+      creativeId: string;
+      creativeName: string;
+      creativeBody: string;
+      creativeTitle: string;
+      creativeCta: string;
+      creativeLinkUrl: string;
+      creativeVideoId: string;
+      creativeImageHash: string;
+      thumbnailUrl: string;
+      isDynamicCreative: boolean;
+      // Money (lifetime window)
       spend: number;
-      impressions: number;
-      reach: number;
-      clicks: number;
-      conversions: number;
       revenue: number;
       roas: number;
-      ctr: number;
       cpc: number;
       cpm: number;
       cpa: number;
+      aov: number;
+      // Reach / delivery
+      impressions: number;
+      reach: number;
+      frequency: number;
+      clicks: number;
+      ctr: number;
+      inlineLinkClicks: number;
+      outboundClicks: number;
+      linkCtr: number;
+      // Funnel
+      conversions: number;
+      addToCart: number;
+      initiateCheckout: number;
+      landingPageView: number;
+      cvr: number;
+      // Rankings (7d window)
+      qualityRanking?: string;
+      engagementRanking?: string;
+      conversionRanking?: string;
+      // Video
+      video3s: number;
+      thruplay: number;
+      hookRate: number;
+      holdRate: number;
+      videoP25: number;
+      videoP50: number;
+      videoP75: number;
+      videoP100: number;
+      videoP25Pct: number;
+      videoP50Pct: number;
+      videoP75Pct: number;
+      videoP100Pct: number;
+      dateStart: string;
+      dateStop: string;
+      // Recency window (7d) — fatigue/decay reads this, not lifetime
+      last7d?: {
+        spend: number;
+        impressions: number;
+        clicks: number;
+        ctr: number;
+        conversions: number;
+        revenue: number;
+        cpa: number;
+      };
     }[];
   }[];
 

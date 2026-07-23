@@ -6,6 +6,10 @@ import {
   Campaign,
   CampaignSchema,
 } from '../../campaigns/schemas/campaign.schema';
+import {
+  IntelligenceBrief,
+  IntelligenceBriefSchema,
+} from '../../pipeline/schemas/intelligence-brief.schema';
 import { META_SNAPSHOT_FETCHER } from '../snapshot/meta-snapshot-fetcher.interface';
 import { TENANT_CAMPAIGNS_PROVIDER } from '../scheduler/tenant-campaigns.provider.interface';
 import { MetaSnapshotFetcherAdapter } from './meta-snapshot-fetcher.adapter';
@@ -22,9 +26,15 @@ import { TenantCampaignsAdapter } from './tenant-campaigns.adapter';
  * transparently.
  *
  * Imports:
- *   - MongooseModule.forFeature([Campaign]) — TenantCampaignsAdapter reads campaigns
+ *   - MongooseModule.forFeature([Campaign, IntelligenceBrief]) —
+ *     MetaSnapshotFetcherAdapter reads campaign-sync's persisted data
+ *     directly (see product-resolver.util.ts for why IntelligenceBrief is
+ *     needed: per-campaign product resolution for the refund-haircut
+ *     reversal) instead of live-fetching Meta; TenantCampaignsAdapter reads
+ *     campaigns.
  *   - CompaniesModule                      — for CompaniesService (product info)
- *   - CampaignsModule                      — exports MetaMetricsService (Meta fetch)
+ *   - CampaignsModule                      — forwardRef only, no longer used
+ *     for a live Meta fetch (MetaSnapshotFetcherAdapter reads Mongo).
  *
  * forwardRef on both is defensive against future circular dependencies
  * — Companies + Campaigns already forward-ref each other.
@@ -32,7 +42,10 @@ import { TenantCampaignsAdapter } from './tenant-campaigns.adapter';
 @Global()
 @Module({
   imports: [
-    MongooseModule.forFeature([{ name: Campaign.name, schema: CampaignSchema }]),
+    MongooseModule.forFeature([
+      { name: Campaign.name, schema: CampaignSchema },
+      { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
+    ]),
     forwardRef(() => CompaniesModule),
     forwardRef(() => CampaignsModule),
   ],

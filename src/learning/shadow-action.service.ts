@@ -3,9 +3,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { ShadowAction, ShadowActionDocument } from './schemas/shadow-action.schema';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
-import { MetaMetricsService } from '../campaigns/meta-ads/meta-metrics.service';
+import { buildFullMetricsFromPersisted } from '../campaigns/meta-ads/persisted-metrics.util';
 import { CompaniesService } from '../companies/companies.service';
-import { getEffectiveConversionValue } from '../common/conversion-value.util';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -28,7 +27,6 @@ export class ShadowActionService {
     private readonly shadowModel: Model<ShadowActionDocument>,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
-    private readonly metaMetrics: MetaMetricsService,
     private readonly companiesService: CompaniesService,
   ) {}
 
@@ -175,28 +173,46 @@ export class ShadowActionService {
 
   // ──────────────────────────────────────────────────────────────────────────
 
+  // [SUPERSEDED 2026-07-23] Was a live MetaMetricsService.fetchFullMetrics
+  // call, resolving a product/conversionValue/conversionEvent from company.products
+  // first. campaign-sync.service.ts (10-min cadence) is now the sole Meta
+  // fetcher — its persisted output is already refund-haircut corrected
+  // (Phase 0), same basis this live fetch used. Kept here, commented, for
+  // reference — persisted-read implementation follows.
+  //
+  // private async fetchCurrentMetrics(shadow: ShadowActionDocument | any): Promise<ShadowAction['metricsAtT'] | null> {
+  //   try {
+  //     const campaign = await this.campaignModel.findOne({ _id: shadow.campaignId }).lean().exec();
+  //     if (!campaign) return null;
+  //     const company = await this.companiesService.findByTenantId(shadow.tenantId);
+  //     if (!company?.meta?.accessToken) return null;
+  //     const product = (company.products ?? []).find((p: any) => p.active);
+  //     const conversionValue = getEffectiveConversionValue(product);
+  //     const conversionEvent = product?.conversionEvent ?? 'Purchase';
+  //     const full = await this.metaMetrics.fetchFullMetrics(
+  //       shadow.metaCampaignId, company.meta.accessToken, conversionValue,
+  //       conversionEvent, product?.customConversionId, product?.refundRatePercent,
+  //     );
+  //     const c = full.campaign;
+  //     return {
+  //       spend: c.spend, impressions: c.impressions, clicks: c.clicks, conversions: c.conversions,
+  //       ctr: c.ctr, cpc: c.cpc, cpa: c.cpa, roas: c.roas, frequency: c.frequency,
+  //       adSets: full.adSets.map(as => ({
+  //         adSetId: as.adSetId, spend: as.spend, clicks: as.clicks,
+  //         conversions: as.conversions, ctr: as.ctr, cpa: as.cpa,
+  //       })),
+  //     } as any;
+  //   } catch (err: any) {
+  //     this.logger.warn(`Shadow fetchCurrentMetrics failed: ${err.message}`);
+  //     return null;
+  //   }
+  // }
+
   private async fetchCurrentMetrics(shadow: ShadowActionDocument | any): Promise<ShadowAction['metricsAtT'] | null> {
     try {
       const campaign = await this.campaignModel.findOne({ _id: shadow.campaignId }).lean().exec();
       if (!campaign) return null;
-      const company = await this.companiesService.findByTenantId(shadow.tenantId);
-      if (!company?.meta?.accessToken) return null;
-      const product = (company.products ?? []).find((p: any) => p.active);
-      // Net of refunds — regret labels compare CPA/ROAS deltas, so the anchor
-      // and the +72h read must use the same refund-adjusted basis as the audit.
-      const conversionValue = getEffectiveConversionValue(product);
-      const conversionEvent = product?.conversionEvent ?? 'Purchase';
-      const full = await this.metaMetrics.fetchFullMetrics(
-        shadow.metaCampaignId,
-        company.meta.accessToken,
-        conversionValue,
-        conversionEvent,
-        // Without the Custom Conversion ID, products like Nadi Leaf read 0
-        // conversions here and every regret label goes 'inconclusive' — same
-        // counting bug class fixed in audit/sync/metrics on 2026-06-10.
-        product?.customConversionId,
-        product?.refundRatePercent,
-      );
+      const full = buildFullMetricsFromPersisted(campaign);
       const c = full.campaign;
       // Schema's metricsAtT is `type: Object` (loose) — extending with `adSets` is safe
       // without a migration. shift_budget regret labeling needs per-ad-set deltas.

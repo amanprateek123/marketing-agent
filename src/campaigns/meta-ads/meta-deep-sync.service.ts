@@ -11,8 +11,10 @@ import {
   BreakdownSnapshotDocument,
 } from '../schemas/breakdown-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
 import { extractConversions, extractActionValue } from './conversion-extractor.util';
-import { getEffectiveConversionValue } from '../../common/conversion-value.util';
+import { getEffectiveConversionValue, getRefundFactor } from '../../common/conversion-value.util';
+import { buildProductResolver } from './product-resolver.util';
 import { fetchAllPagesChunked } from './meta-fetch.util';
 
 const META_API_BASE = 'https://graph.facebook.com/v21.0';
@@ -56,6 +58,8 @@ export class MetaDeepSyncService {
     private readonly timeseriesModel: Model<MetricTimeseriesDocument>,
     @InjectModel(BreakdownSnapshot.name)
     private readonly breakdownModel: Model<BreakdownSnapshotDocument>,
+    @InjectModel(IntelligenceBrief.name)
+    private readonly briefModel: Model<IntelligenceBriefDocument>,
   ) {}
 
   async deepSync(
@@ -90,6 +94,17 @@ export class MetaDeepSyncService {
       return { timeseriesRows: 0, breakdownDocs: 0, campaigns: 0, errors: ['no active campaigns'] };
     }
 
+    // Refund-rate haircut, per campaign — same fix as campaign-sync.service.ts
+    // (see product-resolver.util.ts). Without this, revenueOf() below reports
+    // GROSS pixel revenue for any refundable product, diverging from the old
+    // audit loop's NET figures.
+    const productByCampaign = await buildProductResolver(
+      this.campaignModel, this.briefModel, tenantId, campaignIds, company.products,
+    );
+    const refundFactorByCampaignId = new Map<string, number>(
+      campaignIds.map((id) => [id, getRefundFactor(productByCampaign(id))]),
+    );
+
     const backfillDays = opts?.backfillDays ?? 90;
     const until = new Date();
     const since = new Date(until.getTime() - backfillDays * 86400 * 1000);
@@ -123,7 +138,7 @@ export class MetaDeepSyncService {
             this.logger,
           );
           timeseriesRows += await this.upsertTimeseries(
-            tenantId, level, rows, idField, conversionTypes, fallbackValues,
+            tenantId, level, rows, idField, conversionTypes, fallbackValues, refundFactorByCampaignId,
           );
         } catch (err: any) {
           errors.push(`timeseries ${level}: ${err.message}`);
@@ -175,7 +190,7 @@ export class MetaDeepSyncService {
             this.logger,
           );
           breakdownDocs += await this.upsertBreakdowns(
-            tenantId, spec.type, spec.keys, rows, conversionTypes, fallbackValues,
+            tenantId, spec.type, spec.keys, rows, conversionTypes, fallbackValues, refundFactorByCampaignId,
           );
         } catch (err: any) {
           errors.push(`breakdown ${spec.type}: ${err.message}`);
@@ -203,7 +218,7 @@ export class MetaDeepSyncService {
         );
         breakdownDocs += await this.upsertBreakdowns(
           tenantId, 'hourly', ['hourly_stats_aggregated_by_advertiser_time_zone'],
-          rows, conversionTypes, fallbackValues, 'campaign',
+          rows, conversionTypes, fallbackValues, refundFactorByCampaignId, 'campaign',
         );
       } catch (err: any) {
         errors.push(`breakdown hourly: ${err.message}`);
@@ -238,7 +253,7 @@ export class MetaDeepSyncService {
           );
           breakdownDocs += await this.upsertBreakdowns(
             tenantId, assetSpec.type, [assetSpec.breakdown],
-            rows, conversionTypes, fallbackValues, 'ad',
+            rows, conversionTypes, fallbackValues, refundFactorByCampaignId, 'ad',
           );
         } catch (err: any) {
           // Expected to be empty/failing when no ads use asset_feed_spec.
@@ -291,9 +306,17 @@ export class MetaDeepSyncService {
     conversions: number,
     conversionTypes: Set<string>,
     fallbackValues: Map<string, number>,
+    refundFactorByCampaignId?: Map<string, number>,
   ): number {
     let revenue = extractActionValue(row.action_values, conversionTypes);
-    if (revenue === 0 && conversions > 0 && Array.isArray(row.actions)) {
+    if (revenue > 0) {
+      // Real pixel revenue — GROSS. Net it down by the owning campaign's
+      // product refund rate (same haircut campaign-sync.service.ts applies;
+      // see product-resolver.util.ts). The fallback branch below is already
+      // net (getEffectiveConversionValue), so it must NOT be haircut again.
+      const refundFactor = refundFactorByCampaignId?.get(row.campaign_id) ?? 1;
+      revenue = revenue * refundFactor;
+    } else if (conversions > 0 && Array.isArray(row.actions)) {
       for (const [type, val] of fallbackValues.entries()) {
         if (row.actions.some((a: any) => a?.action_type === type)) {
           revenue = conversions * val;
@@ -311,6 +334,7 @@ export class MetaDeepSyncService {
     idField: string,
     conversionTypes: Set<string>,
     fallbackValues: Map<string, number>,
+    refundFactorByCampaignId: Map<string, number>,
   ): Promise<number> {
     if (rows.length === 0) return 0;
     const ops = rows
@@ -334,7 +358,7 @@ export class MetaDeepSyncService {
                 cpc: parseFloat(r.cpc ?? '0'),
                 cpm: parseFloat(r.cpm ?? '0'),
                 conversions,
-                revenue: this.revenueOf(r, conversions, conversionTypes, fallbackValues),
+                revenue: this.revenueOf(r, conversions, conversionTypes, fallbackValues, refundFactorByCampaignId),
                 addToCart: countAction(r.actions, ['add_to_cart', 'omni_add_to_cart']),
                 initiateCheckout: countAction(r.actions, ['initiate_checkout', 'omni_initiated_checkout']),
                 landingPageView: countAction(r.actions, ['landing_page_view', 'omni_landing_page_view']),
@@ -364,6 +388,7 @@ export class MetaDeepSyncService {
     rows: any[],
     conversionTypes: Set<string>,
     fallbackValues: Map<string, number>,
+    refundFactorByCampaignId: Map<string, number>,
     level: 'adset' | 'campaign' | 'ad' = 'adset',
   ): Promise<number> {
     if (rows.length === 0) return 0;
@@ -380,7 +405,7 @@ export class MetaDeepSyncService {
     const toRow = (r: any) => {
       const conversions = extractConversions(r.actions, conversionTypes);
       const spend = parseFloat(r.spend ?? '0');
-      const revenue = this.revenueOf(r, conversions, conversionTypes, fallbackValues);
+      const revenue = this.revenueOf(r, conversions, conversionTypes, fallbackValues, refundFactorByCampaignId);
       const keys: Record<string, string> = {};
       for (const f of keyFields) {
         const v = r[f];

@@ -1,11 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import axios from 'axios';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
 import { extractConversions, extractActionValue } from './conversion-extractor.util';
-import { getEffectiveConversionValue } from '../../common/conversion-value.util';
+import { getEffectiveConversionValue, getRefundFactor } from '../../common/conversion-value.util';
+import { buildProductResolver } from './product-resolver.util';
+import {
+  fetchAllPages as sharedFetchAllPages,
+  fetchAllPagesChunked as sharedFetchAllPagesChunked,
+} from './meta-fetch.util';
 import {
   inferHookStyleFromCopy,
   inferAudienceType as sharedInferAudienceType,
@@ -36,6 +41,22 @@ const AD_LIFETIME_METRIC_FIELDS = [
   'dateStart', 'dateStop', 'last7d',
 ] as const;
 
+/**
+ * Campaign-level top-line fields, same preservation rule as
+ * AD_LIFETIME_METRIC_FIELDS above but for the campaign insights call (round 3
+ * of syncActiveCampaigns) — previously ungated: a rate-limited/empty response
+ * for that call silently zeroed campaign.spend/impressions/clicks/conversions
+ * via an unconditional $set, with only the audit loop's own live-fetch
+ * "emptyFetchOnSpendingCampaign" check catching it after the fact. Now that
+ * this sync is meant to be the sole source of truth other systems read from
+ * (no live re-fetch behind it to catch a zeroed value), the same
+ * preserve-on-failure guard used for ad-lifetime metrics applies here too.
+ */
+const CAMPAIGN_METRIC_FIELDS = [
+  'spend', 'impressions', 'clicks', 'reach', 'conversions',
+  'roas', 'ctr', 'cpc', 'cpm', 'frequency', 'revenue', 'dataAsOf',
+] as const;
+
 const META_TO_INTERNAL_STATUS: Record<string, string> = {
   ACTIVE: 'active',
   PAUSED: 'paused',
@@ -64,6 +85,8 @@ export class CampaignSyncService {
   constructor(
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(IntelligenceBrief.name)
+    private readonly briefModel: Model<IntelligenceBriefDocument>,
   ) {}
 
   /**
@@ -74,9 +97,17 @@ export class CampaignSyncService {
     tenantId: string,
     enrichedCampaigns: any[],
     conversionTypes: Set<string>,
+    products?: any[],
   ): Promise<{ synced: number; created: number }> {
     let synced = 0;
     let created = 0;
+    // Same refund-rate haircut syncActiveCampaigns applies (see there for
+    // rationale) — a single tenant-wide active product, since this one-time
+    // import path has no per-campaign brief/product resolution wired. Good
+    // enough for historical import; syncActiveCampaigns is the sole recurring
+    // writer active campaigns are actually consolidated onto.
+    const defaultProduct = (products ?? []).find((p: any) => p.active);
+    const refundFactor = getRefundFactor(defaultProduct);
 
     for (const campaign of enrichedCampaigns) {
       const insights = campaign.insights ?? {};
@@ -87,8 +118,9 @@ export class CampaignSyncService {
       const cpc = parseFloat(insights.cpc ?? '0');
       const conversions = this.extractConversions(insights.actions, conversionTypes);
       // Real ROAS: pull action_values from Meta. Each pixel event's `value`
-      // param sums into action_values. ROAS = sum(value) / spend.
-      const actionValue = extractActionValue(insights.action_values, conversionTypes);
+      // param sums into action_values. ROAS = sum(value) / spend. Net down
+      // by the refund haircut — this is gross pixel revenue otherwise.
+      const actionValue = extractActionValue(insights.action_values, conversionTypes) * refundFactor;
 
       const metaStatus = campaign.status ?? 'PAUSED';
       const internalStatus = META_TO_INTERNAL_STATUS[metaStatus] ?? 'paused';
@@ -98,7 +130,7 @@ export class CampaignSyncService {
 
       // ROAS resolution: prefer Meta-reported action_values (true value-tracked);
       // fall back to (conversions × 0) → 0 when neither available. The
-      // syncFromEnrichedData path doesn't have product context here, so it can't
+      // syncFromEnrichedData path doesn't have per-campaign product context here, so it can't
       // do the fallback-to-product.conversionValue trick — that's only available
       // in syncActiveCampaigns where we have company.products in scope.
       const roas = spend > 0 && actionValue > 0 ? actionValue / spend : 0;
@@ -210,7 +242,7 @@ export class CampaignSyncService {
         const res = await this.fetchAllPages(
           `${META_API_BASE}/${accountId}/campaigns`,
           {
-            fields: 'id,name,status,objective,daily_budget,lifetime_budget,start_time,stop_time,bid_strategy,buying_type,smart_promotion_type,special_ad_categories,spend_cap',
+            fields: 'id,name,status,effective_status,objective,daily_budget,lifetime_budget,start_time,stop_time,bid_strategy,buying_type,smart_promotion_type,special_ad_categories,spend_cap',
             filtering,
             limit: '200',
             access_token: accessToken,
@@ -306,7 +338,12 @@ export class CampaignSyncService {
         const insightsRes = await this.fetchAllPagesChunked(
           `${META_API_BASE}/${accountId}/insights`,
           {
-            fields: 'campaign_id,spend,impressions,clicks,ctr,cpc,actions,action_values',
+            // reach/cpm/frequency/date_stop added alongside the pre-existing
+            // fields — frequency feeds runSafetyRails' hard fatigue pause,
+            // date_stop feeds the staleness gate's reporting-lag check, both
+            // previously only available from the old audit loop's own live
+            // fetch (meta-metrics.service.ts). This is the sole fetcher now.
+            fields: 'campaign_id,spend,impressions,clicks,reach,ctr,cpc,cpm,frequency,actions,action_values,date_stop',
             level: 'campaign',
             date_preset: 'maximum',
             limit: '200',
@@ -321,6 +358,38 @@ export class CampaignSyncService {
         for (const row of insightsRes.data?.data ?? []) {
           insightsMap.set(row.campaign_id, row);
         }
+
+        // Detect a total fetch failure for THIS call (rate limit / timeout —
+        // see CAMPAIGN_METRIC_FIELDS comment) and preload each campaign's
+        // last-known top-line metrics so they can be preserved below instead
+        // of zeroed. Mirrors the existing adLifetimeFetchFailed guard.
+        const campaignInsightsFetchFailed = campaignIds.length > 0 && insightsMap.size === 0;
+        const prevCampaignMetricsById = new Map<string, any>();
+        if (campaignInsightsFetchFailed) {
+          const existing = await this.campaignModel
+            .find(
+              { tenantId, metaCampaignId: { $in: campaignIds } },
+              { metaCampaignId: 1, spend: 1, impressions: 1, clicks: 1, reach: 1, conversions: 1, roas: 1, ctr: 1, cpc: 1, cpm: 1, frequency: 1, revenue: 1, dataAsOf: 1 },
+            )
+            .lean()
+            .exec();
+          for (const c of existing) prevCampaignMetricsById.set((c as any).metaCampaignId, c);
+          this.logger.warn(
+            `Campaign insights fetch returned 0 rows for ${accountId} — preserving previous top-line metrics for ${prevCampaignMetricsById.size} campaigns instead of zeroing them`,
+          );
+        }
+
+        // Per-campaign product resolution — needed for the refund-rate
+        // haircut below (net-of-refund revenue is per-product, not
+        // per-tenant). Batched once per account instead of once per campaign.
+        const productByCampaign = await buildProductResolver(
+          this.campaignModel,
+          this.briefModel,
+          tenantId,
+          campaignIds,
+          company.products,
+        );
+
         await new Promise(resolve => setTimeout(resolve, 3000));
 
         // Ad-set metadata — restricted to ACTIVE campaigns only. Fetching ad
@@ -503,15 +572,27 @@ export class CampaignSyncService {
           const spend = parseFloat(insights.spend ?? '0');
           const impressions = parseInt(insights.impressions ?? '0', 10);
           const clicks = parseInt(insights.clicks ?? '0', 10);
+          const reach = parseInt(insights.reach ?? '0', 10);
           const ctr = parseFloat(insights.ctr ?? '0');
           const cpc = parseFloat(insights.cpc ?? '0');
+          const cpm = parseFloat(insights.cpm ?? '0');
+          const frequency = parseFloat(insights.frequency ?? '0');
+          const dataAsOf = insights.date_stop ?? null;
           const conversions = this.extractConversions(insights.actions, conversionTypes);
+          const product = productByCampaign(campaign.id);
+          const refundFactor = getRefundFactor(product);
 
           // Revenue + ROAS: prefer Meta's action_values (true pixel-tracked
-          // revenue); fall back to conversions × product.conversionValue when
-          // the pixel doesn't fire with a `value` param.
+          // revenue, GROSS — net it down by the product's refund rate, same
+          // haircut meta-metrics.service.ts applies); fall back to
+          // conversions × product.conversionValue (already net via
+          // getEffectiveConversionValue in fallbackValueByConversionType)
+          // when the pixel doesn't fire with a `value` param — that branch
+          // must NOT be haircut again, or refunds get double-counted.
           let actionValue = extractActionValue(insights.action_values, conversionTypes);
-          if (actionValue === 0 && conversions > 0) {
+          if (actionValue > 0) {
+            actionValue = actionValue * refundFactor;
+          } else if (conversions > 0) {
             // Pick the product-specific fallback: match any custom-conversion
             // that this campaign's insights.actions reported.
             for (const [type, val] of fallbackValueByConversionType.entries()) {
@@ -521,7 +602,31 @@ export class CampaignSyncService {
               }
             }
           }
-          const roas = spend > 0 && actionValue > 0 ? actionValue / spend : 0;
+          let roas = spend > 0 && actionValue > 0 ? actionValue / spend : 0;
+
+          // Preserve prior top-line metrics on a total fetch failure instead
+          // of writing zeros (see CAMPAIGN_METRIC_FIELDS / the guard above).
+          let finalSpend = spend, finalImpressions = impressions, finalClicks = clicks,
+            finalReach = reach, finalConversions = conversions, finalRoas = roas,
+            finalCtr = ctr, finalCpc = cpc, finalCpm = cpm, finalFrequency = frequency,
+            finalRevenue = actionValue, finalDataAsOf = dataAsOf;
+          if (campaignInsightsFetchFailed) {
+            const prev = prevCampaignMetricsById.get(campaign.id);
+            if (prev) {
+              finalSpend = prev.spend ?? spend;
+              finalImpressions = prev.impressions ?? impressions;
+              finalClicks = prev.clicks ?? clicks;
+              finalReach = prev.reach ?? reach;
+              finalConversions = prev.conversions ?? conversions;
+              finalRoas = prev.roas ?? roas;
+              finalCtr = prev.ctr ?? ctr;
+              finalCpc = prev.cpc ?? cpc;
+              finalCpm = prev.cpm ?? cpm;
+              finalFrequency = prev.frequency ?? frequency;
+              finalRevenue = prev.revenue ?? actionValue;
+              finalDataAsOf = prev.dataAsOf ?? dataAsOf;
+            }
+          }
 
           const internalStatus = META_TO_INTERNAL_STATUS[campaign.status] ?? 'active';
 
@@ -546,7 +651,9 @@ export class CampaignSyncService {
               const adClicks = parseInt(adi.clicks ?? '0', 10);
               const adConversions = this.extractConversions(adi.actions, conversionTypes);
               let adActionValue = extractActionValue(adi.action_values, conversionTypes);
-              if (adActionValue === 0 && adConversions > 0) {
+              if (adActionValue > 0) {
+                adActionValue = adActionValue * refundFactor;
+              } else if (adConversions > 0) {
                 for (const [type, val] of fallbackValueByConversionType.entries()) {
                   if (this.hasActionOfType(adi.actions, type)) {
                     adActionValue = adConversions * val;
@@ -642,7 +749,10 @@ export class CampaignSyncService {
                   clicks: parseInt(ad7.clicks ?? '0', 10),
                   ctr: parseFloat(ad7.ctr ?? '0'),
                   conversions: ad7Conversions,
-                  revenue: extractActionValue(ad7.action_values, conversionTypes),
+                  // Gross-only, no fallback (matches pre-existing behavior) —
+                  // still worth netting the pixel-revenue branch so this
+                  // window is on the same refund basis as the lifetime figures above.
+                  revenue: extractActionValue(ad7.action_values, conversionTypes) * refundFactor,
                   cpa: ad7Conversions > 0 ? ad7Spend / ad7Conversions : 0,
                 },
               } as Record<string, unknown>;
@@ -684,7 +794,9 @@ export class CampaignSyncService {
             // prefer Meta's action_values, fall back to conversions ×
             // product.conversionValue when the pixel event has no value param.
             let asActionValue = extractActionValue(asi.action_values, conversionTypes);
-            if (asActionValue === 0 && asConversions > 0) {
+            if (asActionValue > 0) {
+              asActionValue = asActionValue * refundFactor;
+            } else if (asConversions > 0) {
               for (const [type, val] of fallbackValueByConversionType.entries()) {
                 if (this.hasActionOfType(asi.actions, type)) {
                   asActionValue = asConversions * val;
@@ -868,14 +980,19 @@ export class CampaignSyncService {
             // already writes at launch time (accountId is normalizeAccountId'd
             // above, before this loop starts).
             metaAccountId: accountId,
-            spend,
-            impressions,
-            clicks,
-            conversions,
-            roas,
-            ctr,
-            cpc,
-            revenue: actionValue,
+            spend: finalSpend,
+            impressions: finalImpressions,
+            clicks: finalClicks,
+            reach: finalReach,
+            conversions: finalConversions,
+            roas: finalRoas,
+            ctr: finalCtr,
+            cpc: finalCpc,
+            cpm: finalCpm,
+            frequency: finalFrequency,
+            revenue: finalRevenue,
+            dataAsOf: finalDataAsOf,
+            effectiveStatus: campaign.effective_status ?? '',
             // Structure — previously only written on insert, so budget stayed
             // stale (0) forever on existing docs. Now refreshed every sync.
             budget: campaignBudget,
@@ -959,6 +1076,39 @@ export class CampaignSyncService {
    * fetchAllPages per chunk, merges results. Use for any /insights call
    * that filters by campaign.id, ad set ID, or ad ID across many entities.
    */
+  // [SUPERSEDED 2026-07-23] Original fetchAllPagesChunked body — swallowed
+  // errors via fetchAllPages below with no retry (fetchWithRetry above was
+  // defined but never actually wired to either helper). meta-deep-sync.ts
+  // already used the shared, retry-enabled meta-fetch.util.ts version; this
+  // service is now the sole Meta fetcher for the consolidation, so it needs
+  // at least the same resilience. Kept here, commented, for reference —
+  // delegating implementation follows.
+  //
+  // private async fetchAllPagesChunked(
+  //   initialUrl: string,
+  //   baseParams: any,
+  //   filterField: string,         // e.g. 'campaign.id'
+  //   ids: string[],
+  //   label: string,
+  //   chunkSize = 50,
+  // ): Promise<{ data: { data: any[] } }> {
+  //   const allRows: any[] = [];
+  //   for (let i = 0; i < ids.length; i += chunkSize) {
+  //     const chunk = ids.slice(i, i + chunkSize);
+  //     const baseFiltering = baseParams.filtering ? JSON.parse(baseParams.filtering) : [];
+  //     const otherFilters = baseFiltering.filter((f: any) => f.field !== filterField);
+  //     const filtering = JSON.stringify([
+  //       ...otherFilters,
+  //       { field: filterField, operator: 'IN', value: chunk },
+  //     ]);
+  //     const chunkParams = { ...baseParams, filtering };
+  //     const res = await this.fetchAllPages(initialUrl, chunkParams, `${label} chunk ${i / chunkSize + 1}/${Math.ceil(ids.length / chunkSize)}`);
+  //     allRows.push(...(res.data?.data ?? []));
+  //   }
+  //   this.logger.log(`${label}: ${allRows.length} rows fetched across ${Math.ceil(ids.length / chunkSize)} chunks`);
+  //   return { data: { data: allRows } };
+  // }
+
   private async fetchAllPagesChunked(
     initialUrl: string,
     baseParams: any,
@@ -967,24 +1117,10 @@ export class CampaignSyncService {
     label: string,
     chunkSize = 50,
   ): Promise<{ data: { data: any[] } }> {
-    const allRows: any[] = [];
-    for (let i = 0; i < ids.length; i += chunkSize) {
-      const chunk = ids.slice(i, i + chunkSize);
-      // Compose filtering: merge any base filtering with the chunk's ID list.
-      const baseFiltering = baseParams.filtering ? JSON.parse(baseParams.filtering) : [];
-      // Drop any existing filter on filterField so the chunk's IDs are the
-      // only constraint on that field.
-      const otherFilters = baseFiltering.filter((f: any) => f.field !== filterField);
-      const filtering = JSON.stringify([
-        ...otherFilters,
-        { field: filterField, operator: 'IN', value: chunk },
-      ]);
-      const chunkParams = { ...baseParams, filtering };
-      const res = await this.fetchAllPages(initialUrl, chunkParams, `${label} chunk ${i / chunkSize + 1}/${Math.ceil(ids.length / chunkSize)}`);
-      allRows.push(...(res.data?.data ?? []));
-    }
-    this.logger.log(`${label}: ${allRows.length} rows fetched across ${Math.ceil(ids.length / chunkSize)} chunks`);
-    return { data: { data: allRows } };
+    const rows = await sharedFetchAllPagesChunked(
+      initialUrl, baseParams, filterField, ids, label, this.logger, chunkSize,
+    );
+    return { data: { data: rows } };
   }
 
   /**
@@ -1004,29 +1140,42 @@ export class CampaignSyncService {
    * drop-in compatibility with existing call sites that expected
    * axios-response objects.
    */
+  // [SUPERSEDED 2026-07-23] Original fetchAllPages body — no retry on
+  // transient/rate-limit errors, unlike the shared meta-fetch.util.ts version
+  // deep-sync already used. Kept here, commented, for reference — delegating
+  // implementation follows.
+  //
+  // private async fetchAllPages(
+  //   initialUrl: string,
+  //   initialParams: any,
+  //   label: string,
+  //   maxPages = 20,
+  // ): Promise<{ data: { data: any[] } }> {
+  //   const rows: any[] = [];
+  //   let url: string | null = initialUrl;
+  //   let params: any = initialParams;
+  //   for (let page = 0; page < maxPages && url; page++) {
+  //     try {
+  //       const res: any = await axios.get(url, { params, timeout: 60000 });
+  //       rows.push(...(res.data?.data ?? []));
+  //       url = res.data?.paging?.next ?? null;
+  //       params = undefined;
+  //     } catch (err: any) {
+  //       this.logger.warn(`${label} fetch failed (page ${page}): ${err.response?.data?.error?.message ?? err.message}`);
+  //       url = null;
+  //     }
+  //   }
+  //   this.logger.log(`${label}: ${rows.length} rows fetched across pages`);
+  //   return { data: { data: rows } };
+  // }
+
   private async fetchAllPages(
     initialUrl: string,
     initialParams: any,
     label: string,
     maxPages = 20,
   ): Promise<{ data: { data: any[] } }> {
-    const rows: any[] = [];
-    let url: string | null = initialUrl;
-    let params: any = initialParams;
-    for (let page = 0; page < maxPages && url; page++) {
-      try {
-        const res: any = await axios.get(url, { params, timeout: 60000 });
-        rows.push(...(res.data?.data ?? []));
-        // Meta returns paging.next as a fully-qualified URL with cursor
-        // embedded. Pass with no params on subsequent pages.
-        url = res.data?.paging?.next ?? null;
-        params = undefined;
-      } catch (err: any) {
-        this.logger.warn(`${label} fetch failed (page ${page}): ${err.response?.data?.error?.message ?? err.message}`);
-        url = null;
-      }
-    }
-    this.logger.log(`${label}: ${rows.length} rows fetched across pages`);
+    const rows = await sharedFetchAllPages(initialUrl, initialParams, label, this.logger, maxPages);
     return { data: { data: rows } };
   }
 
