@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Patch, Param, Body, NotFoundException, BadRequestException, Logger, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, NotFoundException, BadRequestException, Logger, Query, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CreativeProducerService, BriefData } from './creative-producer/creative-producer.service';
@@ -264,6 +265,38 @@ export class CreativeController {
     }
 
     return pkg;
+  }
+
+  /**
+   * POST /api/v1/creative/:tenantId/upload-file
+   * Upload a local file (image/video picked or dropped in the browser)
+   * straight to this tenant's S3 bucket — the file-upload counterpart to
+   * rehostMedia below, for when you have the asset on disk rather than
+   * already hosted at a URL. Returns a permanent S3 URL, same shape as
+   * rehostMedia, so callers (e.g. the creative upload form) can treat both
+   * paths identically once they get a URL back.
+   * multipart/form-data body: single field named "file".
+   */
+  @Post(':tenantId/upload-file')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 250 * 1024 * 1024 } }))
+  async uploadFile(
+    @Param('tenantId') tenantId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) {
+      throw new BadRequestException('file is required');
+    }
+    if (!/^image\/|^video\//.test(file.mimetype)) {
+      throw new BadRequestException(`Unsupported file type: ${file.mimetype}`);
+    }
+
+    const ext = file.originalname.split('.').pop()?.toLowerCase() || (file.mimetype.startsWith('video') ? 'mp4' : 'png');
+    const key = `${tenantId}/uploads/${Date.now()}.${ext}`;
+
+    this.logger.log(`Uploading local file to S3: tenantId=${tenantId} originalname=${file.originalname} size=${file.size}`);
+
+    const url = await this.s3Service.uploadBuffer(file.buffer, key, file.mimetype);
+    return { url };
   }
 
   /**
