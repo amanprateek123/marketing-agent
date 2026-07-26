@@ -14,6 +14,27 @@ export interface PrimeOptions {
   skipSync?: boolean;
   /** Cap on how many active campaigns to analyze per run. */
   maxCampaigns?: number;
+  /**
+   * Analyze EVERY eligible campaign instead of the top-N by spend.
+   *
+   * The default top-N exists to bound a single tick's Meta API cost. On the
+   * scheduled sweep that bound is the wrong trade: a campaign outside the top
+   * N is never looked at by anything, so a small campaign quietly burning
+   * money is invisible to the optimiser forever.
+   */
+  analyzeAll?: boolean;
+  /**
+   * Run the cascade on these campaigns specifically (Mongo _id or
+   * metaCampaignId), instead of the top-N-by-spend active selection.
+   *
+   * Explicit targeting deliberately bypasses BOTH the `status: 'active'` and
+   * the managed-source filters. Those exist to stop the automatic scheduler
+   * burning cycles on campaigns nobody here controls — but when an operator
+   * names a campaign, they have already made that judgement, and silently
+   * returning "0 analyzed" because the campaign's source is 'manual' is the
+   * kind of no-op that reads as a broken feature.
+   */
+  campaignIds?: string[];
 }
 
 export interface CampaignCascadeResult {
@@ -108,13 +129,43 @@ export class PrimeService {
     // dashboard's manual-create form). Excludes 'manual' — campaigns a
     // tenant created directly in Meta Ads Manager, synced in for visibility
     // only — see isManagedCampaignSource() in campaign.schema.ts.
+    const explicitIds = (opts.campaignIds ?? []).map((s) => String(s).trim()).filter(Boolean);
     const managedSources = (['agent', 'manual', 'human'] as CampaignSource[]).filter(isManagedCampaignSource);
-    const activeCampaigns = await this.campaignModel
-      .find({ tenantId, status: 'active', source: { $in: managedSources } })
-      .sort({ spend: -1 })
-      .limit(maxCampaigns)
-      .lean()
-      .exec();
+
+    const activeCampaigns = explicitIds.length
+      ? await this.campaignModel
+          .find({
+            tenantId,
+            $or: [
+              { metaCampaignId: { $in: explicitIds } },
+              ...(explicitIds.every((id) => /^[a-f0-9]{24}$/i.test(id))
+                ? [{ _id: { $in: explicitIds } }]
+                : explicitIds
+                    .filter((id) => /^[a-f0-9]{24}$/i.test(id))
+                    .map((id) => ({ _id: id }))),
+            ],
+          })
+          .lean()
+          .exec()
+      : await (() => {
+          const q = this.campaignModel
+            .find({ tenantId, status: 'active', source: { $in: managedSources } })
+            .sort({ spend: -1 });
+          return opts.analyzeAll ? q.lean().exec() : q.limit(maxCampaigns).lean().exec();
+        })();
+
+    if (explicitIds.length && activeCampaigns.length < explicitIds.length) {
+      const found = new Set(
+        activeCampaigns.flatMap((c) => [
+          String((c as { _id: unknown })._id),
+          c.metaCampaignId ?? '',
+        ]),
+      );
+      const missing = explicitIds.filter((id) => !found.has(id));
+      if (missing.length) {
+        this.log.warn(`[${tenantId}] requested campaigns not found: ${missing.join(', ')}`);
+      }
+    }
 
     if (activeCampaigns.length === 0) {
       return {

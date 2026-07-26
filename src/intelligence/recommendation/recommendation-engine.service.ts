@@ -2,7 +2,29 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+
+/**
+ * Stable identity for a proposed action within a cycle.
+ *
+ * Was randomUUID(), which made the `{cycleId, actionId}` unique index on
+ * intelligence_decisions structurally unable to fire: two runs of the same
+ * cycle minted different ids for the identical action, both inserted, and the
+ * review UI showed the same suggestion twice ("4 options" that were really 2).
+ * Hashing the action's own identity means a re-run collides with the first
+ * insert and is rejected by the index, which is what that index was for.
+ */
+function stableActionId(
+  cycleId: string,
+  type: string,
+  targetType: string,
+  targetId: string,
+): string {
+  return createHash('sha1')
+    .update(`${cycleId}|${type}|${targetType}|${targetId}`)
+    .digest('hex')
+    .slice(0, 32);
+}
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
@@ -480,7 +502,32 @@ export class RecommendationEngine extends BaseEngine<
     if (shiftAction) candidates.push(shiftAction);
 
     // Drop gated candidates (their gatedBy tag stays for observability).
-    const filtered = candidates.filter((c) => c.gatedBy.length === 0);
+    const ungated = candidates.filter((c) => c.gatedBy.length === 0);
+
+    // Collapse the same lever proposed at two scopes.
+    //
+    // Signals fire independently at campaign and ad-set level, and
+    // ACTION_SCOPE deliberately allows several action types at both — so a
+    // winner_emerging on a single-ad-set campaign produces "increase budget
+    // (whole campaign)" AND "increase budget (ad group)", which move the exact
+    // same money. The reviewer sees two options and no way to tell them apart.
+    //
+    // Only collapses when the campaign genuinely has one ad set. With two or
+    // more, campaign-level and ad-set-level budget changes are different
+    // decisions (all ad sets vs one) and both deserve to be offered.
+    const adSetCount = Object.keys(adSetLevel ?? {}).length;
+    const filtered =
+      adSetCount <= 1
+        ? ungated.filter((c) => {
+            if (c.targetType !== 'campaign') return true;
+            // Drop the campaign-scoped twin; the ad-set target is the more
+            // specific one and maps directly to a Meta ad-set id, whereas the
+            // campaign target carries our internal campaign id.
+            return !ungated.some(
+              (o) => o.type === c.type && o.targetType === 'adset',
+            );
+          })
+        : ungated;
 
     // Rank by score — which now folds in signal corroboration, diagnosis
     // agreement, forecast trajectory and portfolio context, not just the
@@ -920,7 +967,12 @@ export class RecommendationEngine extends BaseEngine<
       .join(' ');
 
     return {
-      actionId: randomUUID(),
+      actionId: stableActionId(
+        this.currentCycleId ?? '',
+        type,
+        targetType,
+        targetId,
+      ),
       type,
       targetType,
       targetId,
@@ -1049,7 +1101,12 @@ export class RecommendationEngine extends BaseEngine<
     ];
 
     return {
-      actionId: randomUUID(),
+      actionId: stableActionId(
+        this.currentCycleId ?? '',
+        'shift_budget_between_adsets',
+        'adset',
+        loser.id,
+      ),
       type: 'shift_budget_between_adsets',
       targetType: 'adset',
       targetId: loser.id,

@@ -51,6 +51,7 @@ export class SnapshotBuilder {
         learningStage: this.mapLearningStage(input.bundle.campaign.learning_stage),
         deliveryStatus: input.bundle.campaign.effective_status,
         accountId: input.bundle.campaign.account_id ?? '',
+        objective: input.bundle.campaign.objective || undefined,
       },
       missingFields: this.detectMissingFields(campaignMetrics, adSetMetrics),
     };

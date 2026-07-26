@@ -19,6 +19,7 @@ export class EnrichedCampaign {
   data: any;
 }
 
-export const EnrichedCampaignSchema = SchemaFactory.createForClass(EnrichedCampaign);
+export const EnrichedCampaignSchema =
+  SchemaFactory.createForClass(EnrichedCampaign);
 
-EnrichedCampaignSchema.index({ importId: 1 });
+// EnrichedCampaignSchema.index({ importId: 1 });

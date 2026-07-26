@@ -25,6 +25,23 @@ export interface ImageCreative {
   editInstructions?: string[];  // free-text tweaks applied via edit-image, most recent last
   aspectRatio?: string;   // '9:16' | '1:1' | '4:5' — what was requested at generation time
   resolution?: string;    // '1K' | '2K' | '4K'
+  // MEASURED pixel dimensions, written by ImageResizerService whenever it
+  // downloads an asset. Exists because `aspectRatio` records what was
+  // REQUESTED and generators don't always honour it — gpt-image has no native
+  // 4:5 and snaps those requests to 1024x1024, and its "9:16" is really
+  // 1024x1536 (2:3). Anything choosing an asset by shape (launch placement
+  // selection, gallery size badges) must read these, never the tag; the tag is
+  // kept only as a record of intent. Absent on entries never measured yet.
+  width?: number;
+  height?: number;
+  // Set when ImageResizerService produced this entry by canvas-extending
+  // another asset (value = that asset's imageUrl) rather than generating or
+  // uploading it. Two consequences: the extend path never uses such an entry
+  // as its own source (stacking blur margins shrinks the real content to a
+  // stamp), and UI can label it as a derived placement size rather than a
+  // distinct creative. Unlike `aspectRatio`, which records what was
+  // REQUESTED, an extended entry's aspectRatio is what it actually measures.
+  extendedFrom?: string;
   // Soft-delete, reversible — never read by campaign launch code, so a
   // rejected-but-still-referenced-by-a-campaign asset stays fully launchable.
   // GalleryService's live-resolve join skips rejected assets, so this alone

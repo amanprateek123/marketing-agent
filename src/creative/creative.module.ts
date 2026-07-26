@@ -1,6 +1,7 @@
 import { forwardRef, Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { S3Service } from '../common/storage/s3.service';
+import { ImageResizerService } from '../common/media/image-resizer.service';
 import { CreativePackage, CreativePackageSchema } from './schemas/creative-package.schema';
 import { CreativeQaFailure, CreativeQaFailureSchema } from './schemas/creative-qa-failure.schema';
 import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/intelligence-brief.schema';
@@ -46,6 +47,7 @@ import { GalleryController } from '../gallery/gallery.controller';
   controllers: [CreativeController, GalleryController],
   providers: [
     S3Service,
+    ImageResizerService,
     CopyWriterService,
     ImageGeneratorService,
     HeygenService,

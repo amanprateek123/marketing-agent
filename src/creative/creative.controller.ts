@@ -17,6 +17,7 @@ import { CreativePackage, CreativePackageDocument } from './schemas/creative-pac
 import { CANONICAL_LANGUAGES } from '../common/creative/language-utils';
 import { listFormatSpecs, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../common/creative/format-specs';
 import { S3Service } from '../common/storage/s3.service';
+import { ImageResizerService, EXTEND_RATIOS, ExtendRatio } from '../common/media/image-resizer.service';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 import { GalleryService } from '../gallery/gallery.service';
 import {
@@ -64,6 +65,7 @@ export class CreativeController {
     private readonly creativePackageModel: Model<CreativePackageDocument>,
     private readonly s3Service: S3Service,
     private readonly galleryService: GalleryService,
+    private readonly imageResizer: ImageResizerService,
   ) {}
 
   /**
@@ -924,9 +926,78 @@ Return ONLY the image prompt, nothing else.
   }
 
   /**
-   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image
-   * Retry image generation using the saved imagePrompt (does NOT rewrite the prompt).
+   * POST /api/v1/creative/:tenantId/packages/:creativePackageId/generate-sizes
+   * Fill in missing placement sizes by canvas-extending the variant's existing
+   * image — no crop, no model call, no cost. Meta centre-crops a single asset
+   * per placement, which on a headline-top/CTA-bottom creative removes both;
+   * shipping an asset already at the target ratio removes that failure mode.
+   *
+   * Body: { variantIndex?: number, ratios?: ('9:16'|'4:5'|'1:1'|'16:9')[] }
+   *   variantIndex — omit to do every variant in the package
+   *   ratios       — defaults to all four
+   *
+   * Synchronous (~0.3s per size, local CPU only) unlike the generate/regenerate
+   * endpoints, which are fire-and-forget because they wait on an image model.
+   * Existing entries are never modified or replaced, only added alongside.
    */
+  @Post(':tenantId/packages/:creativePackageId/generate-sizes')
+  async generateSizes(
+    @Param('tenantId') tenantId: string,
+    @Param('creativePackageId') creativePackageId: string,
+    @Body() body: { variantIndex?: number; ratios?: ExtendRatio[] } = {},
+  ) {
+    const pkg = await this.creativePackageModel.findOne({ _id: creativePackageId, tenantId }).exec();
+    if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
+
+    const requested = body.ratios?.length ? body.ratios : EXTEND_RATIOS;
+    const invalid = requested.filter((r) => !EXTEND_RATIOS.includes(r));
+    if (invalid.length) {
+      throw new BadRequestException(`Unsupported ratio(s): ${invalid.join(', ')}. Valid: ${EXTEND_RATIOS.join(', ')}`);
+    }
+
+    const images: any[] = (pkg as any).images ?? [];
+    if (!images.some((img) => img.imageUrl)) {
+      throw new BadRequestException(`Creative package ${creativePackageId} has no images to extend`);
+    }
+
+    this.logger.log(`Generating placement sizes: tenantId=${tenantId} packageId=${creativePackageId} variant=${body.variantIndex ?? 'all'} ratios=${requested.join(',')}`);
+
+    // No includeRejected here (unlike the launch path): a human rejected these,
+    // so don't spend S3 rebuilding sizes for them.
+    const { images: updated, added, byRatio } = await this.imageResizer.ensureSizes(
+      images,
+      requested,
+      tenantId,
+      (pkg as any).runId ?? 'manual',
+      { variantIndex: body.variantIndex },
+    );
+
+    if (added > 0) {
+      await this.creativePackageModel.updateOne(
+        { _id: creativePackageId, tenantId },
+        { $set: { images: updated } },
+      );
+    }
+
+    return {
+      status: 'ok',
+      creativePackageId,
+      added,
+      // Which asset now satisfies which ratio, per variant, by measurement —
+      // the same guarantee campaign launch selects from.
+      byRatio,
+      images: updated.map((img: any) => ({
+        variantIndex: img.variantIndex,
+        aspectRatio: img.aspectRatio ?? null,
+        // Measured, where known — `aspectRatio` above is only what was requested.
+        width: img.width ?? null,
+        height: img.height ?? null,
+        imageUrl: img.imageUrl,
+        extendedFrom: img.extendedFrom ?? null,
+      })),
+    };
+  }
+
   /**
    * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image
    * Retry image generation for a specific variant using the saved imagePrompt.

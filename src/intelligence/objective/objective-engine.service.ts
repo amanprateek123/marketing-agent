@@ -61,8 +61,16 @@ export class ObjectiveEngine extends BaseEngine<'objective', ObjectiveData> {
 
   protected async compute(deps: ComputeDeps<'objective'>): Promise<ObjectiveData> {
     const snapshot = deps.snapshot!;
-    const rawMeta = (snapshot.data as { rawCampaign?: { objective?: string } })
-      ?.rawCampaign;
+    // Read from snapshot.meta.objective — the slice field. The older
+    // rawCampaign lookup is kept as a fallback for cycles whose slices predate
+    // that field, but it never resolved on the live path: rawCampaign is
+    // persisted to the snapshot DOCUMENT only and is absent from the slice
+    // handed to this engine, so every campaign silently resolved to 'sales'.
+    const snap = snapshot.data as {
+      meta?: { objective?: string };
+      rawCampaign?: { objective?: string };
+    };
+    const rawMeta = { objective: snap.meta?.objective ?? snap.rawCampaign?.objective };
 
     // Deterministic resolution ladder — for now default 'sales'; extended
     // when Campaign/Company adapters expose campaign.objective + company.primaryObjective.

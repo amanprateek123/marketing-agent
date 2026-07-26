@@ -7,6 +7,7 @@ import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/sch
 import { extractConversions, extractActionValue } from './conversion-extractor.util';
 import { getEffectiveConversionValue, getRefundFactor } from '../../common/conversion-value.util';
 import { buildProductResolver } from './product-resolver.util';
+import { SafetyChecks } from '../campaign-creator/safety-checks';
 import {
   fetchAllPages as sharedFetchAllPages,
   fetchAllPagesChunked as sharedFetchAllPagesChunked,
@@ -1007,6 +1008,23 @@ export class CampaignSyncService {
             syncedAt: new Date(),
           };
           if (gotAdSetsFromMeta) setDoc.metaAdSets = metaAdSets;
+
+          // A cap set in the Meta UI never passes through our launch gate, so
+          // this is the first point at which an incoherent one is visible.
+          // Flag it on the sync that observes it rather than waiting for the
+          // mid-flight force-pause — the breach date is fully determined the
+          // moment the cap and the daily budget are both known.
+          const capCheck = SafetyChecks.evaluateCapCoherence({
+            dailyBudget: campaignBudget,
+            cap: setDoc.spendCap as number,
+            startTime: campaign.start_time,
+            stopTime: campaign.stop_time,
+          });
+          if (capCheck && !capCheck.ok) {
+            this.logger.warn(
+              `Spend cap incoherent on "${campaign.name ?? campaign.id}" (${campaign.id}): ${capCheck.message}`,
+            );
+          }
 
           await this.campaignModel.updateOne(
             { tenantId, metaCampaignId: campaign.id },

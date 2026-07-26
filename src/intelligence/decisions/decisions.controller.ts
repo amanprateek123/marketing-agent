@@ -68,6 +68,40 @@ export class DecisionsController {
     return this.service.summary(tenantId);
   }
 
+  /**
+   * GET /intelligence/:tenantId/decisions/:decisionId/trace
+   *
+   * The sixteen engine steps behind one decision, in plain English, each with
+   * the engine's own recorded output underneath it. Answers "how did it reach
+   * this?" — which the decision card alone can't, since that shows only the
+   * final recommendation and its one-paragraph reasoning.
+   *
+   * Reads exclusively from what the cycle already persisted. It never re-runs
+   * an engine, so opening a trace costs nothing and can't produce a different
+   * answer than the one that was actually acted on.
+   */
+  @Get(':tenantId/decisions/:decisionId/trace')
+  async trace(
+    @Param('tenantId') tenantId: string,
+    @Param('decisionId') decisionId: string,
+    @Query('includeLogs') includeLogs?: string,
+  ) {
+    return this.service.trace(tenantId, decisionId, includeLogs === 'true');
+  }
+
+  /**
+   * GET /api/v1/intelligence/:tenantId/cycles/:cycleId/trace
+   * The sixteen engine steps for one cascade run, in plain English.
+   */
+  @Get(':tenantId/cycles/:cycleId/trace')
+  async cycleTrace(
+    @Param('tenantId') tenantId: string,
+    @Param('cycleId') cycleId: string,
+    @Query('includeLogs') includeLogs?: string,
+  ) {
+    return this.service.cycleTrace(tenantId, cycleId, includeLogs === 'true');
+  }
+
   @Get(':tenantId/cycles')
   async cycles(
     @Param('tenantId') tenantId: string,

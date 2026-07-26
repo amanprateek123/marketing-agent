@@ -16,6 +16,13 @@ export interface ResolvedGalleryAsset {
   assetUrl: string;
   aspectRatio?: string;
   resolution?: string;
+  /**
+   * Derived placement sizes of THIS asset (canvas-extended copies), never
+   * separate creatives — they share their source's variantIndex, so
+   * findUntrackedAssets already declines to give them their own pointer. One
+   * gallery row, several sizes. Empty for assets that have none.
+   */
+  sizes?: Array<{ imageUrl: string; aspectRatio?: string; width?: number; height?: number }>;
 }
 
 /**
@@ -154,10 +161,14 @@ export class GalleryService {
     // rollup is done in JS rather than a $lookup aggregation join.
     const sheetIdToTopicId = new Map(sheets.map(s => [s._id.toString(), s.topicId]));
     const assetCountByTopic = new Map<string, number>();
-    const allAssets = await this.assetModel.find({ tenantId }).select('sheetId').lean().exec();
+    // Same rule as listSheets: count what renders, not what's referenced.
+    // Needs the full pointer (not just sheetId) so each one can be resolved.
+    const allAssets = await this.assetModel.find({ tenantId }).lean().exec();
+    const { visible } = await this.countVisible(allAssets);
     for (const asset of allAssets) {
       const topicId = sheetIdToTopicId.get(asset.sheetId);
       if (!topicId) continue;
+      if (!visible.has(asset._id.toString())) continue;
       assetCountByTopic.set(topicId, (assetCountByTopic.get(topicId) ?? 0) + 1);
     }
     const sheetCountByTopic = new Map<string, number>();
@@ -188,15 +199,30 @@ export class GalleryService {
     const topic = await this.topicModel.findOne({ _id: topicId, tenantId }).lean().exec();
     if (!topic) throw new NotFoundException(`Gallery topic ${topicId} not found`);
     const sheets = await this.sheetModel.find({ tenantId, topicId }).sort({ createdAt: 1 }).lean().exec();
-    const counts = await this.assetModel.aggregate<{ _id: string; count: number }>([
-      { $match: { tenantId, sheetId: { $in: sheets.map(s => s._id.toString()) } } },
-      { $group: { _id: '$sheetId', count: { $sum: 1 } } },
-    ]);
-    const countBySheet = new Map(counts.map(c => [c._id, c.count]));
+    const pointers = await this.assetModel
+      .find({ tenantId, sheetId: { $in: sheets.map(s => s._id.toString()) } })
+      .lean()
+      .exec();
+
+    // assetCount counts what the sheet will actually RENDER, not how many
+    // pointer rows exist — the two diverge the moment an asset is rejected or
+    // its source package is deleted, and a badge that disagrees with the grid
+    // below it looks like a bug in the grid.
+    const { visible, hiddenBySheet } = await this.countVisible(pointers);
+    const countBySheet = new Map<string, number>();
+    for (const p of pointers) {
+      if (!visible.has(p._id.toString())) continue;
+      countBySheet.set(p.sheetId, (countBySheet.get(p.sheetId) ?? 0) + 1);
+    }
+
     return sheets.map(s => ({
       _id: s._id.toString(),
       name: s.name,
       assetCount: countBySheet.get(s._id.toString()) ?? 0,
+      // Pointers that exist but resolve to nothing — almost always a rejected
+      // asset, which is reversible. Surfaced so "my creative disappeared" has a
+      // visible answer instead of being an unexplained gap.
+      hiddenCount: hiddenBySheet.get(s._id.toString()) ?? 0,
     }));
   }
 
@@ -235,10 +261,38 @@ export class GalleryService {
     return this.resolveAssets(assets);
   }
 
+  /**
+   * How many of these pointers actually render, and how many silently don't.
+   *
+   * Asset counts have to be derived from this rather than from a `count()` on
+   * gallery_assets: a pointer is only a reference, and resolveAssets drops any
+   * whose source is rejected, deleted, or has no URL yet. Counting rows counts
+   * things the grid will never show, which reads to the operator as assets
+   * having gone missing.
+   */
+  private async countVisible(
+    pointers: any[],
+  ): Promise<{ visible: Set<string>; hiddenBySheet: Map<string, number> }> {
+    const resolved = await this.resolveAssets(pointers);
+    const visible = new Set(resolved.map(r => r._id));
+    const hiddenBySheet = new Map<string, number>();
+    for (const p of pointers) {
+      if (visible.has(p._id.toString())) continue;
+      hiddenBySheet.set(p.sheetId, (hiddenBySheet.get(p.sheetId) ?? 0) + 1);
+    }
+    return { visible, hiddenBySheet };
+  }
+
   private async resolveAssets(assets: GalleryAssetDocument[] | any[]): Promise<ResolvedGalleryAsset[]> {
     if (assets.length === 0) return [];
     const packageIds = [...new Set(assets.map(a => a.sourcePackageId))];
-    const packages = await this.packageModel.find({ _id: { $in: packageIds } }).lean().exec();
+    // Only the three arrays this method reads — packages carry large copy/debate
+    // fields that counting paths would otherwise pull for every asset.
+    const packages = await this.packageModel
+      .find({ _id: { $in: packageIds } })
+      .select('images video carouselCards')
+      .lean()
+      .exec();
     const packageById = new Map(packages.map(p => [p._id.toString(), p]));
 
     const resolved: ResolvedGalleryAsset[] = [];
@@ -249,13 +303,34 @@ export class GalleryService {
       let assetUrl = '';
       let aspectRatio: string | undefined;
       let resolution: string | undefined;
+      let sizes: ResolvedGalleryAsset['sizes'];
 
       if (asset.assetType === 'image') {
-        const img = (pkg.images ?? []).find((i: any) => i.variantIndex === asset.variantIndex);
+        // A variant can hold several entries: the real creative plus derived
+        // placement sizes appended by ImageResizerService. Resolve the
+        // creative EXPLICITLY as the non-derived one — picking the array's
+        // first match happens to work only because extends are appended, which
+        // is an ordering accident, and getting it wrong would show a
+        // blur-margined derivative as though it were the creative itself.
+        const forVariant = (pkg.images ?? []).filter((i: any) => i.variantIndex === asset.variantIndex && i.imageUrl);
+        const img = forVariant.find((i: any) => !i.extendedFrom) ?? forVariant[0];
         if (!img?.imageUrl || img.rejected) continue; // rejected — hidden from its sheet until restored, pointer untouched
         assetUrl = img.imageUrl;
         aspectRatio = img.aspectRatio;
         resolution = img.resolution;
+        // Derived sizes ride along on the one row rather than becoming rows of
+        // their own. They inherit the creative's rejected state implicitly:
+        // the `continue` above drops the whole asset when its source is
+        // rejected, sizes included.
+        const derived = forVariant.filter((i: any) => i.extendedFrom);
+        if (derived.length) {
+          sizes = derived.map((i: any) => ({
+            imageUrl: i.imageUrl,
+            aspectRatio: i.aspectRatio,
+            width: i.width,
+            height: i.height,
+          }));
+        }
       } else if (asset.assetType === 'video') {
         if (!pkg.video?.videoUrl || pkg.video.rejected) continue;
         assetUrl = pkg.video.videoUrl;
@@ -275,6 +350,7 @@ export class GalleryService {
         assetUrl,
         aspectRatio,
         resolution,
+        ...(sizes ? { sizes } : {}),
       });
     }
     return resolved;

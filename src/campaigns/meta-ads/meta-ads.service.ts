@@ -2392,13 +2392,20 @@ export class MetaAdsService {
         // aborted on the first attempt). Hit in production 2026-07-16: a
         // plain `timeout of 30000ms exceeded` on ad-set creation rolled
         // back and failed an entire otherwise-correct campaign launch.
+        // Classify by shape, not by an allowlist of specific errno values.
+        // The allowlist that used to live here named five codes, so anything
+        // else the OS can throw on a socket — EADDRNOTAVAIL, ENETUNREACH,
+        // EHOSTUNREACH, EPIPE, EAI_AGAIN — still aborted on the spot with
+        // retries left in the budget (hit 2026-07-26: an ad-account listing
+        // burned attempt 1 on a real 80004 rate limit, then threw away
+        // attempts 3 and 4 because attempt 2 came back `read EADDRNOTAVAIL`).
+        // Every Node/libuv syscall error is `E...`; axios's own non-transient
+        // config errors are `ERR_...` (ERR_BAD_OPTION, ERR_FR_TOO_MANY_REDIRECTS)
+        // and must stay non-retryable — retrying those can never succeed.
+        const errCode: string = err.code ?? '';
         const isNetworkError =
           hasNoResponse &&
-          (err.code === 'ECONNABORTED' ||
-            err.code === 'ETIMEDOUT' ||
-            err.code === 'ECONNRESET' ||
-            err.code === 'ECONNREFUSED' ||
-            err.code === 'ENOTFOUND' ||
+          ((errCode.startsWith('E') && !errCode.startsWith('ERR_')) ||
             /timeout/i.test(err.message ?? ''));
         const isRetryable =
           RETRYABLE_ERROR_CODES.includes(metaErrorCode) || isNetworkError;
@@ -2417,7 +2424,12 @@ export class MetaAdsService {
         const fullError = (err as AxiosError<any>)?.response?.data?.error;
         const errorMsg = fullError?.message ?? err.message;
         const errorSubcode = fullError?.error_subcode;
-        const errorDetail = fullError ? JSON.stringify(fullError) : '';
+        // No response body means no Meta `error` object to dump — fall back to
+        // the transport failure, otherwise this logs a bare empty string and
+        // the operator learns nothing about why the call died.
+        const errorDetail = fullError
+          ? JSON.stringify(fullError)
+          : `${method} ${url.replace(/access_token=[^&]+/, 'access_token=***')} failed with no response (${errCode || 'no code'}: ${err.message})`;
         this.logger.error(`Meta API full error: ${errorDetail}`);
         throw new Error(
           `Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`,

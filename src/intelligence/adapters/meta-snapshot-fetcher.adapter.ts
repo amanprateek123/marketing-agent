@@ -124,6 +124,20 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       revenue: toGross(c.revenue ?? 0),
     });
 
+    // Campaign-level learning stage: the WORST stage across ad sets, because
+    // one ad set stuck in LEARNING_LIMITED holds back the whole campaign's
+    // delivery. Sync already stores this per ad set (campaign-sync pulls
+    // learning_stage_info), but it was never rolled up onto rawCampaign — so
+    // `learning_stage` arrived undefined and LifecycleEngine's two
+    // learning-phase branches could never fire, dropping campaigns through to
+    // stage 'unknown', which blocks every action with a '*' gate.
+    const adSetStages: string[] = ((c.metaAdSets ?? []) as any[])
+      .map((as) => as?.learningStage)
+      .filter(Boolean);
+    const stagePriority = ['NOT_DELIVERING', 'LEARNING_LIMITED', 'LEARNING', 'ACTIVE'];
+    const learningStage =
+      stagePriority.find((p) => adSetStages.includes(p)) ?? adSetStages[0];
+
     const rawCampaign: RawMetaCampaign = {
       id: input.metaCampaignId,
       name: c.name ?? '',
@@ -131,6 +145,7 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       status: (c.effectiveStatus || c.status || '').toString().toUpperCase(),
       effective_status: c.effectiveStatus || '',
       account_id: c.metaAccountId ?? '',
+      learning_stage: learningStage,
       insights: campaignInsights,
     };
 

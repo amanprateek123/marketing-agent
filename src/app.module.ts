@@ -13,6 +13,7 @@ import { CreativeModule } from './creative/creative.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { LearningModule } from './learning/learning.module';
 import { IntelligenceModule } from './intelligence/intelligence.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { AuthModule } from './auth/auth.module';
 
 @Module({
@@ -39,6 +40,7 @@ import { AuthModule } from './auth/auth.module';
     CampaignsModule,
     LearningModule,
     IntelligenceModule,
+    DashboardModule,
   ],
 })
 export class AppModule {}

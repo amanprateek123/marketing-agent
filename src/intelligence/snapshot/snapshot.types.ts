@@ -51,6 +51,18 @@ export interface SnapshotData {
     learningStage?: 'LEARNING' | 'LEARNING_LIMITED' | 'ACTIVE' | 'NOT_DELIVERING';
     deliveryStatus?: string;
     accountId: string;
+    /**
+     * Raw Meta objective (OUTCOME_SALES, OUTCOME_TRAFFIC, …).
+     *
+     * Carried on the SLICE, not just the persisted snapshot document.
+     * ObjectiveEngine reads its objective from the slice it receives through
+     * the DAG; `rawCampaign` is written only to the Mongo snapshot doc, so the
+     * engine's lookup found nothing and silently fell back to 'sales' for
+     * EVERY campaign — including the 139 app-promotion, 67 lead, 17 traffic,
+     * 12 engagement and 4 awareness campaigns on this account, whose profiles
+     * exist precisely so they are NOT scored on ROAS.
+     */
+    objective?: string;
   };
   missingFields: string[];
 }

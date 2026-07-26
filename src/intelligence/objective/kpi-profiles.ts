@@ -197,3 +197,163 @@ export function mapMetaObjective(raw?: string): ObjectiveKey | undefined {
   if (u.includes('MESSAGES')) return 'messages';
   return undefined;
 }
+
+// ─── Objective-aware KPI grading ────────────────────────────────────────────
+
+/**
+ * Which objectives are scored on revenue. Everything else produces results
+ * that are real but carry no tracked purchase — clicks, impressions, app
+ * events — and must never be graded on ROAS or purchase counts.
+ */
+const REVENUE_OBJECTIVES: ObjectiveKey[] = ['sales', 'catalog_sales', 'retargeting'];
+
+export function isRevenueObjective(k: ObjectiveKey): boolean {
+  return REVENUE_OBJECTIVES.includes(k);
+}
+
+export type ScoredMetric = 'roas' | 'cpm' | 'cpc' | 'ctr' | 'cvr';
+
+/**
+ * The metric an objective is actually judged on.
+ *
+ * Awareness is a deliberate substitution: its profile names `reach` as
+ * primaryKPI but defines thresholds only for cpm/frequency, and a raw reach
+ * count cannot be graded without a target — so CPM (the efficiency of that
+ * reach) is what carries the verdict.
+ */
+export function scoredMetricFor(k: ObjectiveKey): {
+  metric: ScoredMetric;
+  label: string;
+  lowerIsBetter: boolean;
+} {
+  switch (k) {
+    case 'awareness':
+    case 'video_views':
+      return { metric: 'cpm', label: 'Cost per 1,000 views', lowerIsBetter: true };
+    case 'traffic':
+    case 'app_installs':
+      return { metric: 'cpc', label: 'Cost per click', lowerIsBetter: true };
+    case 'engagement':
+      return { metric: 'ctr', label: 'Click-through rate', lowerIsBetter: false };
+    case 'leads':
+    case 'messages':
+      return { metric: 'cvr', label: 'Conversion rate', lowerIsBetter: false };
+    default:
+      return { metric: 'roas', label: 'Return on ad spend', lowerIsBetter: false };
+  }
+}
+
+/** Raw inputs for grading. Rates are Meta's convention: ctr 0.95 means 0.95%. */
+export interface ObjectiveMetricInput {
+  spend: number;
+  revenue?: number;
+  purchases?: number;
+  conversions?: number;
+  clicks: number;
+  impressions: number;
+}
+
+/**
+ * The countable "result" for an objective — the analogue of a purchase.
+ *
+ * Used by lifecycle to decide whether a campaign has produced ENOUGH of
+ * whatever it was asked for to be classified at all. Keyed off the objective
+ * because a traffic campaign with 12,796 clicks and zero purchases has
+ * produced a great deal; counting only purchases records it as having done
+ * nothing.
+ */
+export function resultsFor(k: ObjectiveKey, m: ObjectiveMetricInput): number {
+  switch (k) {
+    case 'awareness':
+    case 'video_views':
+      return num(m.impressions);
+    case 'traffic':
+    case 'engagement':
+    case 'app_installs':
+      return num(m.clicks);
+    case 'leads':
+    case 'messages':
+      return num(m.conversions ?? m.purchases);
+    default:
+      return num(m.purchases ?? m.conversions);
+  }
+}
+
+export function computeObjectiveMetric(
+  metric: ScoredMetric,
+  m: ObjectiveMetricInput,
+): number {
+  const spend = num(m.spend);
+  switch (metric) {
+    case 'roas':
+      return spend > 0 ? num(m.revenue) / spend : 0;
+    case 'cpm':
+      return num(m.impressions) > 0 ? (spend / num(m.impressions)) * 1000 : 0;
+    case 'cpc':
+      return num(m.clicks) > 0 ? spend / num(m.clicks) : 0;
+    // Percentage-point convention, matching Meta's own `ctr` field.
+    case 'ctr':
+      return num(m.impressions) > 0 ? (num(m.clicks) / num(m.impressions)) * 100 : 0;
+    case 'cvr':
+      return num(m.clicks) > 0 ? (num(m.conversions ?? m.purchases) / num(m.clicks)) * 100 : 0;
+  }
+}
+
+export interface KpiGrade {
+  metric: ScoredMetric;
+  label: string;
+  value: number;
+  healthy: number | null;
+  warning: number | null;
+  lowerIsBetter: boolean;
+  status: 'good' | 'watch' | 'bad' | 'unknown';
+}
+
+/**
+ * Grade an objective's own KPI against its own profile thresholds.
+ *
+ * Unit note: profile thresholds store ctr/cvr as FRACTIONS (0.015 = 1.5%)
+ * while Meta reports them as percentage points. The x100 conversion happens
+ * here, once — doing it at each call site is how a 1.4% CTR ends up compared
+ * against 0.015 and read as 90x its target.
+ */
+export function gradeObjectiveKpi(
+  k: ObjectiveKey,
+  m: ObjectiveMetricInput,
+): KpiGrade {
+  const spec = scoredMetricFor(k);
+  const value = computeObjectiveMetric(spec.metric, m);
+  const profile = getProfile(k);
+  const th = profile.thresholds as unknown as Record<string, Record<string, number>>;
+
+  const isRate = spec.metric === 'ctr' || spec.metric === 'cvr';
+  const scale = isRate ? 100 : 1;
+  const rawHealthy = th.healthy?.[spec.metric];
+  const rawWarning = th.warning?.[spec.metric];
+  const healthy = rawHealthy != null ? rawHealthy * scale : null;
+  const warning = rawWarning != null ? rawWarning * scale : null;
+
+  let status: KpiGrade['status'] = 'unknown';
+  if (healthy != null) {
+    if (spec.lowerIsBetter) {
+      status = value <= healthy ? 'good' : warning != null && value <= warning ? 'watch' : 'bad';
+    } else {
+      status = value >= healthy ? 'good' : warning != null && value >= warning ? 'watch' : 'bad';
+    }
+  }
+
+  return {
+    metric: spec.metric,
+    label: spec.label,
+    value,
+    healthy,
+    warning,
+    lowerIsBetter: spec.lowerIsBetter,
+    status,
+  };
+}
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}

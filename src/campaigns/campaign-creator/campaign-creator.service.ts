@@ -7,7 +7,8 @@ import { ActionLoggerService } from '../../common/action-logger/action-logger.se
 import { CampaignsService } from '../campaigns.service';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CreativeBrief, CreativeBriefDocument } from '../../pipeline/schemas/creative-brief.schema';
-import { CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
+import { CreativePackage, CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
+import { ImageResizerService, ExtendRatio, RatioMap, classifyRatio } from '../../common/media/image-resizer.service';
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
@@ -33,7 +34,24 @@ export class CampaignCreatorService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(CreativeBrief.name)
     private readonly creativeBriefModel: Model<CreativeBriefDocument>,
+    @InjectModel(CreativePackage.name)
+    private readonly creativePackageModel: Model<CreativePackageDocument>,
+    private readonly imageResizer: ImageResizerService,
   ) {}
+
+  /**
+   * Placement sizes guaranteed to exist before a launch uploads to Meta.
+   *
+   * Only 4:5 today, deliberately: asset_customization_rules is disabled (see
+   * MetaAdsService.buildImageAssetFeedSpec), so exactly ONE image per variant
+   * actually ships, and pickPrimaryImageSize prefers 4:5. Guaranteeing that
+   * one size is the entire win available right now — generating the other
+   * three would burn S3 on assets Meta will never request.
+   *
+   * When placement asset customization is re-enabled, widen this to
+   * ['4:5', '9:16'] so Stories/Reels get a real vertical instead of a crop.
+   */
+  private static readonly LAUNCH_RATIOS: readonly ExtendRatio[] = ['4:5'];
 
   /**
    * Phase G Step 1: Safety checks → Campaign Review Team → save as pending_approval → Slack notification.
@@ -519,6 +537,17 @@ export class CampaignCreatorService {
     if (!config || !config.adSets || config.adSets.length === 0) {
       throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
     }
+
+    // Refuse to launch a schedule its own spend cap cannot cover. No-ops for
+    // the common agent case (open-ended run, no cap), and blocks the
+    // guaranteed-breach configuration that otherwise only surfaces as a
+    // mid-flight force-pause days later. See SafetyChecks.evaluateCapCoherence.
+    SafetyChecks.checkCapCoherence({
+      dailyBudget: (campaign as any).budget ?? config.budget,
+      cap: (campaign as any).spendCap,
+      startTime: (campaign as any).launchedAt ?? new Date(),
+      stopTime: (campaign as any).stopTime,
+    });
 
     // Landing-page A/B test campaigns are built with TWO deliberately-separate
     // ad sets that differ ONLY by destination URL (landingUrlOverride). The
@@ -1102,15 +1131,95 @@ export class CampaignCreatorService {
     // asset customization (asset_feed_spec) whenever a variant resolves to
     // more than one distinct hash, and falls back to the plain single-image
     // path otherwise — so this loop doesn't need to know which case it's in.
+    // Guarantee the size Meta will actually serve exists as a real asset first.
+    // Without this, launch ships whatever single size the package happens to
+    // hold and Meta centre-crops it to fit each placement — which on a
+    // headline-top/CTA-bottom creative removes the hook AND the call to
+    // action, so the ad serves stripped of both and reads as weak creative.
+    // Canvas-extend is local CPU with no model call, so this costs a few
+    // hundred ms and zero API spend. Non-fatal: a failure here launches with
+    // whatever sizes the package already had, exactly as before.
+    let launchImages = images;
+    // Which asset satisfies which ratio, per variant, decided by measurement.
+    // Empty when resizing was skipped or failed — every read below tolerates that.
+    let sizesByVariant: RatioMap = {};
+    if (creativePackage && images.some((img: any) => img.imageUrl)) {
+      try {
+        const ensured = await this.imageResizer.ensureSizes(
+          images,
+          CampaignCreatorService.LAUNCH_RATIOS,
+          company.tenantId,
+          (creativePackage as any).runId ?? 'launch',
+          // Launch ignores `rejected` on purpose (see the schema comment on
+          // ImageCreative.rejected), so the sizes guaranteed here must cover
+          // the same set. Without this a rejected image would still ship to
+          // Meta while being the one asset skipped for resizing — landing it
+          // in exactly the centre-crop this whole path exists to prevent.
+          { includeRejected: true },
+        );
+        launchImages = ensured.images;
+        sizesByVariant = ensured.byRatio;
+        if (ensured.added > 0) {
+          // Persist so re-launching this package doesn't rebuild them.
+          await this.creativePackageModel.updateOne(
+            { _id: (creativePackage as any)._id, tenantId: company.tenantId },
+            { $set: { images: ensured.images } },
+          );
+          this.logger.log(`Added ${ensured.added} placement size(s) before launch — Meta has nothing left to crop`);
+        }
+      } catch (err: any) {
+        this.logger.warn(`Placement size generation failed, launching with existing sizes: ${err.message}`);
+      }
+    }
+
+    // Order and label the per-variant upload list BEFORE touching Meta.
+    //
+    // Both matter downstream and neither used to be decided anywhere:
+    // MetaAdsService.pickPrimaryImageSize selects with `images.find(i =>
+    // i.aspectRatio === '4:5')`, and buildImageAssetFeedSpec (when Dynamic
+    // Creative is enabled) treats the FIRST entry as the default for any
+    // unmatched placement. So position and tag together decide what actually
+    // serves — while `aspectRatio` on an images[] entry is only what was
+    // REQUESTED at generation time, and two entries on one variant can carry
+    // the same tag (a 1200x628 original tagged '16:9' plus a derived true
+    // 16:9). Left alone, Meta's asset was chosen by append order.
+    //
+    // So: the assets ensureSizes measured and guaranteed go first, in
+    // LAUNCH_RATIOS order, each labelled with the ratio it MEASURES rather
+    // than the one it claims. Everything else follows, relabelled from its
+    // own measurement where we have one. Same set uploaded as before — only
+    // the order and the labels are now decided rather than incidental.
+    const orderedForUpload: Record<number, Array<{ imageUrl: string; aspectRatio?: string }>> = {};
+    for (const img of launchImages) {
+      if (!img.imageUrl) continue;
+      const list = (orderedForUpload[img.variantIndex] ??= []);
+      if (list.some((e) => e.imageUrl === img.imageUrl)) continue; // same asset twice — upload once
+      list.push({ imageUrl: img.imageUrl, aspectRatio: classifyRatio(img.width, img.height) ?? img.aspectRatio });
+    }
+    for (const [variantKey, list] of Object.entries(orderedForUpload)) {
+      const guaranteed = sizesByVariant[Number(variantKey)] ?? {};
+      const preferred: Array<{ imageUrl: string; aspectRatio?: string }> = [];
+      for (const ratio of CampaignCreatorService.LAUNCH_RATIOS) {
+        const url = guaranteed[ratio];
+        if (!url || preferred.some((e) => e.imageUrl === url)) continue;
+        preferred.push({ imageUrl: url, aspectRatio: ratio });
+      }
+      orderedForUpload[Number(variantKey)] = [
+        ...preferred,
+        ...list.filter((e) => !preferred.some((p) => p.imageUrl === e.imageUrl)),
+      ];
+    }
+
     const imageHashes: Record<number, { hash: string; aspectRatio?: string }[]> = {};
-    for (const img of images) {
-      if (img.imageUrl) {
+    for (const [variantKey, list] of Object.entries(orderedForUpload)) {
+      const variant = Number(variantKey);
+      for (const img of list) {
         try {
           const hash = await this.metaAdsService.uploadImage(img.imageUrl, accountId, company.meta.accessToken);
-          (imageHashes[img.variantIndex] ??= []).push({ hash, aspectRatio: img.aspectRatio });
-          this.logger.log(`Image uploaded for variant ${img.variantIndex} (${img.aspectRatio ?? 'default'}): hash=${hash}`);
+          (imageHashes[variant] ??= []).push({ hash, aspectRatio: img.aspectRatio });
+          this.logger.log(`Image uploaded for variant ${variant} (${img.aspectRatio ?? 'default'}): hash=${hash}`);
         } catch (err: any) {
-          this.logger.warn(`Image upload failed for variant ${img.variantIndex} (${img.aspectRatio ?? 'default'}): ${err.message}`);
+          this.logger.warn(`Image upload failed for variant ${variant} (${img.aspectRatio ?? 'default'}): ${err.message}`);
         }
       }
     }

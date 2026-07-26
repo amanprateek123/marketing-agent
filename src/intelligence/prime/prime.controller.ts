@@ -27,6 +27,8 @@ export class PrimeController {
     body?: {
       skipSync?: boolean;
       maxCampaigns?: number;
+      /** Run only these campaigns (Mongo _id or metaCampaignId). */
+      campaignIds?: string[];
     },
   ) {
     const res = await this.prime.runFor(tenantId, body ?? {});
