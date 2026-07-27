@@ -121,6 +121,14 @@ export interface CreateManualCampaignDto {
  */
 export interface UpdateManualCampaignConfigDto {
   name?: string;
+  /**
+   * Reassign the campaign to a different product. Re-resolves conversion
+   * event/value from the new product and rewrites campaign.productName — which
+   * is what launch() reads for the landing URL, pixel and custom conversion.
+   * Also the repair path for pre-productName campaigns: set it once and the
+   * launch-time refusal to guess goes away.
+   */
+  productName?: string;
   accountId?: string;
   campaignType?: 'advantage_plus' | 'custom';
   /** Daily budget, ₹. */

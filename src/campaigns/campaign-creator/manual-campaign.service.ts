@@ -7,10 +7,13 @@ import {
   CreativePackageDocument,
 } from '../../creative/schemas/creative-package.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
-import { Product } from '../../companies/schemas/company.types';
 import { CreativeBrief } from '../../pipeline/schemas/creative-brief.schema';
 import { CampaignsService } from '../campaigns.service';
 import { SafetyChecks } from './safety-checks';
+import {
+  assertProductLaunchable,
+  resolveCampaignProduct,
+} from './resolve-campaign-product';
 import {
   CreateManualCampaignDto,
   ManualAdSetInput,
@@ -122,18 +125,36 @@ export class ManualCampaignService {
       company,
     );
 
-    const product = this.resolveProduct(
+    // Which product is this campaign for? Resolved strictly (see
+    // resolve-campaign-product.ts) and — critically — PERSISTED on the campaign
+    // below. The old code resolved a product here, used it for conversion
+    // settings, then dropped it on the floor; /approve had to re-guess hours
+    // later from campaignConfig.conversionEvent alone and picked the wrong
+    // product's landing URL, pixel and custom conversion.
+    const requestedProduct =
+      dto.productName ||
+      (creativePackage as unknown as { productName?: string }).productName;
+    const { product, matchedLoosely } = resolveCampaignProduct(
       company,
-      dto.productName || (creativePackage as unknown as { productName?: string }).productName,
+      { productName: requestedProduct, name: dto.name },
     );
+    if (matchedLoosely) {
+      this.logger.warn(
+        `[${tenantId}] product "${matchedLoosely.requested}" matched "${matchedLoosely.matched}" only after normalizing case/spacing — storing the canonical name. Fix the caller to send the exact product name.`,
+      );
+    }
+    // A campaign with no destination is not a campaign. Fail now, at the desk,
+    // rather than at /approve with the operator watching a spinner.
+    assertProductLaunchable(product, 'create');
+
     const adSets = this.buildAdSetConfigs(dto, creativePackage, company);
 
     const objective = dto.objective?.trim() || 'OUTCOME_SALES';
     const campaignConfig = {
       budget: dto.budget,
       objective,
-      conversionEvent: product?.conversionEvent || 'Purchase',
-      conversionValue: product?.conversionValue || 0,
+      conversionEvent: product.conversionEvent || 'Purchase',
+      conversionValue: product.conversionValue || 0,
       adSets,
       scaleRules: '',
       pauseRules: '',
@@ -145,6 +166,8 @@ export class ManualCampaignService {
       name: dto.name.trim(),
       runId: '',
       briefId: '',
+      // The whole point: launch() must never have to re-derive this.
+      productName: product.name,
       source: 'human',
       status: 'pending_approval',
       budget: dto.budget,
@@ -198,7 +221,8 @@ export class ManualCampaignService {
       dto.budget === undefined &&
       !dto.objective &&
       !dto.campaignType &&
-      !dto.adSets
+      !dto.adSets &&
+      !dto.productName
     ) {
       throw new Error('No changes provided');
     }
@@ -281,20 +305,43 @@ export class ManualCampaignService {
       company,
     );
 
-    // conversionEvent/conversionValue are intentionally carried over
-    // unchanged from existingConfig, not re-resolved from company.products —
-    // this DTO has no productName field, so re-resolving here would silently
-    // fall back to the tenant's default active product and could overwrite
-    // the value picked for a DIFFERENT product at create() time. Product
-    // reassignment isn't part of this edit surface.
+    // Product reassignment is explicit-only. Passing productName re-resolves
+    // conversion event/value from the NEW product and rewrites
+    // campaign.productName (the field launch() reads for landing URL, pixel and
+    // custom conversion). Omitting it carries both the product and its
+    // conversion settings over untouched — an edit must never silently move a
+    // campaign onto a different product's funnel.
+    let conversionEvent = existingConfig.conversionEvent || 'Purchase';
+    let conversionValue = existingConfig.conversionValue || 0;
+    if (dto.productName) {
+      const { product, matchedLoosely } = resolveCampaignProduct(
+        company,
+        { productName: dto.productName, name },
+      );
+      if (matchedLoosely) {
+        this.logger.warn(
+          `[${tenantId}] product "${matchedLoosely.requested}" matched "${matchedLoosely.matched}" only after normalizing case/spacing — storing the canonical name.`,
+        );
+      }
+      assertProductLaunchable(product, 'launch');
+      if (campaign.productName && campaign.productName !== product.name) {
+        this.logger.warn(
+          `[${tenantId}] campaign ${campaignId} reassigned from product "${campaign.productName}" to "${product.name}" — landing URL, pixel and conversion settings will follow the new product at launch.`,
+        );
+      }
+      campaign.productName = product.name;
+      conversionEvent = product.conversionEvent || 'Purchase';
+      conversionValue = product.conversionValue || 0;
+    }
+
     campaign.name = name;
     campaign.budget = budget;
     campaign.objective = objective;
     campaign.campaignConfig = {
       budget,
       objective,
-      conversionEvent: existingConfig.conversionEvent || 'Purchase',
-      conversionValue: existingConfig.conversionValue || 0,
+      conversionEvent,
+      conversionValue,
       adSets: rebuiltAdSets,
       scaleRules: existingConfig.scaleRules || '',
       pauseRules: existingConfig.pauseRules || '',
@@ -363,17 +410,11 @@ export class ManualCampaignService {
     }
   }
 
-  private resolveProduct(
-    company: CompanyDocument,
-    productName?: string,
-  ): Product | undefined {
-    const products = ((company as any).products ?? []) as Product[];
-    if (productName) {
-      const match = products.find((p) => p.name === productName);
-      if (match) return match;
-    }
-    return products.find((p) => p.active !== false) ?? products[0];
-  }
+  // resolveProduct() used to live here. It exact-matched the requested name
+  // and, on any miss, silently returned the first active product — so a form
+  // sending "wishletter" for a product named "wish letter" got a DIFFERENT
+  // product with no error. Replaced by resolveCampaignProduct(), which matches
+  // tolerantly (case/spacing) but throws rather than substituting.
 
   private buildAdSetConfigs(
     dto: CreateManualCampaignDto,

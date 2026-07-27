@@ -39,6 +39,7 @@ import {
 } from '../schemas/breakdown-snapshot.schema';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { withUtmParams } from '../meta-ads/meta-utm.util';
+import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
 import { SlackService } from '../../delivery/slack.service';
 import {
   IntelligenceBrief,
@@ -428,18 +429,35 @@ export class CampaignAuditorService {
     // (conversionEvent/customConversionId were derived from `product` right below,
     // same as they still are — only used by the live fetch, so no longer declared.)
 
-    // Match product to the one this campaign is actually selling
+    // Match product to the one this campaign is actually selling. Read path:
+    // an unresolvable product must NOT abort the audit (that would strand the
+    // campaign with no safety rails), but it must be loud — conversionValue
+    // below feeds every ROAS, verdict and pause/scale decision, so the wrong
+    // product here quietly mis-judges the whole campaign.
     const brief = campaign.briefId
       ? await this.briefModel
           .findOne({ tenantId: company.tenantId, briefId: campaign.briefId })
           .lean()
           .exec()
       : null;
-    const briefProduct = brief ? (brief as any).product : '';
-    const product =
-      (company.products ?? []).find((p) =>
-        briefProduct ? p.name === briefProduct : p.active,
-      ) ?? (company.products ?? []).find((p) => p.active);
+    const { resolution: productResolution, error: productError } =
+      tryResolveCampaignProduct(company, campaign as any, brief as any);
+    if (!productResolution) {
+      // Severity tracks whether we can act on it. Campaigns this system
+      // launched get a warn — an unknown product means their verdicts are
+      // running on Meta's action_values alone, and productName is fixable.
+      // Imported campaigns ('manual') are observe-only: every action below is
+      // gated on isManagedCampaignSource, they never had a product recorded,
+      // and a tenant can have hundreds of them — warning on each, every audit
+      // cycle, would bury the ones that matter.
+      const message = `Campaign ${campaign.metaCampaignId} (${campaign.name}): cannot determine which product it sells — ${productError} Auditing with no product: ROAS falls back to Meta's own action_values and product-specific rules are skipped.`;
+      if (isManagedCampaignSource(campaign.source)) {
+        this.logger.warn(`${message} Set campaign.productName to fix.`);
+      } else {
+        this.logger.debug(message);
+      }
+    }
+    const product = productResolution?.product;
     // conversionValue serves as the FALLBACK when Meta's action_values return
     // empty (pixel without value param). For VBB-style dynamic-value setups we
     // prefer the actual event values; the static price is just the safety net.
@@ -2082,36 +2100,50 @@ export class CampaignAuditorService {
             company.meta!.pixelId,
           );
 
-          // Create an ad inside the new ad set using winning variant
+          // Create an ad inside the new ad set using winning variant.
+          // The destination comes from the campaign's OWN product — this used
+          // to be `products.find(p => p.active)`, i.e. the tenant's first
+          // active product regardless of what this campaign sells, which is
+          // how a scaled ad set could end up pointing at another product's
+          // landing page. If it can't be resolved, the ad set stays adless
+          // (visible, fixable) rather than live with a wrong link.
           let newAdId = '';
           if (bestImage?.imageUrl) {
-            const product = (company.products ?? []).find((p: any) => p.active);
-            const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;
-            const taggedLandingUrl = withUtmParams(product?.landingUrl ?? '', {
-              campaignName: campaign.name ?? String(campaign._id),
-              adSetName,
-              adName: newAdName,
-            });
-            try {
-              const { adId } = await this.metaAds.createAdInAdSet(
-                newAdSetId,
-                company.meta!.accessToken,
-                newAdName,
-                {
-                  primaryText: bestVariant.primaryText,
-                  headline: bestVariant.headline,
-                  cta: bestVariant.cta,
-                },
-                bestImage.imageUrl,
-                company.meta!.pageId ?? '',
-                taggedLandingUrl,
-                (company.meta as any)?.specialAdCategories ?? [],
-              );
-              newAdId = adId;
-            } catch (adErr: any) {
+            const { resolution: adProductResolution, error: adProductError } =
+              tryResolveCampaignProduct(company, campaign as any, null);
+            const product = adProductResolution?.product;
+            if (!product?.landingUrl) {
               this.logger.error(
-                `Failed to create ad in new ad set: ${adErr.message}`,
+                `Campaign ${campaign.metaCampaignId}: ad set ${newAdSetId} created but left WITHOUT an ad — ${adProductError ?? `product "${product?.name}" has no landingUrl`}. An adless ad set spends nothing and is fixable; an ad pointing at a guessed product's landing page is not. Set campaign.productName, then add the ad manually.`,
               );
+            } else {
+              const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;
+              const taggedLandingUrl = withUtmParams(product.landingUrl, {
+                campaignName: campaign.name ?? String(campaign._id),
+                adSetName,
+                adName: newAdName,
+              });
+              try {
+                const { adId } = await this.metaAds.createAdInAdSet(
+                  newAdSetId,
+                  company.meta!.accessToken,
+                  newAdName,
+                  {
+                    primaryText: bestVariant.primaryText,
+                    headline: bestVariant.headline,
+                    cta: bestVariant.cta,
+                  },
+                  bestImage.imageUrl,
+                  company.meta!.pageId ?? '',
+                  taggedLandingUrl,
+                  (company.meta as any)?.specialAdCategories ?? [],
+                );
+                newAdId = adId;
+              } catch (adErr: any) {
+                this.logger.error(
+                  `Failed to create ad in new ad set: ${adErr.message}`,
+                );
+              }
             }
           }
 
@@ -2144,7 +2176,7 @@ export class CampaignAuditorService {
 
           await this.campaignModel.updateOne({ _id: campaign._id }, { adSets });
           this.logger.log(
-            `New ${audienceType} ad set created: ${newAdSetId}${newAdId ? ` with ad ${newAdId}` : ' (no ad — image missing)'}`,
+            `New ${audienceType} ad set created: ${newAdSetId}${newAdId ? ` with ad ${newAdId}` : ' (no ad — missing image, or product unresolved; see errors above)'}`,
           );
         }
 

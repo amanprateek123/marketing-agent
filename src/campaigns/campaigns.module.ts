@@ -9,6 +9,7 @@ import { CampaignsService } from './campaigns.service';
 import { CampaignsController } from './campaigns.controller';
 import { CampaignCreatorService } from './campaign-creator/campaign-creator.service';
 import { ManualCampaignService } from './campaign-creator/manual-campaign.service';
+import { CampaignApprovalPreviewService } from './campaign-creator/campaign-approval-preview.service';
 import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
 import { CampaignOptimizerService } from './campaign-auditor/campaign-optimizer.service';
 import { SignalDetectorService } from './campaign-auditor/signal-detector.service';
@@ -62,7 +63,7 @@ import { QUEUES } from '../scheduler/queue.constants';
     DeliveryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, ManualCampaignService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, MetaDeepSyncService, AudienceOrchestrationService],
+  providers: [CampaignsService, CampaignCreatorService, ManualCampaignService, CampaignApprovalPreviewService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, MetaDeepSyncService, AudienceOrchestrationService],
   exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService, MetaDeepSyncService, MetaAdsService, MetaMetricsService, AudienceOrchestrationService],
 })
 export class CampaignsModule {}

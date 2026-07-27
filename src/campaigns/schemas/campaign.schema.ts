@@ -46,6 +46,24 @@ export class Campaign {
   @Prop({ index: true, default: '' })
   briefId: string;
 
+  /**
+   * Which product on the company this campaign sells — the operator's (or the
+   * brief's) explicit choice, recorded at creation time.
+   *
+   * Load-bearing, not decorative: the landing URL, pixel, custom conversion /
+   * custom event and conversion value all come from this product at launch.
+   * Before this field existed, launch() re-derived the product by matching
+   * campaignConfig.conversionEvent against the product list and fell back to
+   * products[0] — which on 2026-07-27 shipped a "wish letter" campaign
+   * pointing at a different product's landing page, pixel and custom
+   * conversion, with no error raised. See resolve-campaign-product.ts.
+   *
+   * Empty only on campaigns created before this field (resolved from
+   * briefId → CreativeBrief.product, or refused outright when ambiguous).
+   */
+  @Prop({ index: true, default: '' })
+  productName: string;
+
   // 'agent' = launched by our system, 'manual' = synced from Meta (tenant created it)
   @Prop({ default: 'agent', index: true })
   source: CampaignSource;

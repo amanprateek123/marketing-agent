@@ -15,6 +15,12 @@ import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
+import {
+  assertProductLaunchable,
+  findProductByName,
+  resolveCampaignProduct,
+} from './resolve-campaign-product';
+import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
 import { getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
@@ -258,11 +264,39 @@ export class CampaignCreatorService {
     const topicSlug = brief.topic.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
     const campaignName = `AGENT_${topicSlug}_${new Date().toISOString().split('T')[0]}`;
 
+    // Canonicalize the brief's product name so launch() resolves it by exact
+    // match. A brief naming a product that doesn't exist is NOT fatal here —
+    // the campaign is only pending_approval and nothing has spent money — but
+    // it must be loud: /approve then refuses to launch rather than guessing,
+    // and the approval preview shows it as a blocker the operator can fix with
+    // PATCH /config { productName }.
+    let campaignProductName = (brief.product ?? '').trim();
+    if (campaignProductName) {
+      try {
+        campaignProductName = findProductByName(
+          (company as any).products ?? [],
+          campaignProductName,
+        ).product.name;
+      } catch (err: any) {
+        this.logger.error(
+          `Brief ${brief.briefId} names product "${brief.product}", which does not resolve for tenant ${company.tenantId}: ${err.message} — campaign saved, but it will refuse to launch until productName is corrected.`,
+        );
+      }
+    } else {
+      this.logger.warn(
+        `Brief ${brief.briefId} has no product — campaign ${campaignName} will resolve its product at launch only if the tenant has exactly one active product.`,
+      );
+    }
+
     const campaign = await this.campaignModel.create({
       tenantId: company.tenantId,
       runId,
       briefId: brief.briefId,
       name: campaignName,
+      // Record the brief's product now, while we still have it. launch() reads
+      // this for the landing URL / pixel / custom conversion instead of
+      // re-deriving the product from conversionEvent hours later.
+      productName: campaignProductName,
       topic: brief.topic ?? '',
       angle: brief.angle ?? '',
       creativePackageId: creativePackage?._id?.toString() ?? '',
@@ -439,6 +473,7 @@ export class CampaignCreatorService {
       runId,
       briefId,
       name: `LP_TEST_${productName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 24)}_${dateTag}`,
+      productName: product.name,
       topic: briefData.topic,
       angle: briefData.angle,
       creativePackageId: (creativePackage as any)._id?.toString() ?? '',
@@ -487,6 +522,66 @@ export class CampaignCreatorService {
     company: CompanyDocument,
     accountId: string,
   ): Promise<CampaignDocument> {
+    // ── Pre-flight: WHICH PRODUCT is this campaign selling? ──────────────────
+    // Runs BEFORE the atomic claim below, deliberately. Everything here is a
+    // pure read, and a failure must leave the campaign at 'pending_approval' —
+    // throwing after the claim would strand it in 'launching' forever (only
+    // the Meta-API block further down has a rollback handler).
+    //
+    // This used to be resolved 600 lines later, at ad-build time, by matching
+    // campaignConfig.conversionEvent against the product list with a
+    // `?? products[0]` fallback. On 2026-07-27 that silently pointed a
+    // "wish letter" campaign at a different product's landing page, pixel and
+    // custom conversion. Resolve it once, up front, and refuse to launch if it
+    // cannot be established with certainty — see resolve-campaign-product.ts.
+    const preflight = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId: company.tenantId })
+      .lean()
+      .exec();
+    if (!preflight) {
+      throw new Error(`Campaign ${campaignId} not found for tenant ${company.tenantId}`);
+    }
+    // Report "already launched" / "wrong status" ahead of any product
+    // complaint — otherwise re-approving a live campaign reports a confusing
+    // product error instead of the real reason. The atomic claim below is
+    // still the authority; this only fixes which message wins.
+    if (preflight.metaCampaignId) {
+      throw new Error(`Campaign ${campaignId} already launched (metaCampaignId: ${preflight.metaCampaignId})`);
+    }
+    if (preflight.status !== 'pending_approval') {
+      throw new Error(`Campaign ${campaignId} cannot be launched (status: ${preflight.status} — must be pending_approval)`);
+    }
+    const preflightBrief = preflight.briefId
+      ? await this.campaignsService.findCreativeBrief(company.tenantId, preflight.briefId)
+      : null;
+    // Throws (leaving status untouched) when the product is missing, unknown,
+    // ambiguous, or has no usable landing URL.
+    const productResolution = resolveCampaignProduct(
+      company,
+      preflight as any,
+      preflightBrief as any,
+    );
+    const product = productResolution.product;
+    // Landing-page tests carry their two URLs on the ad sets themselves
+    // (landingUrlOverride), so the product's own landingUrl isn't the
+    // destination and needn't be set.
+    if (!(preflight as any).campaignConfig?.isLandingPageTest) {
+      assertProductLaunchable(product, 'launch');
+    }
+    if (productResolution.source !== 'campaign') {
+      this.logger.warn(
+        `Campaign ${campaignId} has no productName recorded — resolved "${product.name}" via ${productResolution.source}. Backfill campaign.productName so this never depends on inference.`,
+      );
+    }
+    if (productResolution.matchedLoosely) {
+      this.logger.warn(
+        `Campaign ${campaignId}: product "${productResolution.matchedLoosely.requested}" matched "${productResolution.matchedLoosely.matched}" only after normalizing case/spacing.`,
+      );
+    }
+    this.logger.log(
+      `Launch pre-flight OK: campaign=${campaignId} product="${product.name}" (via ${productResolution.source}) → ${product.landingUrl}`,
+    );
+
     // ── Atomic claim — prevents /approve double-launch race ──────────────────
     // Was: findOne → check status → check metaCampaignId → later update.
     // Race: two concurrent /approve calls both pass the read-then-check, both
@@ -518,12 +613,27 @@ export class CampaignCreatorService {
       throw new Error(`Campaign ${campaignId} cannot be launched (status: ${existing.status} — must be pending_approval)`);
     }
 
-    // Load creative brief early — needed by the audience-expiry fallback path
-    // (line ~330) so warm/hot stages can be detected before the audience
-    // validator decides whether to fall back to advantage_plus or another LAL.
-    const creativeBrief = campaign.briefId
-      ? await this.campaignsService.findCreativeBrief(company.tenantId, campaign.briefId)
-      : null;
+    // Creative brief — needed by the audience-expiry fallback path (line ~330)
+    // so warm/hot stages can be detected before the audience validator decides
+    // whether to fall back to advantage_plus or another LAL. Already loaded by
+    // the pre-flight above (same briefId, the claim only changed `status`), so
+    // reuse it rather than re-reading.
+    const creativeBrief = preflightBrief;
+
+    // Stamp the resolved product onto pre-productName campaigns so every later
+    // consumer (audit loop, creative replacement, ad backfill) reads a recorded
+    // fact instead of re-deriving one. Non-fatal: launch proceeds either way.
+    if (!(campaign as any).productName) {
+      try {
+        await this.campaignModel.updateOne(
+          { _id: campaignId, tenantId: company.tenantId },
+          { $set: { productName: product.name } },
+        );
+        (campaign as any).productName = product.name;
+      } catch (err: any) {
+        this.logger.warn(`Could not backfill productName on ${campaignId}: ${err.message}`);
+      }
+    }
 
     if (!company.meta?.accessToken) {
       throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
@@ -641,9 +751,11 @@ export class CampaignCreatorService {
     // For warm/hot briefs, expired-audience fallback must NOT degrade to
     // advantage_plus (that's cold prospecting). Try another live lookalike
     // from the product's metaAudiences first; if none exist, throw.
-    const launchProduct = creativeBrief
-      ? (company.products ?? []).find(p => p.name === ((creativeBrief as any).product ?? ''))
-      : null;
+    // Uses the pre-flight-resolved product — previously this was a second,
+    // independent brief-only lookup that resolved to null on every manual
+    // campaign, silently skipping the product's metaOptimizationGoal and its
+    // lookalike fallback pool.
+    const launchProduct = product;
 
     // ── optimization_goal normalization ──────────────────────────────────────
     // The Campaign Review LLM occasionally outputs invalid Meta enum values
@@ -1100,30 +1212,15 @@ export class CampaignCreatorService {
       }
     }
 
-    // Find the product for landing URL — match by brief.product name first, fallback to conversionEvent
-    // creativeBrief was loaded earlier (top of launch) for the audience-expiry guard.
-    const briefProduct = creativeBrief ? ((creativeBrief as any).product ?? '') : '';
-    const product = (company.products ?? []).find(p =>
-      briefProduct ? p.name === briefProduct : p.conversionEvent === config.conversionEvent,
-    ) ?? (company.products ?? [])[0];
-    const landingUrl = product?.landingUrl ?? '';
+    // Landing URL comes from the product resolved (and validated) in the
+    // pre-flight at the top of launch(). No re-derivation here: the old
+    // `find(p => p.conversionEvent === config.conversionEvent) ?? products[0]`
+    // is what shipped a campaign pointing at the wrong product's funnel.
+    const landingUrl = product.landingUrl ?? '';
 
-    // Prefer the human-given campaign name (manual campaigns always have a
-    // distinct one) over the topic-based scheme. The topic scheme collapses
-    // to "AGENT_CAMPAIGN_<date>" for every manual campaign launched the same
-    // day (manual campaigns have no `topic`), so two unrelated campaigns
-    // launched on the same date collide on the SAME Meta campaign name — the
-    // duplicate-launch idempotency guard then refuses the second one,
-    // reading it as a retry of the first. Hit in production 2026-07-16: a
-    // small test campaign's successful launch blocked the real campaign's
-    // launch right after. AI-pipeline campaigns keep the old topic-based
-    // name (their `name` field isn't reliably set), unchanged.
-    const dateSuffix = new Date().toISOString().split('T')[0];
-    const humanName = ((campaign as any).name ?? '').trim();
-    const topicSlug = ((campaign as any).topic ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
-    const campaignName = humanName
-      ? `${humanName}_${dateSuffix}`
-      : `AGENT_${topicSlug || 'CAMPAIGN'}_${dateSuffix}`;
+    // Shared with the approval preview so the operator approves the same name
+    // Meta receives — see meta-campaign-name.util.ts for the naming rules.
+    const campaignName = buildMetaCampaignName(campaign as any);
 
     // Upload every image to Meta — usually one per variant, but a variant can
     // carry several (a human creative team's pre-made sizes, or a library

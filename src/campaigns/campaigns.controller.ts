@@ -54,6 +54,11 @@ import {
   CreativePackageDocument,
 } from '../creative/schemas/creative-package.schema';
 import { SafetyChecks } from './campaign-creator/safety-checks';
+import {
+  assertProductLaunchable,
+  resolveCampaignProduct,
+} from './campaign-creator/resolve-campaign-product';
+import { CampaignApprovalPreviewService } from './campaign-creator/campaign-approval-preview.service';
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -63,6 +68,7 @@ export class CampaignsController {
     private readonly campaignsService: CampaignsService,
     private readonly campaignCreator: CampaignCreatorService,
     private readonly manualCampaignService: ManualCampaignService,
+    private readonly approvalPreview: CampaignApprovalPreviewService,
     private readonly campaignAuditorService: CampaignAuditorService,
     private readonly companiesService: CompaniesService,
     private readonly metaAdsService: MetaAdsService,
@@ -221,6 +227,25 @@ export class CampaignsController {
     const campaign = await this.campaignsService.findById(tenantId, campaignId);
     if (!campaign) throw new NotFoundException('Campaign not found');
     return campaign;
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/review
+   * Everything the Approve & Launch screen should show before the click:
+   * the RESOLVED product (and how it was resolved), the exact destination URL
+   * per ad set, pixel + conversion tracking, per-ad-set ₹/day and targeting,
+   * every copy variant and asset that will ship, the Meta campaign name that
+   * will be created, and `blockers` — the things that will make /approve fail.
+   *
+   * Read-only, and safe to call on a broken campaign: it renders the problem
+   * in `blockers` instead of erroring, so the operator can see and fix it.
+   */
+  @Get(':tenantId/:campaignId/review')
+  async reviewBeforeApproval(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+  ) {
+    return this.approvalPreview.build(tenantId, campaignId);
   }
 
   /**
@@ -519,31 +544,25 @@ export class CampaignsController {
       );
     }
 
-    // Resolve product → landing URL. Prefer brief.product if creativeBrief present;
-    // fall back to active product.
-    const briefId = campaign.briefId;
-    let product: any = null;
-    if (briefId) {
-      const brief = await this.creativeBriefModel
-        .findOne({ tenantId, briefId })
-        .lean()
-        .exec();
-      if (brief?.product) {
-        product = (company.products ?? []).find(
-          (p: any) => p.name === brief.product,
-        );
-      }
+    // Resolve product → landing URL. campaign.productName first, then the
+    // brief; never "the first active product" — these ads are being added to a
+    // LIVE campaign, so a wrong guess silently points new ads at another
+    // product's funnel alongside correct ones.
+    const brief = campaign.briefId
+      ? await this.creativeBriefModel
+          .findOne({ tenantId, briefId: campaign.briefId })
+          .lean()
+          .exec()
+      : null;
+    let product: any;
+    try {
+      product = resolveCampaignProduct(company, campaign as any, brief as any)
+        .product;
+      assertProductLaunchable(product, 'create');
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
     }
-    if (!product) {
-      product =
-        (company.products ?? []).find((p: any) => p.active) ??
-        (company.products ?? [])[0];
-    }
-    const landingUrl = product?.landingUrl;
-    if (!landingUrl)
-      throw new BadRequestException(
-        `No landingUrl on product "${product?.name ?? 'unknown'}" — cannot create ads`,
-      );
+    const landingUrl = product.landingUrl as string;
 
     const results: Array<{
       adSetId: string;

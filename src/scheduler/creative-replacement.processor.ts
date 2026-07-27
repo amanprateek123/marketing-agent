@@ -6,6 +6,7 @@ import { Job } from 'bullmq';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { MetaAdsService } from '../campaigns/meta-ads/meta-ads.service';
 import { withUtmParams } from '../campaigns/meta-ads/meta-utm.util';
+import { tryResolveCampaignProduct } from '../campaigns/campaign-creator/resolve-campaign-product';
 import { CompaniesService } from '../companies/companies.service';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
@@ -157,11 +158,26 @@ export class CreativeReplacementProcessor extends WorkerHost {
         return;
       }
 
+      // Destination = the product THIS campaign sells, taken from the campaign
+      // record. Was `products.find(p => p.active)` — the tenant's first active
+      // product — so on a multi-product tenant an added ad could quietly point
+      // at a different funnel than the ad set it joined. Unresolvable → fail
+      // the replacement; never ship an ad to a guessed URL.
+      const { resolution: addProductResolution, error: addProductError } =
+        tryResolveCampaignProduct(company, campaign as any, brief as any);
+      const product = addProductResolution?.product;
+      if (!product?.landingUrl) {
+        this.logger.error(
+          `add_creative aborted for campaign ${campaignId}: ${addProductError ?? `product "${product?.name}" has no landingUrl`}. Set campaign.productName (and the product's Landing URL) before retrying.`,
+        );
+        await updateReplacementStatus('failed');
+        return;
+      }
+
       try {
-        const product = (company.products ?? []).find((p: any) => p.active);
         const adName = `Ad (${replacementHook}) — added ${new Date().toISOString().split('T')[0]}`;
         const adSetName = ((campaign as any)?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId)?.name ?? adSetId;
-        const taggedLandingUrl = withUtmParams(product?.landingUrl ?? '', {
+        const taggedLandingUrl = withUtmParams(product.landingUrl, {
           campaignName: campaign?.name ?? campaignId,
           adSetName,
           adName,
