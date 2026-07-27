@@ -42,6 +42,15 @@ export interface ImageCreative {
   // distinct creative. Unlike `aspectRatio`, which records what was
   // REQUESTED, an extended entry's aspectRatio is what it actually measures.
   extendedFrom?: string;
+  // Set when this entry is an alternate size of another entry that a human
+  // uploaded ready-made (value = that entry's imageUrl) — a creative team's
+  // own 1:1/9:16 cuts of the same ad, filed alongside it instead of as
+  // separate creatives. Display-wise it behaves like `extendedFrom`: it is a
+  // size OF its source, never "the creative" itself, so thumbnail/primary
+  // resolution must skip it. Unlike an extended entry it is a real
+  // human-made asset, so the resizer may still use it as an extend source,
+  // and its aspectRatio is what the uploader tagged rather than a measurement.
+  uploadedSizeOf?: string;
   // Soft-delete, reversible — never read by campaign launch code, so a
   // rejected-but-still-referenced-by-a-campaign asset stays fully launchable.
   // GalleryService's live-resolve join skips rejected assets, so this alone

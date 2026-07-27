@@ -17,13 +17,54 @@ import { CreativePackage, CreativePackageDocument } from './schemas/creative-pac
 import { CANONICAL_LANGUAGES } from '../common/creative/language-utils';
 import { listFormatSpecs, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../common/creative/format-specs';
 import { S3Service } from '../common/storage/s3.service';
-import { ImageResizerService, EXTEND_RATIOS, ExtendRatio } from '../common/media/image-resizer.service';
+import { ImageResizerService, EXTEND_RATIOS, ExtendRatio, classifyRatio } from '../common/media/image-resizer.service';
 import { parseRobustJson } from '../common/llm/robust-json-parser.util';
 import { GalleryService } from '../gallery/gallery.service';
 import {
   HOOK_STYLES_DR, HOOK_STYLES_MEME, HOOK_STYLES_SCREENSHOT, HOOK_STYLES_POLL,
   HOOK_STYLE_DESCRIPTIONS, HOOK_STYLE_DESCRIPTIONS_MEME, HOOK_STYLE_DESCRIPTIONS_SCREENSHOT, HOOK_STYLE_DESCRIPTIONS_POLL,
 } from '../common/creative/hook-styles';
+
+/**
+ * One extra ready-made size of the SAME creative as its parent item — a
+ * creative team's own 1:1/9:16 cuts of one ad, not a separate ad. Filed as
+ * additional entries under the parent's variantIndex (tagged `uploadedSizeOf`)
+ * so launch placement selection and the Gallery see one creative with several
+ * sizes, exactly as they do for resizer-derived sizes.
+ */
+interface UploadCreativeSize {
+  sourceUrl?: string;
+  aspectRatio?: string;
+  resolution?: string;
+}
+
+/** Extensions we're willing to preserve when re-hosting an upload, and what to store them as. */
+const UPLOAD_CONTENT_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+};
+
+/**
+ * What to store a re-hosted upload as, from its source URL's extension.
+ * Falls back to png/mp4 (the long-standing behaviour) whenever the extension
+ * is missing, unrecognised, or disagrees with the declared asset type — a
+ * ".../photo" path or a stray query artefact must never be able to file a
+ * video as a GIF.
+ */
+function resolveUploadMediaType(sourceUrl: string, assetType: 'image' | 'video'): { ext: string; contentType: string } {
+  const ext = sourceUrl.split(/[?#]/)[0].split('.').pop()?.toLowerCase() ?? '';
+  const contentType = UPLOAD_CONTENT_TYPES[ext];
+  if (contentType?.startsWith(assetType)) return { ext, contentType };
+  return assetType === 'image'
+    ? { ext: 'png', contentType: 'image/png' }
+    : { ext: 'mp4', contentType: 'video/mp4' };
+}
 
 /** Shared body shape for both POST packages/upload and POST packages/upload-bulk (one entry per item there). */
 interface UploadCreativeItem {
@@ -43,6 +84,12 @@ interface UploadCreativeItem {
   sourceUrl?: string;
   aspectRatio?: string;
   resolution?: string;
+  /**
+   * Optional extra ready-made sizes of this same creative. Images only — the
+   * schema holds one `video` per package, so a second video size has nowhere
+   * to live that launch/gallery would read (see uploadOneCreative).
+   */
+  sizes?: UploadCreativeSize[];
 }
 
 @Controller('creative')
@@ -343,7 +390,14 @@ export class CreativeController {
    * Body: { productName?, targetLanguage?, topic?,
    *   copy: { headline: string, primaryText: string, cta: string },
    *   assetType: 'image' | 'video', sourceUrl: string,
-   *   aspectRatio?: string, resolution?: string }
+   *   aspectRatio?: string, resolution?: string,
+   *   sizes?: { sourceUrl, aspectRatio?, resolution? }[] }
+   *
+   * `sizes` files ready-made alternate sizes of the SAME image (a creative
+   * team's own 1:1/9:16 cuts) under one creative, so launch picks the right
+   * one per placement instead of letting Meta centre-crop — the manual
+   * counterpart to generate-sizes. Image-only. A size that fails to upload
+   * doesn't fail the creative; it comes back in `sizeErrors`.
    */
   @Post(':tenantId/packages/upload')
   async uploadCreative(@Param('tenantId') tenantId: string, @Body() body: UploadCreativeItem) {
@@ -388,16 +442,59 @@ export class CreativeController {
       throw new BadRequestException('copy.headline, copy.primaryText, and copy.cta are required');
     }
 
-    const ext = assetType === 'image' ? 'png' : 'mp4';
-    const contentType = assetType === 'image' ? 'image/png' : 'video/mp4';
-    const key = `${tenantId}/uploads/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    this.logger.log(`Uploading external ${assetType} to S3 for a new library creative: tenantId=${tenantId} sourceUrl=${sourceUrl}`);
-    const hostedUrl = await this.s3Service.uploadFromUrl(sourceUrl, key, contentType);
+    const extraSizes = (body.sizes ?? [])
+      .map(s => ({ ...s, sourceUrl: s.sourceUrl?.trim() }))
+      .filter((s): s is UploadCreativeSize & { sourceUrl: string } => !!s.sourceUrl);
+    if (extraSizes.length && assetType === 'video') {
+      throw new BadRequestException(
+        'sizes is image-only — a package holds a single video, so an extra video size has nowhere to live that launch and the Gallery would read. Upload each video size as its own row.',
+      );
+    }
+
+    this.logger.log(`Uploading external ${assetType} to S3 for a new library creative: tenantId=${tenantId} sourceUrl=${sourceUrl} extraSizes=${extraSizes.length}`);
+    const hostedUrl = await this.rehostForUpload(tenantId, sourceUrl, assetType);
+
+    // Extra sizes are best-effort on purpose: the creative itself has already
+    // uploaded by this point, and losing it over a bad alternate-size URL
+    // would be a worse trade than filing it with the sizes that worked and
+    // reporting the ones that didn't (same spirit as the bulk endpoint's
+    // one-bad-row-doesn't-block-the-rest).
+    const sizeOutcomes = await Promise.allSettled(
+      extraSizes.map(s => this.rehostForUpload(tenantId, s.sourceUrl, 'image')),
+    );
+    const sizeErrors = sizeOutcomes.flatMap((outcome, i) =>
+      outcome.status === 'rejected'
+        ? [{ sourceUrl: extraSizes[i].sourceUrl, error: outcome.reason?.message ?? 'Upload failed' }]
+        : [],
+    );
+    for (const err of sizeErrors) {
+      this.logger.error(`Extra size failed to upload for tenantId=${tenantId} sourceUrl=${err.sourceUrl}: ${err.error}`);
+    }
 
     const briefId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const images = assetType === 'image'
-      ? [{ variantIndex: 0, imagePrompt: '', imageUrl: hostedUrl, aspectRatio: body.aspectRatio, resolution: body.resolution }]
+      ? [
+          { variantIndex: 0, imagePrompt: '', imageUrl: hostedUrl, aspectRatio: body.aspectRatio, resolution: body.resolution },
+          // Same variantIndex as the creative above, tagged `uploadedSizeOf` —
+          // that pairing is what makes launch placement selection and the
+          // Gallery treat these as sizes of one creative rather than as
+          // separate creatives sharing a headline.
+          ...sizeOutcomes.flatMap((outcome, i) =>
+            outcome.status === 'fulfilled'
+              ? [{
+                  variantIndex: 0,
+                  imagePrompt: '',
+                  imageUrl: outcome.value,
+                  aspectRatio: extraSizes[i].aspectRatio,
+                  resolution: extraSizes[i].resolution,
+                  uploadedSizeOf: hostedUrl,
+                }]
+              : [],
+          ),
+        ]
       : [];
+
+    await this.measureUploadedImages(images);
     const video = assetType === 'video'
       ? { variantIndex: 0, videoPrompt: '', videoUrl: hostedUrl, videoThumbnailUrl: '', aspectRatio: body.aspectRatio, resolution: body.resolution }
       : null;
@@ -433,7 +530,49 @@ export class CreativeController {
       this.logger.error(`Gallery auto-populate failed for uploaded package ${pkg._id}: ${galleryErr.message}`);
     }
 
-    return { status: 'completed', packageId: pkg._id.toString() };
+    return {
+      status: 'completed',
+      packageId: pkg._id.toString(),
+      // Present only when some extra size failed — the creative still landed,
+      // so this is a warning on a successful row, not a failure of it.
+      ...(sizeErrors.length ? { sizeErrors } : {}),
+    };
+  }
+
+  /**
+   * Records what each just-uploaded image actually IS: measured width/height,
+   * plus the placement ratio those pixels classify as whenever the uploader
+   * didn't tag one themselves. Mutates the entries in place, before they're
+   * written.
+   *
+   * Nobody should have to hand-tag the shape of a file they just picked, and a
+   * hand-typed tag is the one thing here that can be wrong — so measurement is
+   * the default and an explicit tag stays authoritative only where it was
+   * given. Best-effort: an image we can't fetch or decode is simply left
+   * unmeasured, exactly as every upload was before, and ensureSizes will
+   * measure it at launch anyway.
+   */
+  private async measureUploadedImages(images: Array<{ imageUrl: string; aspectRatio?: string; width?: number; height?: number }>): Promise<void> {
+    await Promise.all(images.map(async (img) => {
+      const measured = await this.imageResizer.measure(img.imageUrl);
+      if (!measured) return;
+      img.width = measured.width;
+      img.height = measured.height;
+      img.aspectRatio = img.aspectRatio || classifyRatio(measured.width, measured.height);
+    }));
+  }
+
+  /**
+   * Copies an already-hosted asset into this tenant's own S3 space under a
+   * fresh key. Carries the source's own extension/content-type across when
+   * it's one we recognise for the declared kind — every upload used to be
+   * stored as .png/.mp4 regardless, which mislabels a JPEG or a .mov and
+   * leaves anything reading it (Meta's uploader included) to guess from bytes.
+   */
+  private async rehostForUpload(tenantId: string, sourceUrl: string, assetType: 'image' | 'video'): Promise<string> {
+    const { ext, contentType } = resolveUploadMediaType(sourceUrl, assetType);
+    const key = `${tenantId}/uploads/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    return this.s3Service.uploadFromUrl(sourceUrl, key, contentType);
   }
 
   /**

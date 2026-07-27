@@ -376,6 +376,28 @@ export class ImageResizerService {
     return { images: result, added, byRatio };
   }
 
+  /**
+   * Real pixel dimensions of an already-hosted image, or null when it can't be
+   * fetched or decoded. Every caller here treats a missing measurement as
+   * "unknown", never as an error, so this swallows failures the same way
+   * ensureSizes does.
+   *
+   * Exposed for callers that want the measurement WITHOUT the resizing: an
+   * upload can then record what it actually received at the moment it lands,
+   * rather than leaving its shape unknown (and its ratio tag unverified) until
+   * the first ensureSizes run downloads it anyway.
+   */
+  async measure(url: string): Promise<{ width: number; height: number } | null> {
+    try {
+      const meta = await sharp(await this.download(url)).metadata();
+      if (!meta.width || !meta.height) return null;
+      return { width: meta.width, height: meta.height };
+    } catch (err: any) {
+      this.logger.warn(`Could not measure image ${url}: ${err.message}`);
+      return null;
+    }
+  }
+
   private async download(url: string): Promise<Buffer> {
     const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
     return Buffer.from(response.data);

@@ -17,12 +17,13 @@ export interface ResolvedGalleryAsset {
   aspectRatio?: string;
   resolution?: string;
   /**
-   * Derived placement sizes of THIS asset (canvas-extended copies), never
-   * separate creatives — they share their source's variantIndex, so
+   * Alternate placement sizes of THIS asset — canvas-extended copies the
+   * resizer derived, and ready-made ones uploaded alongside the creative —
+   * never separate creatives. They share their source's variantIndex, so
    * findUntrackedAssets already declines to give them their own pointer. One
    * gallery row, several sizes. Empty for assets that have none.
    */
-  sizes?: Array<{ imageUrl: string; aspectRatio?: string; width?: number; height?: number }>;
+  sizes?: Array<{ imageUrl: string; aspectRatio?: string; width?: number; height?: number; derived: boolean }>;
 }
 
 /**
@@ -112,6 +113,13 @@ export class GalleryService {
     for (const img of images) {
       if (img.imageUrl && !alreadyTracked.has(`image-${img.variantIndex}`)) {
         toCreate.push({ assetType: 'image', variantIndex: img.variantIndex });
+        // Mark it here, not just from what's already in the DB: several
+        // entries can share a variantIndex (alternate sizes of one creative),
+        // and they belong on ONE gallery row, resolved together by the join
+        // below. Without this, a package arriving with its sizes already
+        // attached — an upload carrying them — would insert a duplicate
+        // pointer per size, each rendering the same creative.
+        alreadyTracked.add(`image-${img.variantIndex}`);
       }
     }
     if (video?.videoUrl && !alreadyTracked.has('video-0')) {
@@ -306,29 +314,35 @@ export class GalleryService {
       let sizes: ResolvedGalleryAsset['sizes'];
 
       if (asset.assetType === 'image') {
-        // A variant can hold several entries: the real creative plus derived
-        // placement sizes appended by ImageResizerService. Resolve the
-        // creative EXPLICITLY as the non-derived one — picking the array's
-        // first match happens to work only because extends are appended, which
-        // is an ordering accident, and getting it wrong would show a
-        // blur-margined derivative as though it were the creative itself.
+        // A variant can hold several entries: the real creative, derived
+        // placement sizes appended by ImageResizerService, and ready-made
+        // sizes uploaded next to it. Resolve the creative EXPLICITLY as the
+        // one that is neither — picking the array's first match happens to
+        // work only because sizes are appended, which is an ordering
+        // accident, and getting it wrong would show a blur-margined
+        // derivative (or an off-ratio cut) as though it were the creative.
         const forVariant = (pkg.images ?? []).filter((i: any) => i.variantIndex === asset.variantIndex && i.imageUrl);
-        const img = forVariant.find((i: any) => !i.extendedFrom) ?? forVariant[0];
+        const isAlternateSize = (i: any) => !!i.extendedFrom || !!i.uploadedSizeOf;
+        const img = forVariant.find((i: any) => !isAlternateSize(i)) ?? forVariant[0];
         if (!img?.imageUrl || img.rejected) continue; // rejected — hidden from its sheet until restored, pointer untouched
         assetUrl = img.imageUrl;
         aspectRatio = img.aspectRatio;
         resolution = img.resolution;
-        // Derived sizes ride along on the one row rather than becoming rows of
-        // their own. They inherit the creative's rejected state implicitly:
+        // Alternate sizes ride along on the one row rather than becoming rows
+        // of their own. They inherit the creative's rejected state implicitly:
         // the `continue` above drops the whole asset when its source is
         // rejected, sizes included.
-        const derived = forVariant.filter((i: any) => i.extendedFrom);
-        if (derived.length) {
-          sizes = derived.map((i: any) => ({
+        const alternates = forVariant.filter((i: any) => i !== img && isAlternateSize(i));
+        if (alternates.length) {
+          sizes = alternates.map((i: any) => ({
             imageUrl: i.imageUrl,
             aspectRatio: i.aspectRatio,
             width: i.width,
             height: i.height,
+            // Canvas-extended by us vs. supplied ready-made — the first has a
+            // blurred margin, the second is a real cut, and a viewer choosing
+            // an asset for a placement wants to know which.
+            derived: !!i.extendedFrom,
           }));
         }
       } else if (asset.assetType === 'video') {
