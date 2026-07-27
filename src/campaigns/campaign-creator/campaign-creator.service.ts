@@ -22,7 +22,7 @@ import {
 } from './resolve-campaign-product';
 import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
-import { getGrossConversionValue } from '../../common/conversion-value.util';
+import { getEffectiveConversionValue, getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
 
 @Injectable()
@@ -1052,11 +1052,24 @@ export class CampaignCreatorService {
     // Non-conversion goals stay LOWEST_COST_WITHOUT_CAP, which is the
     // correct default for them anyway — they were never the junk-traffic
     // failure mode this cap was built to prevent.
-    const briefProductForBid = (creativeBrief as any)?.product;
-    const productForBid = (company.products ?? []).find((p: any) => p.name === briefProductForBid)
-      ?? (company.products ?? []).find((p: any) => p.active)
-      ?? (company.products ?? [])[0];
-    const histCPA = productForBid?.performance?.avgCPA;
+    // Uses the product resolved in the pre-flight — NOT a second lookup.
+    // This was `find(p => p.name === brief.product) ?? find(p => p.active)`,
+    // which on a manual campaign (no brief) took the tenant's FIRST ACTIVE
+    // product's avgCPA. Hit in production 2026-07-27: a "wish letter" ad set
+    // (breakeven ₹1,100) shipped with COST_CAP ₹1,400 — Nadi Report's CPA —
+    // authorising Meta to pay ₹300 more per sale than the product earns.
+    const histCPA = product?.performance?.avgCPA;
+    // A cost cap above breakeven is a guaranteed-loss configuration: it tells
+    // Meta the maximum acceptable price for a conversion is more than the
+    // conversion is worth. Warn rather than clamp — a product whose historical
+    // CPA genuinely exceeds breakeven is a real (bad) signal the operator
+    // needs to see, not something to paper over by silently bidding lower.
+    const breakevenCPA = getEffectiveConversionValue(product as any) * (product?.contributionMargin ?? 1);
+    if (typeof histCPA === 'number' && histCPA > 0 && breakevenCPA > 0 && histCPA > breakevenCPA) {
+      this.logger.warn(
+        `Product "${product?.name}" has avgCPA ₹${histCPA} but breakeven CPA is only ₹${Math.round(breakevenCPA)} — the COST_CAP below authorises Meta to buy conversions at a loss of ₹${Math.round(histCPA - breakevenCPA)} each. Lower the bid or fix the product's price/margin before scaling.`,
+      );
+    }
     if (typeof histCPA === 'number' && histCPA > 0) {
       const COLD_PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
       const CONVERSION_GOALS = new Set(['OFFSITE_CONVERSIONS', 'VALUE']);
