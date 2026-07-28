@@ -433,54 +433,73 @@ export class ManualCampaignService {
     let adSets: any[];
 
     if (dto.campaignType === 'advantage_plus') {
-      const first = dto.adSets[0];
-      if (!first)
+      if (dto.adSets.length === 0)
+        throw new Error('Advantage+ campaigns need at least one ad set');
+
+      // Advantage+ is a per-ad-set audience flag in Meta, not a one-ad-set
+      // campaign format (that's Advantage+ Shopping, a different product). A
+      // campaign can run several Advantage+ ad sets, each with its own
+      // suggestions and budget share — which is how you A/B two audience
+      // hypotheses while Meta still optimises delivery inside each.
+      //
+      // This branch used to hard-take dto.adSets[0] and drop the rest, so the
+      // card labelled "Advantage+" silently discarded everything after the
+      // first ad set.
+      const totalPct = dto.adSets.reduce((s, a) => s + (a.budgetPercent || 0), 0);
+      if (dto.adSets.length > 1 && Math.abs(totalPct - 100) > 1) {
         throw new Error(
-          'Advantage+ campaigns need one ad set (Meta handles targeting automatically)',
+          `Ad set budget percentages must sum to 100 (currently ${totalPct})`,
         );
-      adSets = [
-        {
-          name: first.name?.trim() || `${dto.name.trim()} — Advantage+`,
-          budgetPercent: 100,
-          audienceType: 'advantage_plus',
-          optimizationGoal: first.optimizationGoal || 'OFFSITE_CONVERSIONS',
-          ads: adIndices,
-          creativeFormat: first.creativeFormat || defaultFormat,
+      }
 
-          // ── Advantage+ audience SUGGESTIONS ────────────────────────────
-          // These used to be dropped on the floor here, on the belief that
-          // Meta requires Advantage+ ad sets to be fully unconstrained. That
-          // is only true of age/gender (see below) — Meta's own Advantage+
-          // audience UI exposes a Detailed targeting box, custom audiences
-          // and location, and treats them as a SUGGESTION it may deliver
-          // beyond rather than a hard filter. MetaAdsService.createAdSet
-          // already handles all of these outside its advantage_plus branch,
-          // so they ship alongside targeting_automation.advantage_audience=1
-          // exactly the way Meta's UI produces them.
-          //
-          // Consequence to be aware of when reading results: an Advantage+ ad
-          // set can and will deliver outside these. Use campaignType='custom'
-          // (advantage_audience=0) when the targeting must actually bind.
-          interests: first.interests?.length
-            ? first.interests.map((x) => x.id)
-            : undefined,
-          // Seeds Advantage+ delivery ("Include these custom audiences"); it
-          // does NOT confine it — createAdSet ships this with
-          // advantage_audience=1. Real retargeting needs campaignType='custom'.
-          metaAudienceId: first.metaAudienceId || undefined,
-          geoLocations: first.geoLocations?.length ? first.geoLocations : undefined,
-          geoStates: first.geoStates?.length ? first.geoStates : undefined,
-          geoCities: first.geoCities?.length ? first.geoCities : undefined,
-          locales: first.locales?.length ? first.locales : undefined,
-          excludeAudienceIds: first.excludeAudienceIds?.length
-            ? first.excludeAudienceIds
-            : undefined,
+      adSets = dto.adSets.map((a, i) => ({
+        name:
+          a.name?.trim() ||
+          `${dto.name.trim()} — Advantage+${dto.adSets.length > 1 ? ` ${i + 1}` : ''}`,
+        budgetPercent: dto.adSets.length === 1 ? 100 : (a.budgetPercent ?? 0),
+        audienceType: 'advantage_plus',
+        optimizationGoal: a.optimizationGoal || 'OFFSITE_CONVERSIONS',
+        // Per-ad-set creative selection, same rule as the custom path: an
+        // empty selection means every variant. Campaign-wide coverage is
+        // validated below, so a deliberate split can't silently drop one.
+        ads: a.ads?.length
+          ? a.ads.filter((v) => adIndices.includes(v))
+          : adIndices,
+        creativeFormat: a.creativeFormat || defaultFormat,
 
-          // Age/gender stay omitted — these are the fields Meta genuinely
-          // constrains under Advantage+ (age_max must remain 65), and
-          // createAdSet deliberately skips them for this audienceType.
-        },
-      ];
+        // ── Advantage+ audience SUGGESTIONS ────────────────────────────
+        // These used to be dropped on the floor here, on the belief that
+        // Meta requires Advantage+ ad sets to be fully unconstrained. That
+        // is only true of age/gender (see below) — Meta's own Advantage+
+        // audience UI exposes a Detailed targeting box, custom audiences
+        // and location, and treats them as a SUGGESTION it may deliver
+        // beyond rather than a hard filter. MetaAdsService.createAdSet
+        // already handles all of these outside its advantage_plus branch,
+        // so they ship alongside targeting_automation.advantage_audience=1
+        // exactly the way Meta's UI produces them.
+        //
+        // Consequence to be aware of when reading results: an Advantage+ ad
+        // set can and will deliver outside these. Use campaignType='custom'
+        // (advantage_audience=0) when the targeting must actually bind.
+        interests: a.interests?.length
+          ? a.interests.map((x) => x.id)
+          : undefined,
+        // Seeds Advantage+ delivery ("Include these custom audiences"); it
+        // does NOT confine it — createAdSet ships this with
+        // advantage_audience=1. Real retargeting needs campaignType='custom'.
+        metaAudienceId: a.metaAudienceId || undefined,
+        geoLocations: a.geoLocations?.length ? a.geoLocations : undefined,
+        geoStates: a.geoStates?.length ? a.geoStates : undefined,
+        geoCities: a.geoCities?.length ? a.geoCities : undefined,
+        locales: a.locales?.length ? a.locales : undefined,
+        excludeAudienceIds: a.excludeAudienceIds?.length
+          ? a.excludeAudienceIds
+          : undefined,
+
+        // Age/gender stay omitted — these are the fields Meta genuinely
+        // constrains under Advantage+ (age_max must remain 65), and
+        // createAdSet deliberately skips them for this audienceType.
+      }));
     } else {
       // Custom: 1..N ad sets, each independently targeted.
       const totalPct = dto.adSets.reduce((s, a) => s + (a.budgetPercent || 0), 0);
@@ -558,11 +577,21 @@ export class ManualCampaignService {
         `"${label}": interest targeting requires at least one interest`,
       );
     }
-    if (a.audienceType === 'advantage_plus') {
-      throw new Error(
-        `"${label}": use the Advantage+ campaign type for Advantage+ ad sets, not a custom ad set`,
-      );
-    }
+    // advantage_plus is deliberately ALLOWED here. It used to throw, on the
+    // premise that Advantage+ is a campaign type — but in Meta it is a
+    // per-ad-set audience flag (targeting_automation.advantage_audience), and
+    // a single campaign can mix Advantage+ and hand-targeted ad sets freely.
+    //
+    // Forbidding it made the exact structure this system's own Campaign Review
+    // Team prompt recommends impossible to build by hand: "ad-set-A
+    // advantage_plus broad; ad-set-B lookalike, split budget ~50/50, same
+    // creative — that isolates AUDIENCE as the variable". The AI path could
+    // produce it; the manual form could not.
+    //
+    // Age/gender are stripped below rather than rejected: Meta overrides both
+    // under Advantage+, so storing them would make campaignConfig claim
+    // targeting that never ships.
+    const isAdvantagePlus = a.audienceType === 'advantage_plus';
 
     // Explicit per-ad-set creative selection — lets a human distribute
     // specific variants to specific ad sets instead of every ad set
@@ -588,9 +617,15 @@ export class ManualCampaignService {
       excludeAudienceIds: a.excludeAudienceIds?.length
         ? a.excludeAudienceIds
         : undefined,
-      ageMin: a.ageMin,
-      ageMax: a.ageMax,
-      gender: a.gender && a.gender !== 'all' ? a.gender : undefined,
+      // Omitted entirely for Advantage+ — createAdSet skips age/gender for that
+      // audienceType (Meta requires age_max to stay 65), so persisting them
+      // would describe targeting the launch never sends.
+      ageMin: isAdvantagePlus ? undefined : a.ageMin,
+      ageMax: isAdvantagePlus ? undefined : a.ageMax,
+      gender:
+        !isAdvantagePlus && a.gender && a.gender !== 'all'
+          ? a.gender
+          : undefined,
       geoLocations: a.geoLocations?.length ? a.geoLocations : undefined,
       // Region/city keys win over the country layer at launch — createAdSet
       // drops geo_locations.countries whenever either is present, because Meta

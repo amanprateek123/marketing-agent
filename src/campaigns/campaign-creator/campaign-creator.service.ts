@@ -832,35 +832,66 @@ export class CampaignCreatorService {
       }
     }
 
-    // Consolidate: if multiple ad sets ended up as advantage_plus (same targeting),
-    // merge them into one ad set with all unique variant indices and full budget
-    const advantagePlusAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType === 'advantage_plus');
+    // Consolidate advantage_plus ad sets that are TRUE duplicates.
+    //
+    // This used to merge every advantage_plus ad set unconditionally, and that
+    // was correct while advantage_plus carried no targeting at all — any two
+    // were identical by construction, so running them separately just split
+    // budget between clones bidding against each other.
+    //
+    // Advantage+ ad sets now carry audience suggestions (interests, geo,
+    // locales, custom audience, exclusions), so two of them can be genuinely
+    // different hypotheses. Merging those silently destroys the experiment —
+    // exactly the A/B the Campaign Review Team prompt asks for. Group by a
+    // targeting signature and only collapse within a group.
+    const apSignature = (as: any) =>
+      JSON.stringify({
+        i: [...(as.interests ?? [])].map(String).sort(),
+        c: [...(as.geoLocations ?? [])].sort(),
+        r: [...(as.geoStates ?? [])].sort(),
+        y: [...(as.geoCities ?? [])].sort(),
+        l: [...(as.locales ?? [])].sort(),
+        a: as.metaAudienceId ?? null,
+        x: [...(as.excludeAudienceIds ?? [])].sort(),
+      });
+
     const otherAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType !== 'advantage_plus');
+    const apBySignature = new Map<string, any[]>();
+    for (const as of (config.adSets as any[]).filter((a: any) => a.audienceType === 'advantage_plus')) {
+      const sig = apSignature(as);
+      apBySignature.set(sig, [...(apBySignature.get(sig) ?? []), as]);
+    }
 
-    if (advantagePlusAdSets.length > 1 && !isLandingPageTest) {
-      // Merge all advantage_plus ad sets into one
-      const allVariants = [...new Set(advantagePlusAdSets.flatMap((as: any) => as.ads))].sort();
-      const totalBudgetPercent = advantagePlusAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
-      // Format precedence: mixed > both > video > image. 'mixed' (1 video + N image)
-      // is preferred when any source ad set wanted that — keeps creative diversity in
-      // the consolidated bucket without duplicating the single video across N variants.
-      const mergedCreativeFormat = advantagePlusAdSets.some((as: any) => as.creativeFormat === 'mixed') ? 'mixed'
-        : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'both') ? 'both'
-        : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'video') ? 'video' : 'image';
+    if (!isLandingPageTest && [...apBySignature.values()].some((g) => g.length > 1)) {
+      const mergedGroups: any[] = [];
+      for (const group of apBySignature.values()) {
+        if (group.length === 1) {
+          mergedGroups.push(group[0]);
+          continue;
+        }
+        const allVariants = [...new Set(group.flatMap((as: any) => as.ads))].sort();
+        const totalBudgetPercent = group.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
+        // Format precedence: mixed > both > video > image. 'mixed' (1 video + N image)
+        // is preferred when any source ad set wanted that — keeps creative diversity in
+        // the consolidated bucket without duplicating the single video across N variants.
+        const mergedCreativeFormat = group.some((as: any) => as.creativeFormat === 'mixed') ? 'mixed'
+          : group.some((as: any) => as.creativeFormat === 'both') ? 'both'
+          : group.some((as: any) => as.creativeFormat === 'video') ? 'video' : 'image';
 
-      const merged = {
-        ...advantagePlusAdSets[0],
-        name: `ADVANTAGE_PLUS_${new Date().toISOString().split('T')[0]}`,
-        ads: allVariants,
-        budgetPercent: totalBudgetPercent,
-        creativeFormat: mergedCreativeFormat,
-        audienceType: 'advantage_plus',
-      };
-      delete merged.metaAudienceId;
-      delete merged.excludeAudienceIds;
-
-      config.adSets = [...otherAdSets, merged];
-      this.logger.log(`Consolidated ${advantagePlusAdSets.length} advantage_plus ad sets into 1 (budget: ${totalBudgetPercent}%, variants: ${allVariants.join(',')})`);
+        // Spread the first member so the group's shared targeting is preserved —
+        // it is identical across the group by definition of the signature, so
+        // nothing an operator chose is lost here.
+        mergedGroups.push({
+          ...group[0],
+          name: `ADVANTAGE_PLUS_${new Date().toISOString().split('T')[0]}`,
+          ads: allVariants,
+          budgetPercent: totalBudgetPercent,
+          creativeFormat: mergedCreativeFormat,
+          audienceType: 'advantage_plus',
+        });
+        this.logger.log(`Consolidated ${group.length} identically-targeted advantage_plus ad sets into 1 (budget: ${totalBudgetPercent}%, variants: ${allVariants.join(',')})`);
+      }
+      config.adSets = [...otherAdSets, ...mergedGroups];
     }
 
     // If only one ad set remains, give it 100% budget
