@@ -1613,15 +1613,39 @@ export class CampaignCreatorService {
       }
     }
 
-    // 3. Lookalike 1% from purchasers
+    // 3. Lookalike 1% from purchasers — ONLY once the seed is actually populated.
+    //
+    // This block used to create the lookalike immediately after creating the
+    // purchasers audience above. A pixel audience holds ZERO people at creation
+    // (Meta backfills it from pixel history over the following hours), and a
+    // lookalike seeded from an empty audience fails PERMANENTLY with
+    // operation_status 433 — Meta never retries, and its own error text says to
+    // delete and recreate.
+    //
+    // That is exactly what happened on 91astrology: purchasers created at epoch
+    // 1777838430, lookalike at 1777838432 — two seconds later. The result sat
+    // dead for months while STANDARD_COHORTS still described it as the "primary
+    // cold prospecting audience", so cold ad sets silently fell back to broad.
+    //
+    // Skipping here is not a loss: POST audiences/rebuild-lookalikes creates it
+    // on a later pass once the seed is ready (and repairs already-dead ones).
     const lookalikeSource = purchasersId ?? existingAudiences.find(a => a.name === purchasersName)?.id;
     const lookalikeName = `${brandPrefix}_Lookalike_1pct`;
     if (lookalikeSource && !existsByName(lookalikeName)) {
       try {
-        const lookalikeId = await this.metaAdsService.createLookalikeAudience(
-          accountId, accessToken, lookalikeName, lookalikeSource, 'IN', 0.01,
-        );
-        newAudiences.push({ id: lookalikeId, name: lookalikeName, type: 'lookalike', lookalikePercent: 1 });
+        const seed = await this.metaAdsService.getAudienceHealth(lookalikeSource, accessToken);
+        if (!seed.seedReady) {
+          this.logger.warn(
+            `Skipping lookalike "${lookalikeName}": seed "${purchasersName}" ${seed.reason}. ` +
+            `Creating it now would fail permanently (Meta operation_status 433). ` +
+            `Run POST /campaigns/${company.tenantId}/audiences/rebuild-lookalikes once the seed fills.`,
+          );
+        } else {
+          const lookalikeId = await this.metaAdsService.createLookalikeAudience(
+            accountId, accessToken, lookalikeName, lookalikeSource, 'IN', 0.01,
+          );
+          newAudiences.push({ id: lookalikeId, name: lookalikeName, type: 'lookalike', lookalikePercent: 1 });
+        }
       } catch (err: any) {
         this.logger.warn(`Failed to create lookalike audience: ${err.message}`);
       }

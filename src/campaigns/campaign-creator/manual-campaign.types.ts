@@ -16,8 +16,17 @@ export interface ManualAdSetInput {
   ageMin?: number;
   ageMax?: number;
   gender?: 'male' | 'female' | 'all';
-  /** ISO country codes, e.g. ['IN']. */
+  /** ISO country codes, e.g. ['IN']. Ignored when geoStates/geoCities are set. */
   geoLocations?: string[];
+  /**
+   * Meta region keys (e.g. '1735' = Maharashtra), from the meta-geo-search
+   * endpoint. When set, MetaAdsService.createAdSet drops the country layer and
+   * targets these regions alone — Meta rejects overlapping country+region
+   * targeting (subcode 1487756), so the two are mutually exclusive by design.
+   */
+  geoStates?: string[];
+  /** Meta city keys, same source/precedence as geoStates (25km radius applied at launch). */
+  geoCities?: string[];
   /** Meta locale IDs (e.g. 84 = Marathi, 53 = Hindi) — filters delivery to users whose platform language matches. */
   locales?: number[];
   /** Required when audienceType is 'interest' — real Meta interest IDs (via the search endpoint), not keywords. */

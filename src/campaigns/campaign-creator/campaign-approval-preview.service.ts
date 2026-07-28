@@ -313,6 +313,18 @@ export class CampaignApprovalPreviewService {
         ageMax: as.ageMax ?? null,
         gender: as.gender ?? 'all',
         geoLocations: as.geoLocations ?? [],
+        // Region/city keys suppress the country layer at launch (createAdSet
+        // drops geo_locations.countries when either is set — Meta rejects the
+        // overlap). Surfaced separately so the approval screen shows the geo
+        // that will ACTUALLY ship, not the country that gets discarded.
+        geoStates: as.geoStates ?? [],
+        geoCities: as.geoCities ?? [],
+        effectiveGeoLayer:
+          (as.geoCities?.length ?? 0) > 0
+            ? 'cities'
+            : (as.geoStates?.length ?? 0) > 0
+              ? 'regions'
+              : 'countries',
         locales: as.locales ?? [],
         interestIds: as.interests ?? [],
         optimizationGoal: as.optimizationGoal ?? '',
@@ -335,6 +347,22 @@ export class CampaignApprovalPreviewService {
           message: `Product "${product.name}" forces optimizationGoal=${product.metaOptimizationGoal}; ${overridden.length} ad set(s) storing a different goal will be overridden at launch.`,
         });
       }
+    }
+
+    // Advantage+ ships custom audiences and interests as SUGGESTIONS
+    // (advantage_audience=1), so delivery goes well outside them. An operator
+    // who picked a retargeting audience here almost certainly expected it to
+    // confine spend — it doesn't, and the money is gone before that's visible
+    // in the metrics. Warn at the one moment it's still cheap to change.
+    const seededAdvantagePlus = configAdSets.filter(
+      (as: any) => as.audienceType === 'advantage_plus' && as.metaAudienceId,
+    );
+    if (seededAdvantagePlus.length > 0) {
+      warnings.push({
+        code: 'advantage_plus_audience_is_a_suggestion',
+        message: `${seededAdvantagePlus.length} Advantage+ ad set(s) include a custom audience. Advantage+ treats it as a seed, not a filter — Meta will deliver to people outside it.`,
+        fix: 'If this is meant to be retargeting, rebuild as a Custom Targeting campaign with audience source "Retarget" — that sets advantage_audience=0 and actually confines delivery.',
+      });
     }
 
     if (product?.customConversionId) {

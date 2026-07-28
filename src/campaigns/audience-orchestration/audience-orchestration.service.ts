@@ -61,7 +61,13 @@ export const STANDARD_COHORTS: StandardCohort[] = [
 export interface CohortStatusEntry {
   key: string;
   metaAudienceId: string | null;
-  status: 'created' | 'exists' | 'failed' | 'skipped';
+  /**
+   * 'deferred' is distinct from 'failed' on purpose: the cohort is fine, its
+   * SEED just isn't populated yet. Deferred cohorts are expected to succeed on
+   * a later rebuildLookalikes() pass, so callers must not treat them as errors
+   * or the setup endpoint reads as broken every first run.
+   */
+  status: 'created' | 'exists' | 'failed' | 'skipped' | 'deferred' | 'repaired';
   error?: string;
 }
 
@@ -168,6 +174,30 @@ export class AudienceOrchestrationService {
               error: `lookalike seed "${cohort.lookalikeSeed}" not created yet — needs source audience first` });
             continue;
           }
+
+          // ── Seed readiness gate ────────────────────────────────────────
+          // Ordering alone is NOT enough. A pixel audience created moments ago
+          // has zero members — Meta backfills it from pixel history over the
+          // following hours — and a lookalike built from an empty seed fails
+          // PERMANENTLY with operation_status 433. It never retries, so the
+          // audience is dead until deleted and recreated.
+          //
+          // This is not hypothetical: 91astrology's lal_1pct_buyers was created
+          // 2 seconds after its purchasers_180d seed and has been broken ever
+          // since, which is why the "primary cold prospecting audience" never
+          // once delivered. Defer instead — rebuildLookalikes() picks it up
+          // once Meta has populated the seed.
+          const seed = await this.metaAdsService.getAudienceHealth(
+            sourceId,
+            company.meta.accessToken,
+          );
+          if (!seed.seedReady) {
+            results.push({ key: cohort.key, metaAudienceId: null, status: 'deferred',
+              error: `seed "${cohort.lookalikeSeed}" not ready — ${seed.reason}. Will be created by the next lookalike rebuild once Meta populates it (usually within 24h).` });
+            this.logger.warn(`Cohort ${cohort.key} DEFERRED for ${tenantId}: ${seed.reason}`);
+            continue;
+          }
+
           audienceId = await this.metaAdsService.createLookalikeAudience(
             accountIdNormalized,
             company.meta.accessToken,
@@ -212,6 +242,204 @@ export class AudienceOrchestrationService {
       );
       await this.companiesService.update(tenantId, { products: updatedProducts as any });
       this.logger.log(`Audience stack: appended ${newAudiences.length} new audiences to ${tenantId}/${targetProduct.name}`);
+    }
+
+    return results;
+  }
+
+  /**
+   * Create-or-repair every lookalike cohort. This is the second half of the
+   * fix for the "lookalike created 2 seconds after its seed" bug — the setup
+   * pass now DEFERS a lookalike whose seed is still empty, and this pass picks
+   * it up later, once Meta has backfilled the seed.
+   *
+   * Handles three states per lookalike cohort:
+   *   - missing        → create it, if the seed is ready
+   *   - dead (400+)    → delete and recreate, if the seed is ready. Meta will
+   *                      not repair a 433 in place; its own error text says to
+   *                      delete and try again, so that is what this does.
+   *   - healthy        → leave alone
+   *
+   * Safe to run repeatedly (idempotent) and safe to schedule — a seed that
+   * isn't ready yet simply defers again rather than burning another dead
+   * audience. Intended to be driven by the weekly refresh the class docblock
+   * describes; also exposed as an endpoint so an operator can repair now.
+   *
+   * @param force  rebuild even lookalikes Meta currently reports as healthy
+   *               (e.g. to refresh a stale seed). Off by default — deleting a
+   *               working audience mid-flight would break live ad sets.
+   */
+  async rebuildLookalikes(
+    tenantId: string,
+    productName?: string,
+    force = false,
+  ): Promise<CohortStatusEntry[]> {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken || !company.meta?.accountId) {
+      throw new Error(`Tenant ${tenantId} missing Meta credentials`);
+    }
+    const token = company.meta.accessToken;
+
+    const targetProduct = productName
+      ? (company.products ?? []).find((p) => p.name === productName)
+      : (company.products ?? []).find((p) => p.active);
+    if (!targetProduct) {
+      throw new Error(`No target product found for tenant ${tenantId}`);
+    }
+
+    const accountIdNormalized = company.meta.accountId.startsWith('act_')
+      ? company.meta.accountId
+      : `act_${company.meta.accountId}`;
+    const country =
+      company.geography === 'India'
+        ? 'IN'
+        : (company.geography ?? 'IN').slice(0, 2).toUpperCase();
+
+    const existing = (targetProduct.metaAudiences ?? []) as any[];
+    const idByName = new Map(existing.map((a) => [a.name, a.id] as [string, string]));
+
+    const results: CohortStatusEntry[] = [];
+    // id → replacement id, applied to product.metaAudiences at the end so a
+    // rebuilt lookalike keeps its slot instead of accumulating duplicates.
+    const replacements = new Map<string, { id: string; name: string }>();
+    const additions: any[] = [];
+
+    // ── Pass 1: repair EXISTING lookalikes, whatever they're named ─────────
+    // Deliberately driven off product.metaAudiences and Meta's own
+    // lookalike_spec rather than the STANDARD_COHORTS naming convention,
+    // because the audiences that exist in practice were created by the OTHER
+    // audience path — CampaignCreatorService.ensurePixelAudiences — which
+    // names them `<BrandPrefix>_Lookalike_1pct`, not `<tenantId>_lal_1pct_buyers`.
+    // A convention-based repair would look straight past the very audiences
+    // that are broken (verified on 91astrology: every stored audience uses the
+    // brand-prefix form). Reading the spec back from Meta also guarantees the
+    // rebuild keeps the identical seed/country/ratio.
+    for (const aud of existing) {
+      if (aud.type !== 'lookalike' || !aud.id) continue;
+      try {
+        const health = await this.metaAdsService.getAudienceHealth(aud.id, token);
+        if (health.usable && !force) {
+          results.push({ key: aud.name ?? aud.id, metaAudienceId: aud.id, status: 'exists' });
+          continue;
+        }
+        if (!health.lookalikeSpec) {
+          results.push({ key: aud.name ?? aud.id, metaAudienceId: aud.id, status: 'failed',
+            error: `dead (${health.reason}) but Meta returned no lookalike_spec — cannot determine its seed, rebuild by hand` });
+          continue;
+        }
+        const { originId, country: specCountry, ratio } = health.lookalikeSpec;
+        const seed = await this.metaAdsService.getAudienceHealth(originId, token);
+        if (!seed.seedReady) {
+          results.push({ key: aud.name ?? aud.id, metaAudienceId: aud.id, status: 'deferred',
+            error: `dead (${health.reason}); seed "${seed.name ?? originId}" still not usable — ${seed.reason}` });
+          this.logger.warn(`Lookalike ${aud.name} left dead: seed not ready (${seed.reason})`);
+          continue;
+        }
+        // Meta refuses a duplicate name, and a 433 cannot be repaired in
+        // place — delete then recreate is the only path Meta itself offers.
+        await this.metaAdsService.deleteAudience(aud.id, token);
+        const newId = await this.metaAdsService.createLookalikeAudience(
+          accountIdNormalized, token, aud.name, originId, specCountry, ratio,
+        );
+        replacements.set(aud.id, { id: newId, name: aud.name });
+        results.push({ key: aud.name ?? aud.id, metaAudienceId: newId, status: 'repaired' });
+        this.logger.log(
+          `Lookalike "${aud.name}" REPAIRED for ${tenantId}: ${aud.id} → ${newId} (seed ${seed.name} @ ${seed.size} people, ratio ${ratio})`,
+        );
+      } catch (err: any) {
+        results.push({ key: aud.name ?? aud.id, metaAudienceId: aud.id, status: 'failed', error: err.message });
+        this.logger.error(`Lookalike "${aud.name}" repair failed for ${tenantId}: ${err.message}`);
+      }
+    }
+
+    // ── Pass 2: create any STANDARD_COHORTS lookalikes that don't exist ────
+    for (const cohort of STANDARD_COHORTS) {
+      if (cohort.kind !== 'lookalike' || !cohort.lookalikeSeed || !cohort.lookalikeRatio) continue;
+
+      const name = this.cohortName(tenantId, cohort);
+      const seedCohort = STANDARD_COHORTS.find((c) => c.key === cohort.lookalikeSeed);
+      const seedId = seedCohort ? idByName.get(this.cohortName(tenantId, seedCohort)) : undefined;
+      if (!seedId) {
+        results.push({ key: cohort.key, metaAudienceId: null, status: 'skipped',
+          error: `seed "${cohort.lookalikeSeed}" does not exist — run the audience setup first` });
+        continue;
+      }
+
+      try {
+        const seed = await this.metaAdsService.getAudienceHealth(seedId, token);
+        const currentId = idByName.get(name);
+
+        // Decide whether the existing lookalike (if any) needs replacing
+        // BEFORE touching the seed gate, so a healthy audience short-circuits
+        // without a needless rebuild.
+        let mustRebuild = force;
+        if (currentId && !force) {
+          const current = await this.metaAdsService.getAudienceHealth(currentId, token);
+          if (current.usable) {
+            results.push({ key: cohort.key, metaAudienceId: currentId, status: 'exists' });
+            continue;
+          }
+          mustRebuild = true;
+          this.logger.warn(`Lookalike ${name} is dead (${current.reason}) — rebuilding`);
+        }
+
+        if (!seed.seedReady) {
+          results.push({ key: cohort.key, metaAudienceId: currentId ?? null, status: 'deferred',
+            error: `seed "${cohort.lookalikeSeed}" still not ready — ${seed.reason}` });
+          continue;
+        }
+
+        // Delete first: Meta rejects a second audience with the same name, and
+        // a 433 audience cannot be repaired in place.
+        if (currentId && mustRebuild) {
+          try {
+            await this.metaAdsService.deleteAudience(currentId, token);
+          } catch (err: any) {
+            // Already gone on Meta's side is fine — proceed to recreate.
+            this.logger.warn(`Could not delete ${currentId} before rebuild (continuing): ${err.message}`);
+          }
+        }
+
+        const newId = await this.metaAdsService.createLookalikeAudience(
+          accountIdNormalized, token, name, seedId, country, cohort.lookalikeRatio,
+        );
+
+        if (currentId) replacements.set(currentId, { id: newId, name });
+        else additions.push({
+          id: newId, name, type: 'lookalike',
+          lookalikePercent: Math.round(cohort.lookalikeRatio * 100),
+        });
+
+        results.push({ key: cohort.key, metaAudienceId: newId,
+          status: currentId ? 'repaired' : 'created' });
+        this.logger.log(
+          `Lookalike ${cohort.key} ${currentId ? 'REPAIRED' : 'created'} for ${tenantId}: ${newId} (seed ${seed.size} people)`,
+        );
+      } catch (err: any) {
+        results.push({ key: cohort.key, metaAudienceId: null, status: 'failed', error: err.message });
+        this.logger.error(`Lookalike ${cohort.key} rebuild failed for ${tenantId}: ${err.message}`);
+      }
+    }
+
+    if (replacements.size > 0 || additions.length > 0) {
+      const updatedProducts = (company.products ?? []).map((p) =>
+        p.name === targetProduct.name
+          ? {
+              ...p,
+              metaAudiences: [
+                ...((p.metaAudiences ?? []) as any[]).map((a) => {
+                  const r = replacements.get(a.id);
+                  return r ? { ...a, id: r.id } : a;
+                }),
+                ...additions,
+              ],
+            }
+          : p,
+      );
+      await this.companiesService.update(tenantId, { products: updatedProducts as any });
+      this.logger.log(
+        `Lookalike rebuild: ${replacements.size} replaced, ${additions.length} added for ${tenantId}/${targetProduct.name}`,
+      );
     }
 
     return results;

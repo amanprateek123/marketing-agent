@@ -155,6 +155,74 @@ export class CampaignsController {
   }
 
   /**
+   * GET /api/v1/campaigns/:tenantId/meta-geo-search?q=maha&type=region&country=IN
+   * Proxies Meta's adgeolocation search so the Create Campaign form can target
+   * states/cities instead of whole countries. Returns Meta region/city `key`
+   * values — the exact thing createAdSet() writes into
+   * targeting.geo_locations.regions[].key / .cities[].key.
+   *
+   * Same route-ordering requirement as meta-audiences/meta-interest-search
+   * above — must precede :tenantId/:campaignId.
+   */
+  @Get(':tenantId/meta-geo-search')
+  async searchMetaGeo(
+    @Param('tenantId') tenantId: string,
+    @Query('q') q?: string,
+    @Query('type') type?: string,
+    @Query('country') country?: string,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
+    }
+    if (type && type !== 'region' && type !== 'city') {
+      throw new BadRequestException(`type must be "region" or "city" (got "${type}")`);
+    }
+    try {
+      return await this.metaAdsService.searchGeoLocations(
+        q ?? '',
+        company.meta.accessToken,
+        { type: (type as 'region' | 'city') ?? 'region', countryCode: country },
+      );
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * GET /api/v1/campaigns/:tenantId/meta-geo-resolve?regions=1735,1738&cities=777934
+   * Reverse of meta-geo-search: turns saved geo keys back into display names
+   * so the Create/Edit Campaign form can show "Maharashtra" rather than the
+   * stored "1735". Returns a flat { key: name } map, and {} on any lookup
+   * failure — the form falls back to rendering raw keys rather than breaking.
+   *
+   * Same route-ordering requirement as the searches above.
+   */
+  @Get(':tenantId/meta-geo-resolve')
+  async resolveMetaGeo(
+    @Param('tenantId') tenantId: string,
+    @Query('regions') regions?: string,
+    @Query('cities') cities?: string,
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company) throw new NotFoundException('Tenant not found');
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
+    }
+    const split = (v?: string) =>
+      (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    return this.metaAdsService.resolveGeoLocations(
+      { regions: split(regions), cities: split(cities) },
+      company.meta.accessToken,
+    );
+  }
+
+  /**
    * GET /api/v1/campaigns/:tenantId/meta-account-audiences?accountId=act_X
    * Live custom + lookalike audiences for ONE specific ad account — unlike
    * meta-audiences above (which reads the saved, single-account snapshot on
@@ -1275,6 +1343,47 @@ export class CampaignsController {
       const summary = {
         created: results.filter((r) => r.status === 'created').length,
         exists: results.filter((r) => r.status === 'exists').length,
+        failed: results.filter((r) => r.status === 'failed').length,
+        skipped: results.filter((r) => r.status === 'skipped').length,
+        // Not a failure — the seed audience just isn't populated yet. These
+        // become real audiences on a later audiences/rebuild-lookalikes run.
+        deferred: results.filter((r) => r.status === 'deferred').length,
+      };
+      return { tenantId, summary, cohorts: results };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/audiences/rebuild-lookalikes
+   * Body: { productName?: string, force?: boolean }
+   *
+   * Creates lookalikes that were deferred at setup time (seed not yet
+   * populated) and repairs ones Meta has marked dead — a lookalike built from
+   * an empty seed fails permanently with operation_status 433 and can only be
+   * fixed by delete-and-recreate, which this does once the seed is ready.
+   *
+   * Idempotent and safe to schedule. Healthy lookalikes are left untouched
+   * unless force=true, since deleting a live audience would break running ad
+   * sets that reference it.
+   */
+  @Post(':tenantId/audiences/rebuild-lookalikes')
+  async rebuildLookalikes(
+    @Param('tenantId') tenantId: string,
+    @Body() body: { productName?: string; force?: boolean } = {},
+  ) {
+    try {
+      const results = await this.audienceOrchestration.rebuildLookalikes(
+        tenantId,
+        body.productName,
+        body.force === true,
+      );
+      const summary = {
+        created: results.filter((r) => r.status === 'created').length,
+        repaired: results.filter((r) => r.status === 'repaired').length,
+        exists: results.filter((r) => r.status === 'exists').length,
+        deferred: results.filter((r) => r.status === 'deferred').length,
         failed: results.filter((r) => r.status === 'failed').length,
         skipped: results.filter((r) => r.status === 'skipped').length,
       };

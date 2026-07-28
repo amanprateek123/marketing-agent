@@ -268,6 +268,8 @@ export class ManualCampaignService {
         ageMax: a.ageMax,
         gender: a.gender as ManualAdSetInput['gender'],
         geoLocations: a.geoLocations,
+        geoStates: (a as { geoStates?: string[] }).geoStates,
+        geoCities: (a as { geoCities?: string[] }).geoCities,
         locales: (a as { locales?: number[] }).locales,
         interests: (a.interests ?? []).map((id) => ({ id, name: id })),
         optimizationGoal: a.optimizationGoal,
@@ -444,9 +446,39 @@ export class ManualCampaignService {
           optimizationGoal: first.optimizationGoal || 'OFFSITE_CONVERSIONS',
           ads: adIndices,
           creativeFormat: first.creativeFormat || defaultFormat,
-          // No age/gender/geo/interests: Meta requires Advantage+ ad sets to
-          // stay unconstrained (meta-ads.service.ts skips these entirely for
-          // audienceType='advantage_plus').
+
+          // ── Advantage+ audience SUGGESTIONS ────────────────────────────
+          // These used to be dropped on the floor here, on the belief that
+          // Meta requires Advantage+ ad sets to be fully unconstrained. That
+          // is only true of age/gender (see below) — Meta's own Advantage+
+          // audience UI exposes a Detailed targeting box, custom audiences
+          // and location, and treats them as a SUGGESTION it may deliver
+          // beyond rather than a hard filter. MetaAdsService.createAdSet
+          // already handles all of these outside its advantage_plus branch,
+          // so they ship alongside targeting_automation.advantage_audience=1
+          // exactly the way Meta's UI produces them.
+          //
+          // Consequence to be aware of when reading results: an Advantage+ ad
+          // set can and will deliver outside these. Use campaignType='custom'
+          // (advantage_audience=0) when the targeting must actually bind.
+          interests: first.interests?.length
+            ? first.interests.map((x) => x.id)
+            : undefined,
+          // Seeds Advantage+ delivery ("Include these custom audiences"); it
+          // does NOT confine it — createAdSet ships this with
+          // advantage_audience=1. Real retargeting needs campaignType='custom'.
+          metaAudienceId: first.metaAudienceId || undefined,
+          geoLocations: first.geoLocations?.length ? first.geoLocations : undefined,
+          geoStates: first.geoStates?.length ? first.geoStates : undefined,
+          geoCities: first.geoCities?.length ? first.geoCities : undefined,
+          locales: first.locales?.length ? first.locales : undefined,
+          excludeAudienceIds: first.excludeAudienceIds?.length
+            ? first.excludeAudienceIds
+            : undefined,
+
+          // Age/gender stay omitted — these are the fields Meta genuinely
+          // constrains under Advantage+ (age_max must remain 65), and
+          // createAdSet deliberately skips them for this audienceType.
         },
       ];
     } else {
@@ -560,6 +592,11 @@ export class ManualCampaignService {
       ageMax: a.ageMax,
       gender: a.gender && a.gender !== 'all' ? a.gender : undefined,
       geoLocations: a.geoLocations?.length ? a.geoLocations : undefined,
+      // Region/city keys win over the country layer at launch — createAdSet
+      // drops geo_locations.countries whenever either is present, because Meta
+      // rejects country+region overlap (subcode 1487756).
+      geoStates: a.geoStates?.length ? a.geoStates : undefined,
+      geoCities: a.geoCities?.length ? a.geoCities : undefined,
       locales: a.locales?.length ? a.locales : undefined,
       interests: a.interests?.length ? a.interests.map((x) => x.id) : undefined,
       optimizationGoal: a.optimizationGoal || 'OFFSITE_CONVERSIONS',

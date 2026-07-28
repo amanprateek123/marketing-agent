@@ -816,6 +816,16 @@ export class MetaAdsService {
     } else if (config.audienceType === 'advantage_plus') {
       // Meta requires age_max >= 65 for Advantage+ — omit age/gender constraints entirely
       targeting.targeting_automation = { advantage_audience: 1 };
+      // Custom audience as an Advantage+ SUGGESTION — Meta's "Include these
+      // custom audiences" box. Semantics differ sharply from the branch above:
+      // with advantage_audience=1 this SEEDS delivery rather than restricting
+      // it, and Meta will spend outside the audience whenever it expects a
+      // better result. Never use this shape for true retargeting — that needs
+      // audienceType retarget/custom (advantage_audience=0), which is what
+      // actually confines delivery to the audience.
+      if (config.metaAudienceId) {
+        targeting.custom_audiences = [{ id: config.metaAudienceId }];
+      }
     } else {
       // interest / broad — disable advantage audience
       targeting.targeting_automation = { advantage_audience: 0 };
@@ -1672,6 +1682,102 @@ export class MetaAdsService {
   }
 
   /**
+   * Minimum members Meta requires in a lookalike SOURCE audience before it can
+   * build the lookalike. Meta's documented floor is 100 people from a single
+   * country; below that the build fails permanently with operation_status 433
+   * ("We couldn't create your lookalike audience. Please delete this audience
+   * and try creating it again") and never retries on its own.
+   */
+  static readonly LOOKALIKE_MIN_SEED_SIZE = 100;
+
+  /**
+   * Health of a single custom/lookalike audience.
+   *
+   * `usable` mirrors the pre-launch check in campaign-creator: codes below 400
+   * are fine, 400+ means Meta refuses to deliver against it. `seedReady`
+   * additionally requires the audience to be big enough to seed a lookalike —
+   * a brand-new pixel audience is code 200 "ready" while still holding zero
+   * people, which is exactly the state that produces a dead lookalike.
+   */
+  async getAudienceHealth(
+    audienceId: string,
+    accessToken: string,
+  ): Promise<{
+    id: string;
+    name?: string;
+    subtype?: string;
+    size: number;
+    usable: boolean;
+    seedReady: boolean;
+    deliveryCode?: number;
+    operationCode?: number;
+    reason?: string;
+    /**
+     * Present on LOOKALIKE audiences. Carries everything needed to rebuild the
+     * audience identically — which matters because a dead lookalike can only
+     * be repaired by delete-and-recreate, and the replacement must keep the
+     * same seed, country and ratio or downstream targeting silently changes.
+     */
+    lookalikeSpec?: { originId: string; country: string; ratio: number };
+  }> {
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/${audienceId}`, {
+      fields:
+        'id,name,subtype,lookalike_spec,delivery_status,operation_status,approximate_count_lower_bound',
+      access_token: accessToken,
+    });
+    const d = res.data ?? {};
+    const spec = d.lookalike_spec;
+    const originId = spec?.origin?.[0]?.id;
+    const deliveryCode = d.delivery_status?.code;
+    const operationCode = d.operation_status?.code;
+    const size = Number(d.approximate_count_lower_bound ?? 0);
+    const usable =
+      d.id === audienceId &&
+      (deliveryCode === undefined || deliveryCode < 400) &&
+      (operationCode === undefined || operationCode < 400);
+    const bigEnough = size >= MetaAdsService.LOOKALIKE_MIN_SEED_SIZE;
+    return {
+      id: audienceId,
+      name: d.name,
+      subtype: d.subtype,
+      ...(originId && spec
+        ? {
+            lookalikeSpec: {
+              originId: String(originId),
+              country: String(spec.country ?? 'IN'),
+              ratio: Number(spec.ratio ?? 0.01),
+            },
+          }
+        : {}),
+      size,
+      usable,
+      // A seed must be usable AND populated. Meta reports delivery code 200 on
+      // an empty, freshly-created audience, so the size check is what actually
+      // prevents the two-seconds-after-creation failure.
+      seedReady: usable && bigEnough,
+      deliveryCode,
+      operationCode,
+      reason: !usable
+        ? `unusable (delivery=${deliveryCode}, operation=${operationCode}: ${d.operation_status?.description ?? d.delivery_status?.description ?? 'unknown'})`
+        : !bigEnough
+          ? `too small to seed a lookalike (${size} < ${MetaAdsService.LOOKALIKE_MIN_SEED_SIZE})`
+          : undefined,
+    };
+  }
+
+  /**
+   * Delete a custom/lookalike audience. Needed for lookalike repair: Meta will
+   * not rebuild an audience stuck in operation_status 433 — its own error text
+   * says to delete and recreate, so a repair pass has to do exactly that.
+   */
+  async deleteAudience(audienceId: string, accessToken: string): Promise<void> {
+    await this.metaApiCall('DELETE', `${META_API_BASE}/${audienceId}`, {
+      access_token: accessToken,
+    });
+    this.logger.log(`Audience deleted: ${audienceId}`);
+  }
+
+  /**
    * List custom + lookalike audiences that live in ONE specific ad account.
    * Custom Audiences are account-scoped Meta objects — an audience created
    * under act_A is a different object from anything in act_B, even with an
@@ -2215,6 +2321,97 @@ export class MetaAdsService {
       name: String(r.name ?? ''),
       audienceSize: Number(r.audience_size_lower_bound ?? r.audience_size ?? 0),
     }));
+  }
+
+  /**
+   * Keyword search for Meta geo locations (regions/states + cities) — powers
+   * the Create Campaign form's geo picker. Returns Meta region/city `key`
+   * values, which is exactly what createAdSet() puts into
+   * targeting.geo_locations.regions[].key / .cities[].key.
+   *
+   * Why this exists: the manual form could only target whole countries, so a
+   * human-built campaign shipped `geo_locations.countries: ['IN']` and burned
+   * budget on low-conversion states. The autonomous path had state targeting
+   * (INDIA_TOP_ASTROLOGY_STATES in audience-targeting-resolver.ts) but those
+   * keys were hand-verified via curl and hardcoded — this endpoint resolves
+   * them live instead, so a key can never drift the way locale IDs did.
+   */
+  async searchGeoLocations(
+    query: string,
+    accessToken: string,
+    opts: { type?: 'region' | 'city'; countryCode?: string } = {},
+  ): Promise<
+    Array<{
+      key: string;
+      name: string;
+      type: string;
+      region?: string;
+      countryCode?: string;
+    }>
+  > {
+    if (!query || query.trim().length < 2) return [];
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/search`, {
+      type: 'adgeolocation',
+      q: query.trim(),
+      // Meta wants this as a JSON array string, not a repeated param.
+      location_types: JSON.stringify([opts.type ?? 'region']),
+      ...(opts.countryCode ? { country_code: opts.countryCode } : {}),
+      limit: 25,
+      access_token: accessToken,
+    });
+    const rows: any[] = res.data?.data ?? [];
+    return rows.map((r) => ({
+      key: String(r.key),
+      name: String(r.name ?? ''),
+      type: String(r.type ?? ''),
+      region: r.region ? String(r.region) : undefined,
+      countryCode: r.country_code ? String(r.country_code) : undefined,
+    }));
+  }
+
+  /**
+   * Resolve already-chosen geo keys back to display names via
+   * /search?type=adgeolocationmeta. Needed because a saved campaign stores
+   * bare keys ('1735'), and the geo search above only looks up BY NAME — so
+   * without this, re-opening a campaign for edit shows "1735, 1738" instead
+   * of "Maharashtra, Karnataka".
+   *
+   * Fails OPEN: any error, or a response shape Meta changes out from under
+   * us, returns {} and the caller falls back to showing raw keys. A cosmetic
+   * label lookup must never block editing a campaign.
+   */
+  async resolveGeoLocations(
+    keys: { regions?: string[]; cities?: string[] },
+    accessToken: string,
+  ): Promise<Record<string, string>> {
+    const regions = keys.regions ?? [];
+    const cities = keys.cities ?? [];
+    if (regions.length === 0 && cities.length === 0) return {};
+    try {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/search`, {
+        type: 'adgeolocationmeta',
+        ...(regions.length ? { regions: JSON.stringify(regions) } : {}),
+        ...(cities.length ? { cities: JSON.stringify(cities) } : {}),
+        access_token: accessToken,
+      });
+      const out: Record<string, string> = {};
+      // Meta returns { data: { regions: { "<key>": {name, ...} }, cities: {...} } }.
+      // Tolerate either that or a flat array — only `name` is actually used.
+      const data = res.data?.data ?? res.data ?? {};
+      for (const bucket of [data.regions, data.cities]) {
+        if (!bucket || typeof bucket !== 'object') continue;
+        for (const [key, val] of Object.entries<any>(bucket)) {
+          const name = val?.name ?? val?.region ?? val?.city;
+          if (name) out[String(key)] = String(name);
+        }
+      }
+      return out;
+    } catch (err: any) {
+      this.logger.warn(
+        `Geo key label lookup unavailable (falling back to raw keys): ${err.message}`,
+      );
+      return {};
+    }
   }
 
   // Locale lookups are stable per language; cache for the process lifetime so

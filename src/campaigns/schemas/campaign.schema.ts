@@ -245,6 +245,12 @@ export class Campaign {
       ageMax?: number;
       gender?: string;
       geoLocations?: string[];
+      /** Meta region keys — take precedence over geoLocations at launch. */
+      geoStates?: string[];
+      /** Meta city keys — take precedence over geoLocations at launch. */
+      geoCities?: string[];
+      /** Meta locale IDs for language targeting. */
+      locales?: number[];
       interests?: string[];
       optimizationGoal: string;
       ads: number[];
