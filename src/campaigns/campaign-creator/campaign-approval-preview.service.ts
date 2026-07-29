@@ -11,6 +11,7 @@ import {
 } from '../../common/conversion-value.util';
 import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { tryResolveCampaignProduct } from './resolve-campaign-product';
+import { checkCopySafety } from '../../common/safety/copy-safety-checker.util';
 
 /**
  * Everything an operator needs to see BEFORE clicking Approve & Launch.
@@ -163,6 +164,36 @@ export class CampaignApprovalPreviewService {
       blockers.push({
         code: 'no_creative_assets',
         message: 'Creative package has no images, videos or carousel cards.',
+      });
+    }
+
+    // ── Copy policy gate, run BEFORE the operator clicks Approve ──────────
+    //
+    // launchCampaign enforces this too, but only after uploading every image
+    // to Meta — on a 40-variant package that's ~157 uploads and several
+    // minutes of waiting before a single bad word aborts the whole launch.
+    // Worse, this screen used to report "Ready to launch" regardless, because
+    // it never looked at the copy at all. Surfacing it here means the Approve
+    // button reflects the same rules the launch will apply.
+    const copyFailures = copyVariants
+      .map((v, i) => ({ i, v, safety: checkCopySafety({
+        primaryText: v?.primaryText,
+        headline: v?.headline,
+        cta: v?.cta,
+        declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
+      }) }))
+      .filter((r) => !r.safety.safe);
+    for (const { i, v, safety } of copyFailures) {
+      const detail = [
+        ...safety.forbiddenClaims.map((f) => `"${f.phrase}" in ${f.copyField} (${f.reason})`),
+        ...safety.specialAdCategoryTriggers.map(
+          (f) => `"${f.phrase}" in ${f.copyField} → needs ${f.category}`,
+        ),
+      ].join('; ');
+      blockers.push({
+        code: 'copy_policy_violation',
+        message: `Copy variant #${i}${v?.headline ? ` ("${String(v.headline).slice(0, 50)}")` : ''} would be rejected at launch: ${detail}`,
+        fix: 'Edit this variant on the campaign edit screen, or declare the special ad category on the company, then re-check.',
       });
     }
 
