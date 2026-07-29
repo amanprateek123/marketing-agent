@@ -63,6 +63,19 @@ export default () => ({
   youtube: {
     apiKey: process.env.YOUTUBE_API_KEY ?? '',
   },
+  pipeline: {
+    // The external creative pipeline (Slack-driven authoring + image generation),
+    // running on its own box. Include the scheme and no trailing slash, e.g.
+    // https://pipeline.example.com — the bridge appends /v1/... itself.
+    // Unset = the Custom-brief path returns 503 and the rest of the app is
+    // unaffected.
+    url: process.env.PIPELINE_API_URL ?? '',
+    // Shared bearer token. Held server-side only; never sent to the browser.
+    token: process.env.PIPELINE_API_TOKEN ?? '',
+    // Per-call HTTP timeout. Runs are asynchronous — every call here either
+    // starts a run or polls it, so none of them waits on generation.
+    timeoutMs: parseInt(process.env.PIPELINE_API_TIMEOUT_MS ?? '30000', 10),
+  },
   ops: {
     // System-failure alert channel (pipeline deaths, creative failures, stale-data
     // audit skips, Slack delivery failures). Separate from tenant webhooks — this

@@ -15,6 +15,7 @@ import { LearningModule } from './learning/learning.module';
 import { IntelligenceModule } from './intelligence/intelligence.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { AuthModule } from './auth/auth.module';
+import { PipelineBridgeModule } from './pipeline-bridge/pipeline-bridge.module';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { AuthModule } from './auth/auth.module';
     LearningModule,
     IntelligenceModule,
     DashboardModule,
+    PipelineBridgeModule,
   ],
 })
 export class AppModule {}
