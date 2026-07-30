@@ -83,6 +83,21 @@ export class PipelineBridgeController {
     return this.bridge.uploadImages(files);
   }
 
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/packages/:packageId/resize
+   *
+   * Generate the remaining placement sizes for a creative the pipeline produced. Returns
+   * immediately — the cascade is Playwright-driven and takes minutes, and the finished sizes are
+   * attached to the package by the pipeline itself. 404 if the pipeline did not make this package.
+   */
+  @Post(':tenantId/packages/:packageId/resize')
+  async resizePackage(
+    @Param('tenantId') _tenantId: string,
+    @Param('packageId') packageId: string,
+  ): Promise<unknown> {
+    return this.bridge.resizePackage(packageId);
+  }
+
   /** GET /api/v1/pipeline-bridge/:tenantId/runs/:runId — status + per-child progress. */
   @Get(':tenantId/runs/:runId')
   async getRun(

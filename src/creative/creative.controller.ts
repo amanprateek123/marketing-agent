@@ -730,6 +730,16 @@ export class CreativeController {
       variantIndex?: number;
       imageUrl?: string;
       aspectRatio?: string;
+      /**
+       * Marks this image as a SIZE OF the given primary image url rather than a creative in its own
+       * right — the same tag upload-bulk applies to its `sizes[]`. Optional and additive: without it
+       * the entry behaves exactly as before.
+       *
+       * It matters because `isAlternateSize` (extendedFrom || uploadedSizeOf) is what the library
+       * and the detail page use to tell a placement cut from a creative. An untagged 9:16 entry can
+       * be picked as the library thumbnail and is not grouped under its parent.
+       */
+      uploadedSizeOf?: string;
       videoUrl?: string;
       selectedCopyIndex?: number;
       copy?: { headline?: string; primaryText?: string; cta?: string; hookStyle?: string };
@@ -751,8 +761,15 @@ export class CreativeController {
       );
       if (existing) {
         existing.imageUrl = body.imageUrl;
+        if (body.uploadedSizeOf !== undefined) existing.uploadedSizeOf = body.uploadedSizeOf;
       } else {
-        images.push({ variantIndex, imagePrompt: '', imageUrl: body.imageUrl, aspectRatio: body.aspectRatio });
+        images.push({
+          variantIndex,
+          imagePrompt: '',
+          imageUrl: body.imageUrl,
+          aspectRatio: body.aspectRatio,
+          ...(body.uploadedSizeOf ? { uploadedSizeOf: body.uploadedSizeOf } : {}),
+        });
       }
       update.images = images;
     }

@@ -93,6 +93,17 @@ export class PipelineBridgeService {
     }
   }
 
+  /**
+   * POST /v1/packages/:packageId/resize — reframe a delivered creative into the other sizes.
+   *
+   * Addressed by package rather than run because that is what the detail page knows; the pipeline
+   * resolves it through the back-reference it records when pushing. A 404 means the package was not
+   * produced by the pipeline, which is the honest answer for one the dashboard generated itself.
+   */
+  async resizePackage(packageId: string): Promise<unknown> {
+    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/resize`);
+  }
+
   /** GET /v1/options — the option contract the Custom-brief form renders from. */
   async getOptions(): Promise<unknown> {
     return this.forward('get', '/v1/options');
