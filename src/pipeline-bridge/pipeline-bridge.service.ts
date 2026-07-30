@@ -99,6 +99,51 @@ export class PipelineBridgeService {
   }
 
   /**
+   * POST /v1/uploads — forward reference image(s) to the pipeline.
+   *
+   * Not routed through `forward()` because that sets a JSON content type, and a multipart body must
+   * carry its own generated boundary. Uses `form-data` (already a transitive dep of axios' Node
+   * stack) so the boundary header comes from the form itself rather than being hand-written.
+   */
+  async uploadImages(
+    files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
+  ): Promise<unknown> {
+    this.assertConfigured();
+    const FormData = (await import('form-data')).default;
+    const form = new FormData();
+    for (const f of files) {
+      form.append('files', f.buffer, {
+        filename: f.originalname,
+        contentType: f.mimetype,
+      });
+    }
+    try {
+      const res = await this.http.request({
+        method: 'post',
+        url: `${this.baseUrl}/v1/uploads`,
+        headers: {
+          ...form.getHeaders(),
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        },
+        data: form,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+      return res.data;
+    } catch (err) {
+      const axiosErr = err as AxiosError<{ error?: string }>;
+      const status = axiosErr.response?.status;
+      const message =
+        axiosErr.response?.data?.error ?? axiosErr.message ?? 'upload failed';
+      if (status && status >= 400 && status < 500) {
+        throw new HttpException(message, status);
+      }
+      this.logger.error(`pipeline POST /v1/uploads failed: ${message}`);
+      throw new BadGatewayException(`Could not upload to the creative pipeline: ${message}`);
+    }
+  }
+
+  /**
    * POST /v1/runs — start a run.
    *
    * `tenantId` is passed through so the pipeline can scope its push-back to the

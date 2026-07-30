@@ -1,11 +1,15 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   Param,
   Post,
   Query,
+  UploadedFiles,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import { StartRunDto } from './dto/start-run.dto';
 import { PipelineBridgeService } from './pipeline-bridge.service';
 
@@ -58,6 +62,25 @@ export class PipelineBridgeController {
     @Body() dto: StartRunDto,
   ): Promise<unknown> {
     return this.bridge.startRun(tenantId, dto);
+  }
+
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/uploads
+   *
+   * Reference image(s) for a Custom-brief run, returned as refs to pass back as
+   * `image_refs`. Kept separate from `runs` so the run body stays plain JSON and
+   * the operator can upload while still filling in the form.
+   */
+  @Post(':tenantId/uploads')
+  @UseInterceptors(FilesInterceptor('files', 5))
+  async uploads(
+    @Param('tenantId') _tenantId: string,
+    @UploadedFiles() files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
+  ): Promise<unknown> {
+    if (!files?.length) {
+      throw new BadRequestException('No files were uploaded.');
+    }
+    return this.bridge.uploadImages(files);
   }
 
   /** GET /api/v1/pipeline-bridge/:tenantId/runs/:runId — status + per-child progress. */

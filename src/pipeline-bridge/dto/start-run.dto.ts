@@ -55,16 +55,52 @@ export class StartRunDto {
   @IsString()
   language?: string;
 
+  /**
+   * Several languages SPLIT the run round-robin rather than multiplying it: count 5 over 3
+   * languages is 5 creatives, not 15. The pipeline owns that assignment so the two sides cannot
+   * disagree about which creative is in which language.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  languages?: string[];
+
   /** A `value` from GET /pipeline-bridge/:tenantId/options -> formats. */
   @IsOptional()
   @IsString()
   format?: string;
+
+  /** Multi-select formats; supersedes the single `format` when both are sent. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  formats?: string[];
 
   /** `value`s from GET /pipeline-bridge/:tenantId/options -> angles. */
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   angles?: string[];
+
+  /**
+   * Reference images already stored by POST /pipeline-bridge/:tenantId/uploads.
+   *
+   * `@IsArray()` only — the element shape ({ filename, s3_url }) is the pipeline's contract and is
+   * validated there. Declaring it as a nested DTO here would mean two places to keep in sync, and
+   * whitelist:true would silently strip anything the nested class did not know about.
+   */
+  @IsOptional()
+  @IsArray()
+  image_refs?: Array<{ filename: string; s3_url: string | null }>;
+
+  /**
+   * What the pipeline should do with the attached image. REQUIRED by the pipeline whenever
+   * `image_refs` is set — Slack asks this with a button after an upload, but this form has no
+   * follow-up turn, so it is answered up front.
+   */
+  @IsOptional()
+  @IsIn(['located_overlay', 'product_reference', 'shape_reference'])
+  image_direction?: 'located_overlay' | 'product_reference' | 'shape_reference';
 
   @IsOptional()
   @IsString()
