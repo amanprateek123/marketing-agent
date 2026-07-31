@@ -364,6 +364,13 @@ export class MetaAdsService {
     // Same gate as createAdInAdSet, but applied here so initial campaign launches
     // (the dominant launch path) are also screened. One BM strike on policy-violating
     // copy can restrict the account for days — cheap regex check, asymmetric upside.
+    // Scan EVERY variant and report them together. This loop used to throw on
+    // the first failure, which on a 40-variant package meant: launch, wait for
+    // ~80 image uploads, die on variant 19, fix it, relaunch, re-upload, die on
+    // variant 28, fix, relaunch, re-upload, die on 29. One offending variant
+    // per attempt, each attempt paying the full upload cost. Collecting them
+    // turns that into a single round trip.
+    const failures: string[] = [];
     for (let i = 0; i < config.copyVariants.length; i++) {
       const v = config.copyVariants[i];
       const safety = checkCopySafety({
@@ -373,10 +380,25 @@ export class MetaAdsService {
         declaredSpecialAdCategories: config.declaredSpecialAdCategories,
       });
       if (!safety.safe) {
-        const errorMsg = `${formatSafetyError(safety)}\n(failed on copyVariant index ${i} of campaign "${config.campaignName}")`;
-        this.logger.error(`Refusing to launch campaign — ${errorMsg}`);
-        throw new Error(errorMsg);
+        failures.push(
+          `  variant #${i}${v.headline ? ` ("${v.headline.slice(0, 60)}")` : ''}:\n` +
+            formatSafetyError(safety)
+              .split('\n')
+              .slice(1)
+              .map((l) => `  ${l}`)
+              .join('\n'),
+        );
       }
+    }
+    if (failures.length > 0) {
+      const errorMsg =
+        `Copy safety check failed on ${failures.length} of ${config.copyVariants.length} copy variant(s) ` +
+        `in campaign "${config.campaignName}" (would risk Meta policy strike):\n` +
+        `${failures.join('\n')}\n` +
+        `Fix ALL of the above before retrying — every one is checked on each launch attempt. ` +
+        `Either rewrite the copy, or (for special-ad-category) declare the category on the company config.`;
+      this.logger.error(`Refusing to launch campaign — ${errorMsg}`);
+      throw new Error(errorMsg);
     }
 
     // ── Idempotency pre-check ──────────────────────────────────────────────
@@ -425,6 +447,13 @@ export class MetaAdsService {
       const adSetResults: MetaLaunchResult['adSets'] = [];
 
       for (const adSetConfig of config.adSets) {
+        // Mirrors createAdSet's placement default: with no explicit
+        // publisherPlatforms override it ships Stories/Reels only, which are
+        // all 9:16 surfaces. Recomputed here rather than read back from Meta
+        // so the two stay in lockstep — if that default ever changes, this
+        // must change with it or ads get the wrong aspect ratio again.
+        const verticalOnlyPlacements = !(adSetConfig as any).publisherPlatforms;
+
         const adSetId = await this.createAdSet(
           config.accountId,
           config.accessToken,
@@ -555,6 +584,7 @@ export class MetaAdsService {
                 variantImages,
                 config.pageId ?? '',
                 buildLandingUrl(adName),
+                verticalOnlyPlacements,
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
@@ -611,6 +641,7 @@ export class MetaAdsService {
               variantImages,
               config.pageId ?? '',
               buildLandingUrl(adName2),
+              verticalOnlyPlacements,
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
@@ -1121,6 +1152,12 @@ export class MetaAdsService {
     images: MetaImageAsset[],
     pageId: string,
     landingUrl: string,
+    /**
+     * True when the target ad set only runs vertical surfaces (Stories/Reels),
+     * which is createAdSet's DEFAULT. Drives pickPrimaryImageSize so the one
+     * image that ships matches the placement instead of being cropped into it.
+     */
+    verticalPlacements = false,
   ): Promise<{ adId: string; creativeId: string }> {
     // Dedup by hash — a variant tagged with the same hash under two aspect
     // ratios (shouldn't normally happen, but campaign-creator.service.ts
@@ -1163,7 +1200,10 @@ export class MetaAdsService {
     // plain image_hash path proven working all session — rather than keep
     // iterating on an unverified feature. buildImageAssetFeedSpec is kept
     // for when Dynamic Creative support is added properly.
-    const primaryImage = this.pickPrimaryImageSize(distinctImages);
+    const primaryImage = this.pickPrimaryImageSize(
+      distinctImages,
+      verticalPlacements,
+    );
     if (primaryImage?.hash) {
       creativeData.object_story_spec.link_data.image_hash = primaryImage.hash;
     }
@@ -1204,14 +1244,27 @@ export class MetaAdsService {
 
   /**
    * Picks the single best size when placement customization isn't in play
-   * (currently always — see buildImageAssetFeedSpec) — prefers 4:5 (Meta's
-   * own Feed default, typically the plurality of impressions across
-   * placements) over 1:1, then 16:9, then vertical 9:16 last, then whatever
-   * else is available. Same preference order buildImageAssetFeedSpec used
-   * for its "default" bucket, kept consistent in case placement
-   * customization is re-enabled later.
+   * (currently always — see buildImageAssetFeedSpec). Exactly ONE image ships
+   * per ad, so this choice decides what every impression looks like.
+   *
+   * `verticalPlacements` matters more than it looks. createAdSet defaults every
+   * ad set to Stories + Reels ONLY (facebook_positions ['facebook_reels','story'],
+   * instagram_positions ['story','reels']) — all 9:16 surfaces. Preferring 4:5
+   * there handed Meta a portrait image for vertical-only placements, so it got
+   * pillarboxed or cropped on every single impression, while the correct 9:16
+   * asset sat uploaded and unused. Feed-style placements still prefer 4:5,
+   * which is Meta's own Feed default and usually the plurality of impressions.
    */
-  private pickPrimaryImageSize(images: MetaImageAsset[]): MetaImageAsset | undefined {
+  private pickPrimaryImageSize(
+    images: MetaImageAsset[],
+    verticalPlacements = false,
+  ): MetaImageAsset | undefined {
+    if (verticalPlacements) {
+      const vertical =
+        images.find((img) => img.aspectRatio === '9:16') ??
+        images.find((img) => img.aspectRatio === '4:5');
+      if (vertical) return vertical;
+    }
     return (
       images.find((img) => img.aspectRatio === '4:5') ??
       images.find((img) => img.aspectRatio === '1:1') ??
@@ -2316,11 +2369,43 @@ export class MetaAdsService {
       access_token: accessToken,
     });
     const rows: any[] = res.data?.data ?? [];
-    return rows.map((r) => ({
+    const options = rows.map((r) => ({
       id: String(r.id),
       name: String(r.name ?? ''),
       audienceSize: Number(r.audience_size_lower_bound ?? r.audience_size ?? 0),
     }));
+    if (options.length === 0) return options;
+
+    // Meta's two interest endpoints disagree: `adinterest` search happily
+    // returns deprecated "Additional interests" (with real historical audience
+    // sizes), while `adinterestvalid` reports them valid:false and launch
+    // strips them. That gap is only discovered at launch — an operator picks
+    // "Arranged marriage", sees it accepted, and finds out minutes into a
+    // launch that it was never targetable. Validate here so dead interests are
+    // never offered.
+    //
+    // Fails OPEN, like validateInterestIds itself: if the validity lookup
+    // errors we return the unfiltered list rather than showing an empty picker.
+    try {
+      const { valid } = await this.validateInterestIds(
+        options.map((o) => o.id),
+        accessToken,
+      );
+      const validSet = new Set(valid);
+      const usable = options.filter((o) => validSet.has(o.id));
+      const dropped = options.length - usable.length;
+      if (dropped > 0) {
+        this.logger.log(
+          `Interest search "${query.trim()}": hid ${dropped} of ${options.length} result(s) Meta reports as no longer targetable`,
+        );
+      }
+      return usable;
+    } catch (err: any) {
+      this.logger.warn(
+        `Interest validity filter unavailable for "${query.trim()}" (returning unfiltered): ${err.message}`,
+      );
+      return options;
+    }
   }
 
   /**

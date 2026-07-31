@@ -11,6 +11,10 @@ import { CreativeBrief } from '../../pipeline/schemas/creative-brief.schema';
 import { CampaignsService } from '../campaigns.service';
 import { SafetyChecks } from './safety-checks';
 import {
+  checkCopySafety,
+  formatSafetyError,
+} from '../../common/safety/copy-safety-checker.util';
+import {
   assertProductLaunchable,
   resolveCampaignProduct,
 } from './resolve-campaign-product';
@@ -124,6 +128,14 @@ export class ManualCampaignService {
       } as unknown as CreativeBrief,
       company,
     );
+
+    // Copy safety runs HERE as well as at launch. The launch-time gate is the
+    // real guard (it also covers AI-built campaigns), but by then the operator
+    // has already approved and the launch has uploaded every image to Meta —
+    // a 40-variant package spends minutes on uploads before the first policy
+    // failure surfaces. Checking at create time reports the same problems
+    // while the form is still open and nothing has been sent to Meta.
+    this.assertCopySafe(creativePackage.copyVariants ?? [], company);
 
     // Which product is this campaign for? Resolved strictly (see
     // resolve-campaign-product.ts) and — critically — PERSISTED on the campaign
@@ -300,6 +312,7 @@ export class ManualCampaignService {
       } as unknown as CreativeBrief,
       company,
     );
+    this.assertCopySafe(creativePackage.copyVariants ?? [], company);
 
     const rebuiltAdSets = this.buildAdSetConfigs(
       { name, campaignType, adSets } as CreateManualCampaignDto,
@@ -417,6 +430,47 @@ export class ManualCampaignService {
   // sending "wishletter" for a product named "wish letter" got a DIFFERENT
   // product with no error. Replaced by resolveCampaignProduct(), which matches
   // tolerantly (case/spacing) but throws rather than substituting.
+
+  /**
+   * Reject a package whose copy would fail Meta's policy gate at launch.
+   *
+   * Reports EVERY offending variant in one error, with its index and headline,
+   * so a large package is fixed in one pass rather than one-per-launch-attempt.
+   * Mirrors the launch-time check in MetaAdsService.launchCampaign — same rules,
+   * same declared-category handling — just far earlier in the flow.
+   */
+  private assertCopySafe(
+    copyVariants: Array<{ primaryText?: string; headline?: string; cta?: string }>,
+    company: CompanyDocument,
+  ): void {
+    const declared = company.meta?.specialAdCategories ?? [];
+    const failures: string[] = [];
+    copyVariants.forEach((v, i) => {
+      const safety = checkCopySafety({
+        primaryText: v.primaryText,
+        headline: v.headline,
+        cta: v.cta,
+        declaredSpecialAdCategories: declared,
+      });
+      if (!safety.safe) {
+        failures.push(
+          `  variant #${i}${v.headline ? ` ("${v.headline.slice(0, 60)}")` : ''}:\n` +
+            formatSafetyError(safety)
+              .split('\n')
+              .slice(1)
+              .map((l) => `  ${l}`)
+              .join('\n'),
+        );
+      }
+    });
+    if (failures.length > 0) {
+      throw new Error(
+        `Copy safety check failed on ${failures.length} of ${copyVariants.length} creative variant(s) — ` +
+          `these would be rejected at launch, so the campaign is not created:\n${failures.join('\n')}\n` +
+          `Edit the offending creatives (or declare the special ad category on the company) and try again.`,
+      );
+    }
+  }
 
   private buildAdSetConfigs(
     dto: CreateManualCampaignDto,

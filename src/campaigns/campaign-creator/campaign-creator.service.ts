@@ -1217,10 +1217,15 @@ export class CampaignCreatorService {
         for (const adSet of config.adSets as any[]) {
           if (!Array.isArray(adSet.interests) || adSet.interests.length === 0) continue;
           const before = adSet.interests.length;
+          // Log the IDs removed from THIS ad set, not the campaign-wide invalid
+          // list — printing the latter alongside a per-ad-set count produced
+          // lines like "dropped 2 invalid Meta interest ID(s) [4 ids]", which
+          // reads as though all four came out of this one ad set.
+          const removed = adSet.interests.filter((id: any) => invalidSet.has(String(id)));
           adSet.interests = adSet.interests.filter((id: any) => !invalidSet.has(String(id)));
           if (adSet.interests.length < before) {
             this.logger.warn(
-              `Ad set "${adSet.name}": dropped ${before - adSet.interests.length} invalid Meta interest ID(s) [${invalid.join(', ')}] — remaining ${adSet.interests.length}. Interest-type ad sets with ZERO remaining interests become broad targeting.`,
+              `Ad set "${adSet.name}": dropped ${removed.length} invalid Meta interest ID(s) [${removed.join(', ')}] — remaining ${adSet.interests.length}. Interest-type ad sets with ZERO remaining interests become broad targeting.`,
             );
           }
         }
