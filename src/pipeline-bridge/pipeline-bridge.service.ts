@@ -104,6 +104,51 @@ export class PipelineBridgeService {
     return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/resize`);
   }
 
+  /**
+   * GET /v1/packages/:packageId — is this creative the pipeline's, and what is its run?
+   *
+   * The detail page has to choose which engine its buttons drive before it renders them, and a
+   * CreativePackage carries no provenance field. A 404 is a legitimate answer, not an error: it
+   * means the dashboard's own generator made this one.
+   */
+  async getPackage(packageId: string): Promise<unknown> {
+    return this.forward('get', `/v1/packages/${encodeURIComponent(packageId)}`);
+  }
+
+  /**
+   * POST /v1/packages/:packageId/revise — re-author the brief from an instruction, then regenerate.
+   *
+   * Returns a NEW run id: the pipeline revises a clone so the source creative keeps its own
+   * artifacts and buttons, and the result arrives in the library as its own package.
+   */
+  async revisePackage(packageId: string, instruction: string): Promise<unknown> {
+    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/revise`, {
+      instruction,
+    });
+  }
+
+  /**
+   * POST /v1/packages/:packageId/regenerate — edit the delivered image in place.
+   *
+   * Same run, same package, pixels only. A 409 means the pipeline's ChatGPT session is logged out;
+   * that is a real recurring state and must be shown, not retried into a silent wait.
+   */
+  async regeneratePackage(
+    packageId: string,
+    instruction: string,
+    tag?: string,
+  ): Promise<unknown> {
+    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/regenerate`, {
+      instruction,
+      ...(tag ? { tag } : {}),
+    });
+  }
+
+  /** POST /v1/runs/:runId/clarify — answer a stalled revise so it can continue. */
+  async clarifyRun(runId: string, answer: string): Promise<unknown> {
+    return this.forward('post', `/v1/runs/${encodeURIComponent(runId)}/clarify`, { answer });
+  }
+
   /** GET /v1/options — the option contract the Custom-brief form renders from. */
   async getOptions(): Promise<unknown> {
     return this.forward('get', '/v1/options');

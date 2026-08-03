@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { StartRunDto } from './dto/start-run.dto';
+import { ClarifyDto, RegenerateDto, ReviseDto } from './dto/iterate.dto';
 import { PipelineBridgeService } from './pipeline-bridge.service';
 
 /**
@@ -96,6 +97,68 @@ export class PipelineBridgeController {
     @Param('packageId') packageId: string,
   ): Promise<unknown> {
     return this.bridge.resizePackage(packageId);
+  }
+
+  /**
+   * GET /api/v1/pipeline-bridge/:tenantId/packages/:packageId
+   *
+   * Whether this creative was produced by the pipeline, and its run. The creative detail page
+   * probes this once on load to decide whether its Rewrite / Edit / Retry buttons drive the
+   * pipeline or the built-in generator. **404 is the expected answer** for a package the dashboard
+   * made itself — callers should treat it as "not ours", not as a failure.
+   */
+  @Get(':tenantId/packages/:packageId')
+  async getPackage(
+    @Param('tenantId') _tenantId: string,
+    @Param('packageId') packageId: string,
+  ): Promise<unknown> {
+    return this.bridge.getPackage(packageId);
+  }
+
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/packages/:packageId/revise
+   *
+   * Re-author the brief from an instruction and regenerate — the pipeline's equivalent of the
+   * built-in "Rewrite". Returns a NEW run id, because the pipeline revises a clone so the source
+   * creative keeps its artifacts; the revision lands as its own package.
+   */
+  @Post(':tenantId/packages/:packageId/revise')
+  async revisePackage(
+    @Param('tenantId') _tenantId: string,
+    @Param('packageId') packageId: string,
+    @Body() dto: ReviseDto,
+  ): Promise<unknown> {
+    return this.bridge.revisePackage(packageId, dto.instruction);
+  }
+
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/packages/:packageId/regenerate
+   *
+   * Edit the delivered image in place from free text — the pipeline's equivalent of the built-in
+   * "Edit". Same package, pixels only.
+   */
+  @Post(':tenantId/packages/:packageId/regenerate')
+  async regeneratePackage(
+    @Param('tenantId') _tenantId: string,
+    @Param('packageId') packageId: string,
+    @Body() dto: RegenerateDto,
+  ): Promise<unknown> {
+    return this.bridge.regeneratePackage(packageId, dto.instruction, dto.tag);
+  }
+
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/clarify
+   *
+   * Answer the question a stalled revise asked. Addressed by run, not package, because the run
+   * waiting on the answer is the clone — which has no package of its own yet.
+   */
+  @Post(':tenantId/runs/:runId/clarify')
+  async clarifyRun(
+    @Param('tenantId') _tenantId: string,
+    @Param('runId') runId: string,
+    @Body() dto: ClarifyDto,
+  ): Promise<unknown> {
+    return this.bridge.clarifyRun(runId, dto.answer);
   }
 
   /** GET /api/v1/pipeline-bridge/:tenantId/runs/:runId — status + per-child progress. */
