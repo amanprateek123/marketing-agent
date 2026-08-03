@@ -1688,7 +1688,15 @@ export class CampaignAuditorService {
       Number.isFinite(shiftPercent) &&
       shiftPercent > 0 &&
       shiftPercent <= 30;
-    const autoApply = AUTO_APPLY_TYPES.has(action.type) || isSmallShift;
+    // scale_adset defaults to approval-gated (company.pipelineConfig.scaleRequiresApproval
+    // defaults true) — set false on the Settings page to let winning ad sets scale
+    // up immediately, same as the other Layer 3 types, instead of sitting until a
+    // human clicks approve.
+    const scaleAutoApply =
+      action.type === 'scale_adset' &&
+      company.pipelineConfig?.scaleRequiresApproval === false;
+    const autoApply =
+      AUTO_APPLY_TYPES.has(action.type) || isSmallShift || scaleAutoApply;
 
     pendingActions.push({
       actionId,
@@ -1869,8 +1877,13 @@ export class CampaignAuditorService {
             { frequency: sourceFreq, ctrTrend: sourceCtrTrend },
           );
         } else if (action.type === 'scale_adset') {
-          // Scale requires explicit approval — only execute if manually approved (not grace-expired)
-          if (!manuallyApproved) continue;
+          // Scale requires explicit approval by default (company.pipelineConfig.scaleRequiresApproval,
+          // default true) — grace-period expiry alone isn't enough, unlike shift/reduce above.
+          // Set scaleRequiresApproval=false on the Settings page to let this auto-execute
+          // once the grace period passes too, same as the other budget actions.
+          const scaleNeedsApproval =
+            company.pipelineConfig?.scaleRequiresApproval !== false;
+          if (scaleNeedsApproval && !manuallyApproved) continue;
           await this.optimizer.scaleAdSet(campaign, company, action.targetId, {
             spend: campaign.spend ?? 0,
             impressions: campaign.impressions ?? 0,
@@ -2134,7 +2147,7 @@ export class CampaignAuditorService {
                     cta: bestVariant.cta,
                   },
                   bestImage.imageUrl,
-                  company.meta!.pageId ?? '',
+                  product?.pageId ?? company.meta!.pageId ?? '',
                   taggedLandingUrl,
                   (company.meta as any)?.specialAdCategories ?? [],
                 );

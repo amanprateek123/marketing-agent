@@ -172,6 +172,39 @@ export class CompaniesController {
   }
 
   /**
+   * GET /api/v1/companies/:tenantId/meta-pages
+   * Discover Facebook Pages visible to the tenant's stored Meta access token —
+   * for the settings UI to pick company.meta.pageId from a real list instead
+   * of hand-typing a Page ID. Root-caused a prod incident (2026-07-29): with
+   * no picker, pageId was silently set to the wrong Page under the same
+   * Business Manager and every ad launched under the wrong brand identity.
+   *
+   * Also flags which Pages are `promotable` — authorized on THIS tenant's
+   * own ad account(s) right now (Meta's promote_pages allowlist) — so the UI
+   * can put ready-to-use Pages first instead of drowning them in every Page
+   * the whole (often shared/agency) Business Manager happens to own.
+   */
+  @Get(':tenantId/meta-pages')
+  async listMetaPages(@Param('tenantId') tenantId: string) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for this tenant');
+    }
+    const accountIds = company.meta.accountIds?.length
+      ? company.meta.accountIds
+      : company.meta.accountId
+        ? [company.meta.accountId]
+        : [];
+    const pages = await this.metaAdsService.listPages(company.meta.accessToken, company.meta.businessId, accountIds);
+    return {
+      pages: pages.map((p) => ({ ...p, currentlySelected: p.id === company.meta?.pageId })),
+      total: pages.length,
+      accessible: pages.filter((p) => p.accessible).length,
+      promotable: pages.filter((p) => p.promotable).length,
+    };
+  }
+
+  /**
    * GET /api/v1/companies/:tenantId/meta-businesses
    * Lists Business Managers the tenant's Meta access token belongs to — lets
    * the settings UI offer a picker for company.meta.businessId instead of

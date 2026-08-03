@@ -188,7 +188,7 @@ export class CreativeReplacementProcessor extends WorkerHost {
           adName,
           { primaryText: selectedVariant.primaryText, headline: selectedVariant.headline, cta: selectedVariant.cta },
           selectedImage.imageUrl,
-          company.meta?.pageId ?? '',
+          product?.pageId ?? company.meta?.pageId ?? '',
           taggedLandingUrl,
           (company.meta as any)?.specialAdCategories ?? [],
         );

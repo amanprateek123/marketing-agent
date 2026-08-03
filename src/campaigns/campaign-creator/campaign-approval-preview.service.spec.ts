@@ -103,10 +103,14 @@ function build(campaign: Record<string, any>, company: Record<string, any> = COM
     getWeeklySpend: async () => 41200,
   };
   const companiesService = { findByTenantId: async () => company };
+  const metaAdsService = {
+    getPage: async (pageId: string) => ({ id: pageId, name: 'Mock Page', category: 'Astrologist' }),
+  };
   const svc = new CampaignApprovalPreviewService(
     campaignModel as any,
     campaignsService as any,
     companiesService as any,
+    metaAdsService as any,
   );
   return svc.build('91astrology', 'c1');
 }

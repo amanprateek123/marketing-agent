@@ -22,6 +22,7 @@ import {
   UpdateManualCampaignConfigDto,
 } from './campaign-creator/manual-campaign.types';
 import { CampaignAuditorService } from './campaign-auditor/campaign-auditor.service';
+import { CampaignOptimizerService } from './campaign-auditor/campaign-optimizer.service';
 import { CompaniesService } from '../companies/companies.service';
 import { MetaAdsService } from './meta-ads/meta-ads.service';
 import { CampaignSyncService } from './meta-ads/campaign-sync.service';
@@ -70,6 +71,7 @@ export class CampaignsController {
     private readonly manualCampaignService: ManualCampaignService,
     private readonly approvalPreview: CampaignApprovalPreviewService,
     private readonly campaignAuditorService: CampaignAuditorService,
+    private readonly campaignOptimizerService: CampaignOptimizerService,
     private readonly companiesService: CompaniesService,
     private readonly metaAdsService: MetaAdsService,
     private readonly campaignSyncService: CampaignSyncService,
@@ -591,10 +593,6 @@ export class CampaignsController {
       throw new BadRequestException(
         'No Meta access token configured for tenant',
       );
-    if (!company.meta.pageId)
-      throw new BadRequestException(
-        'company.meta.pageId is required for ad creative creation',
-      );
 
     const pkg: any = await this.campaignsService.findCreativePackage(
       campaign.creativePackageId,
@@ -631,6 +629,11 @@ export class CampaignsController {
       throw new BadRequestException(err.message);
     }
     const landingUrl = product.landingUrl as string;
+    const pageId = product.pageId ?? company.meta.pageId;
+    if (!pageId)
+      throw new BadRequestException(
+        'product.pageId or company.meta.pageId is required for ad creative creation',
+      );
 
     const results: Array<{
       adSetId: string;
@@ -688,7 +691,7 @@ export class CampaignsController {
               cta: variant.cta,
             },
             image.imageUrl,
-            company.meta.pageId,
+            pageId,
             landingUrl,
             company.meta.specialAdCategories,
           );
@@ -724,6 +727,158 @@ export class CampaignsController {
       failed: results.filter((r) => r.status === 'failed').length,
       results,
     };
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/swap-page
+   *
+   * Fixes which Facebook Page a LIVE campaign's ads post as, in place — same
+   * campaign, same ad sets, same ad IDs. Meta ad creatives are immutable, so
+   * this clones each ad's current creative with the corrected page_id and
+   * points the ad at the clone (meta-ads.service.ts#swapAdPage).
+   *
+   * The target Page must already be promote_pages-authorized on this
+   * campaign's ad account (Business Settings → Ad Account → Pages) — Meta
+   * rejects the new creative outright otherwise. A per-ad failure is
+   * recorded and the rest still run, so one Meta hiccup doesn't leave the
+   * campaign in a half-swapped state.
+   *
+   * Fire-and-forget, same reasoning as /sync: 40 ads × ~3 Meta calls each can
+   * run minutes past the ALB's 60s gateway timeout. Validates synchronously
+   * (fast, no Meta calls), writes campaign.pageSwapStatus so the dashboard
+   * can poll GET /:tenantId/:campaignId for live progress, then dispatches
+   * the actual swap in the background and returns 202 immediately.
+   */
+  @Post(':tenantId/:campaignId/swap-page')
+  @HttpCode(202)
+  async swapCampaignPage(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body() body: { pageId: string },
+  ) {
+    const campaign: any = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId)
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — nothing to swap',
+      );
+    if (!body?.pageId) throw new BadRequestException('pageId is required');
+    if (campaign.pageSwapStatus?.status === 'running')
+      throw new BadRequestException(
+        'A Page swap is already running for this campaign',
+      );
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken)
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
+
+    const allAds = (campaign.metaAdSets ?? []).flatMap((as: any) =>
+      (as.ads ?? []).map((ad: any) => ({ adSetId: as.id, adId: ad.id })),
+    );
+    if (allAds.length === 0)
+      throw new BadRequestException('Campaign has no live ads to swap');
+
+    await this.campaignModel.updateOne(
+      { _id: campaignId, tenantId },
+      {
+        pageSwapStatus: {
+          status: 'running',
+          targetPageId: body.pageId,
+          total: allAds.length,
+          swapped: 0,
+          failed: 0,
+          startedAt: new Date(),
+          results: [],
+        },
+      },
+    );
+
+    this.runPageSwap(
+      tenantId,
+      campaignId,
+      allAds,
+      body.pageId,
+      company.meta.accessToken,
+    ).catch((err: any) => {
+      this.logger.error(
+        `Background page swap failed for ${campaignId}: ${err.message}`,
+      );
+    });
+
+    return {
+      campaignId,
+      pageId: body.pageId,
+      status: 'started',
+      total: allAds.length,
+      message: `Page swap started in the background for ${allAds.length} ads — poll GET /:tenantId/:campaignId (campaign.pageSwapStatus) for live progress.`,
+    };
+  }
+
+  /**
+   * Runs the actual per-ad swap loop and writes progress back to
+   * campaign.pageSwapStatus after every ad — not just at the end — so a
+   * poller sees live movement instead of a status stuck on "running" for
+   * however long the whole batch takes.
+   */
+  private async runPageSwap(
+    tenantId: string,
+    campaignId: string,
+    ads: Array<{ adSetId: string; adId: string }>,
+    pageId: string,
+    accessToken: string,
+  ): Promise<void> {
+    const results: Array<{
+      adSetId: string;
+      adId: string;
+      status: 'swapped' | 'failed';
+      newCreativeId?: string;
+      error?: string;
+    }> = [];
+
+    for (const { adSetId, adId } of ads) {
+      try {
+        const { newCreativeId } = await this.metaAdsService.swapAdPage(
+          adId,
+          pageId,
+          accessToken,
+        );
+        results.push({ adSetId, adId, status: 'swapped', newCreativeId });
+      } catch (err: any) {
+        results.push({ adSetId, adId, status: 'failed', error: err.message });
+      }
+
+      await this.campaignModel.updateOne(
+        { _id: campaignId, tenantId },
+        {
+          'pageSwapStatus.swapped': results.filter(
+            (r) => r.status === 'swapped',
+          ).length,
+          'pageSwapStatus.failed': results.filter((r) => r.status === 'failed')
+            .length,
+          'pageSwapStatus.results': results,
+        },
+      );
+    }
+
+    await this.campaignModel.updateOne(
+      { _id: campaignId, tenantId },
+      {
+        'pageSwapStatus.status': 'complete',
+        'pageSwapStatus.completedAt': new Date(),
+      },
+    );
+
+    // Refresh metaAdSets[].ads so the new creativeId shows up on next read.
+    try {
+      const company = await this.companiesService.findByTenantId(tenantId);
+      await this.campaignSyncService.syncActiveCampaigns(company);
+    } catch {
+      // best-effort
+    }
   }
 
   @Post(':tenantId/:campaignId/pause')
@@ -1040,6 +1195,268 @@ export class CampaignsController {
       status: campaign.status,
       message: `Budget updated to ₹${budget}/day`,
     };
+  }
+
+  /**
+   * PATCH /api/v1/campaigns/:tenantId/:campaignId/adsets/:adSetId/budget
+   *
+   * Operator sets a live ad set's daily budget directly — "put ₹3,000/day on
+   * this one" — rather than waiting on the AI's percent-based scale/shift/
+   * reduce proposals. The only path that previously existed for a live
+   * campaign was accept-or-reject the AI's own number; this is the first
+   * free-entry budget field for an already-launched ad set.
+   *
+   * Same TS-side caps as every other budget path (maxBudgetPerCampaign,
+   * weeklyBudgetCap) via CampaignOptimizerService.setAdSetBudget — a human
+   * typing a number doesn't get to skip the rails an AI-proposed change would
+   * have to clear.
+   */
+  @Patch(':tenantId/:campaignId/adsets/:adSetId/budget')
+  async editAdSetBudget(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('adSetId') adSetId: string,
+    @Body('dailyBudget') dailyBudget: number,
+  ) {
+    if (
+      typeof dailyBudget !== 'number' ||
+      !Number.isFinite(dailyBudget) ||
+      dailyBudget <= 0
+    ) {
+      throw new BadRequestException('dailyBudget must be a positive number');
+    }
+
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) {
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — use PATCH /budget (pre-launch) instead',
+      );
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for tenant');
+    }
+
+    try {
+      const result = await this.campaignOptimizerService.setAdSetBudget(
+        campaign,
+        company,
+        adSetId,
+        dailyBudget,
+      );
+
+      // Refresh metaAdSets[].dailyBudget so the dashboard doesn't show a
+      // stale per-ad-set figure until the next scheduled sync.
+      try {
+        await this.campaignSyncService.syncActiveCampaigns(company);
+      } catch {
+        // best-effort
+      }
+
+      return {
+        campaignId,
+        adSetId,
+        ...result,
+        message: `Ad set budget updated to ₹${dailyBudget}/day`,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/adsets
+   *
+   * Operator adds a brand-new ad set to an already-live campaign — same
+   * campaign, a new ad set inside it. Manual counterpart to the auditor's
+   * automated `add_adset` action: clones an EXISTING live ad's copy variant +
+   * image (via `sourceAdId`) into the new ad set, rather than an AI picking
+   * the "best performing" one — early in a campaign's life that heuristic
+   * has nothing to differentiate on anyway.
+   *
+   * Body: { name?, audienceType: 'advantage_plus'|'retarget'|'lookalike',
+   * metaAudienceId? (required unless advantage_plus), dailyBudget, sourceAdId }.
+   * Same TS-side budget caps as every other budget path, via
+   * CampaignOptimizerService.addAdSet.
+   */
+  @Post(':tenantId/:campaignId/adsets')
+  async addAdSet(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Body()
+    body: {
+      name?: string;
+      audienceType: 'advantage_plus' | 'retarget' | 'lookalike';
+      metaAudienceId?: string;
+      dailyBudget: number;
+      assetType: 'image' | 'video';
+      mediaUrl: string;
+      primaryText: string;
+      headline: string;
+      cta: string;
+    },
+  ) {
+    if (!body?.audienceType) {
+      throw new BadRequestException('audienceType is required');
+    }
+    if (body?.assetType !== 'image' && body?.assetType !== 'video') {
+      throw new BadRequestException("assetType must be 'image' or 'video'");
+    }
+    if (!body?.mediaUrl) {
+      throw new BadRequestException('mediaUrl is required');
+    }
+    if (!body?.primaryText?.trim() || !body?.headline?.trim()) {
+      throw new BadRequestException('primaryText and headline are required');
+    }
+    if (
+      typeof body?.dailyBudget !== 'number' ||
+      !Number.isFinite(body.dailyBudget) ||
+      body.dailyBudget <= 0
+    ) {
+      throw new BadRequestException('dailyBudget must be a positive number');
+    }
+
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) {
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — nothing to add an ad set to',
+      );
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for tenant');
+    }
+
+    try {
+      const result = await this.campaignOptimizerService.addAdSet(
+        campaign,
+        company,
+        {
+          name: body.name,
+          audienceType: body.audienceType,
+          metaAudienceId: body.metaAudienceId,
+          dailyBudget: body.dailyBudget,
+          assetType: body.assetType,
+          mediaUrl: body.mediaUrl,
+          copy: {
+            primaryText: body.primaryText,
+            headline: body.headline,
+            cta: body.cta || 'Shop Now',
+          },
+        },
+      );
+
+      // Refresh metaAdSets[] so the new ad set/ad show up on next read.
+      try {
+        await this.campaignSyncService.syncActiveCampaigns(company);
+      } catch {
+        // best-effort
+      }
+
+      return {
+        campaignId,
+        ...result,
+        message: `New ${body.audienceType} ad set created with 1 ad at ₹${body.dailyBudget}/day`,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/adsets/:adSetId/creatives
+   *
+   * Operator-authored creative added to an EXISTING live ad set — the human
+   * writes their own copy and supplies their own image/video (already
+   * uploaded via POST /creative/:tenantId/upload-file), rather than the AI
+   * generating something or backfill-variants re-adding an existing package
+   * variant. The ad set's budget/audience are untouched — only a new ad
+   * joins it.
+   *
+   * Body: { name?, assetType: 'image'|'video', mediaUrl, primaryText,
+   * headline, cta }.
+   */
+  @Post(':tenantId/:campaignId/adsets/:adSetId/creatives')
+  async addCreativeToAdSet(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('adSetId') adSetId: string,
+    @Body()
+    body: {
+      name?: string;
+      assetType: 'image' | 'video';
+      mediaUrl: string;
+      primaryText: string;
+      headline: string;
+      cta: string;
+    },
+  ) {
+    if (body?.assetType !== 'image' && body?.assetType !== 'video') {
+      throw new BadRequestException("assetType must be 'image' or 'video'");
+    }
+    if (!body?.mediaUrl) {
+      throw new BadRequestException('mediaUrl is required');
+    }
+    if (!body?.primaryText?.trim() || !body?.headline?.trim()) {
+      throw new BadRequestException('primaryText and headline are required');
+    }
+
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) {
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — nothing to add a creative to',
+      );
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new BadRequestException('No Meta access token configured for tenant');
+    }
+
+    try {
+      const result = await this.campaignOptimizerService.addCreativeToAdSet(
+        campaign,
+        company,
+        {
+          adSetId,
+          name: body.name,
+          assetType: body.assetType,
+          mediaUrl: body.mediaUrl,
+          copy: {
+            primaryText: body.primaryText,
+            headline: body.headline,
+            cta: body.cta || 'Shop Now',
+          },
+        },
+      );
+
+      // Refresh metaAdSets[].ads so the new ad shows up on next read.
+      try {
+        await this.campaignSyncService.syncActiveCampaigns(company);
+      } catch {
+        // best-effort
+      }
+
+      return {
+        campaignId,
+        adSetId,
+        ...result,
+        message: `New ${body.assetType} ad added to ad set`,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
   }
 
   /**

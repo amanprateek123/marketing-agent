@@ -5,6 +5,9 @@ import { CampaignsService } from '../campaigns.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { SafetyChecks } from '../campaign-creator/safety-checks';
+import { withUtmParams } from '../meta-ads/meta-utm.util';
+import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
 
 export interface CampaignMetrics {
   spend: number;
@@ -91,6 +94,67 @@ export class CampaignOptimizerService {
     );
 
     return { oldBudget: campaign.budget, newBudget };
+  }
+
+  /**
+   * Operator-driven direct budget set on one live ad set — "put ₹3,000/day
+   * on this one" — as opposed to the AI's percent-based scale/shift/reduce
+   * moves above. Same TS-side caps (maxBudgetPerCampaign, weeklyBudgetCap)
+   * so a manual entry can't bypass the rails those enforce on AI changes;
+   * a human can still type a number that blows the budget, so this checks
+   * it the same way scaleAdSet does rather than trusting the input.
+   */
+  async setAdSetBudget(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    adSetId: string,
+    newDailyBudget: number,
+  ): Promise<{ oldDailyBudget: number; newDailyBudget: number; newCampaignBudget: number }> {
+    const adSets = (campaign as any).metaAdSets ?? [];
+    const adSet = adSets.find((a: any) => a.id === adSetId);
+    if (!adSet) {
+      throw new Error(`Ad set ${adSetId} not found on campaign ${campaign._id}`);
+    }
+    const oldDailyBudget = adSet.dailyBudget ?? 0;
+    const delta = newDailyBudget - oldDailyBudget;
+
+    // campaign.budget can drift from the sum of live ad-set budgets (manual
+    // edits, partial scale failures) — reduce over the ad sets we actually
+    // have rather than trust the stored total.
+    const currentTotalBudget = adSets.reduce(
+      (sum: number, a: any) => sum + (a.dailyBudget ?? 0),
+      0,
+    ) || campaign.budget || 0;
+    const newTotalBudget = currentTotalBudget + delta;
+
+    // Same per-campaign cap the launch/pre-launch-edit paths enforce.
+    SafetyChecks.checkCampaignBudget(newTotalBudget, company);
+
+    const currentWeeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
+    const weeklyCap = (company as any).weeklyBudgetCap ?? 0;
+    if (weeklyCap && currentWeeklySpend + delta * 7 > weeklyCap) {
+      throw new Error(
+        `₹${currentWeeklySpend.toFixed(0)} already committed this week + ₹${(delta * 7).toFixed(0)} projected from this change would exceed the ₹${weeklyCap} weekly cap.`,
+      );
+    }
+
+    await this.metaAdsService.updateAdSetBudget(
+      adSetId,
+      newDailyBudget,
+      company.meta!.accessToken,
+    );
+
+    await this.campaignsService.updateBudget(
+      company.tenantId,
+      campaign._id.toString(),
+      newTotalBudget,
+    );
+
+    this.logger.log(
+      `Manual budget set: tenantId=${company.tenantId} adSet=${adSetId} ₹${oldDailyBudget}/day → ₹${newDailyBudget}/day (campaign total ₹${currentTotalBudget.toFixed(0)} → ₹${newTotalBudget.toFixed(0)})`,
+    );
+
+    return { oldDailyBudget, newDailyBudget, newCampaignBudget: newTotalBudget };
   }
 
   /**
@@ -427,5 +491,214 @@ export class CampaignOptimizerService {
     });
 
     return { newAdSetId, sourcePaused };
+  }
+
+  /**
+   * Operator-driven "add a new ad set to this live campaign" — same campaign,
+   * a brand-new ad set inside it. This is the manual counterpart to the
+   * auditor's automated `add_adset` action (campaign-auditor.service.ts):
+   * same Meta API calls (createAdSetInCampaign → createAdInAdSet), same
+   * carousel guard, same "resolve product strictly, never guess" rule — but
+   * every choice here is the operator's (which existing ad's creative to
+   * clone, which audience, how much budget), not an AI heuristic. Written as
+   * fresh logic rather than refactoring the auditor's inline version, so a
+   * bug here can't regress the automated path.
+   */
+  async addAdSet(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    opts: {
+      name?: string;
+      audienceType: 'advantage_plus' | 'retarget' | 'lookalike';
+      metaAudienceId?: string;
+      dailyBudget: number;
+      /** Operator-chosen creative — picked from the Gallery/library or freshly uploaded, same contract as addCreativeToAdSet. */
+      assetType: 'image' | 'video';
+      mediaUrl: string;
+      copy: { primaryText: string; headline: string; cta: string };
+    },
+  ): Promise<{ newAdSetId: string; newAdId: string; newCampaignBudget: number }> {
+    if (!campaign.metaCampaignId) {
+      throw new Error(`Campaign ${campaign._id} was never launched on Meta`);
+    }
+    if (opts.audienceType !== 'advantage_plus' && !opts.metaAudienceId) {
+      throw new Error(`metaAudienceId is required for audienceType=${opts.audienceType}`);
+    }
+
+    // Resolve product strictly from the campaign's own record — never fall
+    // back to "the tenant's first active product," which is how a new ad set
+    // could point at another product's landing page/pixel/conversion.
+    const { resolution, error } = tryResolveCampaignProduct(company, campaign as any, null);
+    const product = resolution?.product;
+    if (!product?.landingUrl) {
+      throw new Error(
+        error ?? `Product "${product?.name}" has no Landing URL — set it before adding an ad set.`,
+      );
+    }
+
+    // Same TS-side caps as every other budget path — a human picking a
+    // number doesn't get to skip the rails an AI-proposed change would.
+    const adSets: any[] = (campaign as any).metaAdSets ?? (campaign as any).adSets ?? [];
+    const currentTotalBudget =
+      adSets.reduce((sum: number, a: any) => sum + (a.dailyBudget ?? 0), 0) ||
+      campaign.budget ||
+      0;
+    const newTotalBudget = currentTotalBudget + opts.dailyBudget;
+    SafetyChecks.checkCampaignBudget(newTotalBudget, company);
+    const currentWeeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
+    const weeklyCap = (company as any).weeklyBudgetCap ?? 0;
+    if (weeklyCap && currentWeeklySpend + opts.dailyBudget * 7 > weeklyCap) {
+      throw new Error(
+        `₹${currentWeeklySpend.toFixed(0)} already committed this week + ₹${(opts.dailyBudget * 7).toFixed(0)} projected from this ad set would exceed the ₹${weeklyCap} weekly cap.`,
+      );
+    }
+
+    const adSetName = opts.name?.trim() || `${opts.audienceType.toUpperCase()}_${new Date().toISOString().split('T')[0]}`;
+    // Inherit the existing campaign's optimization goal — mixing OFFSITE_CONVERSIONS
+    // and VALUE ad sets in one campaign splits the learning signal and confuses
+    // ROAS comparison across ad sets.
+    const inheritedOptimizationGoal =
+      (campaign as any).campaignConfig?.adSets?.[0]?.optimizationGoal ?? 'OFFSITE_CONVERSIONS';
+
+    const newAdSetId = await this.metaAdsService.createAdSetInCampaign(
+      campaign.metaCampaignId,
+      company.meta!.accessToken,
+      {
+        name: adSetName,
+        budgetPercent: 100, // totalBudget below IS this ad set's budget, not the campaign's
+        audienceType: opts.audienceType,
+        optimizationGoal: inheritedOptimizationGoal,
+        ads: [0], // bookkeeping only — not read by createAdSet's Meta payload; the ad itself is created separately below
+        ...(opts.metaAudienceId ? { metaAudienceId: opts.metaAudienceId } : {}),
+      },
+      opts.dailyBudget,
+      (campaign as any).campaignConfig?.conversionEvent ?? 'Purchase',
+      product.pixelId ?? company.meta!.pixelId,
+    );
+
+    const newAdName = `${adSetName} — ${opts.copy.headline || 'ad'}`;
+    const taggedLandingUrl = withUtmParams(product.landingUrl, {
+      campaignName: campaign.name ?? String(campaign._id),
+      adSetName,
+      adName: newAdName,
+    });
+    const pageId = product.pageId ?? company.meta!.pageId ?? '';
+    const specialAdCategories = (company.meta as any)?.specialAdCategories ?? [];
+    const { adId: newAdId } =
+      opts.assetType === 'video'
+        ? await this.metaAdsService.createVideoAdInAdSet(
+            newAdSetId,
+            company.meta!.accessToken,
+            newAdName,
+            opts.copy,
+            opts.mediaUrl,
+            pageId,
+            taggedLandingUrl,
+            specialAdCategories,
+          )
+        : await this.metaAdsService.createAdInAdSet(
+            newAdSetId,
+            company.meta!.accessToken,
+            newAdName,
+            opts.copy,
+            opts.mediaUrl,
+            pageId,
+            taggedLandingUrl,
+            specialAdCategories,
+          );
+
+    // The ad set itself defaults to PAUSED on creation (separate from the ad,
+    // which createAdInAdSet/createVideoAdInAdSet already activate internally).
+    await this.metaAdsService.updateAdStatus(newAdSetId, 'ACTIVE', company.meta!.accessToken);
+
+    await this.campaignsService.updateBudget(company.tenantId, campaign._id.toString(), newTotalBudget);
+
+    this.logger.log(
+      `Manual add_adset: tenantId=${company.tenantId} campaign=${campaign._id} newAdSet=${newAdSetId} newAd=${newAdId} ₹${opts.dailyBudget}/day (${opts.assetType})`,
+    );
+
+    return { newAdSetId, newAdId, newCampaignBudget: newTotalBudget };
+  }
+
+  /**
+   * Operator-authored creative added to an EXISTING live ad set — a human
+   * writes their own copy and supplies their own image/video, rather than
+   * the AI generating something (add_creative/replace_creative) or backfill-
+   * variants re-adding a variant already sitting in the package. The ad set
+   * itself, its budget, and its audience are untouched — only a new ad joins
+   * it.
+   *
+   * mediaUrl is expected to already be hosted (e.g. via
+   * POST /creative/:tenantId/upload-file) — this method doesn't accept raw
+   * file bytes, matching how every other Meta-write path in this codebase
+   * takes a URL, never a file.
+   */
+  async addCreativeToAdSet(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    opts: {
+      adSetId: string;
+      name?: string;
+      assetType: 'image' | 'video';
+      mediaUrl: string;
+      copy: { primaryText: string; headline: string; cta: string };
+    },
+  ): Promise<{ adId: string; creativeId: string }> {
+    if (!campaign.metaCampaignId) {
+      throw new Error(`Campaign ${campaign._id} was never launched on Meta`);
+    }
+
+    // Resolve product strictly from the campaign's own record — never fall
+    // back to "the tenant's first active product," same rule every other
+    // ad-creation path in this codebase follows.
+    const { resolution, error } = tryResolveCampaignProduct(company, campaign as any, null);
+    const product = resolution?.product;
+    if (!product?.landingUrl) {
+      throw new Error(
+        error ?? `Product "${product?.name}" has no Landing URL — set it before adding a creative.`,
+      );
+    }
+
+    const adSetName =
+      ((campaign as any).metaAdSets ?? (campaign as any).adSets ?? []).find(
+        (as: any) => (as.id ?? as.metaAdSetId) === opts.adSetId,
+      )?.name ?? opts.adSetId;
+    const adName = opts.name?.trim() || `${adSetName} — manual ${new Date().toISOString().split('T')[0]}`;
+    const taggedLandingUrl = withUtmParams(product.landingUrl, {
+      campaignName: campaign.name ?? String(campaign._id),
+      adSetName,
+      adName,
+    });
+    const pageId = product.pageId ?? company.meta!.pageId ?? '';
+    const specialAdCategories = (company.meta as any)?.specialAdCategories ?? [];
+
+    const result =
+      opts.assetType === 'video'
+        ? await this.metaAdsService.createVideoAdInAdSet(
+            opts.adSetId,
+            company.meta!.accessToken,
+            adName,
+            opts.copy,
+            opts.mediaUrl,
+            pageId,
+            taggedLandingUrl,
+            specialAdCategories,
+          )
+        : await this.metaAdsService.createAdInAdSet(
+            opts.adSetId,
+            company.meta!.accessToken,
+            adName,
+            opts.copy,
+            opts.mediaUrl,
+            pageId,
+            taggedLandingUrl,
+            specialAdCategories,
+          );
+
+    this.logger.log(
+      `Manual creative added: tenantId=${company.tenantId} campaign=${campaign._id} adSet=${opts.adSetId} newAd=${result.adId} (${opts.assetType})`,
+    );
+
+    return result;
   }
 }

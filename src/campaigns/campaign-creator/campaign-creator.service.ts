@@ -639,8 +639,8 @@ export class CampaignCreatorService {
       throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
     }
 
-    if (!company.meta?.pageId) {
-      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId}. Set company.meta.pageId — required for ad creative creation.`);
+    if (!product.pageId && !company.meta?.pageId) {
+      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId} or product "${product.name}". Set product.pageId or company.meta.pageId — required for ad creative creation.`);
     }
 
     const config = (campaign as any).campaignConfig;
@@ -1491,7 +1491,7 @@ export class CampaignCreatorService {
       launchResult = await this.metaAdsService.launchCampaign({
         accountId: accountId,
         accessToken: company.meta.accessToken,
-        pageId: company.meta.pageId,
+        pageId: product?.pageId ?? company.meta.pageId,
         pixelId: product?.pixelId ?? company.meta.pixelId,
         campaignName,
         budget: campaign.budget,

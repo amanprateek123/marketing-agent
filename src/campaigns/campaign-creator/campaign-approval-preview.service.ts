@@ -4,6 +4,7 @@ import { Model } from 'mongoose';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CampaignsService } from '../campaigns.service';
 import { CompaniesService } from '../../companies/companies.service';
+import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { Product } from '../../companies/schemas/company.types';
 import {
   getEffectiveConversionValue,
@@ -52,6 +53,7 @@ export class CampaignApprovalPreviewService {
     private readonly campaignModel: Model<CampaignDocument>,
     private readonly campaignsService: CampaignsService,
     private readonly companiesService: CompaniesService,
+    private readonly metaAdsService: MetaAdsService,
   ) {}
 
   async build(tenantId: string, campaignId: string): Promise<any> {
@@ -204,12 +206,37 @@ export class CampaignApprovalPreviewService {
         message: 'No Meta access token configured for this tenant.',
       });
     }
-    if (!company.meta?.pageId) {
+    // Same override precedence as pixelId below: a product can pin its own
+    // Page (multi-brand tenants running one Page per product) and falls back
+    // to the tenant default otherwise.
+    const effectivePageId = product?.pageId || company.meta?.pageId;
+    const pageSource = product?.pageId ? 'product' : 'company_default';
+    if (!effectivePageId) {
       blockers.push({
         code: 'no_page_id',
         message:
           'No Meta Page ID configured — ad creatives cannot be created without one.',
       });
+    }
+    // Resolve the Page's actual name from Meta rather than trusting the
+    // stored ID — a wrong-but-present pageId used to sail through this
+    // screen invisibly (see prod incident 2026-07-29: ads launched under
+    // "Bhrigu Nandi Nadi Insights" instead of the intended Page, and nothing
+    // here would have shown it). Never throws: a lookup failure becomes a
+    // warning, not a broken approval screen.
+    let metaPage: { id: string; name: string; category?: string; source: 'product' | 'company_default' } | null = null;
+    if (effectivePageId && company.meta?.accessToken) {
+      const resolved = await this.metaAdsService.getPage(
+        effectivePageId,
+        company.meta.accessToken,
+      );
+      metaPage = resolved ? { ...resolved, source: pageSource } : null;
+      if (!metaPage) {
+        warnings.push({
+          code: 'page_id_unresolved',
+          message: `Configured Page ID ${effectivePageId} (from ${pageSource === 'product' ? `product "${product?.name}"` : 'company.meta.pageId'}) could not be resolved via Meta — it may be invalid or the access token may not have access to it. Verify at GET /api/v1/companies/${tenantId}/meta-pages before approving.`,
+        });
+      }
     }
     const allowedAccountIds =
       company.meta?.accountIds ??
@@ -434,6 +461,8 @@ export class CampaignApprovalPreviewService {
         stopTime: (campaign as any).stopTime ?? null,
         intendedAccountId,
         allowedAccountIds,
+        /** The Page this campaign's ads will actually post as — resolved live from Meta, not just the stored ID. Null if it couldn't be resolved (see warnings). */
+        metaPage,
         isLandingPageTest,
         briefId: campaign.briefId || null,
         creativePackageId: campaign.creativePackageId || null,

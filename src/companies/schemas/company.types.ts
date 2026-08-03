@@ -82,6 +82,7 @@ export interface Product {
   customEventName?: string;          // if conversionEvent is "CustomEvent", this is the event name (e.g. "NADI_REPORT_PURCHASE_COMPLETED")
   customConversionId?: string;       // Meta Custom Conversion ID — takes priority, sends pixel_id + custom_conversion_id to Meta
   pixelId?: string;                  // Meta Pixel ID if different from company.meta.pixelId
+  pageId?: string;                   // Facebook Page ID this product's ads should post as, if different from company.meta.pageId (e.g. a tenant running multiple product-specific Pages)
   /**
    * Meta ad-set optimization goal. Defaults to 'OFFSITE_CONVERSIONS' when unset.
    * Set to 'VALUE' for Value-Based Bidding on funnels where revenue per conversion

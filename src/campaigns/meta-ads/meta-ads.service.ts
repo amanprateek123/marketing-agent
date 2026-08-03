@@ -37,6 +37,16 @@ export interface MetaAdAccountSummary {
   timezoneName: string;
 }
 
+export interface MetaPageSummary {
+  id: string;
+  name: string;
+  category?: string;
+  /** True if the token can post ads as this Page right now (from /me/accounts). False = owned by the Business Manager but not yet granted to this token — page_id will 403 at launch until access is granted. */
+  accessible: boolean;
+  /** True if this tenant's configured ad account(s) are authorized to advertise as this Page (Meta's own promote_pages allowlist). A Page can be fully manageable above and still get rejected at launch if it isn't on this list — this is the exact gate Meta Ads Manager enforces per ad account. */
+  promotable: boolean;
+}
+
 export interface MetaCustomAudience {
   id: string;
   name: string;
@@ -1963,6 +1973,64 @@ export class MetaAdsService {
   }
 
   /**
+   * Video counterpart of createAdInAdSet — used by the manual "add creative"
+   * endpoint (video ads previously could only be attached at initial campaign
+   * launch, never appended to an already-live ad set). Uploads the video,
+   * lets Meta extract its own thumbnail (getVideoThumbnailHash — no separate
+   * thumbnail upload needed from the caller), then creates + activates the ad.
+   */
+  async createVideoAdInAdSet(
+    adSetId: string,
+    accessToken: string,
+    adName: string,
+    copy: { primaryText: string; headline: string; cta: string },
+    videoUrl: string,
+    pageId: string,
+    landingUrl: string,
+    declaredSpecialAdCategories?: string[],
+  ): Promise<{ adId: string; creativeId: string }> {
+    // Same safety pre-check as the image path — one Meta policy strike can
+    // restrict a Business Manager for days.
+    const safety = checkCopySafety({
+      primaryText: copy.primaryText,
+      headline: copy.headline,
+      cta: copy.cta,
+      declaredSpecialAdCategories,
+    });
+    if (!safety.safe) {
+      const errorMsg = formatSafetyError(safety);
+      this.logger.error(`Refusing to launch video ad "${adName}" — ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+
+    const adSetRes = await this.metaApiCall(
+      'GET',
+      `${META_API_BASE}/${adSetId}`,
+      { fields: 'account_id', access_token: accessToken },
+    );
+    const accountId = `act_${adSetRes.data?.account_id}`;
+
+    const videoId = await this.uploadVideo(videoUrl, accountId, accessToken);
+    const thumbnailHash = await this.getVideoThumbnailHash(videoId, accountId, accessToken);
+
+    const result = await this.createVideoAd(
+      accountId,
+      accessToken,
+      adSetId,
+      adName,
+      copy,
+      [{ videoId, thumbnailHash }],
+      pageId,
+      landingUrl,
+      thumbnailHash,
+    );
+
+    await this.updateAdStatus(result.adId, 'ACTIVE', accessToken);
+
+    return result;
+  }
+
+  /**
    * Attach a custom audience to a live ad set's targeting. Read-modify-write
    * so we don't blow away geo / age / placements set at launch.
    *
@@ -2058,6 +2126,58 @@ export class MetaAdsService {
       access_token: accessToken,
     });
     this.logger.log(`Ad creative updated: ${adId} → creative ${newCreativeId}`);
+  }
+
+  /**
+   * Fix which Facebook Page a LIVE ad posts as, without touching the
+   * campaign/ad set/ad IDs. Ad creatives are immutable on Meta — object_story_spec.page_id
+   * can never be patched in place — so this reads the ad's current creative
+   * (whatever copy/image/link/video is actually live), clones it with only
+   * page_id overridden, creates that as a new creative object, and points
+   * the existing ad at it via updateAdCreative. Works for image, video, and
+   * carousel ads alike since none of link_data/video_data/asset_feed_spec is
+   * touched — only the sibling page_id field on the same object_story_spec.
+   *
+   * Root incident (2026-07-29): company.meta.pageId pointed at the wrong
+   * Page and every ad in a launched campaign inherited it — this is the
+   * in-place fix, added so the campaign doesn't have to be relaunched from
+   * scratch (losing ad set delivery/learning) just to correct the Page.
+   *
+   * The target Page must already be promote_pages-authorized on the ad
+   * account this ad's account belongs to, or Meta rejects the new creative
+   * outright — this does not (and cannot) grant that authorization itself.
+   */
+  async swapAdPage(
+    adId: string,
+    newPageId: string,
+    accessToken: string,
+  ): Promise<{ newCreativeId: string }> {
+    const adRes = await this.metaApiCall('GET', `${META_API_BASE}/${adId}`, {
+      fields: 'account_id,creative{name,object_story_spec}',
+      access_token: accessToken,
+    });
+    const creative = adRes?.data?.creative;
+    const objectStorySpec = creative?.object_story_spec;
+    if (!objectStorySpec) {
+      throw new Error(
+        `Ad ${adId}: could not read current creative's object_story_spec — refusing to guess its shape and clone blind`,
+      );
+    }
+    const accountId = `act_${adRes.data.account_id}`;
+
+    const createRes = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/adcreatives`, {
+      name: `${creative.name ?? 'Creative'} (page swap → ${newPageId})`,
+      object_story_spec: { ...objectStorySpec, page_id: newPageId },
+      access_token: accessToken,
+    });
+    const newCreativeId = createRes.data?.id;
+    if (!newCreativeId) {
+      throw new Error(`Ad ${adId}: page-swap creative creation returned no ID`);
+    }
+
+    await this.updateAdCreative(adId, newCreativeId, accessToken);
+    this.logger.log(`Ad ${adId}: Page swapped to ${newPageId} via new creative ${newCreativeId}`);
+    return { newCreativeId };
   }
 
   async updateAdStatus(
@@ -2570,30 +2690,29 @@ export class MetaAdsService {
     if (businessId) {
       const bizRef = businessId.trim();
       const [owned, client] = await Promise.all([
-        this.metaApiCall('GET', `${META_API_BASE}/${bizRef}/owned_ad_accounts`, {
+        this.paginateEdge(`${META_API_BASE}/${bizRef}/owned_ad_accounts`, {
           fields, access_token: accessToken, limit: 200,
         }),
         // client_ad_accounts = accounts other businesses shared INTO this one
         // (agency-managed clients). Own permission scope can lack visibility
         // here even when owned_ad_accounts works — don't let that 403 kill discovery.
-        this.metaApiCall('GET', `${META_API_BASE}/${bizRef}/client_ad_accounts`, {
+        this.paginateEdge(`${META_API_BASE}/${bizRef}/client_ad_accounts`, {
           fields, access_token: accessToken, limit: 200,
         }).catch((err: any) => {
           this.logger.warn(`client_ad_accounts fetch failed for business ${bizRef}: ${err.message}`);
-          return { data: { data: [] } };
+          return [];
         }),
       ]);
       const seen = new Set<string>();
-      rows = [...(owned?.data?.data ?? []), ...(client?.data?.data ?? [])].filter((r) => {
+      rows = [...owned, ...client].filter((r) => {
         if (seen.has(r.id)) return false;
         seen.add(r.id);
         return true;
       });
     } else {
-      const res = await this.metaApiCall('GET', `${META_API_BASE}/me/adaccounts`, {
+      rows = await this.paginateEdge(`${META_API_BASE}/me/adaccounts`, {
         fields, access_token: accessToken, limit: 200,
       });
-      rows = res?.data?.data ?? [];
     }
     return rows.map((r) => ({
       id: r.id,
@@ -2602,6 +2721,99 @@ export class MetaAdsService {
       currency: r.currency,
       timezoneName: r.timezone_name,
     }));
+  }
+
+  /**
+   * List Facebook Pages available for ad identity (company.meta.pageId).
+   * /me/accounts returns Pages the token can directly manage — these are
+   * postable right now. When businessId is set, also cross-references the
+   * Business Manager's owned_pages + client_pages so Pages the business owns
+   * but hasn't granted this token a role on yet still show up (accessible:
+   * false) instead of silently vanishing from the picker.
+   *
+   * When accountIds is set, also cross-references each ad account's own
+   * promote_pages allowlist — the exact per-account gate Meta Ads Manager
+   * enforces, tighter than "the Business owns it" or "the token can manage
+   * it": a Page can pass both of those and still get rejected at launch if
+   * it isn't authorized on the specific ad account being used.
+   *
+   * Added after a prod incident (2026-07-29) where company.meta.pageId was
+   * hand-typed and silently pointed at the wrong Page under the same
+   * Business Manager — there was no way to see/select from the real list.
+   */
+  async listPages(accessToken: string, businessId?: string, accountIds?: string[]): Promise<MetaPageSummary[]> {
+    const fields = 'id,name,category';
+    const managed = await this.paginateEdge(`${META_API_BASE}/me/accounts`, {
+      fields, access_token: accessToken, limit: 200,
+    });
+    const seen = new Set<string>(managed.map((p) => p.id));
+    const pages: MetaPageSummary[] = managed.map((p) => ({
+      id: p.id, name: p.name, category: p.category, accessible: true, promotable: false,
+    }));
+
+    if (businessId) {
+      const bizRef = businessId.trim();
+      const [owned, client] = await Promise.all([
+        this.paginateEdge(`${META_API_BASE}/${bizRef}/owned_pages`, {
+          fields, access_token: accessToken, limit: 200,
+        }).catch((err: any) => {
+          this.logger.warn(`owned_pages fetch failed for business ${bizRef}: ${err.message}`);
+          return [];
+        }),
+        this.paginateEdge(`${META_API_BASE}/${bizRef}/client_pages`, {
+          fields, access_token: accessToken, limit: 200,
+        }).catch((err: any) => {
+          this.logger.warn(`client_pages fetch failed for business ${bizRef}: ${err.message}`);
+          return [];
+        }),
+      ]);
+      for (const p of [...owned, ...client]) {
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        pages.push({ id: p.id, name: p.name, category: p.category, accessible: false, promotable: false });
+      }
+    }
+
+    if (accountIds?.length) {
+      const promotableResults = await Promise.all(accountIds.map((id) => {
+        const acctRef = id.startsWith('act_') ? id : `act_${id}`;
+        return this.paginateEdge(`${META_API_BASE}/${acctRef}/promote_pages`, {
+          fields, access_token: accessToken, limit: 200,
+        }).catch((err: any) => {
+          this.logger.warn(`promote_pages fetch failed for ${acctRef}: ${err.message}`);
+          return [];
+        });
+      }));
+      for (const p of promotableResults.flat()) {
+        const existing = pages.find((x) => x.id === p.id);
+        if (existing) existing.promotable = true;
+        else {
+          seen.add(p.id);
+          pages.push({ id: p.id, name: p.name, category: p.category, accessible: false, promotable: true });
+        }
+      }
+    }
+
+    return pages;
+  }
+
+  /**
+   * Resolve a single Page's name/category by ID — used on the campaign
+   * approval screen to show "this will post as <name>" instead of a bare ID
+   * a human can't sanity-check. Returns null (never throws) if the ID is
+   * invalid or the token can't see it, so the approval screen can surface
+   * that as its own warning rather than failing to render.
+   */
+  async getPage(pageId: string, accessToken: string): Promise<{ id: string; name: string; category?: string } | null> {
+    try {
+      const res = await this.metaApiCall('GET', `${META_API_BASE}/${pageId}`, {
+        fields: 'id,name,category', access_token: accessToken,
+      });
+      return res?.data ? { id: res.data.id, name: res.data.name, category: res.data.category } : null;
+    } catch (err: any) {
+      this.logger.warn(`getPage failed for ${pageId}: ${err.message}`);
+      return null;
+    }
   }
 
   /**
@@ -2642,6 +2854,28 @@ export class MetaAdsService {
       );
       return null;
     }
+  }
+
+  /**
+   * Follows `paging.next` until exhausted or maxPages is hit. Confirmed live
+   * 2026-08-03: owned_pages on this account's Business Manager returned 24
+   * rows on one call and 43 on the next with the identical request (limit=200
+   * does not guarantee a single page) — a picker built on the un-paginated
+   * first page silently hides real Pages/accounts, which is exactly the class
+   * of bug this whole feature exists to close. maxPages is a runaway backstop,
+   * not an expected limit — no Business Manager here is 2000+ objects deep.
+   */
+  private async paginateEdge(url: string, params: any, maxPages = 10): Promise<any[]> {
+    const rows: any[] = [];
+    let nextUrl: string | null = url;
+    let nextParams: any = params;
+    for (let i = 0; i < maxPages && nextUrl; i++) {
+      const res = await this.metaApiCall('GET', nextUrl, nextParams);
+      rows.push(...(res?.data?.data ?? []));
+      nextUrl = res?.data?.paging?.next ?? null;
+      nextParams = undefined; // paging.next is already a complete URL with its own query params
+    }
+    return rows;
   }
 
   // ─── Retry wrapper for transient Meta API errors ────────────────────────────
