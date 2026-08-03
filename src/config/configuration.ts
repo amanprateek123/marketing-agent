@@ -37,6 +37,21 @@ export default () => ({
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
     s3Bucket: process.env.AWS_S3_BUCKET ?? '',
     region: process.env.AWS_REGION ?? 'ap-south-1',
+    /**
+     * Presign media URLs in creative READ responses. Default OFF, which is
+     * production behaviour: the production bucket is public-read, so the stored
+     * URL already renders and signing would only add an expiry.
+     *
+     * Turn it on for a deployment whose bucket is PRIVATE — otherwise every
+     * thumbnail 403s, since the dashboard renders them with a plain <img src>.
+     *
+     * Deliberately opt-in rather than always-on. A signed URL is a VIEW, but not
+     * every consumer treats it as one: the gallery-to-campaign flow copies
+     * `images[].imageUrl` out of a getCreativePackage response and persists it
+     * into a manual campaign (campaigns/new/page.tsx), which would bake an
+     * expiring link into a live Meta ad.
+     */
+    signMediaUrls: (process.env.S3_SIGN_MEDIA_URLS ?? '').toLowerCase() === 'true',
   },
   google: {
     aiApiKey: process.env.GOOGLE_AI_API_KEY ?? '',

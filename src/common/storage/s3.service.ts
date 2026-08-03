@@ -10,10 +10,13 @@ export class S3Service {
   private readonly s3: S3Client;
   private readonly bucket: string;
   private readonly region: string;
+  /** See presignIfOwnBucket — OFF in production, on only for a private-bucket deployment. */
+  private readonly signMediaUrls: boolean;
 
   constructor(private readonly configService: ConfigService) {
     this.region = this.configService.get<string>('aws.region') ?? 'ap-south-1';
     this.bucket = this.configService.get<string>('aws.s3Bucket') ?? '';
+    this.signMediaUrls = this.configService.get<boolean>('aws.signMediaUrls') ?? false;
     this.s3 = new S3Client({
       region: this.region,
       credentials: {
@@ -56,21 +59,25 @@ export class S3Service {
    *
    * `uploadBuffer` PutObjects with no ACL and returns a bare
    * `https://<bucket>.s3.<region>.amazonaws.com/<key>`, which only renders when the bucket has a
-   * public-read policy. That holds for the production bucket, so nothing changed there — but it
-   * does NOT hold for every deployment (a private bucket returns 403 to the dashboard's plain
-   * `<img src>`, and every thumbnail silently breaks). Signing on the way out makes the display
-   * path work either way, without making any object public.
+   * public-read policy. That holds for the production bucket — so this is OFF by default and
+   * production behaviour is unchanged. Switch `S3_SIGN_MEDIA_URLS=true` on a deployment whose
+   * bucket is PRIVATE, where otherwise every thumbnail 403s.
    *
-   * Deliberately narrow:
+   * Opt-in rather than always-on for a specific reason: a signed URL is a VIEW, but not every
+   * consumer treats it as one. The gallery-to-campaign flow copies `images[].imageUrl` out of a
+   * getCreativePackage response and persists it into a manual campaign, which would bake an
+   * expiring link into a live Meta ad.
+   *
+   * Deliberately narrow when it IS on:
    * - Only URLs in OUR configured bucket are touched. Anything else (a Higgsfield CDN link, an
    *   already-signed URL, a data URI) is returned byte-identical, so this can be applied to a
    *   whole document without auditing where each field came from.
-   * - This signs a VIEW of the data. Stored documents are never rewritten, so server-side
-   *   consumers — notably the Meta upload in campaign-creator.service.ts, which reads the
-   *   CreativePackage straight from Mongo — keep seeing the durable URL and cannot be handed a
-   *   URL that expires mid-campaign.
+   * - It signs a view. Stored documents are never rewritten, so the Meta upload in
+   *   campaign-creator.service.ts, which reads the CreativePackage straight from Mongo, keeps
+   *   seeing the durable URL.
    */
   async presignIfOwnBucket(url: string, expiresIn = 12 * 3600): Promise<string> {
+    if (!this.signMediaUrls) return url;
     const key = this.ownBucketKey(url);
     if (!key) return url;
     try {
