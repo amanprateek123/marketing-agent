@@ -286,6 +286,9 @@ export class ManualCampaignService {
         interests: (a.interests ?? []).map((id) => ({ id, name: id })),
         optimizationGoal: a.optimizationGoal,
         creativeFormat: a.creativeFormat as ManualAdSetInput['creativeFormat'],
+        placementPreset: (
+          a as { placementPreset?: ManualAdSetInput['placementPreset'] }
+        ).placementPreset,
         ads: a.ads,
       }));
 
@@ -520,6 +523,7 @@ export class ManualCampaignService {
           ? a.ads.filter((v) => adIndices.includes(v))
           : adIndices,
         creativeFormat: a.creativeFormat || defaultFormat,
+        placementPreset: a.placementPreset,
 
         // ── Advantage+ audience SUGGESTIONS ────────────────────────────
         // These used to be dropped on the floor here, on the belief that
@@ -691,6 +695,7 @@ export class ManualCampaignService {
       optimizationGoal: a.optimizationGoal || 'OFFSITE_CONVERSIONS',
       ads,
       creativeFormat: a.creativeFormat || defaultFormat,
+      placementPreset: a.placementPreset,
     };
   }
 }

@@ -85,9 +85,11 @@ interface UploadCreativeItem {
   aspectRatio?: string;
   resolution?: string;
   /**
-   * Optional extra ready-made sizes of this same creative. Images only — the
-   * schema holds one `video` per package, so a second video size has nowhere
-   * to live that launch/gallery would read (see uploadOneCreative).
+   * Optional extra ready-made sizes of this same creative (e.g. a creative
+   * team's own 1:1/9:16/16:9 cuts of one ad). Works for both images
+   * (additional `images[]` entries tagged `uploadedSizeOf`) and video
+   * (additional `videos[]` entries alongside the primary) — see
+   * uploadOneCreative for how each is stored.
    */
   sizes?: UploadCreativeSize[];
 }
@@ -393,11 +395,13 @@ export class CreativeController {
    *   aspectRatio?: string, resolution?: string,
    *   sizes?: { sourceUrl, aspectRatio?, resolution? }[] }
    *
-   * `sizes` files ready-made alternate sizes of the SAME image (a creative
-   * team's own 1:1/9:16 cuts) under one creative, so launch picks the right
+   * `sizes` files ready-made alternate sizes of the SAME creative (a creative
+   * team's own 1:1/9:16/16:9 cuts) alongside it, so launch picks the right
    * one per placement instead of letting Meta centre-crop — the manual
-   * counterpart to generate-sizes. Image-only. A size that fails to upload
-   * doesn't fail the creative; it comes back in `sizeErrors`.
+   * counterpart to generate-sizes. Works for both images (extra `images[]`
+   * entries tagged `uploadedSizeOf`) and video (extra `videos[]` entries next
+   * to the primary `video`). A size that fails to upload doesn't fail the
+   * creative; it comes back in `sizeErrors`.
    */
   @Post(':tenantId/packages/upload')
   async uploadCreative(@Param('tenantId') tenantId: string, @Body() body: UploadCreativeItem) {
@@ -445,11 +449,6 @@ export class CreativeController {
     const extraSizes = (body.sizes ?? [])
       .map(s => ({ ...s, sourceUrl: s.sourceUrl?.trim() }))
       .filter((s): s is UploadCreativeSize & { sourceUrl: string } => !!s.sourceUrl);
-    if (extraSizes.length && assetType === 'video') {
-      throw new BadRequestException(
-        'sizes is image-only — a package holds a single video, so an extra video size has nowhere to live that launch and the Gallery would read. Upload each video size as its own row.',
-      );
-    }
 
     this.logger.log(`Uploading external ${assetType} to S3 for a new library creative: tenantId=${tenantId} sourceUrl=${sourceUrl} extraSizes=${extraSizes.length}`);
     const hostedUrl = await this.rehostForUpload(tenantId, sourceUrl, assetType);
@@ -460,7 +459,7 @@ export class CreativeController {
     // reporting the ones that didn't (same spirit as the bulk endpoint's
     // one-bad-row-doesn't-block-the-rest).
     const sizeOutcomes = await Promise.allSettled(
-      extraSizes.map(s => this.rehostForUpload(tenantId, s.sourceUrl, 'image')),
+      extraSizes.map(s => this.rehostForUpload(tenantId, s.sourceUrl, assetType)),
     );
     const sizeErrors = sizeOutcomes.flatMap((outcome, i) =>
       outcome.status === 'rejected'
@@ -498,6 +497,31 @@ export class CreativeController {
     const video = assetType === 'video'
       ? { variantIndex: 0, videoPrompt: '', videoUrl: hostedUrl, videoThumbnailUrl: '', aspectRatio: body.aspectRatio, resolution: body.resolution }
       : null;
+    // Additive sizes for video (parity with images' uploadedSizeOf entries),
+    // but stored the way the schema already models multi-size video: `videos[]`
+    // holds every size INCLUDING the primary (see campaign-creator.service.ts —
+    // launch reads videos[] instead of `video` whenever it's non-empty, so the
+    // primary must be in there too or it silently drops out of launch). `video`
+    // stays set to the primary regardless, since reject/restore/rejected-assets
+    // still key off it — same "primary carries the reject state, sizes ride
+    // along" model the Gallery already uses for image sizes.
+    const videos = assetType === 'video' && video
+      ? [
+          video,
+          ...sizeOutcomes.flatMap((outcome, i) =>
+            outcome.status === 'fulfilled'
+              ? [{
+                  variantIndex: 0,
+                  videoPrompt: '',
+                  videoUrl: outcome.value,
+                  videoThumbnailUrl: '',
+                  aspectRatio: extraSizes[i].aspectRatio,
+                  resolution: extraSizes[i].resolution,
+                }]
+              : [],
+          ),
+        ]
+      : [];
 
     const pkg = await this.creativePackageModel.create({
       tenantId,
@@ -510,6 +534,10 @@ export class CreativeController {
       selectedCopyIndex: 0,
       images,
       video,
+      // Only worth writing when there's more than the primary — an empty
+      // array is the schema default and campaign-creator.service.ts already
+      // falls back to `video` whenever videos[] is empty.
+      ...(videos.length > 1 ? { videos } : {}),
       completedAt: new Date(),
     });
 

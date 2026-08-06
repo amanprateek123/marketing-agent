@@ -60,6 +60,9 @@ import {
   resolveCampaignProduct,
 } from './campaign-creator/resolve-campaign-product';
 import { CampaignApprovalPreviewService } from './campaign-creator/campaign-approval-preview.service';
+import { PlacementPreset, PLACEMENT_PRESET_LABELS } from './meta-ads/placement-presets';
+
+const VALID_PLACEMENT_PRESETS = new Set<PlacementPreset>(['vertical', 'vertical_feed', 'everywhere']);
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -1269,17 +1272,87 @@ export class CampaignsController {
   }
 
   /**
+   * PATCH /api/v1/campaigns/:tenantId/:campaignId/adsets/:adSetId/placement
+   *
+   * Operator changes which Meta surfaces a live ad set can serve on —
+   * "switch this to Vertical + Feed" — the manual counterpart to the AI
+   * audit loop's narrow_placement action, but broadening as well as
+   * narrowing, and expressed as a fixed preset (see placement-presets.ts)
+   * rather than raw Facebook/Instagram position arrays an operator would
+   * have to get right by hand.
+   *
+   * Body: { placementPreset: 'vertical' | 'vertical_feed' | 'everywhere' }.
+   */
+  @Patch(':tenantId/:campaignId/adsets/:adSetId/placement')
+  async editAdSetPlacement(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('adSetId') adSetId: string,
+    @Body('placementPreset') placementPreset: PlacementPreset,
+  ) {
+    if (!VALID_PLACEMENT_PRESETS.has(placementPreset)) {
+      throw new BadRequestException(
+        `placementPreset must be one of ${[...VALID_PLACEMENT_PRESETS].join(', ')}`,
+      );
+    }
+
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) {
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — nothing to change placements on',
+      );
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
+    }
+
+    try {
+      const result = await this.campaignOptimizerService.setAdSetPlacement(
+        campaign,
+        company,
+        adSetId,
+        placementPreset,
+      );
+
+      // Refresh metaAdSets[].targetingDetail so the dashboard doesn't show
+      // stale placement chips until the next scheduled sync.
+      try {
+        await this.campaignSyncService.syncActiveCampaigns(company);
+      } catch {
+        // best-effort
+      }
+
+      return {
+        campaignId,
+        ...result,
+        message: `Ad set placements updated to ${PLACEMENT_PRESET_LABELS[placementPreset]}`,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
    * POST /api/v1/campaigns/:tenantId/:campaignId/adsets
    *
    * Operator adds a brand-new ad set to an already-live campaign — same
    * campaign, a new ad set inside it. Manual counterpart to the auditor's
-   * automated `add_adset` action: clones an EXISTING live ad's copy variant +
-   * image (via `sourceAdId`) into the new ad set, rather than an AI picking
-   * the "best performing" one — early in a campaign's life that heuristic
-   * has nothing to differentiate on anyway.
+   * automated `add_adset` action.
    *
    * Body: { name?, audienceType: 'advantage_plus'|'retarget'|'lookalike',
-   * metaAudienceId? (required unless advantage_plus), dailyBudget, sourceAdId }.
+   * metaAudienceId? (required unless advantage_plus), dailyBudget,
+   * placementPreset? ('vertical'|'vertical_feed'|'everywhere', defaults to
+   * 'vertical') } plus EITHER a single creative ({assetType, mediaUrl,
+   * primaryText, headline, cta}) OR a whole Gallery sheet ({sheetId,
+   * excludeAssetIds?}) — every usable asset in the sheet becomes its own ad
+   * in the new ad set, copy pulled from each asset's own source package.
    * Same TS-side budget caps as every other budget path, via
    * CampaignOptimizerService.addAdSet.
    */
@@ -1293,24 +1366,18 @@ export class CampaignsController {
       audienceType: 'advantage_plus' | 'retarget' | 'lookalike';
       metaAudienceId?: string;
       dailyBudget: number;
-      assetType: 'image' | 'video';
-      mediaUrl: string;
-      primaryText: string;
-      headline: string;
-      cta: string;
+      placementPreset?: PlacementPreset;
+      sheetId?: string;
+      excludeAssetIds?: string[];
+      assetType?: 'image' | 'video';
+      mediaUrl?: string;
+      primaryText?: string;
+      headline?: string;
+      cta?: string;
     },
   ) {
     if (!body?.audienceType) {
       throw new BadRequestException('audienceType is required');
-    }
-    if (body?.assetType !== 'image' && body?.assetType !== 'video') {
-      throw new BadRequestException("assetType must be 'image' or 'video'");
-    }
-    if (!body?.mediaUrl) {
-      throw new BadRequestException('mediaUrl is required');
-    }
-    if (!body?.primaryText?.trim() || !body?.headline?.trim()) {
-      throw new BadRequestException('primaryText and headline are required');
     }
     if (
       typeof body?.dailyBudget !== 'number' ||
@@ -1318,6 +1385,27 @@ export class CampaignsController {
       body.dailyBudget <= 0
     ) {
       throw new BadRequestException('dailyBudget must be a positive number');
+    }
+    if (
+      body.placementPreset !== undefined &&
+      !VALID_PLACEMENT_PRESETS.has(body.placementPreset)
+    ) {
+      throw new BadRequestException(
+        `placementPreset must be one of ${[...VALID_PLACEMENT_PRESETS].join(', ')}`,
+      );
+    }
+    if (!!body?.sheetId === !!body?.mediaUrl) {
+      throw new BadRequestException(
+        'Provide exactly one of sheetId or mediaUrl',
+      );
+    }
+    if (!body.sheetId) {
+      if (body?.assetType !== 'image' && body?.assetType !== 'video') {
+        throw new BadRequestException("assetType must be 'image' or 'video'");
+      }
+      if (!body?.primaryText?.trim() || !body?.headline?.trim()) {
+        throw new BadRequestException('primaryText and headline are required');
+      }
     }
 
     const campaign = await this.campaignModel
@@ -1344,27 +1432,38 @@ export class CampaignsController {
           audienceType: body.audienceType,
           metaAudienceId: body.metaAudienceId,
           dailyBudget: body.dailyBudget,
-          assetType: body.assetType,
-          mediaUrl: body.mediaUrl,
-          copy: {
-            primaryText: body.primaryText,
-            headline: body.headline,
-            cta: body.cta || 'Shop Now',
-          },
+          placementPreset: body.placementPreset,
+          ...(body.sheetId
+            ? { sheetId: body.sheetId, excludeAssetIds: body.excludeAssetIds }
+            : {
+                assetType: body.assetType!,
+                mediaUrl: body.mediaUrl!,
+                copy: {
+                  primaryText: body.primaryText!,
+                  headline: body.headline!,
+                  cta: body.cta || 'Shop Now',
+                },
+              }),
         },
       );
 
-      // Refresh metaAdSets[] so the new ad set/ad show up on next read.
+      // Refresh metaAdSets[] so the new ad set/ad(s) show up on next read.
       try {
         await this.campaignSyncService.syncActiveCampaigns(company);
       } catch {
         // best-effort
       }
 
+      const skippedNote = result.skippedCarousel
+        ? `, skipped ${result.skippedCarousel} carousel card(s)`
+        : '';
+      const failedNote = result.failed.length
+        ? `, ${result.failed.length} failed`
+        : '';
       return {
         campaignId,
         ...result,
-        message: `New ${body.audienceType} ad set created with 1 ad at ₹${body.dailyBudget}/day`,
+        message: `New ${body.audienceType} ad set created with ${result.createdAds.length} ad(s) at ₹${body.dailyBudget}/day${failedNote}${skippedNote}`,
       };
     } catch (err: any) {
       throw new BadRequestException(err.message);
@@ -1453,6 +1552,79 @@ export class CampaignsController {
         adSetId,
         ...result,
         message: `New ${body.assetType} ad added to ad set`,
+      };
+    } catch (err: any) {
+      throw new BadRequestException(err.message);
+    }
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/:campaignId/adsets/:adSetId/creatives/bulk
+   *
+   * Whole-sheet counterpart to addCreativeToAdSet above — attaches every
+   * usable asset in a Gallery sheet to this EXISTING live ad set as its own
+   * new ad, copy pulled from each asset's own source package instead of
+   * being typed once. The ad set's budget/audience are untouched.
+   *
+   * Body: { sheetId, excludeAssetIds? }.
+   */
+  @Post(':tenantId/:campaignId/adsets/:adSetId/creatives/bulk')
+  async addCreativeToAdSetBulk(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('adSetId') adSetId: string,
+    @Body() body: { sheetId?: string; excludeAssetIds?: string[] },
+  ) {
+    if (!body?.sheetId) {
+      throw new BadRequestException('sheetId is required');
+    }
+
+    const campaign = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId })
+      .exec();
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    if (!campaign.metaCampaignId) {
+      throw new BadRequestException(
+        'Campaign was never launched on Meta — nothing to add a creative to',
+      );
+    }
+
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
+    }
+
+    try {
+      const result = await this.campaignOptimizerService.addCreativeToAdSet(
+        campaign,
+        company,
+        {
+          adSetId,
+          sheetId: body.sheetId,
+          excludeAssetIds: body.excludeAssetIds,
+        },
+      );
+
+      // Refresh metaAdSets[].ads so the new ads show up on next read.
+      try {
+        await this.campaignSyncService.syncActiveCampaigns(company);
+      } catch {
+        // best-effort
+      }
+
+      const skippedNote = result.skippedCarousel
+        ? `, skipped ${result.skippedCarousel} carousel card(s)`
+        : '';
+      const failedNote = result.failed.length
+        ? `, ${result.failed.length} failed`
+        : '';
+      return {
+        campaignId,
+        adSetId,
+        ...result,
+        message: `${result.createdAds.length} ad(s) added to ad set${failedNote}${skippedNote}`,
       };
     } catch (err: any) {
       throw new BadRequestException(err.message);

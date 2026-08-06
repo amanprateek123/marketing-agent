@@ -5,6 +5,7 @@ import {
   formatSafetyError,
 } from '../../common/safety/copy-safety-checker.util';
 import { withUtmParams } from './meta-utm.util';
+import { PlacementPreset, resolvePlacementPreset } from './placement-presets';
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -140,6 +141,11 @@ export interface MetaAdSetConfig {
   // convert. Leave undefined for warm/hot custom-audience retargeting where
   // LOWEST_COST_WITHOUT_CAP is fine (the audience itself is the quality gate).
   bidAmountInr?: number;
+  // Which Meta surfaces this ad set can serve on — resolved via
+  // resolvePlacementPreset() in placement-presets.ts. Undefined -> 'vertical',
+  // the long-standing unconditional default (see createAdSet below), so every
+  // existing caller that doesn't set this keeps its current behavior.
+  placementPreset?: PlacementPreset;
 }
 
 export interface MetaCampaignConfig {
@@ -457,12 +463,12 @@ export class MetaAdsService {
       const adSetResults: MetaLaunchResult['adSets'] = [];
 
       for (const adSetConfig of config.adSets) {
-        // Mirrors createAdSet's placement default: with no explicit
-        // publisherPlatforms override it ships Stories/Reels only, which are
-        // all 9:16 surfaces. Recomputed here rather than read back from Meta
-        // so the two stay in lockstep — if that default ever changes, this
-        // must change with it or ads get the wrong aspect ratio again.
-        const verticalOnlyPlacements = !(adSetConfig as any).publisherPlatforms;
+        // Mirrors createAdSet's placement resolution: the 'vertical' preset
+        // (the default when unset) ships Stories/Reels only, which are all
+        // 9:16 surfaces. Recomputed here rather than read back from Meta so
+        // the two stay in lockstep — if that default ever changes, this must
+        // change with it or ads get the wrong aspect ratio again.
+        const verticalOnlyPlacements = (adSetConfig.placementPreset ?? 'vertical') === 'vertical';
 
         const adSetId = await this.createAdSet(
           config.accountId,
@@ -903,31 +909,22 @@ export class MetaAdsService {
       );
     }
 
-    // Skip Audience Network by default — for Indian DTC, AN is mostly garbage
-    // app-install clicks. 5-15% of budget historically burned there before the
-    // auditor caught it. Meta's `narrowAdSetPlacements` helper can still expand
-    // back to AN later if data warrants. Override only if config explicitly sets
-    // publisher_platforms (some retargeting flows do want AN).
-    //
-    // Also restricted to native-9:16 surfaces (Stories/Reels) — every image/video
-    // asset this pipeline produces is 9:16 with text baked into the top/bottom
-    // ~15% margins. Feed, Marketplace, and Explore render 4:5/1:1 and Meta
-    // center-crops to fit, which was cutting the hook text and CTA off entirely
-    // (crop math: 9:16→1:1 drops the outer ~22% off both edges). The image-gen
-    // prompts now keep text inside a center safe zone too, but this default stays
-    // narrow so already-launched creative (generated before that fix) doesn't get
-    // cropped either. Override via config.publisherPlatforms once Feed/Marketplace
-    // reach is worth re-adding (Meta requires explicit positions per platform when
-    // publisher_platforms is overridden — see the else branch).
-    if (!(config as any).publisherPlatforms) {
-      targeting.publisher_platforms = ['facebook', 'instagram'];
-      // 'video_feeds' was deprecated in v21.0 (subcode 2490562). Reels-style
-      // surface lives under 'facebook_reels' now.
-      targeting.facebook_positions = ['facebook_reels', 'story'];
-      targeting.instagram_positions = ['story', 'reels'];
-    } else {
-      targeting.publisher_platforms = (config as any).publisherPlatforms;
-    }
+    // Placement preset — resolvePlacementPreset() in placement-presets.ts is
+    // the single source of truth for what each preset resolves to. Always
+    // scoped to facebook+instagram, never Audience Network/Messenger — for
+    // Indian DTC, AN is mostly garbage app-install clicks (5-15% of budget
+    // historically burned there before the auditor caught it). Undefined
+    // config.placementPreset resolves to 'vertical', the long-standing
+    // default: every image/video asset this pipeline produces is 9:16 with
+    // text baked into the top/bottom ~15% margins, and Feed/Marketplace
+    // center-crop to fit (crop math: 9:16→1:1 drops the outer ~22% off both
+    // edges), which was cutting the hook text and CTA off entirely. Callers
+    // that know their creative tolerates a crop (or supply non-vertical
+    // sizes) can opt into 'vertical_feed'/'everywhere' explicitly.
+    const resolvedPlacements = resolvePlacementPreset(config.placementPreset);
+    targeting.publisher_platforms = resolvedPlacements.publisherPlatforms;
+    targeting.facebook_positions = resolvedPlacements.facebookPositions;
+    targeting.instagram_positions = resolvedPlacements.instagramPositions;
 
     // Bid strategy: prefer COST_CAP when bidAmountInr is supplied (anchors
     // broad cold audiences to historical CPA, prevents ₹6 junk-traffic spiral

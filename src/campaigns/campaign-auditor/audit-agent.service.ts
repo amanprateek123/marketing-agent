@@ -8,6 +8,7 @@ import { AuditSignalPacket } from './signal-detector.service';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { ShadowActionService } from '../../learning/shadow-action.service';
 import { ActionOutcomeService } from '../../learning/action-outcome.service';
+import { VALID_FB_POSITIONS, VALID_IG_POSITIONS, VALID_AN_POSITIONS } from '../meta-ads/placement-presets';
 
 export type LeakDiagnosis =
   | 'creative_leak'         // CTR below benchmark / creativeFatigue
@@ -933,13 +934,11 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
                   this.logger.warn(`Dropping narrow_placement — invalid platform in ${JSON.stringify(platforms)}`);
                   return false;
                 }
-                // Validate position values against Meta API constants. Catches the
-                // `stream` vs `reels` confusion that locked 91astro to IG Feed for
+                // Validate position values against Meta API constants (shared with the
+                // operator-facing placement presets — see placement-presets.ts). Catches
+                // the `stream` vs `reels` confusion that locked 91astro to IG Feed for
                 // 18 hours in May 2026. CRITICAL: 'stream' = Instagram FEED (NOT Reels);
                 // 'reels' = Instagram REELS. They are different placements.
-                const VALID_FB_POSITIONS = new Set(['feed', 'right_hand_column', 'marketplace', 'video_feeds', 'story', 'search', 'instream_video', 'facebook_reels', 'facebook_reels_overlay']);
-                const VALID_IG_POSITIONS = new Set(['stream', 'story', 'explore', 'reels', 'shop', 'profile_feed', 'ig_search']);
-                const VALID_AN_POSITIONS = new Set(['classic', 'rewarded_video', 'instream_video']);
                 const fbPos = a.params?.facebookPositions;
                 const igPos = a.params?.instagramPositions;
                 const anPos = a.params?.audienceNetworkPositions;

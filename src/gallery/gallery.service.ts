@@ -22,6 +22,8 @@ export interface ResolvedGalleryAsset {
    * never separate creatives. They share their source's variantIndex, so
    * findUntrackedAssets already declines to give them their own pointer. One
    * gallery row, several sizes. Empty for assets that have none.
+   * `imageUrl` is a misnomer kept for shape compatibility — for a video
+   * asset (assetType: 'video') it holds that size's videoUrl, not an image.
    */
   sizes?: Array<{ imageUrl: string; aspectRatio?: string; width?: number; height?: number; derived: boolean }>;
 }
@@ -269,6 +271,20 @@ export class GalleryService {
     return this.resolveAssets(assets);
   }
 
+  /** Sheet metadata only (no assets) — e.g. for defaulting a name elsewhere to the sheet's own name. */
+  async getSheet(
+    tenantId: string,
+    sheetId: string,
+  ): Promise<{ _id: string; name: string; topicId: string } | null> {
+    const sheet = await this.sheetModel
+      .findOne({ _id: sheetId, tenantId })
+      .lean()
+      .exec();
+    return sheet
+      ? { _id: sheet._id.toString(), name: sheet.name, topicId: sheet.topicId }
+      : null;
+  }
+
   /**
    * How many of these pointers actually render, and how many silently don't.
    *
@@ -298,7 +314,7 @@ export class GalleryService {
     // fields that counting paths would otherwise pull for every asset.
     const packages = await this.packageModel
       .find({ _id: { $in: packageIds } })
-      .select('images video carouselCards')
+      .select('images video videos carouselCards')
       .lean()
       .exec();
     const packageById = new Map(packages.map(p => [p._id.toString(), p]));
@@ -350,6 +366,23 @@ export class GalleryService {
         assetUrl = pkg.video.videoUrl;
         aspectRatio = pkg.video.aspectRatio;
         resolution = pkg.video.resolution;
+        // `videos[]` holds every size INCLUDING the primary (see
+        // campaign-creator.service.ts) — exclude whichever entry matches the
+        // primary so it isn't listed as its own alternate. Same "primary
+        // carries the reject state, sizes ride along on one row" model as
+        // images: the `continue` above already dropped the whole asset if
+        // pkg.video is rejected, sizes included.
+        const primaryVideoUrl = pkg.video.videoUrl;
+        const videoAlternates = (pkg.videos ?? []).filter(
+          (v: any) => v.variantIndex === asset.variantIndex && v.videoUrl && v.videoUrl !== primaryVideoUrl,
+        );
+        if (videoAlternates.length) {
+          sizes = videoAlternates.map((v: any) => ({
+            imageUrl: v.videoUrl,
+            aspectRatio: v.aspectRatio,
+            derived: false,
+          }));
+        }
       } else {
         const card = (pkg.carouselCards ?? []).find((c: any) => c.slotIndex === asset.variantIndex);
         if (!card?.imageUrl) continue;
