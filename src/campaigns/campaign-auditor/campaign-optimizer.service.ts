@@ -821,6 +821,8 @@ export class CampaignOptimizerService {
       opts.dailyBudget,
       (campaign as any).campaignConfig?.conversionEvent ?? 'Purchase',
       product.pixelId ?? company.meta!.pixelId,
+      product.customEventName,
+      product.customConversionId,
     );
 
     const pageId = product.pageId ?? company.meta!.pageId ?? '';

@@ -1989,6 +1989,15 @@ export class CampaignAuditorService {
           let audienceType = action.metrics?.audienceType ?? 'retarget';
           const targeting = action.metrics?.targeting ?? {};
 
+          // Resolve the campaign's OWN product once — reused below both for
+          // the new ad set's conversion tracking (pixel/custom event/custom
+          // conversion) and for the new ad's landing page, so this can't
+          // point at a different product's pixel or URL the way
+          // `products.find(p => p.active)` used to (see note further down).
+          const { resolution: adSetProductResolution, error: adSetProductError } =
+            tryResolveCampaignProduct(company, campaign as any, null);
+          const adSetProduct = adSetProductResolution?.product;
+
           // For retarget: find an existing retarget/custom audience from the product
           let retargetAudienceId: string | undefined;
           if (audienceType === 'retarget') {
@@ -2110,7 +2119,9 @@ export class CampaignAuditorService {
             },
             campaign.budget,
             (campaign as any).campaignConfig?.conversionEvent ?? 'Purchase',
-            company.meta!.pixelId,
+            adSetProduct?.pixelId ?? company.meta!.pixelId,
+            adSetProduct?.customEventName,
+            adSetProduct?.customConversionId,
           );
 
           // Create an ad inside the new ad set using winning variant.
@@ -2122,12 +2133,10 @@ export class CampaignAuditorService {
           // (visible, fixable) rather than live with a wrong link.
           let newAdId = '';
           if (bestImage?.imageUrl) {
-            const { resolution: adProductResolution, error: adProductError } =
-              tryResolveCampaignProduct(company, campaign as any, null);
-            const product = adProductResolution?.product;
+            const product = adSetProduct;
             if (!product?.landingUrl) {
               this.logger.error(
-                `Campaign ${campaign.metaCampaignId}: ad set ${newAdSetId} created but left WITHOUT an ad — ${adProductError ?? `product "${product?.name}" has no landingUrl`}. An adless ad set spends nothing and is fixable; an ad pointing at a guessed product's landing page is not. Set campaign.productName, then add the ad manually.`,
+                `Campaign ${campaign.metaCampaignId}: ad set ${newAdSetId} created but left WITHOUT an ad — ${adSetProductError ?? `product "${product?.name}" has no landingUrl`}. An adless ad set spends nothing and is fixable; an ad pointing at a guessed product's landing page is not. Set campaign.productName, then add the ad manually.`,
               );
             } else {
               const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;

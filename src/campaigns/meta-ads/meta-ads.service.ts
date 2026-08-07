@@ -1876,6 +1876,51 @@ export class MetaAdsService {
   }
 
   /**
+   * Validates a product's Custom Conversion ID against the specific ad
+   * account it's about to be used on — Custom Conversions are account-scoped
+   * in Meta, so an ID saved on the product (tenant-global) may not be shared
+   * with every account it launches to. Meta does NOT reject ad-set creation
+   * for an inaccessible custom_conversion_id — the ad set is created,
+   * reports "Active", and simply never delivers any impressions, surfacing
+   * only as a "delivery error" in Meta's UI, not an exception this code can
+   * catch and roll back on (hit in production 2026-07-16). Falls back to
+   * `undefined` (plain pixel+event tracking) rather than trust the saved ID
+   * blindly. Shared by every path that can create an ad set — the initial
+   * campaign launch AND ad sets added to an already-live campaign — after
+   * the latter was found to skip this check entirely (2026-08-07 incident,
+   * wish_letter_2026-08-07 tracked generic Purchase instead of its Custom
+   * Conversion because addAdSet never passed customConversionId through).
+   */
+  async validateCustomConversionId(
+    accountId: string,
+    accessToken: string,
+    customConversionId?: string,
+  ): Promise<string | undefined> {
+    if (!customConversionId) return undefined;
+    const normalizedAccountId = `act_${accountId.replace(/^act_/, '')}`;
+    try {
+      const res = await this.metaApiCall(
+        'GET',
+        `${META_API_BASE}/${normalizedAccountId}/customconversions`,
+        { fields: 'id', limit: 200, access_token: accessToken },
+      );
+      const available = new Set((res.data?.data ?? []).map((c: any) => c.id));
+      if (!available.has(customConversionId)) {
+        this.logger.warn(
+          `Custom conversion ${customConversionId} not available on ${normalizedAccountId} — falling back to plain pixel+event tracking instead of a promoted_object that would silently never deliver.`,
+        );
+        return undefined;
+      }
+      return customConversionId;
+    } catch (err: any) {
+      this.logger.warn(
+        `Custom conversion validation failed (falling back to plain pixel+event): ${err.message}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Create a new ad set in an existing campaign (used by auditor for retarget/narrowed ad sets).
    */
   async createAdSetInCampaign(
@@ -1885,6 +1930,8 @@ export class MetaAdsService {
     totalBudget: number,
     conversionEvent: string,
     pixelId?: string,
+    customEventName?: string,
+    customConversionId?: string,
   ): Promise<string> {
     // Need accountId from campaign — fetch it
     const campaignRes = await this.metaApiCall(
@@ -1897,6 +1944,12 @@ export class MetaAdsService {
     );
     const accountId = `act_${campaignRes.data?.account_id}`;
 
+    const validatedCustomConversionId = await this.validateCustomConversionId(
+      accountId,
+      accessToken,
+      customConversionId,
+    );
+
     return this.createAdSet(
       accountId,
       accessToken,
@@ -1905,6 +1958,8 @@ export class MetaAdsService {
       totalBudget,
       conversionEvent,
       pixelId,
+      customEventName,
+      validatedCustomConversionId,
     );
   }
 
