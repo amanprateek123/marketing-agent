@@ -143,6 +143,46 @@ describe('MetaAdsService — createAdSet promoted_object', () => {
     });
   });
 
+  it('sends click-only attribution_spec (no VIEW_THROUGH) for an app campaign, regardless of optimization goal', async () => {
+    // Real Meta rejection hit in production 2026-08-11: an app ad set
+    // (application_id set) sent the website-pixel default of 7-day click +
+    // 1-day view and got subcode 1885501 "View-through attribution window
+    // is invalid" — Meta only accepts (CLICK_THROUGH 1, view 0) or
+    // (CLICK_THROUGH 7, view 0) for app campaigns. This must hold even
+    // though App Engagement reports optimizationGoal === 'OFFSITE_CONVERSIONS',
+    // the exact goal whose website-pixel branch adds VIEW_THROUGH.
+    const engagementPayload = await callCreateAdSet({
+      conversionEvent: 'Purchase',
+      applicationId: '935762695083961',
+      config: { optimizationGoal: 'OFFSITE_CONVERSIONS' },
+    });
+    expect(engagementPayload.attribution_spec).toEqual([
+      { event_type: 'CLICK_THROUGH', window_days: 7 },
+    ]);
+
+    const installsPayload = await callCreateAdSet({
+      conversionEvent: 'Purchase',
+      applicationId: '935762695083961',
+      objectStoreUrl: 'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
+      config: { optimizationGoal: 'APP_INSTALLS' },
+    });
+    expect(installsPayload.attribution_spec).toEqual([
+      { event_type: 'CLICK_THROUGH', window_days: 7 },
+    ]);
+  });
+
+  it('leaves the website-pixel OFFSITE_CONVERSIONS attribution_spec unchanged (7-day click + 1-day view)', async () => {
+    const payload = await callCreateAdSet({
+      conversionEvent: 'Purchase',
+      pixelId: 'pixel_1',
+      config: { optimizationGoal: 'OFFSITE_CONVERSIONS' },
+    });
+    expect(payload.attribution_spec).toEqual([
+      { event_type: 'CLICK_THROUGH', window_days: 7 },
+      { event_type: 'VIEW_THROUGH', window_days: 1 },
+    ]);
+  });
+
   it('sets targeting.user_os when an ad set targets a single platform', async () => {
     const payload = await callCreateAdSet({
       conversionEvent: 'chat_success',

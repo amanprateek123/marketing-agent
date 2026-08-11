@@ -1023,7 +1023,22 @@ export class MetaAdsService {
     // campaign form lets a human pick objective/optimizationGoal freely — the
     // AI path only ever produces OFFSITE_CONVERSIONS, so this branch protects
     // exactly the surface most likely to hit an unvalidated combination.
-    if (optimizationGoal === 'OFFSITE_CONVERSIONS') {
+    // App campaigns (any optimization_goal, as long as applicationId is set —
+    // App Engagement via OFFSITE_CONVERSIONS, App Installs, etc.) reject any
+    // VIEW_THROUGH window outright: Meta only accepts (CLICK_THROUGH 1, view 0)
+    // or (CLICK_THROUGH 7, view 0). Hit in production 2026-08-11 — the
+    // OFFSITE_CONVERSIONS branch below (tuned for website pixel campaigns,
+    // which DO accept a 1-day view window) sent the same 7-click+1-view spec
+    // to an app ad set and got subcode 1885501 "View-through attribution
+    // window is invalid", same failure family as the LANDING_PAGE_VIEWS case
+    // already documented below. Must be checked before the optimizationGoal
+    // branches, since App Engagement also reports optimizationGoal ===
+    // 'OFFSITE_CONVERSIONS' and would otherwise fall into that branch.
+    if (applicationId) {
+      adSetData.attribution_spec = [
+        { event_type: 'CLICK_THROUGH', window_days: 7 },
+      ];
+    } else if (optimizationGoal === 'OFFSITE_CONVERSIONS') {
       adSetData.attribution_spec = [
         { event_type: 'CLICK_THROUGH', window_days: 7 },
         { event_type: 'VIEW_THROUGH', window_days: 1 },
