@@ -1105,34 +1105,32 @@ export class MetaAdsService {
       // (see the subcode-specific comments on that branch). Watch the first
       // real launch closely for a rejected combination.
       const mappedEventType = this.mapConversionEvent(conversionEvent);
-      // Per-platform store URL wins when this ad set targets exactly one OS
-      // (config.userOs === ['iOS'] or ['Android']) and that platform's URL is
-      // set on the product; otherwise falls back to the campaign-default
-      // objectStoreUrl — but ONLY when object_store_url is mandatory
-      // (APP_INSTALLS). Real Meta rejection hit in production 2026-08-11
-      // (subcode 1487678 "Mobile Targeting Mismatch" — "The app you're
-      // trying to create an ad for is on a different operating system than
-      // targeting settings for this ad set"): an App Engagement ad set with
-      // userOs unset (targets both platforms) fell back to the Android-only
-      // default URL and Meta rejected the platform mismatch outright. Since
-      // object_store_url is OPTIONAL for App Engagement, the correct fix is
-      // to omit it rather than guess wrong — there genuinely is no single
-      // correct object_store_url for an ad set targeting both platforms.
+      // object_store_url is MANDATORY for every app-promotion ad set,
+      // regardless of optimization goal — not just APP_INSTALLS as originally
+      // assumed. Confirmed by two real, contradictory-seeming Meta rejections
+      // on the same live launch, production 2026-08-11:
+      //   1. subcode 1885011 "Object Store URL Is Required" when omitted for
+      //      an App Engagement (OFFSITE_CONVERSIONS) ad set.
+      //   2. subcode 1487678 "Mobile Targeting Mismatch" when a single-platform
+      //      URL was sent for an ad set targeting BOTH platforms (userOs unset).
+      // Together these mean: the field is always required, AND a single ad set
+      // can never validly target both platforms at once for app promotion —
+      // there is no third option. Callers MUST scope config.userOs to exactly
+      // one platform for an app-promotion ad set; this function can only pick
+      // the best matching URL, not fix an ad set that targets both.
       const singleOs =
         config.userOs?.length === 1 ? config.userOs[0] : undefined;
       const resolvedObjectStoreUrl =
         (singleOs === 'iOS' && objectStoreUrlIos) ||
         (singleOs === 'Android' && objectStoreUrlAndroid) ||
-        (singleOs && objectStoreUrl) ||
-        (!singleOs && optimizationGoal === 'APP_INSTALLS' ? objectStoreUrl : undefined) ||
+        objectStoreUrl ||
         undefined;
       adSetData.promoted_object = {
         application_id: applicationId,
         custom_event_type: mappedEventType,
-        // object_store_url is mandatory for the App Installs objective, but
-        // NOT for pure App Engagement ad sets that only optimize toward an
-        // existing user's in-app event — omit when unset rather than send
-        // an empty/wrong value.
+        // Always include when resolvable — see the mandatory-field comment
+        // above. Omitted only if genuinely nothing is configured (caller bug,
+        // not a valid app-promotion state — Meta will reject this ad set).
         ...(resolvedObjectStoreUrl
           ? { object_store_url: resolvedObjectStoreUrl }
           : {}),

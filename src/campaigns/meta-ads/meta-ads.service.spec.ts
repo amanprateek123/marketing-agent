@@ -74,17 +74,18 @@ describe('MetaAdsService — createAdSet promoted_object', () => {
     expect(payload.destination_type).toBeUndefined();
   });
 
-  it('includes object_store_url only when supplied (APP_INSTALLS — the mandatory-field case)', async () => {
+  it('includes object_store_url whenever a matching URL is configured — mandatory for every app-promotion goal', async () => {
     const withUrl = await callCreateAdSet({
       conversionEvent: 'chat_success',
       applicationId: '935762695083961',
       objectStoreUrl: 'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
-      config: { optimizationGoal: 'APP_INSTALLS' },
     });
     expect(withUrl.promoted_object.object_store_url).toBe(
       'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
     );
 
+    // No URL configured anywhere on the product — nothing to resolve, so it's
+    // omitted (a caller/config bug, not a valid state; Meta will reject this).
     const withoutUrl = await callCreateAdSet({
       conversionEvent: 'chat_success',
       applicationId: '935762695083961',
@@ -229,12 +230,17 @@ describe('MetaAdsService — createAdSet promoted_object', () => {
     );
   });
 
-  it('omits object_store_url for App Engagement when userOs is unset or targets both platforms', async () => {
-    // Real Meta rejection hit in production 2026-08-11 (subcode 1487678
-    // "Mobile Targeting Mismatch"): falling back to a single-platform store
-    // URL while targeting both platforms gets rejected outright — object_store_url
-    // is optional for App Engagement (OFFSITE_CONVERSIONS), so omit it rather
-    // than guess wrong. baseConfig's optimizationGoal is OFFSITE_CONVERSIONS.
+  it('falls back to the campaign-default store URL when userOs is unset or targets both platforms — mandatory regardless of goal', async () => {
+    // Two real, seemingly-contradictory Meta rejections on the same live
+    // launch, production 2026-08-11, reconciled: (1) subcode 1885011 "Object
+    // Store URL Is Required" when this field was omitted for App Engagement —
+    // proving it's mandatory for every app-promotion goal, not just
+    // APP_INSTALLS. (2) subcode 1487678 "Mobile Targeting Mismatch" when a
+    // single-platform URL was sent for an ad set targeting BOTH platforms.
+    // Together: the field must always be sent, AND a single ad set can never
+    // validly target both platforms for app promotion — that's a targeting
+    // config problem the caller must fix (scope userOs to one platform), not
+    // something this function can paper over by omitting a required field.
     const unsplit = await callCreateAdSet({
       conversionEvent: 'chat_success',
       applicationId: '935762695083961',
@@ -242,7 +248,7 @@ describe('MetaAdsService — createAdSet promoted_object', () => {
       objectStoreUrlIos: 'https://apps.apple.com/app/91astrology/id123',
       objectStoreUrlAndroid: 'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
     });
-    expect(unsplit.promoted_object.object_store_url).toBeUndefined();
+    expect(unsplit.promoted_object.object_store_url).toBe('https://default.example/app');
 
     const both = await callCreateAdSet({
       conversionEvent: 'chat_success',
@@ -252,16 +258,6 @@ describe('MetaAdsService — createAdSet promoted_object', () => {
       objectStoreUrlAndroid: 'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
       config: { userOs: ['iOS', 'Android'] },
     });
-    expect(both.promoted_object.object_store_url).toBeUndefined();
-  });
-
-  it('still falls back to the campaign-default store URL for APP_INSTALLS when userOs is unset — mandatory field, best effort', async () => {
-    const payload = await callCreateAdSet({
-      conversionEvent: 'chat_success',
-      applicationId: '935762695083961',
-      objectStoreUrl: 'https://default.example/app',
-      config: { optimizationGoal: 'APP_INSTALLS' },
-    });
-    expect(payload.promoted_object.object_store_url).toBe('https://default.example/app');
+    expect(both.promoted_object.object_store_url).toBe('https://default.example/app');
   });
 });
