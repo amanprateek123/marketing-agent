@@ -1,0 +1,37 @@
+{
+  "tenantId": "91astrology",
+  "name": "91Astrology",
+  "industry": "Astrology & Spiritual Services",
+  "targetAudience": "Indian adults 25-45 facing decisions about marriage, career and family, who consult astrology for reassurance",
+  "tone": "warm, reassuring, plain-spoken",
+  "uniqueValue": "Nadi-leaf based personalised readings delivered as a written report, not a live consultation",
+  "language": "hindi",
+  "geography": "India",
+  "platforms": ["meta"],
+  "customerLanguage": ["hindi", "hinglish", "english"],
+  "weeklyBudgetCap": 20000,
+  "maxBudgetPerCampaign": 5000,
+  "primaryObjective": "conversions",
+  "products": [
+    {
+      "name": "Nadi Report",
+      "price": 999,
+      "currency": "INR",
+      "description": "Personalised Nadi astrology report covering marriage compatibility, career timing and family questions, delivered as a PDF.",
+      "active": true,
+      "languages": ["hindi", "hinglish", "english"],
+      "differentiators": [
+        "Written report you can re-read, not a one-off phone call",
+        "Based on Nadi leaf readings rather than generic birth-chart software"
+      ]
+    },
+    {
+      "name": "Nadi Report Premium",
+      "price": 2499,
+      "currency": "INR",
+      "description": "Extended Nadi report with year-by-year timing and a follow-up clarification round.",
+      "active": true,
+      "languages": ["hindi", "english"]
+    }
+  ]
+}
