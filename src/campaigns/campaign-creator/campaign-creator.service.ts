@@ -1472,10 +1472,31 @@ export class CampaignCreatorService {
         accessToken: company.meta.accessToken,
         pageId: product?.pageId ?? company.meta.pageId,
         pixelId: product?.pixelId ?? company.meta.pixelId,
-        applicationId: product?.metaAppId,
-        objectStoreUrl: product?.metaAppStoreUrl,
-        objectStoreUrlIos: product?.metaAppStoreUrlIos,
-        objectStoreUrlAndroid: product?.metaAppStoreUrlAndroid,
+        // Gated on objective, not just product.metaAppId being set — a
+        // product can be configured for app tracking AND still run under a
+        // website-style objective (Traffic/Sales) intentionally, e.g. to get
+        // real fbclid-based user-level attribution via a landing page instead
+        // of Meta's native App Promotion ad format, which requires the ad's
+        // link to exactly match object_store_url (subcode 1885031, hit in
+        // production 2026-08-11) and gives no user-level data back to us.
+        // Without this gate, any app-tracked product would always take the
+        // application_id branch regardless of the objective actually chosen.
+        applicationId:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppId
+            : undefined,
+        objectStoreUrl:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppStoreUrl
+            : undefined,
+        objectStoreUrlIos:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppStoreUrlIos
+            : undefined,
+        objectStoreUrlAndroid:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppStoreUrlAndroid
+            : undefined,
         campaignName,
         budget: campaign.budget,
         objective: config.objective ?? 'OUTCOME_SALES',
