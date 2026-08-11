@@ -4,7 +4,7 @@ import {
   checkCopySafety,
   formatSafetyError,
 } from '../../common/safety/copy-safety-checker.util';
-import { withUtmParams } from './meta-utm.util';
+import { resolveAdLandingUrl } from './meta-utm.util';
 import { PlacementPreset, resolvePlacementPreset } from './placement-presets';
 
 const META_API_VERSION = 'v21.0';
@@ -514,12 +514,12 @@ export class MetaAdsService {
         const selectedCopyIndex = config.selectedCopyIndex ?? 0;
 
         // Per-ad-set URL override (landing-page A/B test) falls back to the
-        // campaign-global landingUrl. UTM params are appended either way, so
-        // downstream analytics still attribute by campaign/ad-set/ad name.
+        // campaign-global landingUrl. See resolveAdLandingUrl's doc comment
+        // for why app campaigns (applicationId set) skip UTM tagging entirely.
         const adSetLandingUrl =
           adSetConfig.landingUrlOverride || config.landingUrl;
         const buildLandingUrl = (adName: string) =>
-          withUtmParams(adSetLandingUrl, {
+          resolveAdLandingUrl(adSetLandingUrl, config.applicationId, {
             campaignName: config.campaignName,
             adSetName: adSetConfig.name,
             adName,

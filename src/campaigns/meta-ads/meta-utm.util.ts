@@ -32,6 +32,25 @@ export function withUtmParams(
   }
 }
 
+/**
+ * Resolve the actual URL an ad's creative should link to. Website products
+ * get UTM-tagged landingUrl as usual — but app products (applicationId set)
+ * MUST link to the exact, untagged store URL: Meta rejects the ad outright
+ * (subcode 1885031 "Object store URL does not match promoted object", hit in
+ * production 2026-08-11) unless the creative's link is byte-for-byte
+ * identical to the ad set's object_store_url — no query string, no tracking
+ * tags. This means our own click-tracking redirect (the /dl/:token deep-link
+ * system) can't be used as an app ad's link either; Meta's own App-Events
+ * attribution (via applicationId) is the only mechanism available here.
+ */
+export function resolveAdLandingUrl(
+  landingUrl: string,
+  applicationId: string | undefined,
+  ctx: { campaignName: string; adSetName: string; adName: string },
+): string {
+  return applicationId ? landingUrl : withUtmParams(landingUrl, ctx);
+}
+
 function utmSlug(s: string): string {
   return (s ?? '')
     .toLowerCase()
