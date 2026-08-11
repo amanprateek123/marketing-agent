@@ -37,6 +37,21 @@ export default () => ({
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
     s3Bucket: process.env.AWS_S3_BUCKET ?? '',
     region: process.env.AWS_REGION ?? 'ap-south-1',
+    /**
+     * Presign media URLs in creative READ responses. Default OFF, which is
+     * production behaviour: the production bucket is public-read, so the stored
+     * URL already renders and signing would only add an expiry.
+     *
+     * Turn it on for a deployment whose bucket is PRIVATE — otherwise every
+     * thumbnail 403s, since the dashboard renders them with a plain <img src>.
+     *
+     * Deliberately opt-in rather than always-on. A signed URL is a VIEW, but not
+     * every consumer treats it as one: the gallery-to-campaign flow copies
+     * `images[].imageUrl` out of a getCreativePackage response and persists it
+     * into a manual campaign (campaigns/new/page.tsx), which would bake an
+     * expiring link into a live Meta ad.
+     */
+    signMediaUrls: (process.env.S3_SIGN_MEDIA_URLS ?? '').toLowerCase() === 'true',
   },
   google: {
     aiApiKey: process.env.GOOGLE_AI_API_KEY ?? '',
@@ -62,6 +77,19 @@ export default () => ({
   },
   youtube: {
     apiKey: process.env.YOUTUBE_API_KEY ?? '',
+  },
+  pipeline: {
+    // The external creative pipeline (Slack-driven authoring + image generation),
+    // running on its own box. Include the scheme and no trailing slash, e.g.
+    // https://pipeline.example.com — the bridge appends /v1/... itself.
+    // Unset = the Custom-brief path returns 503 and the rest of the app is
+    // unaffected.
+    url: process.env.PIPELINE_API_URL ?? '',
+    // Shared bearer token. Held server-side only; never sent to the browser.
+    token: process.env.PIPELINE_API_TOKEN ?? '',
+    // Per-call HTTP timeout. Runs are asynchronous — every call here either
+    // starts a run or polls it, so none of them waits on generation.
+    timeoutMs: parseInt(process.env.PIPELINE_API_TIMEOUT_MS ?? '30000', 10),
   },
   ops: {
     // System-failure alert channel (pipeline deaths, creative failures, stale-data

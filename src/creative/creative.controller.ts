@@ -205,7 +205,42 @@ export class CreativeController {
       .sort({ createdAt: -1 })
       .limit(100)
       .lean()
-      .exec();
+      .exec()
+      .then(pkgs => this.signAssetUrls(pkgs));
+  }
+
+  /**
+   * Sign every media URL in a package that lives in our own bucket, so the dashboard's plain
+   * `<img src>` / `<video src>` can load it.
+   *
+   * Uploads go up with no ACL (S3Service.uploadBuffer), so the stored URL only renders when the
+   * bucket has a public-read policy. Signing here makes the display path correct for a private
+   * bucket too, and is a no-op for URLs that are already public, already signed, or hosted
+   * somewhere else entirely.
+   *
+   * This only rewrites the RESPONSE. Stored documents are untouched, so server-side consumers —
+   * notably the Meta upload, which reads the package straight from Mongo — still get the durable
+   * URL and can never be handed one that expires mid-campaign.
+   */
+  private async signAssetUrls<T>(input: T): Promise<T> {
+    const MEDIA_KEYS = ['imageUrl', 'videoUrl', 'thumbnailUrl', 'audioUrl', 'assetUrl', 'url'];
+    const walk = async (node: any): Promise<any> => {
+      if (Array.isArray(node)) return Promise.all(node.map(walk));
+      if (!node || typeof node !== 'object') return node;
+      // A lean() document is a plain object, but guard anyway — Buffer/Date/ObjectId must
+      // survive untouched rather than being rebuilt key-by-key.
+      if (node instanceof Date || Buffer.isBuffer(node)) return node;
+      await Promise.all(Object.keys(node).map(async k => {
+        const v = node[k];
+        if (typeof v === 'string' && MEDIA_KEYS.includes(k)) {
+          node[k] = await this.s3Service.presignIfOwnBucket(v);
+        } else if (v && typeof v === 'object') {
+          node[k] = await walk(v);
+        }
+      }));
+      return node;
+    };
+    return walk(input);
   }
 
   /**
@@ -315,7 +350,7 @@ export class CreativeController {
       throw new NotFoundException(`Creative package ${creativePackageId} not found for tenant ${tenantId}`);
     }
 
-    return pkg;
+    return this.signAssetUrls(pkg);
   }
 
   /**
@@ -683,7 +718,7 @@ export class CreativeController {
         rejected.push({ packageId: pkg._id.toString(), assetType: 'video', variantIndex: 0, assetUrl: (pkg as any).video.videoUrl, productName: (pkg as any).productName });
       }
     }
-    return rejected;
+    return this.signAssetUrls(rejected);
   }
 
   /**
@@ -723,6 +758,16 @@ export class CreativeController {
       variantIndex?: number;
       imageUrl?: string;
       aspectRatio?: string;
+      /**
+       * Marks this image as a SIZE OF the given primary image url rather than a creative in its own
+       * right — the same tag upload-bulk applies to its `sizes[]`. Optional and additive: without it
+       * the entry behaves exactly as before.
+       *
+       * It matters because `isAlternateSize` (extendedFrom || uploadedSizeOf) is what the library
+       * and the detail page use to tell a placement cut from a creative. An untagged 9:16 entry can
+       * be picked as the library thumbnail and is not grouped under its parent.
+       */
+      uploadedSizeOf?: string;
       videoUrl?: string;
       selectedCopyIndex?: number;
       copy?: { headline?: string; primaryText?: string; cta?: string; hookStyle?: string };
@@ -744,8 +789,15 @@ export class CreativeController {
       );
       if (existing) {
         existing.imageUrl = body.imageUrl;
+        if (body.uploadedSizeOf !== undefined) existing.uploadedSizeOf = body.uploadedSizeOf;
       } else {
-        images.push({ variantIndex, imagePrompt: '', imageUrl: body.imageUrl, aspectRatio: body.aspectRatio });
+        images.push({
+          variantIndex,
+          imagePrompt: '',
+          imageUrl: body.imageUrl,
+          aspectRatio: body.aspectRatio,
+          ...(body.uploadedSizeOf ? { uploadedSizeOf: body.uploadedSizeOf } : {}),
+        });
       }
       update.images = images;
     }
