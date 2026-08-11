@@ -33,6 +33,15 @@ const PRODUCTS = [
     contributionMargin: 1,
     languages: ['hindi', 'english', 'hinglish'],
   },
+  {
+    name: '91Astrology App - Chat',
+    active: true,
+    conversionEvent: 'Purchase',
+    metaAppId: '935762695083961',
+    metaAppStoreUrl: 'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
+    landingUrl: 'https://91astrology.com/dl/aHZEoQ',
+    price: 0,
+  },
 ];
 
 const COMPANY = {
@@ -200,6 +209,43 @@ describe('CampaignApprovalPreviewService', () => {
     const codes = r.blockers.map((b: any) => b.code);
     expect(codes).toContain('already_launched');
     expect(codes).toContain('not_pending_approval');
+  });
+
+  it('reports app_event tracking for an app product under OUTCOME_APP_PROMOTION', async () => {
+    const campaign: any = baseCampaign({ productName: '91Astrology App - Chat' });
+    campaign.campaignConfig.objective = 'OUTCOME_APP_PROMOTION';
+    const r = await build(campaign);
+
+    expect(r.product.conversionTracking).toEqual({
+      type: 'app_event',
+      event: 'Purchase',
+      applicationId: '935762695083961',
+    });
+    expect(r.product.applicationId).toBe('935762695083961');
+    expect(r.product.appStoreUrl).toBe(
+      'https://play.google.com/store/apps/details?id=com.nintyoneastrology.app',
+    );
+  });
+
+  it('falls back to standard pixel tracking for the SAME app product under a website objective (OUTCOME_SALES) — real launch reads objective, not just metaAppId', async () => {
+    // Real gap hit in production 2026-08-11: this preview used to show
+    // "app_event" tracking regardless of objective, because it only checked
+    // product.metaAppId — misleading right before a real-money approval for
+    // a campaign that (per campaign-creator.service.ts's launch() gate)
+    // would actually launch as a plain pixel campaign under OUTCOME_SALES.
+    const campaign: any = baseCampaign({ productName: '91Astrology App - Chat' });
+    campaign.campaignConfig.objective = 'OUTCOME_SALES';
+    const r = await build(campaign);
+
+    expect(r.product.conversionTracking).toEqual({
+      type: 'standard_event',
+      event: 'Purchase',
+    });
+    expect(r.product.applicationId).toBeNull();
+    expect(r.product.appStoreUrl).toBeNull();
+    // Falls back to the company default pixel — product itself has none.
+    expect(r.product.pixelId).toBe('999');
+    expect(r.product.pixelSource).toBe('company_default');
   });
 
   it('does not require a product landing URL for a landing-page test', async () => {

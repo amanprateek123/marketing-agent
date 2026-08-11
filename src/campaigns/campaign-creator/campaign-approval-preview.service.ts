@@ -434,14 +434,28 @@ export class CampaignApprovalPreviewService {
     // Events on the app itself, not a website pixel — they have no pixelId
     // and never will. Only block on a missing pixel for website-funnel
     // products, or this would wrongly refuse to launch every app campaign.
-    if (!(product as any)?.metaAppId && !product?.pixelId && !company.meta?.pixelId) {
+    //
+    // Gated on the campaign's actual objective, not just metaAppId being
+    // set — a product configured for app tracking can still run under a
+    // website-style objective (Sales/Traffic) intentionally, to get real
+    // fbclid-based attribution via a landing page instead of Meta's native
+    // App Promotion format (which requires the ad's link to exactly match
+    // object_store_url, subcode 1885031, hit in production 2026-08-11).
+    // Must mirror the same gate campaign-creator.service.ts's launch() uses,
+    // or this preview shows "App event" info for a campaign that will
+    // actually launch as a plain pixel campaign — misleading right before a
+    // real-money approval.
+    const isAppPromotion =
+      (config.objective ?? campaign.objective) === 'OUTCOME_APP_PROMOTION';
+    const trackedAsAppEvent = isAppPromotion && !!(product as any)?.metaAppId;
+    if (!trackedAsAppEvent && !product?.pixelId && !company.meta?.pixelId) {
       blockers.push({
         code: 'no_pixel',
         message:
           'Neither the product nor the company has a Pixel ID — conversion optimization cannot be configured.',
       });
     }
-    if ((product as any)?.metaAppId && !(product as any)?.metaAppStoreUrl) {
+    if (trackedAsAppEvent && !(product as any)?.metaAppStoreUrl) {
       warnings.push({
         code: 'app_promotion_no_store_url',
         message: `Product "${product?.name}" has metaAppId set but no metaAppStoreUrl. Fine for App Engagement ad sets optimizing toward an existing user's in-app event; the App Installs objective requires a store URL and will fail without one.`,
@@ -451,7 +465,7 @@ export class CampaignApprovalPreviewService {
     // store URL from metaAppStoreUrlIos/Android, falling back to the
     // campaign-default metaAppStoreUrl only when set — flag ad sets left
     // with neither, same reasoning as the blanket check above.
-    if ((product as any)?.metaAppId) {
+    if (trackedAsAppEvent) {
       const platformAdSetsMissingUrl = configAdSets.filter((as: any) => {
         const os = Array.isArray(as.userOs) ? as.userOs : [];
         if (os.length !== 1) return false;
@@ -523,7 +537,7 @@ export class CampaignApprovalPreviewService {
             refundRatePercent: (product as any).refundRatePercent ?? 0,
             contributionMargin: margin ?? null,
             breakevenROAS: margin ? Number((1 / margin).toFixed(2)) : null,
-            conversionTracking: (product as any).metaAppId
+            conversionTracking: trackedAsAppEvent
               ? {
                   type: 'app_event',
                   event: product.conversionEvent || '',
@@ -544,8 +558,8 @@ export class CampaignApprovalPreviewService {
             pixelSource: (product as any).pixelId
               ? 'product'
               : 'company_default',
-            applicationId: (product as any).metaAppId ?? null,
-            appStoreUrl: (product as any).metaAppStoreUrl ?? null,
+            applicationId: trackedAsAppEvent ? (product as any).metaAppId : null,
+            appStoreUrl: trackedAsAppEvent ? (product as any).metaAppStoreUrl ?? null : null,
             metaOptimizationGoal: (product as any).metaOptimizationGoal ?? null,
             languages: product.languages ?? [],
           }
