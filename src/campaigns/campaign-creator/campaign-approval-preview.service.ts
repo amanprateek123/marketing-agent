@@ -384,6 +384,7 @@ export class CampaignApprovalPreviewService {
               ? 'regions'
               : 'countries',
         locales: as.locales ?? [],
+        userOs: as.userOs ?? [],
         interestIds: as.interests ?? [],
         optimizationGoal: as.optimizationGoal ?? '',
         creativeFormat: as.creativeFormat ?? 'image',
@@ -429,12 +430,49 @@ export class CampaignApprovalPreviewService {
         message: `Optimizing toward Custom Conversion ${product.customConversionId}. Custom conversions are ad-account-scoped — launch verifies it exists on the chosen account and falls back to plain pixel+event tracking if not.`,
       });
     }
-    if (!product?.pixelId && !company.meta?.pixelId) {
+    // App Promotion/Engagement products (metaAppId set) track via Meta App
+    // Events on the app itself, not a website pixel — they have no pixelId
+    // and never will. Only block on a missing pixel for website-funnel
+    // products, or this would wrongly refuse to launch every app campaign.
+    if (!(product as any)?.metaAppId && !product?.pixelId && !company.meta?.pixelId) {
       blockers.push({
         code: 'no_pixel',
         message:
           'Neither the product nor the company has a Pixel ID — conversion optimization cannot be configured.',
       });
+    }
+    if ((product as any)?.metaAppId && !(product as any)?.metaAppStoreUrl) {
+      warnings.push({
+        code: 'app_promotion_no_store_url',
+        message: `Product "${product?.name}" has metaAppId set but no metaAppStoreUrl. Fine for App Engagement ad sets optimizing toward an existing user's in-app event; the App Installs objective requires a store URL and will fail without one.`,
+      });
+    }
+    // Platform-split ad sets (userOs targeting exactly one OS) resolve their
+    // store URL from metaAppStoreUrlIos/Android, falling back to the
+    // campaign-default metaAppStoreUrl only when set — flag ad sets left
+    // with neither, same reasoning as the blanket check above.
+    if ((product as any)?.metaAppId) {
+      const platformAdSetsMissingUrl = configAdSets.filter((as: any) => {
+        const os = Array.isArray(as.userOs) ? as.userOs : [];
+        if (os.length !== 1) return false;
+        const platformUrl =
+          os[0] === 'iOS'
+            ? (product as any)?.metaAppStoreUrlIos
+            : (product as any)?.metaAppStoreUrlAndroid;
+        return !platformUrl && !(product as any)?.metaAppStoreUrl;
+      });
+      if (platformAdSetsMissingUrl.length > 0) {
+        const platforms = [
+          ...new Set(platformAdSetsMissingUrl.map((as: any) => as.userOs[0])),
+        ];
+        const missingFieldNames = platforms.map((p) =>
+          p === 'iOS' ? 'metaAppStoreUrlIos' : 'metaAppStoreUrlAndroid',
+        );
+        warnings.push({
+          code: 'app_promotion_platform_store_url_missing',
+          message: `${platformAdSetsMissingUrl.length} ad set(s) target ${platforms.join('/')} only, but product "${product?.name}" has neither ${missingFieldNames.join('/')} nor a fallback metaAppStoreUrl set. Fine for App Engagement; App Installs will fail without one.`,
+        });
+      }
     }
 
     const grossValue = getGrossConversionValue(product as any);
@@ -485,21 +523,29 @@ export class CampaignApprovalPreviewService {
             refundRatePercent: (product as any).refundRatePercent ?? 0,
             contributionMargin: margin ?? null,
             breakevenROAS: margin ? Number((1 / margin).toFixed(2)) : null,
-            conversionTracking: product.customConversionId
-              ? { type: 'custom_conversion', id: product.customConversionId }
-              : (product as any).customEventName
-                ? {
-                    type: 'custom_event',
-                    name: (product as any).customEventName,
-                  }
-                : {
-                    type: 'standard_event',
-                    event: product.conversionEvent || 'Purchase',
-                  },
+            conversionTracking: (product as any).metaAppId
+              ? {
+                  type: 'app_event',
+                  event: product.conversionEvent || '',
+                  applicationId: (product as any).metaAppId,
+                }
+              : product.customConversionId
+                ? { type: 'custom_conversion', id: product.customConversionId }
+                : (product as any).customEventName
+                  ? {
+                      type: 'custom_event',
+                      name: (product as any).customEventName,
+                    }
+                  : {
+                      type: 'standard_event',
+                      event: product.conversionEvent || 'Purchase',
+                    },
             pixelId: (product as any).pixelId || company.meta?.pixelId || '',
             pixelSource: (product as any).pixelId
               ? 'product'
               : 'company_default',
+            applicationId: (product as any).metaAppId ?? null,
+            appStoreUrl: (product as any).metaAppStoreUrl ?? null,
             metaOptimizationGoal: (product as any).metaOptimizationGoal ?? null,
             languages: product.languages ?? [],
           }

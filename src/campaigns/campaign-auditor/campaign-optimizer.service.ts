@@ -823,6 +823,10 @@ export class CampaignOptimizerService {
       product.pixelId ?? company.meta!.pixelId,
       product.customEventName,
       product.customConversionId,
+      product.metaAppId,
+      product.metaAppStoreUrl,
+      product.metaAppStoreUrlIos,
+      product.metaAppStoreUrlAndroid,
     );
 
     const pageId = product.pageId ?? company.meta!.pageId ?? '';

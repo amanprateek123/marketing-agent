@@ -2122,6 +2122,10 @@ export class CampaignAuditorService {
             adSetProduct?.pixelId ?? company.meta!.pixelId,
             adSetProduct?.customEventName,
             adSetProduct?.customConversionId,
+            adSetProduct?.metaAppId,
+            adSetProduct?.metaAppStoreUrl,
+            adSetProduct?.metaAppStoreUrlIos,
+            adSetProduct?.metaAppStoreUrlAndroid,
           );
 
           // Create an ad inside the new ad set using winning variant.

@@ -251,6 +251,8 @@ export class Campaign {
       geoCities?: string[];
       /** Meta locale IDs for language targeting. */
       locales?: number[];
+      /** Device OS targeting — 'iOS'/'Android' to split into per-platform ad sets. */
+      userOs?: ('iOS' | 'Android')[];
       interests?: string[];
       optimizationGoal: string;
       ads: number[];

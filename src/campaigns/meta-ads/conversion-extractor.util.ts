@@ -21,6 +21,34 @@ const STANDARD_PRIORITY = [
 ];
 
 /**
+ * Meta reports app-events conversions under prefixed action_types, never the
+ * bare event name — app_custom_event.other.<event> for non-standard events,
+ * mobile_app_install/omni_app_install for installs. Products tracked via
+ * metaAppId (not pixelId) need these variants added to conversionTypes, or
+ * extractConversions silently returns 0 for a campaign that's actually
+ * converting (same failure shape as the missing customConversionId bug from
+ * 2026-06-10 — see campaign-sync.service.ts).
+ *
+ * Every in-app event this pipeline tracks today is non-standard (chat_success
+ * etc.), matching the OTHER-only assumption already made by mapConversionEvent
+ * in meta-ads.service.ts — extend with standard app-event action_types later
+ * only if a product actually needs one.
+ */
+export function appEventActionTypes(product: {
+  metaAppId?: string;
+  conversionEvent?: string;
+  customEventName?: string;
+}): string[] {
+  if (!product.metaAppId || !product.conversionEvent) return [];
+  const eventName = product.customEventName ?? product.conversionEvent;
+  return [
+    'mobile_app_install',
+    'omni_app_install',
+    `app_custom_event.other.${eventName}`,
+  ];
+}
+
+/**
  * Extract the conversion count from a Meta actions array.
  *
  * conversionTypes is pre-filtered to only contain purchase-type custom conversions

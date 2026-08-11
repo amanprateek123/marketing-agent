@@ -37,6 +37,10 @@ class ProductDto {
   @IsOptional() @IsString() customEventName?: string;
   @IsOptional() @IsString() customConversionId?: string;
   @IsOptional() @IsString() pixelId?: string;
+  @IsOptional() @IsString() metaAppId?: string;
+  @IsOptional() @IsString() metaAppStoreUrl?: string;
+  @IsOptional() @IsString() metaAppStoreUrlIos?: string;
+  @IsOptional() @IsString() metaAppStoreUrlAndroid?: string;
   @IsOptional() @IsString() pageId?: string;
   @IsOptional() @IsString() metaOptimizationGoal?: string;
   @IsOptional() @IsBoolean() hidePriceInCreative?: boolean;

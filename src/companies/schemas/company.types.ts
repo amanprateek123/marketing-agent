@@ -82,6 +82,34 @@ export interface Product {
   customEventName?: string;          // if conversionEvent is "CustomEvent", this is the event name (e.g. "NADI_REPORT_PURCHASE_COMPLETED")
   customConversionId?: string;       // Meta Custom Conversion ID — takes priority, sends pixel_id + custom_conversion_id to Meta
   pixelId?: string;                  // Meta Pixel ID if different from company.meta.pixelId
+  /**
+   * Meta App ID (react-native-fbsdk-next / Facebook SDK application_id) for
+   * App Promotion / App Engagement campaigns — a native-app counterpart to
+   * pixelId. When set, ad-set creation targets promoted_object.application_id
+   * instead of pixel_id and conversionEvent is read as an App Event name
+   * (e.g. "chat_success") rather than a pixel event. Mutually exclusive in
+   * practice with pixelId/customConversionId — this product is either a
+   * website funnel or an in-app funnel, never both.
+   */
+  metaAppId?: string;
+  /**
+   * Mobile app store URL (App Store / Play Store listing) tied to metaAppId.
+   * Required by Meta for App Installs objective ad sets; NOT required for
+   * pure App Engagement ad sets that only optimize toward an existing user's
+   * in-app event (e.g. driving installed users to chat_success) — omit it
+   * there. Unvalidated against the app's registered store URLs in Business
+   * Manager; wrong values fail silently the same way a mismatched
+   * customConversionId does (see validateCustomConversionId's comment).
+   *
+   * Used as the default/fallback store URL for ad sets that don't set
+   * userOs (or set both platforms). For a platform-split campaign — separate
+   * iOS and Android ad sets with independent budgets/reporting — set
+   * metaAppStoreUrlIos/metaAppStoreUrlAndroid instead; createAdSet resolves
+   * per ad set based on that ad set's userOs targeting.
+   */
+  metaAppStoreUrl?: string;
+  metaAppStoreUrlIos?: string;
+  metaAppStoreUrlAndroid?: string;
   pageId?: string;                   // Facebook Page ID this product's ads should post as, if different from company.meta.pageId (e.g. a tenant running multiple product-specific Pages)
   /**
    * Meta ad-set optimization goal. Defaults to 'OFFSITE_CONVERSIONS' when unset.

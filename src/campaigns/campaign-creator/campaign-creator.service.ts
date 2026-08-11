@@ -772,6 +772,7 @@ export class CampaignCreatorService {
       'OFFSITE_CONVERSIONS', 'VALUE', 'LANDING_PAGE_VIEWS', 'LINK_CLICKS',
       'IMPRESSIONS', 'REACH', 'THRUPLAY', 'POST_ENGAGEMENT', 'PAGE_LIKES',
       'AD_RECALL_LIFT', 'LEAD_GENERATION', 'QUALITY_LEAD', 'QUALITY_CALL',
+      'APP_INSTALLS',
     ]);
     const productOptGoal = launchProduct?.metaOptimizationGoal;
     let optGoalNormalized = false;
@@ -1471,6 +1472,10 @@ export class CampaignCreatorService {
         accessToken: company.meta.accessToken,
         pageId: product?.pageId ?? company.meta.pageId,
         pixelId: product?.pixelId ?? company.meta.pixelId,
+        applicationId: product?.metaAppId,
+        objectStoreUrl: product?.metaAppStoreUrl,
+        objectStoreUrlIos: product?.metaAppStoreUrlIos,
+        objectStoreUrlAndroid: product?.metaAppStoreUrlAndroid,
         campaignName,
         budget: campaign.budget,
         objective: config.objective ?? 'OUTCOME_SALES',

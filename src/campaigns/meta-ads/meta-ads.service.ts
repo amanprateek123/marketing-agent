@@ -125,6 +125,13 @@ export interface MetaAdSetConfig {
   // segment.languages or product.languages (canonical names → IDs via META_LOCALE_IDS).
   locales?: number[];
   interests?: string[]; // Meta interest IDs from the interest catalog (NOT names — names are rejected by API)
+  // Device OS targeting (Meta's targeting.user_os, values are literally
+  // 'iOS'/'Android' — case-sensitive). Undefined/empty = no OS filter, ships
+  // to both. Set to a single platform to split a campaign into per-platform
+  // ad sets with independent budgets/reporting — createAdSet then also picks
+  // that platform's store URL (product.metaAppStoreUrlIos/Android) over the
+  // campaign-default metaAppStoreUrl, when this ad set targets exactly one OS.
+  userOs?: ('iOS' | 'Android')[];
   optimizationGoal: string;
   ads: number[];
   // Optional per-ad-set destination URL. When set, every ad in THIS ad set
@@ -153,6 +160,19 @@ export interface MetaCampaignConfig {
   accessToken: string;
   pageId?: string;
   pixelId?: string;
+  // App Promotion / App Engagement counterpart to pixelId — set together with
+  // conversionEvent (read as an App Event name, e.g. "chat_success") to build
+  // promoted_object.application_id instead of promoted_object.pixel_id. See
+  // the applicationId branch in createAdSet for exact field semantics.
+  applicationId?: string;
+  // App store URL for the app behind applicationId. Only required for the
+  // App Installs objective — omit for pure App Engagement ad sets optimizing
+  // toward an existing user's in-app event. Used as the fallback whenever an
+  // ad set's userOs isn't exactly one platform; objectStoreUrlIos/Android
+  // win over this for an ad set that targets that single platform.
+  objectStoreUrl?: string;
+  objectStoreUrlIos?: string;
+  objectStoreUrlAndroid?: string;
   campaignName: string;
   budget: number; // in INR (full rupees, not paise)
   objective: string;
@@ -480,6 +500,10 @@ export class MetaAdsService {
           config.pixelId,
           config.customEventName,
           config.customConversionId,
+          config.applicationId,
+          config.objectStoreUrl,
+          config.objectStoreUrlIos,
+          config.objectStoreUrlAndroid,
         );
         created.adSetIds.push(adSetId);
 
@@ -819,6 +843,10 @@ export class MetaAdsService {
     pixelId?: string,
     customEventName?: string,
     customConversionId?: string,
+    applicationId?: string,
+    objectStoreUrl?: string,
+    objectStoreUrlIos?: string,
+    objectStoreUrlAndroid?: string,
   ): Promise<string> {
     // ABO: budget at ad set level for testing new creatives/audiences
     const dailyBudgetPaise = Math.round(
@@ -902,6 +930,13 @@ export class MetaAdsService {
       targeting.locales = config.locales;
     }
 
+    // Device OS targeting — splits a campaign into per-platform ad sets
+    // (independent budget/reporting). Values are Meta's literal, case-
+    // sensitive strings ('iOS'/'Android'), not ISO or lowercase.
+    if (Array.isArray(config.userOs) && config.userOs.length > 0) {
+      targeting.user_os = config.userOs;
+    }
+
     // Exclude audiences (past buyers)
     if (config.excludeAudienceIds && config.excludeAudienceIds.length > 0) {
       targeting.excluded_custom_audiences = config.excludeAudienceIds.map(
@@ -957,7 +992,10 @@ export class MetaAdsService {
       daily_budget: dailyBudgetPaise,
       billing_event: 'IMPRESSIONS',
       optimization_goal: optimizationGoal,
-      destination_type: 'WEBSITE',
+      // destination_type: 'WEBSITE' only applies to website-pixel ad sets —
+      // Meta rejects it on App Promotion/Engagement ad sets (application_id
+      // promoted_object), so it's omitted whenever applicationId is set.
+      ...(applicationId ? {} : { destination_type: 'WEBSITE' }),
       bid_strategy: useBidCap ? 'COST_CAP' : 'LOWEST_COST_WITHOUT_CAP',
       ...(useBidCap
         ? { bid_amount: Math.round(config.bidAmountInr! * 100) }
@@ -1027,10 +1065,62 @@ export class MetaAdsService {
     //     aren't tied to a conversion event, so Meta doesn't want a
     //     promoted_object for them; pixel-based reporting still works via
     //     the account's pixel without declaring it here.
+    //   - APP_INSTALLS: the true Meta App Installs objective — REQUIRES a
+    //     promoted_object (application_id + object_store_url), unlike the
+    //     traffic-style goals above. Only reachable via the applicationId
+    //     branch below since it's app-only; there's no APP_INSTALLS+pixel
+    //     combination in Meta's API.
     const isConversionGoal =
-      optimizationGoal === 'OFFSITE_CONVERSIONS' || isValueOptimization;
+      optimizationGoal === 'OFFSITE_CONVERSIONS' ||
+      optimizationGoal === 'APP_INSTALLS' ||
+      isValueOptimization;
     if (!isConversionGoal) {
       // Intentionally no promoted_object.
+    } else if (applicationId && conversionEvent) {
+      // App Promotion / App Engagement — targets Meta App Events on
+      // applicationId instead of a website pixel. Custom Conversions
+      // (customConversionId) are a Pixel/Conversions-API-only construct in
+      // Meta, so this branch is checked before, and short-circuits, the
+      // pixel-based branches below — applicationId and pixelId are mutually
+      // exclusive per product (see Product.metaAppId's doc comment).
+      //
+      // UNVALIDATED IN PRODUCTION as of 2026-08-07 — built from Meta's
+      // documented promoted_object/App Events reference, not yet confirmed
+      // against a live launch the way the pixel branch below has been
+      // (see the subcode-specific comments on that branch). Watch the first
+      // real launch closely for a rejected combination.
+      const mappedEventType = this.mapConversionEvent(conversionEvent);
+      // Per-platform store URL wins when this ad set targets exactly one OS
+      // (config.userOs === ['iOS'] or ['Android']) and that platform's URL is
+      // set on the product; otherwise falls back to the campaign-default
+      // objectStoreUrl. A mixed/unset userOs always uses the default — Meta
+      // requires ONE object_store_url per ad set, so there's no correct
+      // per-platform choice when an ad set targets both (or neither).
+      const singleOs =
+        config.userOs?.length === 1 ? config.userOs[0] : undefined;
+      const resolvedObjectStoreUrl =
+        (singleOs === 'iOS' && objectStoreUrlIos) ||
+        (singleOs === 'Android' && objectStoreUrlAndroid) ||
+        objectStoreUrl ||
+        undefined;
+      adSetData.promoted_object = {
+        application_id: applicationId,
+        custom_event_type: mappedEventType,
+        // object_store_url is mandatory for the App Installs objective, but
+        // NOT for pure App Engagement ad sets that only optimize toward an
+        // existing user's in-app event — omit when unset rather than send
+        // an empty/wrong value.
+        ...(resolvedObjectStoreUrl
+          ? { object_store_url: resolvedObjectStoreUrl }
+          : {}),
+      };
+      // custom_event_str is only valid alongside custom_event_type=OTHER.
+      // Every in-app event this pipeline currently knows about (chat_success,
+      // chat_started, etc.) is non-standard and maps to OTHER.
+      if (mappedEventType === 'OTHER') {
+        adSetData.promoted_object.custom_event_str =
+          customEventName ?? conversionEvent;
+      }
     } else if (customConversionId) {
       if (isValueOptimization && pixelId) {
         adSetData.promoted_object = {
@@ -1932,6 +2022,10 @@ export class MetaAdsService {
     pixelId?: string,
     customEventName?: string,
     customConversionId?: string,
+    applicationId?: string,
+    objectStoreUrl?: string,
+    objectStoreUrlIos?: string,
+    objectStoreUrlAndroid?: string,
   ): Promise<string> {
     // Need accountId from campaign — fetch it
     const campaignRes = await this.metaApiCall(
@@ -1960,6 +2054,10 @@ export class MetaAdsService {
       pixelId,
       customEventName,
       validatedCustomConversionId,
+      applicationId,
+      objectStoreUrl,
+      objectStoreUrlIos,
+      objectStoreUrlAndroid,
     );
   }
 

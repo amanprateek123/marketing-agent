@@ -12,7 +12,7 @@ import {
 } from '../schemas/breakdown-snapshot.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
-import { extractConversions, extractActionValue } from './conversion-extractor.util';
+import { extractConversions, extractActionValue, appEventActionTypes } from './conversion-extractor.util';
 import { getEffectiveConversionValue, getRefundFactor } from '../../common/conversion-value.util';
 import { buildProductResolver } from './product-resolver.util';
 import { fetchAllPagesChunked } from './meta-fetch.util';
@@ -286,6 +286,7 @@ export class MetaDeepSyncService {
     for (const p of company.products ?? []) {
       if (p.customConversionId) types.add(`offsite_conversion.custom.${p.customConversionId}`);
       if ((p as any).customEventName) types.add((p as any).customEventName);
+      for (const t of appEventActionTypes(p)) types.add(t);
     }
     return types;
   }

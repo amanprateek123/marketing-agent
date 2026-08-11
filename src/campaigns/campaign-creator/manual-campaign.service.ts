@@ -283,6 +283,7 @@ export class ManualCampaignService {
         geoStates: (a as { geoStates?: string[] }).geoStates,
         geoCities: (a as { geoCities?: string[] }).geoCities,
         locales: (a as { locales?: number[] }).locales,
+        userOs: (a as { userOs?: ManualAdSetInput['userOs'] }).userOs,
         interests: (a.interests ?? []).map((id) => ({ id, name: id })),
         optimizationGoal: a.optimizationGoal,
         creativeFormat: a.creativeFormat as ManualAdSetInput['creativeFormat'],
@@ -550,6 +551,7 @@ export class ManualCampaignService {
         geoStates: a.geoStates?.length ? a.geoStates : undefined,
         geoCities: a.geoCities?.length ? a.geoCities : undefined,
         locales: a.locales?.length ? a.locales : undefined,
+        userOs: a.userOs?.length ? a.userOs : undefined,
         excludeAudienceIds: a.excludeAudienceIds?.length
           ? a.excludeAudienceIds
           : undefined,
@@ -693,6 +695,7 @@ export class ManualCampaignService {
       locales: a.locales?.length ? a.locales : undefined,
       interests: a.interests?.length ? a.interests.map((x) => x.id) : undefined,
       optimizationGoal: a.optimizationGoal || 'OFFSITE_CONVERSIONS',
+      userOs: a.userOs?.length ? a.userOs : undefined,
       ads,
       creativeFormat: a.creativeFormat || defaultFormat,
       placementPreset: a.placementPreset,

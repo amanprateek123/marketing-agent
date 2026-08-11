@@ -31,6 +31,15 @@ export interface ManualAdSetInput {
   geoCities?: string[];
   /** Meta locale IDs (e.g. 84 = Marathi, 53 = Hindi) — filters delivery to users whose platform language matches. */
   locales?: number[];
+  /**
+   * Device OS targeting — set to a single platform ('iOS' or 'Android') to
+   * split an App Promotion/Engagement campaign into per-platform ad sets
+   * with independent budgets/reporting. MetaAdsService.createAdSet also
+   * picks that platform's store URL (product.metaAppStoreUrlIos/Android)
+   * over the campaign-default when this targets exactly one OS. Omit for no
+   * OS filter (ships to both).
+   */
+  userOs?: ('iOS' | 'Android')[];
   /** Required when audienceType is 'interest' — real Meta interest IDs (via the search endpoint), not keywords. */
   interests?: Array<{ id: string; name: string }>;
   optimizationGoal?: string;

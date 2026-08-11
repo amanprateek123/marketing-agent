@@ -4,7 +4,7 @@ import { Model } from 'mongoose';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
-import { extractConversions, extractActionValue } from './conversion-extractor.util';
+import { extractConversions, extractActionValue, appEventActionTypes } from './conversion-extractor.util';
 import { getEffectiveConversionValue, getRefundFactor } from '../../common/conversion-value.util';
 import { buildProductResolver } from './product-resolver.util';
 import { SafetyChecks } from '../campaign-creator/safety-checks';
@@ -215,6 +215,10 @@ export class CampaignSyncService {
       if (p.customEventName) {
         conversionTypes.add(p.customEventName);
       }
+      // App-events products (metaAppId set) report conversions under Meta's
+      // prefixed app action_types, not the bare event name — see
+      // appEventActionTypes doc comment.
+      for (const t of appEventActionTypes(p)) conversionTypes.add(t);
     }
     // For fallback ROAS calc when Meta returns no action_values (pixel didn't
     // fire with value param): use product.conversionValue ?? product.price.
