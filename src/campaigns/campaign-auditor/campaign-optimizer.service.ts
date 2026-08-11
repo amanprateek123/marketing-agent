@@ -1,10 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import { AgentType } from '../../claude/claude.types';
 import { ActionLoggerService } from '../../common/action-logger/action-logger.service';
 import { CampaignsService } from '../campaigns.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
+import { SafetyChecks } from '../campaign-creator/safety-checks';
+import { withUtmParams } from '../meta-ads/meta-utm.util';
+import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
+import { GalleryService } from '../../gallery/gallery.service';
+import { CreativePackage, CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
+import { PlacementPreset, resolvePlacementPreset } from '../meta-ads/placement-presets';
 
 export interface CampaignMetrics {
   spend: number;
@@ -17,6 +25,19 @@ export interface CampaignMetrics {
   frequency: number;
 }
 
+/** One ad's worth of media + copy — the unit createAdsForEntries fans out over. */
+interface AdEntry {
+  assetType: 'image' | 'video';
+  mediaUrl: string;
+  copy: { primaryText: string; headline: string; cta: string };
+}
+
+/** Result of creating N ads from N entries — some may fail without aborting the rest. */
+interface CreateAdsResult {
+  createdAds: Array<{ adId: string; creativeId: string; headline: string; assetType: 'image' | 'video' }>;
+  failed: Array<{ headline?: string; error: string }>;
+}
+
 @Injectable()
 export class CampaignOptimizerService {
   private readonly logger = new Logger(CampaignOptimizerService.name);
@@ -25,6 +46,9 @@ export class CampaignOptimizerService {
     private readonly campaignsService: CampaignsService,
     private readonly metaAdsService: MetaAdsService,
     private readonly actionLogger: ActionLoggerService,
+    private readonly galleryService: GalleryService,
+    @InjectModel(CreativePackage.name)
+    private readonly creativePackageModel: Model<CreativePackageDocument>,
   ) {}
 
   /**
@@ -91,6 +115,106 @@ export class CampaignOptimizerService {
     );
 
     return { oldBudget: campaign.budget, newBudget };
+  }
+
+  /**
+   * Operator-driven direct budget set on one live ad set — "put ₹3,000/day
+   * on this one" — as opposed to the AI's percent-based scale/shift/reduce
+   * moves above. Same TS-side caps (maxBudgetPerCampaign, weeklyBudgetCap)
+   * so a manual entry can't bypass the rails those enforce on AI changes;
+   * a human can still type a number that blows the budget, so this checks
+   * it the same way scaleAdSet does rather than trusting the input.
+   */
+  async setAdSetBudget(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    adSetId: string,
+    newDailyBudget: number,
+  ): Promise<{ oldDailyBudget: number; newDailyBudget: number; newCampaignBudget: number }> {
+    const adSets = (campaign as any).metaAdSets ?? [];
+    const adSet = adSets.find((a: any) => a.id === adSetId);
+    if (!adSet) {
+      throw new Error(`Ad set ${adSetId} not found on campaign ${campaign._id}`);
+    }
+    const oldDailyBudget = adSet.dailyBudget ?? 0;
+    const delta = newDailyBudget - oldDailyBudget;
+
+    // campaign.budget can drift from the sum of live ad-set budgets (manual
+    // edits, partial scale failures) — reduce over the ad sets we actually
+    // have rather than trust the stored total.
+    const currentTotalBudget = adSets.reduce(
+      (sum: number, a: any) => sum + (a.dailyBudget ?? 0),
+      0,
+    ) || campaign.budget || 0;
+    const newTotalBudget = currentTotalBudget + delta;
+
+    // Same per-campaign cap the launch/pre-launch-edit paths enforce.
+    SafetyChecks.checkCampaignBudget(newTotalBudget, company);
+
+    const currentWeeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
+    const weeklyCap = (company as any).weeklyBudgetCap ?? 0;
+    if (weeklyCap && currentWeeklySpend + delta * 7 > weeklyCap) {
+      throw new Error(
+        `₹${currentWeeklySpend.toFixed(0)} already committed this week + ₹${(delta * 7).toFixed(0)} projected from this change would exceed the ₹${weeklyCap} weekly cap.`,
+      );
+    }
+
+    await this.metaAdsService.updateAdSetBudget(
+      adSetId,
+      newDailyBudget,
+      company.meta!.accessToken,
+    );
+
+    await this.campaignsService.updateBudget(
+      company.tenantId,
+      campaign._id.toString(),
+      newTotalBudget,
+    );
+
+    this.logger.log(
+      `Manual budget set: tenantId=${company.tenantId} adSet=${adSetId} ₹${oldDailyBudget}/day → ₹${newDailyBudget}/day (campaign total ₹${currentTotalBudget.toFixed(0)} → ₹${newTotalBudget.toFixed(0)})`,
+    );
+
+    return { oldDailyBudget, newDailyBudget, newCampaignBudget: newTotalBudget };
+  }
+
+  /**
+   * Operator-driven placement change on one live ad set — "switch this to
+   * Vertical + Feed" — the manual counterpart to the AI audit loop's
+   * narrow_placement action (narrowAdSetPlacement below), but broadening as
+   * well as narrowing, and resolved from a fixed preset rather than raw
+   * position arrays an operator would have to get right by hand. Reuses
+   * MetaAdsService.updateAdSetPlacements unchanged — no new Meta-API-facing
+   * code. Logs via plain Logger, not ActionLoggerService, matching
+   * setAdSetBudget above: ActionLoggerService's `agent` field is for
+   * AI-attributed actions, and this is a human's PATCH.
+   */
+  async setAdSetPlacement(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    adSetId: string,
+    placementPreset: PlacementPreset,
+  ): Promise<{ adSetId: string; placementPreset: PlacementPreset }> {
+    if (!campaign.metaCampaignId) {
+      throw new Error(`Campaign ${campaign._id} was never launched on Meta`);
+    }
+
+    const resolved = resolvePlacementPreset(placementPreset);
+    await this.metaAdsService.updateAdSetPlacements(
+      adSetId,
+      {
+        publisherPlatforms: resolved.publisherPlatforms,
+        facebookPositions: resolved.facebookPositions,
+        instagramPositions: resolved.instagramPositions,
+      },
+      company.meta!.accessToken,
+    );
+
+    this.logger.log(
+      `Manual placement set: tenantId=${company.tenantId} adSet=${adSetId} → ${placementPreset} (${resolved.facebookPositions.join(',')} / ${resolved.instagramPositions.join(',')})`,
+    );
+
+    return { adSetId, placementPreset };
   }
 
   /**
@@ -427,5 +551,476 @@ export class CampaignOptimizerService {
     });
 
     return { newAdSetId, sourcePaused };
+  }
+
+  /**
+   * Resolves a Gallery sheet into ad-ready entries — every non-carousel,
+   * non-excluded asset in it, copy pulled from its source CreativePackage
+   * (`copyVariants[variantIndex]`, falling back to the package's selected
+   * variant) same as the frontend's ExistingCreativePicker/GalleryPicker
+   * already do client-side, just moved server-side so this endpoint can
+   * resolve a whole sheet from a bare sheetId. Carousel cards are skipped —
+   * a card is a slide inside ONE multi-card ad, not a standalone ad, and out
+   * of scope here (the existing campaigns/new GalleryPicker excludes them
+   * the same way).
+   */
+  private async resolveSheetEntries(
+    tenantId: string,
+    sheetId: string,
+    excludeAssetIds?: string[],
+  ): Promise<{ entries: AdEntry[]; skippedCarousel: number }> {
+    const assets = await this.galleryService.listSheetAssets(tenantId, sheetId);
+    const excludeSet = new Set(excludeAssetIds ?? []);
+    const skippedCarousel = assets.filter(
+      (a) => a.assetType === 'carousel_card',
+    ).length;
+    const usable = assets.filter(
+      (a) => a.assetType !== 'carousel_card' && !excludeSet.has(a._id),
+    );
+
+    const packageIds = [...new Set(usable.map((a) => a.sourcePackageId))];
+    const packages = await this.creativePackageModel
+      .find({ _id: { $in: packageIds } })
+      .select('copyVariants selectedCopyIndex')
+      .lean()
+      .exec();
+    const packageById = new Map(packages.map((p) => [p._id.toString(), p]));
+
+    const entries: AdEntry[] = usable.map((a) => {
+      const pkg = packageById.get(a.sourcePackageId);
+      const variant =
+        (pkg as any)?.copyVariants?.[a.variantIndex] ??
+        (pkg as any)?.copyVariants?.[(pkg as any)?.selectedCopyIndex ?? 0];
+      return {
+        assetType: a.assetType as 'image' | 'video',
+        mediaUrl: a.assetUrl,
+        copy: {
+          primaryText: variant?.primaryText ?? '',
+          headline: variant?.headline ?? '',
+          cta: variant?.cta || 'Shop Now',
+        },
+      };
+    });
+
+    return { entries, skippedCarousel };
+  }
+
+  /**
+   * Fans out N ad-creation calls (one per entry) over the SAME existing,
+   * unchanged MetaAdsService methods the single-creative paths already use —
+   * no new Meta-API-facing code. Batched 4-at-a-time rather than one big
+   * Promise.allSettled: metaApiCall already retries account-level throttling
+   * (code 80004) with backoff, but a large sheet firing every ad-creation
+   * POST at once would still burn that retry budget simultaneously. One bad
+   * entry doesn't block the rest — same "isolate failures" spirit as
+   * uploadCreativeBulk/addExistingAssets elsewhere in this codebase.
+   */
+  private async createAdsForEntries(
+    adSetId: string,
+    entries: AdEntry[],
+    accessToken: string,
+    adNameFor: (entry: AdEntry) => string,
+    landingUrlFor: (adName: string) => string,
+    pageId: string,
+    specialAdCategories: string[],
+  ): Promise<CreateAdsResult> {
+    const createdAds: CreateAdsResult['createdAds'] = [];
+    const failed: CreateAdsResult['failed'] = [];
+
+    const BATCH_SIZE = 4;
+    for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+      const batch = entries.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map((entry) => {
+          const adName = adNameFor(entry);
+          const landingUrl = landingUrlFor(adName);
+          return entry.assetType === 'video'
+            ? this.metaAdsService.createVideoAdInAdSet(
+                adSetId,
+                accessToken,
+                adName,
+                entry.copy,
+                entry.mediaUrl,
+                pageId,
+                landingUrl,
+                specialAdCategories,
+              )
+            : this.metaAdsService.createAdInAdSet(
+                adSetId,
+                accessToken,
+                adName,
+                entry.copy,
+                entry.mediaUrl,
+                pageId,
+                landingUrl,
+                specialAdCategories,
+              );
+        }),
+      );
+      results.forEach((result, idx) => {
+        const entry = batch[idx];
+        if (result.status === 'fulfilled') {
+          createdAds.push({
+            ...result.value,
+            headline: entry.copy.headline,
+            assetType: entry.assetType,
+          });
+        } else {
+          failed.push({
+            headline: entry.copy.headline,
+            error: (result.reason as any)?.message ?? 'Ad creation failed',
+          });
+        }
+      });
+    }
+
+    return { createdAds, failed };
+  }
+
+  /**
+   * Operator-driven "add a new ad set to this live campaign" — same campaign,
+   * a brand-new ad set inside it. This is the manual counterpart to the
+   * auditor's automated `add_adset` action (campaign-auditor.service.ts):
+   * same Meta API calls (createAdSetInCampaign → createAdInAdSet), same
+   * carousel guard, same "resolve product strictly, never guess" rule — but
+   * every choice here is the operator's (which existing ad's creative to
+   * clone, which audience, how much budget), not an AI heuristic. Written as
+   * fresh logic rather than refactoring the auditor's inline version, so a
+   * bug here can't regress the automated path.
+   *
+   * Accepts EITHER one operator-supplied creative (unchanged from before) OR
+   * a whole Gallery sheet (`sheetId`) — every usable asset in the sheet
+   * becomes its own ad in the new ad set, copy pulled from each asset's own
+   * source package. The ad set's budget is unaffected by which mode is used —
+   * Meta ad set budget is per-ad-set, not per-ad, so it doesn't scale with
+   * how many ads populate it.
+   */
+  async addAdSet(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    opts: {
+      name?: string;
+      audienceType: 'advantage_plus' | 'retarget' | 'lookalike';
+      metaAudienceId?: string;
+      dailyBudget: number;
+      /** Which Meta surfaces the new ad set can serve on. Undefined -> 'vertical' (the long-standing default) — see placement-presets.ts. */
+      placementPreset?: PlacementPreset;
+    } & (
+      | {
+          assetType: 'image' | 'video';
+          mediaUrl: string;
+          copy: { primaryText: string; headline: string; cta: string };
+        }
+      | { sheetId: string; excludeAssetIds?: string[] }
+    ),
+  ): Promise<{
+    newAdSetId: string;
+    newAdId: string;
+    newCampaignBudget: number;
+    createdAds: CreateAdsResult['createdAds'];
+    failed: CreateAdsResult['failed'];
+    skippedCarousel: number;
+  }> {
+    if (!campaign.metaCampaignId) {
+      throw new Error(`Campaign ${campaign._id} was never launched on Meta`);
+    }
+    if (opts.audienceType !== 'advantage_plus' && !opts.metaAudienceId) {
+      throw new Error(
+        `metaAudienceId is required for audienceType=${opts.audienceType}`,
+      );
+    }
+
+    // Resolve product strictly from the campaign's own record — never fall
+    // back to "the tenant's first active product," which is how a new ad set
+    // could point at another product's landing page/pixel/conversion.
+    const { resolution, error } = tryResolveCampaignProduct(
+      company,
+      campaign as any,
+      null,
+    );
+    const product = resolution?.product;
+    if (!product?.landingUrl) {
+      throw new Error(
+        error ??
+          `Product "${product?.name}" has no Landing URL — set it before adding an ad set.`,
+      );
+    }
+    const landingUrl = product.landingUrl;
+
+    // Same TS-side caps as every other budget path — a human picking a
+    // number doesn't get to skip the rails an AI-proposed change would.
+    const adSets: any[] =
+      (campaign as any).metaAdSets ?? (campaign as any).adSets ?? [];
+    const currentTotalBudget =
+      adSets.reduce((sum: number, a: any) => sum + (a.dailyBudget ?? 0), 0) ||
+      campaign.budget ||
+      0;
+    const newTotalBudget = currentTotalBudget + opts.dailyBudget;
+    SafetyChecks.checkCampaignBudget(newTotalBudget, company);
+    const currentWeeklySpend = await this.campaignsService.getWeeklySpend(
+      company.tenantId,
+    );
+    const weeklyCap = (company as any).weeklyBudgetCap ?? 0;
+    if (weeklyCap && currentWeeklySpend + opts.dailyBudget * 7 > weeklyCap) {
+      throw new Error(
+        `₹${currentWeeklySpend.toFixed(0)} already committed this week + ₹${(opts.dailyBudget * 7).toFixed(0)} projected from this ad set would exceed the ₹${weeklyCap} weekly cap.`,
+      );
+    }
+
+    // Resolve the sheet (if that's the mode) BEFORE creating anything on
+    // Meta — an empty/all-excluded/all-carousel sheet must never leave
+    // behind an orphaned, adless ad set.
+    let entries: AdEntry[];
+    let skippedCarousel = 0;
+    let sheetName: string | undefined;
+    if ('sheetId' in opts) {
+      const resolved = await this.resolveSheetEntries(
+        company.tenantId,
+        opts.sheetId,
+        opts.excludeAssetIds,
+      );
+      entries = resolved.entries;
+      skippedCarousel = resolved.skippedCarousel;
+      if (entries.length === 0) {
+        throw new Error(
+          'No usable creatives in this sheet — everything is a carousel card, excluded, or the sheet is empty.',
+        );
+      }
+      sheetName = (
+        await this.galleryService.getSheet(company.tenantId, opts.sheetId)
+      )?.name;
+    } else {
+      entries = [
+        { assetType: opts.assetType, mediaUrl: opts.mediaUrl, copy: opts.copy },
+      ];
+    }
+
+    const adSetName =
+      opts.name?.trim() ||
+      sheetName ||
+      `${opts.audienceType.toUpperCase()}_${new Date().toISOString().split('T')[0]}`;
+    // Inherit the existing campaign's optimization goal — mixing OFFSITE_CONVERSIONS
+    // and VALUE ad sets in one campaign splits the learning signal and confuses
+    // ROAS comparison across ad sets.
+    const inheritedOptimizationGoal =
+      (campaign as any).campaignConfig?.adSets?.[0]?.optimizationGoal ??
+      'OFFSITE_CONVERSIONS';
+
+    const newAdSetId = await this.metaAdsService.createAdSetInCampaign(
+      campaign.metaCampaignId,
+      company.meta!.accessToken,
+      {
+        name: adSetName,
+        budgetPercent: 100, // totalBudget below IS this ad set's budget, not the campaign's
+        audienceType: opts.audienceType,
+        optimizationGoal: inheritedOptimizationGoal,
+        ads: [0], // bookkeeping only — not read by createAdSet's Meta payload; the ad(s) are created separately below
+        placementPreset: opts.placementPreset,
+        ...(opts.metaAudienceId ? { metaAudienceId: opts.metaAudienceId } : {}),
+      },
+      opts.dailyBudget,
+      (campaign as any).campaignConfig?.conversionEvent ?? 'Purchase',
+      product.pixelId ?? company.meta!.pixelId,
+      product.customEventName,
+      product.customConversionId,
+    );
+
+    const pageId = product.pageId ?? company.meta!.pageId ?? '';
+    const specialAdCategories =
+      (company.meta as any)?.specialAdCategories ?? [];
+    const { createdAds, failed } = await this.createAdsForEntries(
+      newAdSetId,
+      entries,
+      company.meta!.accessToken,
+      (entry) => `${adSetName} — ${entry.copy.headline || 'ad'}`,
+      (adName) =>
+        withUtmParams(landingUrl, {
+          campaignName: campaign.name ?? String(campaign._id),
+          adSetName,
+          adName,
+        }),
+      pageId,
+      specialAdCategories,
+    );
+
+    // Every entry failed — mirror the pre-existing behavior where a single
+    // createAdInAdSet throw aborted before activation/budget-commit.
+    // Promise.allSettled never rejects the outer call, so this has to be
+    // checked explicitly now that there can be more than one entry. The ad
+    // set itself is left behind on Meta (PAUSED, adless) — acceptable, since
+    // no budget was committed and nothing went live.
+    if (createdAds.length === 0) {
+      this.logger.warn(
+        `addAdSet: every ad failed, leaving an empty PAUSED ad set on Meta: ${newAdSetId}`,
+      );
+      throw new Error(
+        failed[0]?.error
+          ? `Ad set was created but every ad failed: ${failed[0].error}`
+          : 'Ad set was created but no ads could be created.',
+      );
+    }
+
+    // The ad set itself defaults to PAUSED on creation (separate from each
+    // ad, which createAdInAdSet/createVideoAdInAdSet already activate internally).
+    await this.metaAdsService.updateAdStatus(
+      newAdSetId,
+      'ACTIVE',
+      company.meta!.accessToken,
+    );
+
+    await this.campaignsService.updateBudget(
+      company.tenantId,
+      campaign._id.toString(),
+      newTotalBudget,
+    );
+
+    this.logger.log(
+      `Manual add_adset: tenantId=${company.tenantId} campaign=${campaign._id} newAdSet=${newAdSetId} created=${createdAds.length} failed=${failed.length} skippedCarousel=${skippedCarousel} ₹${opts.dailyBudget}/day`,
+    );
+
+    return {
+      newAdSetId,
+      newAdId: createdAds[0].adId,
+      newCampaignBudget: newTotalBudget,
+      createdAds,
+      failed,
+      skippedCarousel,
+    };
+  }
+
+  /**
+   * Operator-authored creative added to an EXISTING live ad set — a human
+   * writes their own copy and supplies their own image/video, rather than
+   * the AI generating something (add_creative/replace_creative) or backfill-
+   * variants re-adding a variant already sitting in the package. The ad set
+   * itself, its budget, and its audience are untouched — only new ad(s) join
+   * it.
+   *
+   * mediaUrl is expected to already be hosted (e.g. via
+   * POST /creative/:tenantId/upload-file) — this method doesn't accept raw
+   * file bytes, matching how every other Meta-write path in this codebase
+   * takes a URL, never a file.
+   *
+   * Accepts EITHER one operator-supplied creative (unchanged from before) OR
+   * a whole Gallery sheet (`sheetId`) — every usable asset in the sheet
+   * becomes its own new ad in this ad set.
+   */
+  async addCreativeToAdSet(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    opts: {
+      adSetId: string;
+      name?: string;
+    } & (
+      | {
+          assetType: 'image' | 'video';
+          mediaUrl: string;
+          copy: { primaryText: string; headline: string; cta: string };
+        }
+      | { sheetId: string; excludeAssetIds?: string[] }
+    ),
+  ): Promise<{
+    adId: string;
+    creativeId: string;
+    createdAds: CreateAdsResult['createdAds'];
+    failed: CreateAdsResult['failed'];
+    skippedCarousel: number;
+  }> {
+    if (!campaign.metaCampaignId) {
+      throw new Error(`Campaign ${campaign._id} was never launched on Meta`);
+    }
+
+    // Resolve product strictly from the campaign's own record — never fall
+    // back to "the tenant's first active product," same rule every other
+    // ad-creation path in this codebase follows.
+    const { resolution, error } = tryResolveCampaignProduct(
+      company,
+      campaign as any,
+      null,
+    );
+    const product = resolution?.product;
+    if (!product?.landingUrl) {
+      throw new Error(
+        error ??
+          `Product "${product?.name}" has no Landing URL — set it before adding a creative.`,
+      );
+    }
+    const landingUrl = product.landingUrl;
+
+    const adSetName =
+      ((campaign as any).metaAdSets ?? (campaign as any).adSets ?? []).find(
+        (as: any) => (as.id ?? as.metaAdSetId) === opts.adSetId,
+      )?.name ?? opts.adSetId;
+
+    let entries: AdEntry[];
+    let skippedCarousel = 0;
+    if ('sheetId' in opts) {
+      const resolved = await this.resolveSheetEntries(
+        company.tenantId,
+        opts.sheetId,
+        opts.excludeAssetIds,
+      );
+      entries = resolved.entries;
+      skippedCarousel = resolved.skippedCarousel;
+      if (entries.length === 0) {
+        throw new Error(
+          'No usable creatives in this sheet — everything is a carousel card, excluded, or the sheet is empty.',
+        );
+      }
+    } else {
+      entries = [
+        { assetType: opts.assetType, mediaUrl: opts.mediaUrl, copy: opts.copy },
+      ];
+    }
+
+    const pageId = product.pageId ?? company.meta!.pageId ?? '';
+    const specialAdCategories =
+      (company.meta as any)?.specialAdCategories ?? [];
+
+    // Single-creative mode keeps the EXACT historical fixed ad name (no
+    // headline suffix) — only sheet mode (many ads at once, `name` doesn't
+    // make sense per-ad) switches to a per-entry headline-based name.
+    const fixedAdName =
+      opts.name?.trim() ||
+      `${adSetName} — manual ${new Date().toISOString().split('T')[0]}`;
+    const adNameFor =
+      'sheetId' in opts
+        ? (entry: AdEntry) => `${adSetName} — ${entry.copy.headline || 'ad'}`
+        : () => fixedAdName;
+
+    const { createdAds, failed } = await this.createAdsForEntries(
+      opts.adSetId,
+      entries,
+      company.meta!.accessToken,
+      adNameFor,
+      (adName) =>
+        withUtmParams(landingUrl, {
+          campaignName: campaign.name ?? String(campaign._id),
+          adSetName,
+          adName,
+        }),
+      pageId,
+      specialAdCategories,
+    );
+
+    if (createdAds.length === 0) {
+      throw new Error(
+        failed[0]?.error
+          ? `No ads could be created: ${failed[0].error}`
+          : 'No ads could be created.',
+      );
+    }
+
+    this.logger.log(
+      `Manual creative added: tenantId=${company.tenantId} campaign=${campaign._id} adSet=${opts.adSetId} created=${createdAds.length} failed=${failed.length} skippedCarousel=${skippedCarousel}`,
+    );
+
+    return {
+      adId: createdAds[0].adId,
+      creativeId: createdAds[0].creativeId,
+      createdAds,
+      failed,
+      skippedCarousel,
+    };
   }
 }

@@ -535,6 +535,31 @@ export class Campaign {
     autoApplied?: boolean;
     replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed'; // replace/add creative only
   }[];
+
+  /**
+   * Progress of the most recent in-place Page swap (swap-page endpoint) —
+   * clones each live ad's creative with a corrected page_id, no new campaign/
+   * ad set/ad IDs. Runs fire-and-forget (40 ads × ~3 Meta calls each can take
+   * minutes, same ALB-timeout reasoning as /sync above) — the dashboard polls
+   * this field for live progress instead of waiting on the HTTP response.
+   */
+  @Prop({ type: Object, default: null })
+  pageSwapStatus?: {
+    status: 'running' | 'complete' | 'failed';
+    targetPageId: string;
+    total: number;
+    swapped: number;
+    failed: number;
+    startedAt: Date;
+    completedAt?: Date;
+    results: Array<{
+      adSetId: string;
+      adId: string;
+      status: 'swapped' | 'failed';
+      newCreativeId?: string;
+      error?: string;
+    }>;
+  } | null;
 }
 
 export const CampaignSchema = SchemaFactory.createForClass(Campaign);

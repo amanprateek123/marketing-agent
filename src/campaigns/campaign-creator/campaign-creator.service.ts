@@ -639,8 +639,8 @@ export class CampaignCreatorService {
       throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
     }
 
-    if (!company.meta?.pageId) {
-      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId}. Set company.meta.pageId — required for ad creative creation.`);
+    if (!product.pageId && !company.meta?.pageId) {
+      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId} or product "${product.name}". Set product.pageId or company.meta.pageId — required for ad creative creation.`);
     }
 
     const config = (campaign as any).campaignConfig;
@@ -1448,38 +1448,16 @@ export class CampaignCreatorService {
     // actually being launched to — it's saved once on the product (tenant-
     // global), but custom conversions are account-scoped in Meta, same
     // failure shape as product.metaAudiences (see the purchaser-exclusion
-    // account-scoping note above). Unlike a bad audience ID, Meta does NOT
-    // reject ad-set creation for an inaccessible custom_conversion_id — the
-    // ad set is created, reports "Active", and simply never delivers any
-    // impressions, surfacing only as a "delivery error" in Meta's UI, not
-    // an exception this code can catch and roll back on. Hit in production
-    // 2026-07-16: a fully "launched" 18-ad campaign sat at 0 impressions
-    // indefinitely with no error anywhere in our own logs. Validate up
-    // front and fall back to plain pixel+event tracking (works everywhere
-    // the pixel is installed, no account-scoping issue) rather than trust
-    // the saved ID blindly.
-    let validatedCustomConversionId = product?.customConversionId;
-    if (validatedCustomConversionId) {
-      try {
-        const res = await axios.get(
-          `https://graph.facebook.com/v21.0/act_${accountId.replace(/^act_/, '')}/customconversions`,
-          {
-            params: { fields: 'id', limit: 200, access_token: company.meta.accessToken },
-            timeout: 10000,
-          },
-        );
-        const available = new Set((res.data?.data ?? []).map((c: any) => c.id));
-        if (!available.has(validatedCustomConversionId)) {
-          this.logger.warn(
-            `Custom conversion ${validatedCustomConversionId} not available on ${accountId} — falling back to plain pixel+event tracking instead of a promoted_object that would silently never deliver.`,
-          );
-          validatedCustomConversionId = undefined;
-        }
-      } catch (err: any) {
-        this.logger.warn(`Custom conversion validation failed (falling back to plain pixel+event): ${err.message}`);
-        validatedCustomConversionId = undefined;
-      }
-    }
+    // account-scoping note above). Shared with the add-ad-set path via
+    // MetaAdsService.validateCustomConversionId — see that method's comment
+    // for the 2026-07-16 (silent non-delivery) and 2026-08-07 (add-ad-set
+    // skipped this check entirely) incidents that shaped it.
+    const validatedCustomConversionId =
+      await this.metaAdsService.validateCustomConversionId(
+        accountId,
+        company.meta.accessToken,
+        product?.customConversionId,
+      );
 
     // Launch: campaign → ad sets → ads via Meta Graph API.
     // Wrapped in try/catch so failures reset status from 'launching' back to
@@ -1491,7 +1469,7 @@ export class CampaignCreatorService {
       launchResult = await this.metaAdsService.launchCampaign({
         accountId: accountId,
         accessToken: company.meta.accessToken,
-        pageId: company.meta.pageId,
+        pageId: product?.pageId ?? company.meta.pageId,
         pixelId: product?.pixelId ?? company.meta.pixelId,
         campaignName,
         budget: campaign.budget,

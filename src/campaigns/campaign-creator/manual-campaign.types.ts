@@ -1,5 +1,7 @@
 /** Request shape for the dashboard's manual Create Campaign form. */
 
+import { PlacementPreset } from '../meta-ads/placement-presets';
+
 export interface ManualAdSetInput {
   name: string;
   /** Ignored (forced 100) when this is the only ad set, or campaignType is advantage_plus. */
@@ -33,6 +35,8 @@ export interface ManualAdSetInput {
   interests?: Array<{ id: string; name: string }>;
   optimizationGoal?: string;
   creativeFormat?: 'video' | 'image' | 'both' | 'mixed';
+  /** Which Meta surfaces this ad set can serve on. Undefined -> 'vertical' (the long-standing default) — see placement-presets.ts. */
+  placementPreset?: PlacementPreset;
   /**
    * Which copy-variant indices this ad set should ship as ads — lets a
    * human distribute specific creatives to specific ad sets instead of

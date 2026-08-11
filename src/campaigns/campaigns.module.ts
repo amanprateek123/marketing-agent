@@ -36,6 +36,7 @@ import { ShadowAction, ShadowActionSchema } from '../learning/schemas/shadow-act
 import { DeliveryModule } from '../delivery/delivery.module';
 import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 import { QUEUES } from '../scheduler/queue.constants';
+import { GalleryModule } from '../gallery/gallery.module';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { QUEUES } from '../scheduler/queue.constants';
     CommonModule,
     LearningModule,
     DeliveryModule,
+    GalleryModule,
   ],
   controllers: [CampaignsController],
   providers: [CampaignsService, CampaignCreatorService, ManualCampaignService, CampaignApprovalPreviewService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, MetaDeepSyncService, AudienceOrchestrationService],
