@@ -35,6 +35,12 @@ describe('appEventActionTypes', () => {
   it('returns nothing when conversionEvent is unset', () => {
     expect(appEventActionTypes({ metaAppId: '935762695083961' })).toEqual([]);
   });
+
+  it('returns the standard mobile-purchase action_types for conversionEvent=Purchase, not the OTHER shape', () => {
+    const types = appEventActionTypes({ metaAppId: '935762695083961', conversionEvent: 'Purchase' });
+    expect(types).toEqual(['mobile_app_install', 'omni_app_install', 'mobile_app_purchase', 'omni_purchase']);
+    expect(types).not.toContain('app_custom_event.other.Purchase');
+  });
 });
 
 describe('extractConversions / extractActionValue — app-event actions', () => {
@@ -61,5 +67,43 @@ describe('extractConversions / extractActionValue — app-event actions', () => 
   it('sums the matching action_type value for revenue via extractActionValue', () => {
     const actionValues = [{ action_type: 'app_custom_event.other.chat_success', value: '499.5' }];
     expect(extractActionValue(actionValues, conversionTypes)).toBe(499.5);
+  });
+});
+
+describe('extractActionValue — real wallet-recharge ROAS (conversionEvent=Purchase)', () => {
+  const conversionTypes = new Set(appEventActionTypes({
+    metaAppId: '935762695083961',
+    conversionEvent: 'Purchase',
+  }));
+
+  it('extracts recharge value when only mobile_app_purchase is reported', () => {
+    const actionValues = [{ action_type: 'mobile_app_purchase', value: '999' }];
+    expect(extractActionValue(actionValues, conversionTypes)).toBe(999);
+  });
+
+  it('extracts recharge value when only omni_purchase is reported', () => {
+    const actionValues = [{ action_type: 'omni_purchase', value: '499' }];
+    expect(extractActionValue(actionValues, conversionTypes)).toBe(499);
+  });
+
+  it('does NOT double-count when Meta reports the same recharge under both action_types', () => {
+    // mobile_app_purchase and omni_purchase are in STANDARD_EVENTS specifically
+    // so this pair goes through the priority pick-one path (like the website
+    // purchase/offsite_conversion.fb_pixel_purchase pair already does) instead
+    // of the generic sum-all-matches path — otherwise a single recharge Meta
+    // reports under both labels would double real revenue.
+    const actionValues = [
+      { action_type: 'mobile_app_purchase', value: '999' },
+      { action_type: 'omni_purchase', value: '999' },
+    ];
+    expect(extractActionValue(actionValues, conversionTypes)).toBe(999);
+  });
+
+  it('prefers omni_purchase over mobile_app_purchase when both are present with different values', () => {
+    const actionValues = [
+      { action_type: 'mobile_app_purchase', value: '999' },
+      { action_type: 'omni_purchase', value: '499' },
+    ];
+    expect(extractActionValue(actionValues, conversionTypes)).toBe(499);
   });
 });

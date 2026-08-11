@@ -44,3 +44,6 @@ higgsfield-config/
 # Claude Code session data — contains auth tokens
 .claude/settings.local.json
 docs
+
+# Playwright MCP browser test output
+.playwright-mcp/

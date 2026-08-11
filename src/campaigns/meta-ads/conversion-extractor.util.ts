@@ -7,6 +7,17 @@ const STANDARD_EVENTS = new Set([
   'submit_application',
   'subscribe',
   'start_trial',
+  // Mobile-app purchase equivalents of the website pixel pair above — Meta
+  // commonly reports the same app purchase under both the legacy and
+  // omni-channel action_type simultaneously, so these need the same
+  // pick-one-don't-sum treatment (Path B excludes STANDARD_EVENTS; Path C
+  // picks the first non-zero match below) or ROAS double-counts.
+  'mobile_app_purchase',
+  'omni_purchase',
+  // Same legacy/omni pairing for installs — affects conversion COUNT (and
+  // therefore CPA) rather than revenue, but the same double-count risk.
+  'mobile_app_install',
+  'omni_app_install',
 ]);
 
 const STANDARD_PRIORITY = [
@@ -18,6 +29,12 @@ const STANDARD_PRIORITY = [
   'submit_application',
   'subscribe',
   'start_trial',
+  // omni_purchase first — Meta's current canonical unified metric; falls
+  // back to the legacy mobile_app_purchase if that's what actually appears.
+  'omni_purchase',
+  'mobile_app_purchase',
+  'omni_app_install',
+  'mobile_app_install',
 ];
 
 /**
@@ -29,10 +46,15 @@ const STANDARD_PRIORITY = [
  * converting (same failure shape as the missing customConversionId bug from
  * 2026-06-10 — see campaign-sync.service.ts).
  *
- * Every in-app event this pipeline tracks today is non-standard (chat_success
- * etc.), matching the OTHER-only assumption already made by mapConversionEvent
- * in meta-ads.service.ts — extend with standard app-event action_types later
- * only if a product actually needs one.
+ * Mirrors the standard-vs-OTHER split mapConversionEvent already makes at
+ * launch time (meta-ads.service.ts) — a product whose conversionEvent is the
+ * literal string 'Purchase' fires AppEventsLogger.logPurchase() client-side
+ * (see 91astro-app/src/utils/analytics.js), which Meta reports as a standard
+ * mobile-app purchase action_type, not the app_custom_event.other.* shape.
+ * Without this split, ROAS silently reads 0 in our own audit/sync pipeline
+ * even once Meta's own Ads Manager is reporting real revenue correctly —
+ * same failure shape as the missing customEventName bug this file already
+ * documents, now for the revenue side instead of the conversion-count side.
  */
 export function appEventActionTypes(product: {
   metaAppId?: string;
@@ -40,12 +62,16 @@ export function appEventActionTypes(product: {
   customEventName?: string;
 }): string[] {
   if (!product.metaAppId || !product.conversionEvent) return [];
+  const installTypes = ['mobile_app_install', 'omni_app_install'];
+  if (product.conversionEvent === 'Purchase') {
+    // omni_purchase is Meta's newer channel-agnostic action_type; mobile_app_purchase
+    // is the classic one. Match both — unvalidated against a real payload as of
+    // 2026-08-11, watch the first live recharge closely and adjust if Meta's
+    // actual response differs (see the equivalent caveat on the OTHER-event path).
+    return [...installTypes, 'mobile_app_purchase', 'omni_purchase'];
+  }
   const eventName = product.customEventName ?? product.conversionEvent;
-  return [
-    'mobile_app_install',
-    'omni_app_install',
-    `app_custom_event.other.${eventName}`,
-  ];
+  return [...installTypes, `app_custom_event.other.${eventName}`];
 }
 
 /**
