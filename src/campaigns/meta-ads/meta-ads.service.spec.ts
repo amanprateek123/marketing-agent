@@ -260,4 +260,17 @@ describe('MetaAdsService — createAdSet promoted_object', () => {
     });
     expect(both.promoted_object.object_store_url).toBe('https://default.example/app');
   });
+
+  it('treats TWO_SECOND_CONTINUOUS_VIDEO_VIEWS as a non-conversion goal, same as THRUPLAY/REACH — no promoted_object, click-only attribution', async () => {
+    const payload = await callCreateAdSet({
+      conversionEvent: 'Purchase',
+      pixelId: 'pixel_1',
+      config: { optimizationGoal: 'TWO_SECOND_CONTINUOUS_VIDEO_VIEWS' },
+    });
+    expect(payload.promoted_object).toBeUndefined();
+    expect(payload.optimization_goal).toBe('TWO_SECOND_CONTINUOUS_VIDEO_VIEWS');
+    expect(payload.attribution_spec).toEqual([
+      { event_type: 'CLICK_THROUGH', window_days: 1 },
+    ]);
+  });
 });

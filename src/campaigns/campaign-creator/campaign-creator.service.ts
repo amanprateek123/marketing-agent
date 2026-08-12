@@ -770,9 +770,9 @@ export class CampaignCreatorService {
     // Normalized value is persisted back to campaignConfig so audit/UI see truth.
     const VALID_OPTIMIZATION_GOALS = new Set([
       'OFFSITE_CONVERSIONS', 'VALUE', 'LANDING_PAGE_VIEWS', 'LINK_CLICKS',
-      'IMPRESSIONS', 'REACH', 'THRUPLAY', 'POST_ENGAGEMENT', 'PAGE_LIKES',
-      'AD_RECALL_LIFT', 'LEAD_GENERATION', 'QUALITY_LEAD', 'QUALITY_CALL',
-      'APP_INSTALLS',
+      'IMPRESSIONS', 'REACH', 'THRUPLAY', 'TWO_SECOND_CONTINUOUS_VIDEO_VIEWS',
+      'POST_ENGAGEMENT', 'PAGE_LIKES', 'AD_RECALL_LIFT', 'LEAD_GENERATION',
+      'QUALITY_LEAD', 'QUALITY_CALL', 'APP_INSTALLS',
     ]);
     const productOptGoal = launchProduct?.metaOptimizationGoal;
     let optGoalNormalized = false;
