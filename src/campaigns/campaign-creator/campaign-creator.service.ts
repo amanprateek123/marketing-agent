@@ -12,6 +12,7 @@ import { ImageResizerService, ExtendRatio, RatioMap, classifyRatio } from '../..
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
+import { VALID_OPTIMIZATION_GOALS } from '../meta-ads/optimization-goals';
 import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
@@ -768,12 +769,6 @@ export class CampaignCreatorService {
     //   2. Else: validate against Meta's valid-goal whitelist for OUTCOME_SALES
     //      campaigns. Invalid → default to OFFSITE_CONVERSIONS with warn.
     // Normalized value is persisted back to campaignConfig so audit/UI see truth.
-    const VALID_OPTIMIZATION_GOALS = new Set([
-      'OFFSITE_CONVERSIONS', 'VALUE', 'LANDING_PAGE_VIEWS', 'LINK_CLICKS',
-      'IMPRESSIONS', 'REACH', 'THRUPLAY', 'TWO_SECOND_CONTINUOUS_VIDEO_VIEWS',
-      'POST_ENGAGEMENT', 'PAGE_LIKES', 'AD_RECALL_LIFT', 'LEAD_GENERATION',
-      'QUALITY_LEAD', 'QUALITY_CALL', 'APP_INSTALLS',
-    ]);
     const productOptGoal = launchProduct?.metaOptimizationGoal;
     let optGoalNormalized = false;
     for (const adSet of config.adSets as any[]) {

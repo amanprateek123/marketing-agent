@@ -13,6 +13,7 @@ import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-
 import { GalleryService } from '../../gallery/gallery.service';
 import { CreativePackage, CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
 import { PlacementPreset, resolvePlacementPreset } from '../meta-ads/placement-presets';
+import { VALID_OPTIMIZATION_GOALS } from '../meta-ads/optimization-goals';
 
 export interface CampaignMetrics {
   spend: number;
@@ -705,6 +706,18 @@ export class CampaignOptimizerService {
       dailyBudget: number;
       /** Which Meta surfaces the new ad set can serve on. Undefined -> 'vertical' (the long-standing default) — see placement-presets.ts. */
       placementPreset?: PlacementPreset;
+      /**
+       * Operator override — ships this ad set with a DIFFERENT optimization
+       * goal than the campaign's existing ad sets. Omit (the default) to
+       * inherit the campaign's goal, same as before. The frontend only sends
+       * this after the operator has explicitly confirmed a warning about
+       * mixed-goal ad sets splitting the audit loop's ROAS/CPA comparison
+       * and the Day-14/30 learning writeback for this campaign — see the
+       * inheritedOptimizationGoal comment below for the underlying risk.
+       * Invalid values are ignored (falls back to inherit), same guard as
+       * CampaignCreatorService's LLM-output normalization.
+       */
+      optimizationGoal?: string;
     } & (
       | {
           assetType: 'image' | 'video';
@@ -799,12 +812,30 @@ export class CampaignOptimizerService {
       opts.name?.trim() ||
       sheetName ||
       `${opts.audienceType.toUpperCase()}_${new Date().toISOString().split('T')[0]}`;
-    // Inherit the existing campaign's optimization goal — mixing OFFSITE_CONVERSIONS
-    // and VALUE ad sets in one campaign splits the learning signal and confuses
-    // ROAS comparison across ad sets.
+    // Default: inherit the existing campaign's optimization goal — mixing
+    // OFFSITE_CONVERSIONS and VALUE ad sets in one campaign splits the
+    // learning signal and confuses ROAS comparison across ad sets. An
+    // operator can override this explicitly (opts.optimizationGoal) after
+    // confirming that tradeoff in the UI; a missing/invalid override falls
+    // back to the inherited goal exactly as before.
     const inheritedOptimizationGoal =
       (campaign as any).campaignConfig?.adSets?.[0]?.optimizationGoal ??
       'OFFSITE_CONVERSIONS';
+    let resolvedOptimizationGoal = inheritedOptimizationGoal;
+    if (opts.optimizationGoal) {
+      if (VALID_OPTIMIZATION_GOALS.has(opts.optimizationGoal)) {
+        resolvedOptimizationGoal = opts.optimizationGoal;
+        if (resolvedOptimizationGoal !== inheritedOptimizationGoal) {
+          this.logger.warn(
+            `addAdSet: operator override optimizationGoal="${resolvedOptimizationGoal}" differs from campaign's existing "${inheritedOptimizationGoal}" — proceeding per explicit confirmation.`,
+          );
+        }
+      } else {
+        this.logger.warn(
+          `addAdSet: invalid optimizationGoal="${opts.optimizationGoal}" — falling back to inherited "${inheritedOptimizationGoal}".`,
+        );
+      }
+    }
 
     const newAdSetId = await this.metaAdsService.createAdSetInCampaign(
       campaign.metaCampaignId,
@@ -813,7 +844,7 @@ export class CampaignOptimizerService {
         name: adSetName,
         budgetPercent: 100, // totalBudget below IS this ad set's budget, not the campaign's
         audienceType: opts.audienceType,
-        optimizationGoal: inheritedOptimizationGoal,
+        optimizationGoal: resolvedOptimizationGoal,
         ads: [0], // bookkeeping only — not read by createAdSet's Meta payload; the ad(s) are created separately below
         placementPreset: opts.placementPreset,
         ...(opts.metaAudienceId ? { metaAudienceId: opts.metaAudienceId } : {}),

@@ -61,6 +61,7 @@ import {
 } from './campaign-creator/resolve-campaign-product';
 import { CampaignApprovalPreviewService } from './campaign-creator/campaign-approval-preview.service';
 import { PlacementPreset, PLACEMENT_PRESET_LABELS } from './meta-ads/placement-presets';
+import { VALID_OPTIMIZATION_GOALS } from './meta-ads/optimization-goals';
 
 const VALID_PLACEMENT_PRESETS = new Set<PlacementPreset>(['vertical', 'vertical_feed', 'everywhere']);
 
@@ -1349,12 +1350,15 @@ export class CampaignsController {
    * Body: { name?, audienceType: 'advantage_plus'|'retarget'|'lookalike',
    * metaAudienceId? (required unless advantage_plus), dailyBudget,
    * placementPreset? ('vertical'|'vertical_feed'|'everywhere', defaults to
-   * 'vertical') } plus EITHER a single creative ({assetType, mediaUrl,
-   * primaryText, headline, cta}) OR a whole Gallery sheet ({sheetId,
-   * excludeAssetIds?}) — every usable asset in the sheet becomes its own ad
-   * in the new ad set, copy pulled from each asset's own source package.
-   * Same TS-side budget caps as every other budget path, via
-   * CampaignOptimizerService.addAdSet.
+   * 'vertical'), optimizationGoal? (defaults to inheriting the campaign's
+   * existing goal — only pass this to deliberately ship a DIFFERENT goal;
+   * the frontend gates that behind an operator confirmation, since mixed
+   * goals in one campaign split the audit loop's ROAS/CPA comparison) }
+   * plus EITHER a single creative ({assetType, mediaUrl, primaryText,
+   * headline, cta}) OR a whole Gallery sheet ({sheetId, excludeAssetIds?})
+   * — every usable asset in the sheet becomes its own ad in the new ad set,
+   * copy pulled from each asset's own source package. Same TS-side budget
+   * caps as every other budget path, via CampaignOptimizerService.addAdSet.
    */
   @Post(':tenantId/:campaignId/adsets')
   async addAdSet(
@@ -1367,6 +1371,7 @@ export class CampaignsController {
       metaAudienceId?: string;
       dailyBudget: number;
       placementPreset?: PlacementPreset;
+      optimizationGoal?: string;
       sheetId?: string;
       excludeAssetIds?: string[];
       assetType?: 'image' | 'video';
@@ -1392,6 +1397,14 @@ export class CampaignsController {
     ) {
       throw new BadRequestException(
         `placementPreset must be one of ${[...VALID_PLACEMENT_PRESETS].join(', ')}`,
+      );
+    }
+    if (
+      body.optimizationGoal !== undefined &&
+      !VALID_OPTIMIZATION_GOALS.has(body.optimizationGoal)
+    ) {
+      throw new BadRequestException(
+        `optimizationGoal must be one of ${[...VALID_OPTIMIZATION_GOALS].join(', ')}`,
       );
     }
     if (!!body?.sheetId === !!body?.mediaUrl) {
@@ -1433,6 +1446,7 @@ export class CampaignsController {
           metaAudienceId: body.metaAudienceId,
           dailyBudget: body.dailyBudget,
           placementPreset: body.placementPreset,
+          optimizationGoal: body.optimizationGoal,
           ...(body.sheetId
             ? { sheetId: body.sheetId, excludeAssetIds: body.excludeAssetIds }
             : {
