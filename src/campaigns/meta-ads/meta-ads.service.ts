@@ -1507,11 +1507,21 @@ export class MetaAdsService {
       title: copy.headline,
     };
 
-    // Thumbnail is required by Meta for video ads
-    const thumbnailHash = primary?.thumbnailHash ?? fallbackThumbnailHash;
-    if (thumbnailHash) {
-      videoData.image_hash = thumbnailHash;
+    // Thumbnail is required by Meta for video ads. thumbnailHash/fallback were
+    // both resolved earlier in the launch (often minutes ago, under whatever
+    // rate-limit conditions applied then) — retry once more right here, right
+    // before submission, rather than shipping a payload Meta is guaranteed to
+    // reject with subcode 1443226 (missing image_hash/image_url).
+    let thumbnailHash = primary?.thumbnailHash ?? fallbackThumbnailHash;
+    if (!thumbnailHash && primary?.videoId) {
+      thumbnailHash = await this.getVideoThumbnailHash(primary.videoId, accountId, accessToken);
     }
+    if (!thumbnailHash) {
+      throw new Error(
+        `No thumbnail available for video ${primary?.videoId} (ad "${adName}") — Meta requires image_hash or image_url on video_data`,
+      );
+    }
+    videoData.image_hash = thumbnailHash;
 
     const creativeData: any = {
       name: `Creative — ${adName}`,
