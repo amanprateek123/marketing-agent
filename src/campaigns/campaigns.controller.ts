@@ -60,10 +60,17 @@ import {
   resolveCampaignProduct,
 } from './campaign-creator/resolve-campaign-product';
 import { CampaignApprovalPreviewService } from './campaign-creator/campaign-approval-preview.service';
-import { PlacementPreset, PLACEMENT_PRESET_LABELS } from './meta-ads/placement-presets';
+import {
+  PlacementPreset,
+  PLACEMENT_PRESET_LABELS,
+} from './meta-ads/placement-presets';
 import { VALID_OPTIMIZATION_GOALS } from './meta-ads/optimization-goals';
 
-const VALID_PLACEMENT_PRESETS = new Set<PlacementPreset>(['vertical', 'vertical_feed', 'everywhere']);
+const VALID_PLACEMENT_PRESETS = new Set<PlacementPreset>([
+  'vertical',
+  'vertical_feed',
+  'everywhere',
+]);
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -185,7 +192,9 @@ export class CampaignsController {
       );
     }
     if (type && type !== 'region' && type !== 'city') {
-      throw new BadRequestException(`type must be "region" or "city" (got "${type}")`);
+      throw new BadRequestException(
+        `type must be "region" or "city" (got "${type}")`,
+      );
     }
     try {
       return await this.metaAdsService.searchGeoLocations(
@@ -221,7 +230,10 @@ export class CampaignsController {
       );
     }
     const split = (v?: string) =>
-      (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      (v ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
     return this.metaAdsService.resolveGeoLocations(
       { regions: split(regions), cities: split(cities) },
       company.meta.accessToken,
@@ -248,13 +260,18 @@ export class CampaignsController {
     const company = await this.companiesService.findByTenantId(tenantId);
     if (!company) throw new NotFoundException('Tenant not found');
     if (!company.meta?.accessToken) {
-      throw new BadRequestException('No Meta access token configured for this tenant');
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
     }
     if (!accountId) {
       throw new BadRequestException('accountId query param is required');
     }
     try {
-      return await this.metaAdsService.listCustomAudiences(accountId, company.meta.accessToken);
+      return await this.metaAdsService.listCustomAudiences(
+        accountId,
+        company.meta.accessToken,
+      );
     } catch (err: any) {
       throw new BadRequestException(err.message);
     }
@@ -290,7 +307,9 @@ export class CampaignsController {
    */
   @Get(':tenantId/weekly-spend')
   async getWeeklySpend(@Param('tenantId') tenantId: string) {
-    return { weeklySpend: await this.campaignsService.getWeeklySpend(tenantId) };
+    return {
+      weeklySpend: await this.campaignsService.getWeeklySpend(tenantId),
+    };
   }
 
   @Get(':tenantId/:campaignId')
@@ -425,7 +444,8 @@ export class CampaignsController {
       // (some were stored "act_"-prefixed before the sync endpoint normalized
       // on write) by comparing bare IDs on both sides instead of trusting
       // the stored format.
-      const stripPrefix = (id: string) => (id.startsWith('act_') ? id.slice(4) : id);
+      const stripPrefix = (id: string) =>
+        id.startsWith('act_') ? id.slice(4) : id;
       const normalizedAllowed = new Set(allowedIds.map(stripPrefix));
       if (!normalizedAllowed.has(stripPrefix(accountId))) {
         throw new Error(
@@ -626,8 +646,11 @@ export class CampaignsController {
       : null;
     let product: any;
     try {
-      product = resolveCampaignProduct(company, campaign as any, brief as any)
-        .product;
+      product = resolveCampaignProduct(
+        company,
+        campaign as any,
+        brief as any,
+      ).product;
       assertProductLaunchable(product, 'create');
     } catch (err: any) {
       throw new BadRequestException(err.message);
@@ -1242,7 +1265,9 @@ export class CampaignsController {
 
     const company = await this.companiesService.findByTenantId(tenantId);
     if (!company?.meta?.accessToken) {
-      throw new BadRequestException('No Meta access token configured for tenant');
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
     }
 
     try {
@@ -1433,7 +1458,9 @@ export class CampaignsController {
 
     const company = await this.companiesService.findByTenantId(tenantId);
     if (!company?.meta?.accessToken) {
-      throw new BadRequestException('No Meta access token configured for tenant');
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
     }
 
     try {
@@ -1534,7 +1561,9 @@ export class CampaignsController {
 
     const company = await this.companiesService.findByTenantId(tenantId);
     if (!company?.meta?.accessToken) {
-      throw new BadRequestException('No Meta access token configured for tenant');
+      throw new BadRequestException(
+        'No Meta access token configured for tenant',
+      );
     }
 
     try {
@@ -1835,14 +1864,53 @@ export class CampaignsController {
     }
 
     this.campaignSyncService.syncActiveCampaigns(company).catch((err: any) => {
-      this.logger.error(`Background campaign sync failed for ${tenantId}: ${err.message}`);
+      this.logger.error(
+        `Background campaign sync failed for ${tenantId}: ${err.message}`,
+      );
     });
 
     return {
       success: true,
       status: 'started',
-      message: 'Campaign sync started in the background — poll GET /:tenantId shortly for updated data.',
+      message:
+        'Campaign sync started in the background — poll GET /:tenantId shortly for updated data.',
     };
+  }
+
+  /**
+   * POST /api/v1/campaigns/:tenantId/refresh-revenue
+   * Body: { metaCampaignIds: string[] }
+   *
+   * Re-derives revenue/conversion figures for SPECIFIC campaigns regardless
+   * of status — the regular /sync and /deep-sync endpoints deliberately
+   * never touch paused/completed campaigns (Meta API-budget tradeoff), so a
+   * paused campaign's revenueBasis can be permanently stuck at 'unknown'
+   * even after a correctness fix ships. Never touches status, budget,
+   * targeting, or anything except the top-line revenue/metric fields.
+   * Synchronous (small, explicit id list) — returns before/after per
+   * campaign so the caller can verify what actually changed.
+   */
+  @Post(':tenantId/refresh-revenue')
+  async refreshRevenue(
+    @Param('tenantId') tenantId: string,
+    @Body('metaCampaignIds') metaCampaignIds: string[],
+  ) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company.meta?.accessToken) {
+      throw new BadRequestException(
+        'No Meta access token configured for this tenant',
+      );
+    }
+    if (!Array.isArray(metaCampaignIds) || metaCampaignIds.length === 0) {
+      throw new BadRequestException(
+        'metaCampaignIds must be a non-empty array',
+      );
+    }
+    const results = await this.campaignSyncService.refreshRevenueForCampaigns(
+      company,
+      metaCampaignIds,
+    );
+    return { success: true, results };
   }
 
   /**
@@ -1871,17 +1939,22 @@ export class CampaignsController {
       );
     }
 
-    const parsedBackfillDays = backfillDays ? parseInt(backfillDays, 10) : undefined;
+    const parsedBackfillDays = backfillDays
+      ? parseInt(backfillDays, 10)
+      : undefined;
     this.metaDeepSyncService
       .deepSync(company, { backfillDays: parsedBackfillDays })
       .catch((err: any) => {
-        this.logger.error(`Background deep-sync failed for ${tenantId}: ${err.message}`);
+        this.logger.error(
+          `Background deep-sync failed for ${tenantId}: ${err.message}`,
+        );
       });
 
     return {
       success: true,
       status: 'started',
-      message: 'Deep sync started in the background — segment/timeseries data will update over the next few minutes.',
+      message:
+        'Deep sync started in the background — segment/timeseries data will update over the next few minutes.',
     };
   }
 

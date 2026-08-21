@@ -390,12 +390,16 @@ export interface ToolImpactOverview {
       legacyAgentName: number;
     };
     /**
-     * Mutually exclusive first-failed-stage buckets. Together with `mature`,
-     * these reconcile to the complete source population considered.
+     * First-failed-stage buckets. Together with `mature`, these reconcile to
+     * the complete source population considered — EXCEPT
+     * 'manual_source_name_coincidence', which is a diagnostic overlay on top
+     * of 'manual_source' (never additional, never subtracted from it), not a
+     * distinct funnel stage. Exclude that one code before reconciling.
      */
     exclusions: Array<{
       code:
         | 'manual_source'
+        | 'manual_source_name_coincidence'
         | 'unrecognized_source'
         | 'human_outside_agent_scope'
         | 'missing_meta_campaign_id'

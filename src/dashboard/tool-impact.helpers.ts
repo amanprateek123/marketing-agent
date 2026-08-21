@@ -19,10 +19,17 @@ type CampaignLike = {
 };
 
 /**
- * Before Campaign.source was persisted consistently, autonomous launches were
- * deliberately given this deterministic Meta name (see campaign-creator and
- * meta-campaign-name.util). Keep the matcher strict: a generic occurrence of
- * "agent" is not ownership evidence.
+ * Some campaigns the marketing team created directly in Meta happen to have
+ * names matching this old deterministic pattern (real example: a manual
+ * campaign named "AGENT_LANDING_PAGE_TEST_NADI_REPORT_2026-06-29", ₹30,605
+ * spend, source='manual' — never launched by this tool). This constant is
+ * kept only as a DIAGNOSTIC signal (surfaced in the exclusion ledger as
+ * "worth reviewing"), never as ownership evidence: ownership is decided
+ * exclusively by the persisted `source` field. A naming coincidence is not
+ * proof, and crediting the tool's track record on a guess is exactly the
+ * class of mistake this whole page exists to catch, not repeat. If a
+ * specific historical campaign really was tool-launched, fix its `source`
+ * field — don't infer it here.
  */
 export const LEGACY_AGENT_META_NAME =
   /^AGENT_[A-Z0-9][A-Z0-9_]*_\d{4}-\d{2}-\d{2}(?:_\d{4}-\d{2}-\d{2})?(?:[\s-]+TAT)?$/i;
@@ -44,17 +51,18 @@ export function classifyToolOwnership(
       confidence: 'recorded',
     };
   }
-  if (
+  return null;
+}
+
+/** Manual campaign whose name coincidentally matches the old agent-name
+ *  pattern — surfaced as a "worth reviewing" diagnostic, never as ownership. */
+export function isNameCoincidenceWorthReviewing(
+  campaign: CampaignLike,
+): boolean {
+  return (
     campaign.source === 'manual' &&
     LEGACY_AGENT_META_NAME.test(String(campaign.name ?? '').trim())
-  ) {
-    return {
-      actor: 'agent',
-      evidence: 'legacy_agent_name',
-      confidence: 'name_inferred',
-    };
-  }
-  return null;
+  );
 }
 
 export function isVerifiedToolLaunch(campaign: CampaignLike): boolean {
@@ -119,8 +127,12 @@ export function buildToolImpactCohort(
     };
   };
 
-  // Within each funnel transition these reason counts are mutually exclusive:
-  // a selected campaign missing both launch fields is assigned to the first
+  // Within each funnel transition these reason counts are mutually exclusive
+  // — EXCEPT 'manual_source_name_coincidence', which is a diagnostic overlay
+  // on top of 'manual_source' (every campaign it counts is already counted
+  // there too), not an additional funnel stage. Exclude that one code when
+  // reconciling exclusions + mature against the total population.
+  // A selected campaign missing both launch fields is assigned to the first
   // failed predicate (Meta id), so the gap can be reconciled exactly.
   const missingMeta = selected.filter(
     (c) => String(c.metaCampaignId ?? '').trim().length === 0,
@@ -161,20 +173,25 @@ export function buildToolImpactCohort(
             classifyToolOwnership(campaign)?.evidence ===
             'persisted_human_source',
         ).length,
-        legacyAgentName: selected.filter(
-          (campaign) =>
-            classifyToolOwnership(campaign)?.evidence === 'legacy_agent_name',
-        ).length,
+        // Always 0 now — ownership is never name-inferred. Kept as a field
+        // (rather than removed) so old snapshots/clients don't break on a
+        // missing key; see isNameCoincidenceWorthReviewing for the real signal.
+        legacyAgentName: 0,
       },
       exclusions: [
         {
           code: 'manual_source',
           stage: 'scope',
-          count: campaigns.filter(
-            (c) => c.source === 'manual' && classifyToolOwnership(c) == null,
-          ).length,
+          count: campaigns.filter((c) => c.source === 'manual').length,
           description:
-            'Created directly in Meta and imported for observation; excludes legacy rows that match Meridian’s deterministic AGENT_<topic>_<date> marker.',
+            'Created directly in Meta and imported for observation; never credited to this tool, regardless of naming.',
+        },
+        {
+          code: 'manual_source_name_coincidence',
+          stage: 'scope',
+          count: campaigns.filter(isNameCoincidenceWorthReviewing).length,
+          description:
+            'Manual (marketing-team) campaign whose Meta name happens to match the old AGENT_<topic>_<date> convention. Not counted as tool-owned — a name is not provenance — but worth a human checking whether its source field was ever miscategorized.',
         },
         {
           code: 'unrecognized_source',

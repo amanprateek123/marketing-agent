@@ -5,6 +5,7 @@ import {
   durationStats,
   isVerifiedToolLaunch,
   classifyToolOwnership,
+  isNameCoincidenceWorthReviewing,
 } from './tool-impact.helpers';
 
 describe('tool impact cohort', () => {
@@ -76,50 +77,54 @@ describe('tool impact cohort', () => {
     expect(isVerifiedToolLaunch(campaigns[3])).toBe(false);
     expect(isVerifiedToolLaunch(campaigns[4])).toBe(false);
     expect(isVerifiedToolLaunch(campaigns[6])).toBe(false);
-    expect(isVerifiedToolLaunch(campaigns[7])).toBe(true);
-    expect(classifyToolOwnership(campaigns[7])).toEqual({
-      actor: 'agent',
-      evidence: 'legacy_agent_name',
-      confidence: 'name_inferred',
-    });
+  });
+
+  it('never credits a manual campaign as tool-owned, even on a name coincidence', () => {
+    // Real example: a marketing-team campaign named
+    // "AGENT_LANDING_PAGE_TEST_NADI_REPORT_2026-06-29" (source='manual',
+    // never launched by this tool) — a name match is not provenance.
+    expect(classifyToolOwnership(campaigns[7])).toBeNull();
+    expect(isVerifiedToolLaunch(campaigns[7])).toBe(false);
     expect(
       classifyToolOwnership({
         source: 'manual',
         name: 'AGENT_WISH_LETTER_2026-08-01_2026-08-02',
       }),
-    ).toMatchObject({ actor: 'agent', evidence: 'legacy_agent_name' });
+    ).toBeNull();
+    expect(isNameCoincidenceWorthReviewing(campaigns[7])).toBe(true);
+    expect(isNameCoincidenceWorthReviewing(campaigns[6])).toBe(false);
   });
 
   it('defaults the evidence cohort to autonomous agent campaigns', () => {
     const result = buildToolImpactCohort(campaigns, 'agent', now);
 
     expect(result.summary).toMatchObject({
-      created: 6,
-      launched: 4,
-      withSpend: 3,
-      mature: 2,
+      created: 5,
+      launched: 3,
+      withSpend: 2,
+      mature: 1,
       bySource: {
-        agent: { created: 6, launched: 4, withSpend: 3, mature: 2 },
+        agent: { created: 5, launched: 3, withSpend: 2, mature: 1 },
         human: { created: 0, launched: 0, withSpend: 0, mature: 0 },
       },
       ownershipEvidence: {
         persistedAgentSource: 5,
         persistedHumanSource: 0,
-        legacyAgentName: 1,
+        legacyAgentName: 0,
       },
     });
     expect(result.launched.map((campaign) => campaign._id)).toEqual([
       'agent-mature',
       'agent-immature',
       'agent-zero-spend',
-      'legacy-agent',
     ]);
     expect(
       Object.fromEntries(
         result.summary.exclusions.map(({ code, count }) => [code, count]),
       ),
     ).toEqual({
-      manual_source: 1,
+      manual_source: 2,
+      manual_source_name_coincidence: 1,
       unrecognized_source: 0,
       human_outside_agent_scope: 1,
       missing_meta_campaign_id: 1,
@@ -127,11 +132,15 @@ describe('tool impact cohort', () => {
       zero_spend: 1,
       not_mature: 1,
     });
+    // manual_source_name_coincidence overlaps manual_source by design (see
+    // the comment above the exclusions block) — excluded from this sum.
     expect(
-      result.summary.exclusions.reduce(
-        (total, exclusion) => total + exclusion.count,
-        0,
-      ) + result.summary.mature,
+      result.summary.exclusions
+        .filter(
+          (exclusion) => exclusion.code !== 'manual_source_name_coincidence',
+        )
+        .reduce((total, exclusion) => total + exclusion.count, 0) +
+        result.summary.mature,
     ).toBe(campaigns.length);
   });
 
@@ -139,12 +148,12 @@ describe('tool impact cohort', () => {
     const result = buildToolImpactCohort(campaigns, 'managed', now);
 
     expect(result.summary).toMatchObject({
-      created: 7,
-      launched: 5,
-      withSpend: 4,
-      mature: 3,
+      created: 6,
+      launched: 4,
+      withSpend: 3,
+      mature: 2,
       bySource: {
-        agent: { created: 6, launched: 4, withSpend: 3, mature: 2 },
+        agent: { created: 5, launched: 3, withSpend: 2, mature: 1 },
         human: { created: 1, launched: 1, withSpend: 1, mature: 1 },
       },
     });
