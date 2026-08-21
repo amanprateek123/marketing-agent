@@ -11,11 +11,15 @@ import {
   TenantEconomics,
   TenantEconomicsService,
 } from '../common/economics/tenant-economics.service';
-import { Campaign } from '../campaigns/schemas/campaign.schema';
+import {
+  Campaign,
+  isManagedCampaignSource,
+} from '../campaigns/schemas/campaign.schema';
 import { MetricTimeseries } from '../campaigns/schemas/metric-timeseries.schema';
 import { Company } from '../companies/schemas/company.schema';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
 import { IntelligenceDecision } from '../intelligence/decisions/intelligence-decision.schema';
+import { CampaignIntelligenceCycle } from '../intelligence/orchestrator/cycle.schema';
 import { PipelineRun } from '../pipeline/schemas/pipeline-run.schema';
 import { parseCampaignName } from './campaign-name.parser';
 import { ObjectiveVerdict, evaluateObjective } from './objective-evaluation';
@@ -27,6 +31,7 @@ import {
   FacetRollup,
   PortfolioRollup,
   TenantActivity,
+  ToolImpactOverview,
   TrendDelta,
   WindowMetrics,
 } from './dashboard.types';
@@ -78,6 +83,8 @@ export class DashboardService {
     private readonly creativeModel: Model<CreativePackage>,
     @InjectModel(IntelligenceDecision.name)
     private readonly decisionModel: Model<IntelligenceDecision>,
+    @InjectModel(CampaignIntelligenceCycle.name)
+    private readonly cycleModel: Model<CampaignIntelligenceCycle>,
   ) {}
 
   async getOverview(
@@ -100,9 +107,17 @@ export class DashboardService {
         .limit(50)
         .lean()
         .exec(),
-      this.creativeModel.find({ tenantId }).select('status images video carouselCards').lean().exec(),
+      this.creativeModel
+        .find({ tenantId })
+        .select('status images video carouselCards')
+        .lean()
+        .exec(),
       this.decisionModel
-        .find({ tenantId, status: 'pending' })
+        // 'pending' isn't a real DecisionStatus (see intelligence-decision.schema.ts) —
+        // a decision sits in 'shadow_review' until a human approves/rejects it or it
+        // expires. Querying the wrong string silently returned [] here, so the
+        // "optimiser decisions waiting on you" tile always read 0.
+        .find({ tenantId, status: 'shadow_review' })
         .select('_id')
         .lean()
         .exec(),
@@ -120,18 +135,29 @@ export class DashboardService {
       .filter(Boolean);
 
     const rows = campaigns.map((c) =>
-      this.buildRow(c, econ, windowByCampaign, hasTimeseries, now, knownProducts),
+      this.buildRow(
+        c,
+        econ,
+        windowByCampaign,
+        hasTimeseries,
+        now,
+        knownProducts,
+      ),
     );
 
     // Rows that belong to THIS window. With real timeseries a campaign
     // qualifies if it spent inside the window regardless of launch date;
     // without it, launch date is the only filter available.
     const windowRows = hasTimeseries
-      ? rows.filter((r) => r.spend > 0 || r.status === 'active' || r.status === 'pending_approval')
+      ? rows.filter(
+          (r) =>
+            r.spend > 0 ||
+            r.status === 'active' ||
+            r.status === 'pending_approval',
+        )
       : rows.filter(
           (r) =>
-            !r.launchedAt ||
-            new Date(r.launchedAt).getTime() >= from.getTime(),
+            !r.launchedAt || new Date(r.launchedAt).getTime() >= from.getTime(),
         );
 
     const portfolio = this.rollUp(windowRows, econ);
@@ -149,7 +175,10 @@ export class DashboardService {
             ? num(c.roas) * spend
             : 0;
       // Each campaign's own product margin — same reason as buildRow.
-      const product = parseCampaignName(c.name ?? c.topic, knownProducts).product;
+      const product = parseCampaignName(
+        c.name ?? c.topic,
+        knownProducts,
+      ).product;
       const rowEcon = this.economics.forProduct(econ, product);
       return {
         spend,
@@ -246,7 +275,11 @@ export class DashboardService {
       campaigns: windowRows,
       facets: {
         byProduct: this.facetRollup(windowRows, econ, (r) => r.facets.product),
-        byFunnel: this.facetRollup(windowRows, econ, (r) => r.facets.funnelLabel),
+        byFunnel: this.facetRollup(
+          windowRows,
+          econ,
+          (r) => r.facets.funnelLabel,
+        ),
         byBudgetModel: this.facetRollup(windowRows, econ, (r) =>
           r.facets.budgetModel.toUpperCase(),
         ),
@@ -255,10 +288,165 @@ export class DashboardService {
           econ,
           (r) => r.facets.language ?? 'unspecified',
         ),
-        byObjective: this.facetRollup(windowRows, econ, (r) => r.objectiveLabel),
+        byObjective: this.facetRollup(
+          windowRows,
+          econ,
+          (r) => r.objectiveLabel,
+        ),
       },
       insights: this.buildInsights(company),
       activity,
+    };
+  }
+
+  /**
+   * What THIS TOOL has done, isolated from the account-wide picture.
+   *
+   * getOverview() intentionally includes every campaign this tenant runs,
+   * including ones the marketing team created and manages directly in Meta
+   * ('manual' source) — that's the right scope for "is the account healthy."
+   * It is the WRONG scope for "is the tool working": most of this tenant's
+   * spend and its entire negative portfolio ROAS belongs to campaigns the
+   * tool has never touched. This endpoint filters to isManagedCampaignSource
+   * ('agent' + 'human') and reuses the exact same row-building and rollup
+   * logic as getOverview so the numbers never disagree with each other.
+   */
+  async getToolImpact(tenantId: string): Promise<ToolImpactOverview> {
+    const now = new Date();
+    const econ = await this.economics.forTenant(tenantId);
+
+    const [company, campaigns, decisions, cycles] = await Promise.all([
+      this.companyModel.findOne({ tenantId }).lean().exec(),
+      this.campaignModel.find({ tenantId }).lean().exec(),
+      this.decisionModel
+        .find({ tenantId })
+        .sort({ createdAt: -1 })
+        .lean()
+        .exec(),
+      this.cycleModel
+        .find({ tenantId })
+        .select('campaignId startedAt completedAt status')
+        .lean()
+        .exec(),
+    ]);
+
+    const knownProducts: string[] = (
+      ((company as any)?.products ?? []) as Array<{ name?: string }>
+    )
+      .map((p) => String(p?.name ?? '').trim())
+      .filter(Boolean);
+
+    const managed = campaigns.filter((c: any) =>
+      isManagedCampaignSource(c.source),
+    );
+    // hasTimeseries=false: buildRow falls back to each campaign doc's own
+    // running totals — "what has this campaign done, lifetime" is the right
+    // frame for "what has the tool achieved," not a 30-day slice.
+    const rows = managed.map((c: any) =>
+      this.buildRow(c, econ, new Map(), false, now, knownProducts),
+    );
+    const portfolio = this.rollUp(rows, econ);
+
+    const byStatus: Record<string, number> = {};
+    for (const c of managed as any[]) {
+      byStatus[c.status ?? 'unknown'] =
+        (byStatus[c.status ?? 'unknown'] ?? 0) + 1;
+    }
+
+    const topWinner =
+      rows
+        .filter((r) => r.isRevenueObjective && r.contributionProfit > 0)
+        .sort((a, b) => b.contributionProfit - a.contributionProfit)[0] ?? null;
+
+    const decisionsByStatus = {
+      shadow_review: 0,
+      approved: 0,
+      rejected: 0,
+      expired: 0,
+    };
+    const actionTypeCounts = new Map<string, number>();
+    let openOpportunityINR7d = 0;
+    for (const d of decisions as any[]) {
+      const status = d.status as keyof typeof decisionsByStatus;
+      if (status in decisionsByStatus) decisionsByStatus[status]++;
+      actionTypeCounts.set(
+        d.actionType,
+        (actionTypeCounts.get(d.actionType) ?? 0) + 1,
+      );
+      if (d.status === 'shadow_review') {
+        openOpportunityINR7d += Number(d.expectedProfitDeltaINR7d ?? 0);
+      }
+    }
+    const examples = (decisions as any[])
+      .filter((d) => d.status === 'shadow_review')
+      .sort(
+        (a, b) =>
+          Number(b.expectedProfitDeltaINR7d ?? 0) -
+          Number(a.expectedProfitDeltaINR7d ?? 0),
+      )
+      .slice(0, 5)
+      .map((d) => ({
+        campaignName: d.campaignName ?? 'Unknown campaign',
+        actionType: d.actionType,
+        reasoning: d.reasoning ?? '',
+        expectedProfitDeltaINR7d: round(
+          Number(d.expectedProfitDeltaINR7d ?? 0),
+          2,
+        ),
+        status: d.status,
+      }));
+
+    const campaignsWatched = new Set((cycles as any[]).map((c) => c.campaignId))
+      .size;
+    const lastCycleAt = (cycles as any[])
+      .map((c) => c.completedAt ?? c.startedAt)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+
+    return {
+      tenantId,
+      generatedAt: now.toISOString(),
+      economics: {
+        productName: econ.productName,
+        marginPct: econ.marginPct,
+        refundPct: econ.refundPct,
+        netMarginPct: econ.netMarginPct,
+        breakevenROAS: econ.breakevenROAS,
+        targetROAS: econ.targetROAS,
+        method: econ.method,
+        isEstimated: econ.method === 'generic-default',
+        hasMixedMargins: econ.hasMixedMargins,
+        byProduct: Object.values(econ.byProduct).map((p) => ({
+          productName: p.productName,
+          marginPct: p.marginPct,
+          breakevenROAS: p.breakevenROAS,
+          targetROAS: p.targetROAS,
+        })),
+        notes: econ.notes,
+      },
+      automation: {
+        cyclesRun: cycles.length,
+        campaignsWatched,
+        lastCycleAt: lastCycleAt ? new Date(lastCycleAt).toISOString() : null,
+        cadenceLabel: 'Every 6 hours, automatically — plus on demand',
+      },
+      diagnosis: {
+        decisionsProposed: decisions.length,
+        byStatus: decisionsByStatus,
+        byActionType: [...actionTypeCounts.entries()]
+          .map(([actionType, count]) => ({ actionType, count }))
+          .sort((a, b) => b.count - a.count),
+        openOpportunityINR7d: round(openOpportunityINR7d, 2),
+        examples,
+      },
+      launched: {
+        totalCampaigns: managed.length,
+        byStatus,
+        withSpend: rows.filter((r) => r.spend > 0).length,
+        portfolio,
+        topWinner,
+        campaigns: rows,
+      },
     };
   }
 
@@ -333,7 +521,7 @@ export class DashboardService {
     // not be attributed to a configured product.
     const econ = this.economics.forProduct(tenantEcon, facets.product);
     const windowed = hasTimeseries
-      ? windowByCampaign.get(String(c.metaCampaignId ?? '')) ?? emptyRaw()
+      ? (windowByCampaign.get(String(c.metaCampaignId ?? '')) ?? emptyRaw())
       : {
           spend: num(c.spend),
           revenue: num(c.revenue),
@@ -402,6 +590,7 @@ export class DashboardService {
       status: c.status ?? 'unknown',
       statusLabel: STATUS_LABELS[c.status] ?? c.status ?? '—',
       metaCampaignId: c.metaCampaignId ?? undefined,
+      source: c.source ?? 'manual',
 
       spend: round(spend, 2),
       revenue: round(revenue, 2),
@@ -427,7 +616,9 @@ export class DashboardService {
       // awareness campaign's spend is the cost of the impressions it was
       // asked to buy, not a shortfall against revenue nobody expected.
       moneyAtRisk:
-        evaluation.isRevenueObjective && profit < 0 ? round(Math.abs(profit), 2) : 0,
+        evaluation.isRevenueObjective && profit < 0
+          ? round(Math.abs(profit), 2)
+          : 0,
 
       objective: evaluation.objectiveRaw,
       objectiveKey: evaluation.objectiveKey,
@@ -816,7 +1007,8 @@ export class DashboardService {
             `${r.primaryKpi.label} is ${r.primaryKpi.display} against a target of ` +
             `${r.primaryKpi.targetDisplay ?? 'n/a'}. Judged on its own objective, not on sales.`,
           amount: r.spend,
-          suggestedAction: r.nextAction ?? 'Refresh creative or narrow the audience.',
+          suggestedAction:
+            r.nextAction ?? 'Refresh creative or narrow the audience.',
           href: `${base}/campaigns/${r.id}`,
           campaignId: r.id,
           campaignName: r.name,
@@ -950,7 +1142,8 @@ export class DashboardService {
         connected: !!meta?.accessToken,
         accountId: meta?.accountId ?? null,
         businessId: meta?.businessId ?? null,
-        accountCount: (meta?.accountIds ?? []).length || (meta?.accountId ? 1 : 0),
+        accountCount:
+          (meta?.accountIds ?? []).length || (meta?.accountId ? 1 : 0),
         pixelId: meta?.pixelId ?? null,
         pageId: meta?.pageId ?? null,
       },
@@ -964,7 +1157,8 @@ export class DashboardService {
         runningNow: runs.filter(
           (r) => r.status === 'running' || r.status === 'pending',
         ).length,
-        failedInWindow: runsInWindow.filter((r) => r.status === 'failed').length,
+        failedInWindow: runsInWindow.filter((r) => r.status === 'failed')
+          .length,
       },
       creatives: {
         total: creatives.length,

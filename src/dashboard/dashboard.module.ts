@@ -16,6 +16,10 @@ import {
   IntelligenceDecisionSchema,
 } from '../intelligence/decisions/intelligence-decision.schema';
 import {
+  CampaignIntelligenceCycle,
+  CampaignIntelligenceCycleSchema,
+} from '../intelligence/orchestrator/cycle.schema';
+import {
   PipelineRun,
   PipelineRunSchema,
 } from '../pipeline/schemas/pipeline-run.schema';
@@ -40,6 +44,10 @@ import { DashboardService } from './dashboard.service';
       { name: PipelineRun.name, schema: PipelineRunSchema },
       { name: CreativePackage.name, schema: CreativePackageSchema },
       { name: IntelligenceDecision.name, schema: IntelligenceDecisionSchema },
+      {
+        name: CampaignIntelligenceCycle.name,
+        schema: CampaignIntelligenceCycleSchema,
+      },
     ]),
   ],
   controllers: [DashboardController],

@@ -1,6 +1,6 @@
 import { Controller, Get, Param, ParseIntPipe, Query } from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
-import { DashboardOverview } from './dashboard.types';
+import { DashboardOverview, ToolImpactOverview } from './dashboard.types';
 
 @Controller('dashboard')
 export class DashboardController {
@@ -27,6 +27,22 @@ export class DashboardController {
   ): Promise<DashboardOverview> {
     const days = clampWindow(windowDays);
     return this.dashboard.getOverview(tenantId, days);
+  }
+
+  /**
+   * GET /api/v1/dashboard/:tenantId/tool-impact
+   *
+   * Scoped to campaigns THIS TOOL launched (source 'agent' + 'human') —
+   * excludes 'manual' campaigns the marketing team runs directly in Meta.
+   * getOverview's account-wide numbers are the wrong evidence for "is the
+   * tool working," since most of an account's spend and its whole portfolio
+   * ROAS can belong to campaigns the tool has never touched.
+   */
+  @Get(':tenantId/tool-impact')
+  async getToolImpact(
+    @Param('tenantId') tenantId: string,
+  ): Promise<ToolImpactOverview> {
+    return this.dashboard.getToolImpact(tenantId);
   }
 }
 

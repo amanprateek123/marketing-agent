@@ -112,6 +112,8 @@ export interface DashboardCampaignRow {
   status: string;
   statusLabel: string;
   metaCampaignId?: string;
+  /** 'agent' | 'human' | 'manual' — see isManagedCampaignSource for what this gates. */
+  source: string;
 
   spend: number;
   revenue: number;
@@ -257,6 +259,58 @@ export interface DashboardEconomics {
     targetROAS: number;
   }>;
   notes: string[];
+}
+
+/**
+ * What THIS TOOL has actually done, as opposed to the account-wide picture in
+ * DashboardOverview (which includes campaigns the marketing team runs in Meta
+ * directly and this system has never touched). Scoped to
+ * isManagedCampaignSource campaigns only ('agent' + 'human' sources) — see
+ * campaign.schema.ts for why 'manual' campaigns don't belong here.
+ */
+export interface ToolImpactOverview {
+  tenantId: string;
+  generatedAt: string;
+
+  economics: DashboardEconomics;
+
+  automation: {
+    /** Intelligence cycles run — one per (campaign, 6h tick or manual Prime). */
+    cyclesRun: number;
+    /** Distinct campaigns that have ever gone through a cycle. */
+    campaignsWatched: number;
+    lastCycleAt: string | null;
+    cadenceLabel: string;
+  };
+
+  diagnosis: {
+    decisionsProposed: number;
+    byStatus: Record<
+      'shadow_review' | 'approved' | 'rejected' | 'expired',
+      number
+    >;
+    byActionType: Array<{ actionType: string; count: number }>;
+    /** Sum of expectedProfitDeltaINR7d across still-open (shadow_review) decisions. */
+    openOpportunityINR7d: number;
+    /** A handful of the highest-impact open decisions, for the "here's what it found" beat. */
+    examples: Array<{
+      campaignName: string;
+      actionType: string;
+      reasoning: string;
+      expectedProfitDeltaINR7d: number;
+      status: string;
+    }>;
+  };
+
+  launched: {
+    totalCampaigns: number;
+    byStatus: Record<string, number>;
+    /** Campaigns that actually spent money, vs paused/failed at zero spend. */
+    withSpend: number;
+    portfolio: PortfolioRollup;
+    topWinner: DashboardCampaignRow | null;
+    campaigns: DashboardCampaignRow[];
+  };
 }
 
 export interface DashboardOverview {
