@@ -331,8 +331,11 @@ export interface ToolImpactCohortStageCounts {
 export interface ToolImpactRawOutcome {
   /** Every verified launch in the requested tool-owned cohort. */
   campaigns: number;
-  /** The measured population used for both numerator and denominator. */
+  /** Every verified-launch campaign with real spend, sales + non-sales. */
   campaignsWithSpend: number;
+  /** Sales-objective campaigns with spend — the population `spend` below is
+   *  actually summed over. Use this (not campaignsWithSpend) alongside it. */
+  salesCampaignsWithSpend: number;
   spend: number;
   attributedReturn: number;
   revenueBasis: Array<{
@@ -349,8 +352,29 @@ export interface ToolImpactRawOutcome {
   /** True only when persisted attributed action value >= ad spend. */
   metOneXActionValueThreshold: boolean;
   thresholdRule: 'weighted_attributed_roas_gte_1';
+  /** @deprecated use nonSales.campaigns */
   nonSalesCampaigns: number;
+  /** @deprecated use nonSales.spend */
   nonSalesSpend: number;
+  /**
+   * Non-sales spend, reported separately — never folded into the ROAS above.
+   * Grouped by objective because CPM (awareness) and CPC (traffic) aren't
+   * the same unit and blending them would repeat the mistake this whole
+   * function exists to avoid.
+   */
+  nonSales: {
+    campaigns: number;
+    spend: number;
+    byObjective: Array<{
+      objectiveKey: string;
+      objectiveLabel: string;
+      campaignCount: number;
+      spend: number;
+      primaryKpiLabel: string;
+      weightedValue: number | null;
+      weightedDisplay: string;
+    }>;
+  };
 }
 
 export interface ToolImpactOverview {

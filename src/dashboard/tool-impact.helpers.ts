@@ -253,15 +253,21 @@ export function buildToolImpactCohort(
 export function buildRawRoasOutcome(
   rows: DashboardCampaignRow[],
 ): ToolImpactOverview['launched']['rawOutcome'] {
-  // This is deliberately a complete portfolio action-value test, not an
-  // objective scorecard or proof of ledger cash:
-  // every verified campaign that spent money belongs in both numerator and
-  // denominator. Excluding awareness/traffic spend would flatter the claim
-  // "what Meridian spent versus what Meta/configuration attributed".
+  // ROAS only means something for a campaign that was actually asked to
+  // drive purchases — the same principle dashboard.service.ts's rollUp()
+  // already applies account-wide ("Including awareness/app-promotion/
+  // traffic spend in the denominator drags the headline down with money
+  // that was never supposed to come back as tracked purchases"). Blending
+  // a ₹0-return Awareness campaign into the numerator/denominator here
+  // isn't a neutral "complete portfolio test" — it's grading spend against
+  // a goal nobody gave it, and makes the sales-objective spend look worse
+  // than it is. Sales-only for the headline math; non-sales spend is
+  // reported separately, never folded into ROAS.
   const measuredRows = rows.filter((row) => row.spend > 0);
+  const salesRows = measuredRows.filter((row) => row.isRevenueObjective);
   const nonSalesRows = measuredRows.filter((row) => !row.isRevenueObjective);
-  const spend = sum(measuredRows.map((row) => row.spend));
-  const attributedReturn = sum(measuredRows.map((row) => row.revenue));
+  const spend = sum(salesRows.map((row) => row.spend));
+  const attributedReturn = sum(salesRows.map((row) => row.revenue));
   const weightedRoas = spend > 0 ? attributedReturn / spend : 0;
   const revenueBasis = (
     [
@@ -271,7 +277,7 @@ export function buildRawRoasOutcome(
       'unknown',
     ] as const
   ).map((basis) => {
-    const basisRows = measuredRows.filter((row) => row.revenueBasis === basis);
+    const basisRows = salesRows.filter((row) => row.revenueBasis === basis);
     const basisSpend = sum(basisRows.map((row) => row.spend));
     const basisRevenue = sum(basisRows.map((row) => row.revenue));
     return {
@@ -293,9 +299,69 @@ export function buildRawRoasOutcome(
           ? 'above'
           : 'below';
 
+  // Non-sales campaigns don't share one KPI unit (CPM for awareness, CPC
+  // for traffic, ...) — blending them into a single "average" would repeat
+  // the exact mistake this function exists to avoid. Grouped by objective
+  // instead; each group's own weighted result (never a naive average).
+  const nonSalesByObjective = new Map<
+    string,
+    { objectiveLabel: string; rows: DashboardCampaignRow[] }
+  >();
+  for (const row of nonSalesRows) {
+    const objectiveKey = row.objectiveKey ?? 'unknown';
+    const group = nonSalesByObjective.get(objectiveKey) ?? {
+      objectiveLabel: row.objectiveLabel ?? 'Other',
+      rows: [],
+    };
+    group.rows.push(row);
+    nonSalesByObjective.set(objectiveKey, group);
+  }
+  const nonSales = {
+    campaigns: nonSalesRows.length,
+    spend: round(sum(nonSalesRows.map((row) => row.spend)), 2),
+    byObjective: [...nonSalesByObjective.entries()].map(
+      ([objectiveKey, group]) => {
+        const groupSpend = sum(group.rows.map((row) => row.spend));
+        const groupClicks = sum(group.rows.map((row) => row.clicks ?? 0));
+        const groupImpressions = sum(
+          group.rows.map((row) => row.impressions ?? 0),
+        );
+        // Every row in a group shares one primaryKpi.key (same objective),
+        // so its direction/label are safe to read off the first row —
+        // recomputing the weighted value from raw totals, not averaging
+        // each row's own already-computed per-campaign KPI value.
+        const sample = group.rows[0].primaryKpi as
+          | DashboardCampaignRow['primaryKpi']
+          | undefined;
+        const weightedValue =
+          sample?.key === 'cpc' && groupClicks > 0
+            ? groupSpend / groupClicks
+            : sample?.key === 'cpm' && groupImpressions > 0
+              ? (groupSpend / groupImpressions) * 1000
+              : null;
+        return {
+          objectiveKey,
+          objectiveLabel: group.objectiveLabel,
+          campaignCount: group.rows.length,
+          spend: round(groupSpend, 2),
+          primaryKpiLabel: sample?.label ?? 'Result',
+          weightedValue: weightedValue == null ? null : round(weightedValue, 2),
+          weightedDisplay:
+            weightedValue == null ? 'n/a' : `₹${weightedValue.toFixed(2)}`,
+        };
+      },
+    ),
+  };
+
   return {
     campaigns: rows.length,
     campaignsWithSpend: measuredRows.length,
+    // Distinct from campaignsWithSpend above (which counts sales + non-sales
+    // together): `spend`/`attributedReturn`/`weightedRoas` below are
+    // sales-only, so the campaign count next to them must match that same
+    // population or the tile reads "₹X across Y campaigns" with Y counting
+    // campaigns that contributed nothing to X.
+    salesCampaignsWithSpend: salesRows.length,
     spend: round(spend, 2),
     attributedReturn: round(attributedReturn, 2),
     revenueBasis,
@@ -315,6 +381,7 @@ export function buildRawRoasOutcome(
     thresholdRule: 'weighted_attributed_roas_gte_1',
     nonSalesCampaigns: nonSalesRows.length,
     nonSalesSpend: round(sum(nonSalesRows.map((row) => row.spend)), 2),
+    nonSales,
   };
 }
 

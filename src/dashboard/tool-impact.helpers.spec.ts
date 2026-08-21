@@ -170,7 +170,7 @@ describe('tool impact raw return math', () => {
     return values as DashboardCampaignRow;
   }
 
-  it('uses weighted totals across every verified campaign with spend', () => {
+  it('uses weighted totals across sales campaigns only — non-sales spend never enters the ROAS math', () => {
     const result = buildRawRoasOutcome([
       row({
         isRevenueObjective: true,
@@ -189,21 +189,40 @@ describe('tool impact raw return math', () => {
         spend: 2_000,
         revenue: 10_000,
         revenueBasis: 'meta_action_value',
+        objectiveKey: 'awareness',
+        objectiveLabel: 'Awareness',
+        clicks: 500,
+        impressions: 400_000,
+        primaryKpi: {
+          key: 'cpm',
+          label: 'Cost per 1,000 views',
+          value: 5,
+          display: '₹5',
+          target: null,
+          targetDisplay: null,
+          direction: 'lower_better',
+          status: 'neutral',
+        },
       }),
     ]);
 
+    // Sales-only: the ₹2,000/₹10,000 awareness row never enters this math —
+    // an Awareness campaign has no purchase expectation, so folding its
+    // spend and Meta-attributed action value into "ROAS" would grade it on
+    // a goal nobody gave it (and, perversely, inflate the number here).
     expect(result).toEqual({
       campaigns: 3,
       campaignsWithSpend: 3,
-      spend: 3_000,
-      attributedReturn: 10_600,
+      salesCampaignsWithSpend: 2,
+      spend: 1_000,
+      attributedReturn: 600,
       revenueBasis: [
         {
           basis: 'meta_action_value',
-          campaignCount: 2,
-          spend: 2_100,
-          revenue: 10_150,
-          weightedRoas: 4.833333,
+          campaignCount: 1,
+          spend: 100,
+          revenue: 150,
+          weightedRoas: 1.5,
         },
         {
           basis: 'configured_conversion_value',
@@ -228,13 +247,28 @@ describe('tool impact raw return math', () => {
         },
       ],
       containsModeledOrUnknownRevenue: true,
-      weightedRoas: 3.533333,
-      returnSurplus: 7_600,
-      returnPosition: 'above',
-      metOneXActionValueThreshold: true,
+      weightedRoas: 0.6,
+      returnSurplus: -400,
+      returnPosition: 'below',
+      metOneXActionValueThreshold: false,
       thresholdRule: 'weighted_attributed_roas_gte_1',
       nonSalesCampaigns: 1,
       nonSalesSpend: 2_000,
+      nonSales: {
+        campaigns: 1,
+        spend: 2_000,
+        byObjective: [
+          {
+            objectiveKey: 'awareness',
+            objectiveLabel: 'Awareness',
+            campaignCount: 1,
+            spend: 2_000,
+            primaryKpiLabel: 'Cost per 1,000 views',
+            weightedValue: 5,
+            weightedDisplay: '₹5.00',
+          },
+        ],
+      },
     });
   });
 
