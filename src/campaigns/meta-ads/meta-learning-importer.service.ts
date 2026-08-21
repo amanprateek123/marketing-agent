@@ -47,6 +47,16 @@ export interface CampaignCaseStudy {
   lesson: string;
 }
 
+interface DetectableProduct {
+  name: string;
+  price: number;
+  customConversionId?: string;
+  customEventName?: string;
+  conversionEvent?: string;
+  metaAppId?: string;
+  pixelId?: string;
+}
+
 /**
  * Meta Learning Importer — pulls historical campaign data from Meta,
  * generates case studies per campaign, stores them for agent context.
@@ -312,6 +322,11 @@ export class MetaLearningImporterService {
     const products = (company.products ?? []).filter(p => p.active).map(p => ({
       name: p.name,
       price: p.price,
+      customConversionId: p.customConversionId,
+      customEventName: p.customEventName,
+      conversionEvent: p.conversionEvent,
+      metaAppId: p.metaAppId,
+      pixelId: p.pixelId,
     }));
     const customConversions: { id: string; name: string }[] = (importDoc as any).customConversions ?? [];
 
@@ -916,53 +931,170 @@ export class MetaLearningImporterService {
   private detectProduct(
     campaign: any,
     customConversions: { id: string; name: string }[],
-    products: { name: string; price: number }[],
+    products: DetectableProduct[],
   ): string {
-    // Build id → name map for custom conversions
-    const ccMap = new Map(customConversions.map(c => [c.id, c.name]));
-
-    // Gather all promoted_object entries from ad sets
+    const normalize = (value: unknown): string =>
+      String(value ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+    const uniqueProducts = (matches: DetectableProduct[]): DetectableProduct[] =>
+      [...new Map(matches.map(product => [normalize(product.name), product])).values()];
     const adSets: any[] = campaign.adSets ?? [];
-    for (const adSet of adSets) {
-      const po = adSet.promoted_object;
-      if (!po) continue;
+    const promotedObjects = adSets
+      .map(adSet => adSet.promoted_object)
+      .filter(Boolean);
 
-      let eventName: string | undefined;
+    // A configured custom-conversion ID is the strongest available mapping.
+    const customConversionIds = new Set(
+      promotedObjects
+        .map(po => String(po.custom_conversion_id ?? '').trim())
+        .filter(Boolean),
+    );
+    const directCustomConversionMatches = uniqueProducts(
+      products.filter(product =>
+        customConversionIds.has(String(product.customConversionId ?? '').trim()),
+      ),
+    );
+    if (directCustomConversionMatches.length === 1) {
+      return directCustomConversionMatches[0].name;
+    }
+    if (directCustomConversionMatches.length > 1) return 'unknown';
 
-      // Custom conversion: offsite_conversion.custom.<id>
-      if (po.custom_conversion_id) {
-        eventName = ccMap.get(String(po.custom_conversion_id));
-      }
+    // Restrict candidates using exact promoted-object metadata where configured.
+    // Shared IDs/events stay ambiguous and are resolved only by more specific text.
+    const exactGroups: DetectableProduct[][] = [];
+    const applicationIds = new Set(
+      promotedObjects
+        .map(po => String(po.application_id ?? '').trim())
+        .filter(Boolean),
+    );
+    const applicationMatches = uniqueProducts(
+      products.filter(product =>
+        applicationIds.has(String(product.metaAppId ?? '').trim()),
+      ),
+    );
+    if (applicationMatches.length > 0) exactGroups.push(applicationMatches);
 
-      // Custom event type (e.g. NADI_REPORT_PURCHASE_COMPLETED)
-      if (!eventName && po.custom_event_type) {
-        eventName = String(po.custom_event_type);
-      }
+    const pixelIds = new Set(
+      promotedObjects
+        .map(po => String(po.pixel_id ?? '').trim())
+        .filter(Boolean),
+    );
+    const pixelMatches = uniqueProducts(
+      products.filter(product =>
+        pixelIds.has(String(product.pixelId ?? '').trim()),
+      ),
+    );
+    if (pixelMatches.length > 0) exactGroups.push(pixelMatches);
 
-      if (eventName) {
-        // Fuzzy match event name → product name
-        const normalized = eventName.toLowerCase().replace(/[_\-\.]/g, ' ');
-        for (const product of products) {
-          const productWords = product.name.toLowerCase().split(/\s+/);
-          if (productWords.some(word => word.length > 3 && normalized.includes(word))) {
-            return product.name;
-          }
-        }
-        // No product match — return the event name itself so it's still useful
-        return eventName;
-      }
+    const genericEventNames = new Set(['', 'other', 'custom', 'custom event']);
+    const promotedEventNames = new Set(
+      promotedObjects
+        .flatMap(po => [po.custom_event_str, po.custom_event_type])
+        .map(normalize)
+        .filter(name => !genericEventNames.has(name)),
+    );
+    const eventMatches = uniqueProducts(
+      products.filter(product =>
+        [product.customEventName, product.conversionEvent]
+          .map(normalize)
+          .filter(name => !genericEventNames.has(name))
+          .some(name => promotedEventNames.has(name)),
+      ),
+    );
+    if (eventMatches.length > 0) exactGroups.push(eventMatches);
+
+    let candidateProducts = products;
+    for (const group of exactGroups) {
+      const names = new Set(group.map(product => normalize(product.name)));
+      candidateProducts = candidateProducts.filter(product =>
+        names.has(normalize(product.name)),
+      );
+    }
+    candidateProducts = uniqueProducts(candidateProducts);
+    if (exactGroups.length > 0 && candidateProducts.length === 0) return 'unknown';
+    if (candidateProducts.length === 1 && exactGroups.length > 0) {
+      return candidateProducts[0].name;
     }
 
-    // Fallback: match campaign name against product names
-    const campaignName = (campaign.name ?? '').toLowerCase();
-    for (const product of products) {
-      const productWords = product.name.toLowerCase().split(/\s+/);
-      if (productWords.some(word => word.length > 3 && campaignName.includes(word))) {
-        return product.name;
-      }
-    }
+    const ccNameById = new Map(
+      customConversions.map(conversion => [String(conversion.id), conversion.name]),
+    );
+    const promotedTexts = promotedObjects.flatMap(po => [
+      ccNameById.get(String(po.custom_conversion_id ?? '')),
+      po.custom_event_str,
+      po.custom_event_type,
+    ]);
+    const matchUniqueMostSpecific = (
+      texts: unknown[],
+      candidates: DetectableProduct[],
+    ): DetectableProduct | undefined => {
+      const textTokenSets = texts
+        .map(normalize)
+        .filter(Boolean)
+        .map(text => new Set(text.split(' ')));
+      const rankedMatches = uniqueProducts(candidates).map(product => {
+        const tokens = normalize(product.name).split(' ').filter(Boolean);
+        const matchedTokenCount = Math.max(
+          0,
+          ...textTokenSets.map(textTokens =>
+            tokens.filter(token => textTokens.has(token)).length,
+          ),
+        );
+        return {
+          product,
+          tokens,
+          matchedTokenCount,
+          fullMatch:
+            tokens.length > 0 && matchedTokenCount === tokens.length,
+        };
+      });
+      const fullMatches = rankedMatches
+        .filter(match => match.fullMatch)
+        .map(match => match.product);
+      const maximalMatches = fullMatches.filter(product => {
+        const tokens = new Set(normalize(product.name).split(' ').filter(Boolean));
+        return !fullMatches.some(other => {
+          if (other === product) return false;
+          const otherTokens = new Set(
+            normalize(other.name).split(' ').filter(Boolean),
+          );
+          return (
+            otherTokens.size > tokens.size &&
+            [...tokens].every(token => otherTokens.has(token))
+          );
+        });
+      });
+      if (maximalMatches.length === 1) return maximalMatches[0];
+      if (maximalMatches.length > 1) return undefined;
 
-    return 'unknown';
+      // Meta event names sometimes omit a generic product suffix (for example,
+      // NADI_LEAF for "Nadi Leaf Reading"). Require at least two matching name
+      // tokens and a unique best score; a shared token such as NADI is not enough.
+      const bestTokenCount = Math.max(
+        0,
+        ...rankedMatches.map(match => match.matchedTokenCount),
+      );
+      if (bestTokenCount < 2) return undefined;
+      const bestMatches = rankedMatches.filter(
+        match => match.matchedTokenCount === bestTokenCount,
+      );
+      return bestMatches.length === 1 ? bestMatches[0].product : undefined;
+    };
+
+    const promotedMatch = matchUniqueMostSpecific(
+      promotedTexts,
+      candidateProducts,
+    );
+    if (promotedMatch) return promotedMatch.name;
+
+    const campaignNameMatch = matchUniqueMostSpecific(
+      [campaign.name],
+      candidateProducts,
+    );
+    return campaignNameMatch?.name ?? 'unknown';
   }
 
   enrichCampaign(
@@ -980,7 +1112,7 @@ export class MetaLearningImporterService {
   ): Promise<any | null> {
     const [insightsRes, adSetsRes, adSetInsightsRes, adInsightsRes, demoRes, adsRes] = await Promise.all([
       axios.get(
-        `${META_API_BASE}/${campaign.id}/insights?fields=spend,impressions,clicks,ctr,cpc,actions,frequency&date_preset=maximum&access_token=${accessToken}`,
+        `${META_API_BASE}/${campaign.id}/insights?fields=spend,impressions,clicks,ctr,cpc,actions,action_values,frequency,date_stop&date_preset=maximum&access_token=${accessToken}`,
         { timeout: 30000 },
       ).catch(() => ({ data: { data: [] } })),
       axios.get(

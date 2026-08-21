@@ -11,15 +11,13 @@ import {
   TenantEconomics,
   TenantEconomicsService,
 } from '../common/economics/tenant-economics.service';
-import {
-  Campaign,
-  isManagedCampaignSource,
-} from '../campaigns/schemas/campaign.schema';
+import { Campaign } from '../campaigns/schemas/campaign.schema';
 import { MetricTimeseries } from '../campaigns/schemas/metric-timeseries.schema';
 import { Company } from '../companies/schemas/company.schema';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
 import { IntelligenceDecision } from '../intelligence/decisions/intelligence-decision.schema';
 import { CampaignIntelligenceCycle } from '../intelligence/orchestrator/cycle.schema';
+import { ExecutedAction } from '../learning/schemas/executed-action.schema';
 import { PipelineRun } from '../pipeline/schemas/pipeline-run.schema';
 import { parseCampaignName } from './campaign-name.parser';
 import { ObjectiveVerdict, evaluateObjective } from './objective-evaluation';
@@ -32,9 +30,19 @@ import {
   PortfolioRollup,
   TenantActivity,
   ToolImpactOverview,
+  ToolImpactScope,
   TrendDelta,
   WindowMetrics,
 } from './dashboard.types';
+import {
+  buildRawRoasOutcome,
+  buildToolImpactCohort,
+  campaignIsMature,
+  classifyToolOwnership,
+  durationStats,
+  isVerifiedToolLaunch,
+  TOOL_IMPACT_MATURITY_DAYS,
+} from './tool-impact.helpers';
 
 /** Spend below which a zero-revenue campaign isn't worth alarming about. */
 const ZERO_CONV_ALERT_MIN_SPEND = 2000;
@@ -85,6 +93,8 @@ export class DashboardService {
     private readonly decisionModel: Model<IntelligenceDecision>,
     @InjectModel(CampaignIntelligenceCycle.name)
     private readonly cycleModel: Model<CampaignIntelligenceCycle>,
+    @InjectModel(ExecutedAction.name)
+    private readonly executedActionModel: Model<ExecutedAction>,
   ) {}
 
   async getOverview(
@@ -300,35 +310,81 @@ export class DashboardService {
   }
 
   /**
-   * What THIS TOOL has done, isolated from the account-wide picture.
+   * Auditable product impact, isolated from campaigns created in Ads Manager.
    *
-   * getOverview() intentionally includes every campaign this tenant runs,
-   * including ones the marketing team created and manages directly in Meta
-   * ('manual' source) — that's the right scope for "is the account healthy."
-   * It is the WRONG scope for "is the tool working": most of this tenant's
-   * spend and its entire negative portfolio ROAS belongs to campaigns the
-   * tool has never touched. This endpoint filters to isManagedCampaignSource
-   * ('agent' + 'human') and reuses the exact same row-building and rollup
-   * logic as getOverview so the numbers never disagree with each other.
+   * Default scope is deliberately `agent`: a dashboard-created campaign proves
+   * that the product can launch safely, but it does not prove autonomous
+   * research/creative/decision quality. `scope=managed` expands the operational
+   * footprint to agent + human without ever admitting imported manual rows.
    */
-  async getToolImpact(tenantId: string): Promise<ToolImpactOverview> {
+  async getToolImpact(
+    tenantId: string,
+    scope: ToolImpactScope = 'agent',
+  ): Promise<ToolImpactOverview> {
     const now = new Date();
     const econ = await this.economics.forTenant(tenantId);
-
-    const [company, campaigns, decisions, cycles] = await Promise.all([
+    const [company, campaigns] = await Promise.all([
       this.companyModel.findOne({ tenantId }).lean().exec(),
       this.campaignModel.find({ tenantId }).lean().exec(),
-      this.decisionModel
-        .find({ tenantId })
-        .sort({ createdAt: -1 })
-        .lean()
-        .exec(),
-      this.cycleModel
-        .find({ tenantId })
-        .select('campaignId startedAt completedAt status')
-        .lean()
-        .exec(),
     ]);
+
+    const allCampaigns = campaigns as any[];
+    const cohort = buildToolImpactCohort(
+      allCampaigns,
+      scope,
+      now,
+      TOOL_IMPACT_MATURITY_DAYS,
+    );
+    const launchedCampaigns = cohort.launched as any[];
+    const exactCampaignIds = launchedCampaigns.map((c) => String(c._id));
+
+    // Every downstream evidence query is joined to the exact verified-launch
+    // campaign ids. A tenant-wide decision/cycle total would quietly credit
+    // the tool for intelligence generated against marketing-team campaigns.
+    const exactCampaignFilter = {
+      tenantId,
+      campaignId: { $in: exactCampaignIds },
+    };
+
+    const agentCampaigns = (cohort.selected as any[]).filter(
+      (campaign) => classifyToolOwnership(campaign)?.actor === 'agent',
+    );
+
+    const [decisions, cycles, executedActions, pipelineRuns] =
+      await Promise.all([
+        exactCampaignIds.length
+          ? this.decisionModel
+              .find(exactCampaignFilter)
+              .sort({ createdAt: -1 })
+              .lean()
+              .exec()
+          : Promise.resolve([]),
+        exactCampaignIds.length
+          ? this.cycleModel
+              .find(exactCampaignFilter)
+              .select('campaignId startedAt completedAt status')
+              .lean()
+              .exec()
+          : Promise.resolve([]),
+        exactCampaignIds.length
+          ? this.executedActionModel
+              .find(exactCampaignFilter)
+              .sort({ executedAt: -1 })
+              .lean()
+              .exec()
+          : Promise.resolve([]),
+        // Status totals must include persisted runs that died before creating
+        // a Campaign document. A retry may update the same run record, so this
+        // is explicitly a final/current record distribution—not attempt rate.
+        this.runModel
+          .find({ tenantId })
+          .select(
+            'runId status startedAt completedAt campaignId metaCampaignId',
+          )
+          .sort({ startedAt: -1 })
+          .lean()
+          .exec(),
+      ]);
 
     const knownProducts: string[] = (
       ((company as any)?.products ?? []) as Array<{ name?: string }>
@@ -336,19 +392,24 @@ export class DashboardService {
       .map((p) => String(p?.name ?? '').trim())
       .filter(Boolean);
 
-    const managed = campaigns.filter((c: any) =>
-      isManagedCampaignSource(c.source),
-    );
-    // hasTimeseries=false: buildRow falls back to each campaign doc's own
-    // running totals — "what has this campaign done, lifetime" is the right
-    // frame for "what has the tool achieved," not a 30-day slice.
-    const rows = managed.map((c: any) =>
+    // hasTimeseries=false is intentional: this evidence page declares its
+    // metricsWindow as campaign-lifetime and shows freshness separately.
+    const cohortRows = (cohort.selected as any[]).map((c) =>
       this.buildRow(c, econ, new Map(), false, now, knownProducts),
     );
+    const launchedIdSet = new Set(exactCampaignIds);
+    const rows = cohortRows.filter((row) => launchedIdSet.has(row.id));
     const portfolio = this.rollUp(rows, econ);
+    const rawOutcome = buildRawRoasOutcome(rows);
+    const matureIdSet = new Set(
+      (cohort.mature as any[]).map((campaign) => String(campaign._id)),
+    );
+    const matureRawOutcome = buildRawRoasOutcome(
+      rows.filter((row) => matureIdSet.has(row.id)),
+    );
 
     const byStatus: Record<string, number> = {};
-    for (const c of managed as any[]) {
+    for (const c of launchedCampaigns) {
       byStatus[c.status ?? 'unknown'] =
         (byStatus[c.status ?? 'unknown'] ?? 0) + 1;
     }
@@ -357,6 +418,12 @@ export class DashboardService {
       rows
         .filter((r) => r.isRevenueObjective && r.contributionProfit > 0)
         .sort((a, b) => b.contributionProfit - a.contributionProfit)[0] ?? null;
+    const bestRawResult =
+      rows
+        .filter((r) => r.spend > 0)
+        .sort(
+          (a, b) => b.returnSurplus - a.returnSurplus || b.roas - a.roas,
+        )[0] ?? null;
 
     const decisionsByStatus = {
       shadow_review: 0,
@@ -365,47 +432,205 @@ export class DashboardService {
       expired: 0,
     };
     const actionTypeCounts = new Map<string, number>();
-    let openOpportunityINR7d = 0;
     for (const d of decisions as any[]) {
       const status = d.status as keyof typeof decisionsByStatus;
       if (status in decisionsByStatus) decisionsByStatus[status]++;
+      const actionType = String(d.actionType ?? 'unknown');
       actionTypeCounts.set(
-        d.actionType,
-        (actionTypeCounts.get(d.actionType) ?? 0) + 1,
+        actionType,
+        (actionTypeCounts.get(actionType) ?? 0) + 1,
       );
-      if (d.status === 'shadow_review') {
-        openOpportunityINR7d += Number(d.expectedProfitDeltaINR7d ?? 0);
-      }
     }
-    const examples = (decisions as any[])
-      .filter((d) => d.status === 'shadow_review')
+    const openWithEstimate = (decisions as any[]).filter(
+      (d) =>
+        d.status === 'shadow_review' &&
+        Number.isFinite(Number(d.expectedProfitDeltaINR7d)),
+    );
+    const highestExpected = openWithEstimate.length
+      ? Math.max(
+          ...openWithEstimate.map((d) => Number(d.expectedProfitDeltaINR7d)),
+        )
+      : null;
+    const examples = openWithEstimate
       .sort(
         (a, b) =>
-          Number(b.expectedProfitDeltaINR7d ?? 0) -
-          Number(a.expectedProfitDeltaINR7d ?? 0),
+          Number(b.expectedProfitDeltaINR7d) -
+          Number(a.expectedProfitDeltaINR7d),
       )
       .slice(0, 5)
       .map((d) => ({
         campaignName: d.campaignName ?? 'Unknown campaign',
         actionType: d.actionType,
         reasoning: d.reasoning ?? '',
-        expectedProfitDeltaINR7d: round(
-          Number(d.expectedProfitDeltaINR7d ?? 0),
-          2,
-        ),
+        expectedProfitDeltaINR7d: round(Number(d.expectedProfitDeltaINR7d), 2),
+        isModelEstimate: true as const,
         status: d.status,
       }));
 
-    const campaignsWatched = new Set((cycles as any[]).map((c) => c.campaignId))
-      .size;
+    const outcomesByLabel = {
+      improved: 0,
+      worsened: 0,
+      neutral: 0,
+      inconclusive: 0,
+    };
+    for (const action of executedActions as any[]) {
+      const label = action.outcomeLabel as keyof typeof outcomesByLabel;
+      if (label in outcomesByLabel) outcomesByLabel[label]++;
+    }
+    const finalized72h = (executedActions as any[]).filter(
+      (a) => a.status === 'final',
+    ).length;
+    const conclusive72h =
+      outcomesByLabel.improved +
+      outcomesByLabel.worsened +
+      outcomesByLabel.neutral;
+    const latestExecutedAt = (executedActions as any[])
+      .map((a) => a.executedAt)
+      .filter((at) => isFiniteDate(at))
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+
+    const campaignsWatched = new Set(
+      (cycles as any[]).map((c) => String(c.campaignId)),
+    ).size;
     const lastCycleAt = (cycles as any[])
       .map((c) => c.completedAt ?? c.startedAt)
-      .filter(Boolean)
+      .filter((at) => isFiniteDate(at))
       .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+
+    const agentById = new Map(
+      agentCampaigns.map((campaign) => [String(campaign._id), campaign]),
+    );
+    const agentByRunId = new Map(
+      agentCampaigns
+        .filter((campaign) => String(campaign.runId ?? '').trim())
+        .map((campaign) => [String(campaign.runId), campaign]),
+    );
+    const agentByMetaId = new Map(
+      agentCampaigns
+        .filter((campaign) => String(campaign.metaCampaignId ?? '').trim())
+        .map((campaign) => [String(campaign.metaCampaignId), campaign]),
+    );
+    const joinedRuns = (pipelineRuns as any[])
+      .map((run) => ({
+        run,
+        campaign:
+          agentById.get(String(run.campaignId ?? '')) ??
+          agentByRunId.get(String(run.runId ?? '')) ??
+          agentByMetaId.get(String(run.metaCampaignId ?? '')),
+      }))
+      .filter((joined) => joined.campaign != null);
+    const runCompleted = (pipelineRuns as any[]).filter(
+      (run) => run.status === 'completed',
+    ).length;
+    const runFailed = (pipelineRuns as any[]).filter(
+      (run) => run.status === 'failed',
+    ).length;
+    const approvalReadyDurations = joinedRuns
+      .map(({ run, campaign }) =>
+        hoursBetween(run.startedAt, campaign.createdAt),
+      )
+      .filter((duration): duration is number => duration != null);
+    const liveDurations = joinedRuns
+      .map(({ run, campaign }) =>
+        hoursBetween(run.startedAt, campaign.launchedAt),
+      )
+      .filter((duration): duration is number => duration != null);
+
+    const spendingLaunches = launchedCampaigns.filter(
+      (campaign) => num(campaign.spend) > 0,
+    );
+    // `syncedAt` only proves that a sync process touched the document. A
+    // failed Meta insights fetch can update syncedAt while preserving old
+    // metrics, so it must never make financial evidence appear fresh.
+    const freshnessDates = spendingLaunches
+      .map((campaign) => campaign.dataAsOf)
+      .filter((at) => isFiniteDate(at))
+      .map((at) => new Date(at));
+    const freshnessPopulation = spendingLaunches.length;
+    // A completed/paused campaign naturally has an old final coverage date;
+    // ongoing staleness is actionable only for campaigns that are still live.
+    const staleCampaigns = spendingLaunches.filter((campaign) => {
+      if (campaign.status !== 'active' || !isFiniteDate(campaign.dataAsOf)) {
+        return false;
+      }
+      return (
+        (now.getTime() - new Date(campaign.dataAsOf).getTime()) / 36e5 >
+        STALE_METRICS_HOURS
+      );
+    }).length;
+    const campaignsWithoutFreshness =
+      freshnessPopulation - freshnessDates.length;
+    const freshnessStatus: ToolImpactOverview['freshness']['status'] =
+      freshnessDates.length === 0
+        ? 'unknown'
+        : staleCampaigns > 0 || campaignsWithoutFreshness > 0
+          ? 'partially_stale'
+          : 'fresh';
+    const freshnessMs = freshnessDates.map((at) => at.getTime());
+
+    const includedSources: Array<'agent' | 'human'> =
+      scope === 'managed' ? ['agent', 'human'] : ['agent'];
+    const methodologyWarnings = [
+      'Attributed-action-value ROAS here means persisted attributed action value divided by ad spend. A value at or above 1.0x only says that attributed action value met or exceeded ad spend; it does not prove collected cash or include COGS, fulfilment, payment fees, tax, or operating costs.',
+      'Return provenance is disclosed per campaign: Meta-reported action_value for the configured conversion action (refund-adjusted where configured), Meta-attributed conversions multiplied by configured product value, no attributed return, or unknown derivation. Meta action_value can represent a purchase or an assigned value for another conversion; it is not proof of collected cash.',
+      'Persisted attributed return is not reconciled company-ledger cash. Reconcile unknown rows and any external founder claim with Ads Manager and your order ledger.',
+      'Figures are campaign-lifetime totals and Meta can revise recent attribution. Check freshness before quoting them.',
+      'Observed post-action outcomes are before/after measurements, not randomized causal proof.',
+      'Executed-action outcomes are scoped to these campaign IDs, but legacy outcome records do not contain intelligence decision IDs. They are a campaign-level action track record, not a one-to-one audit of the proposals displayed above.',
+      'Pipeline status includes every persisted run record, including records that failed before campaign creation. Retries can reuse and update a run record, so this is a current/final run-record distribution—not a per-attempt success rate. Duration statistics include only records joinable to an agent campaign; approval-ready time uses campaign.createdAt as the persisted proxy.',
+      ...(cohort.summary.ownershipEvidence.legacyAgentName > 0
+        ? [
+            `${cohort.summary.ownershipEvidence.legacyAgentName} legacy campaign record(s) are included as AI-owned because their Meta names match Meridian’s deterministic AGENT_<topic>_<date> convention. Their stored source is manual and no run linkage survives locally, so this is name-inferred evidence until explicitly reconciled/backfilled.`,
+          ]
+        : []),
+    ];
 
     return {
       tenantId,
       generatedAt: now.toISOString(),
+      scope: {
+        requested: scope,
+        includedSources,
+        label:
+          scope === 'agent'
+            ? 'AI-launched campaigns'
+            : 'All campaigns launched through Meridian',
+        cohortRule:
+          scope === 'agent'
+            ? "actor=agent from persisted source='agent' OR strict legacy AGENT_<topic>_<date> name evidence; impact metrics require a verified Meta launch"
+            : 'actor=agent/human from persisted source OR strict legacy AGENT_<topic>_<date> name evidence; impact metrics require a verified Meta launch',
+      },
+      methodology: {
+        version: 'attributed_action_value_roas_v1',
+        headlineMetric: 'attributed_action_value_roas',
+        revenueLabel:
+          'Persisted attributed return, with observed, configured-estimate, zero-return, or unknown derivation disclosed per campaign',
+        actionValueRoasFormula: 'sum(attributedReturn) / sum(adSpend)',
+        returnSurplusFormula: 'sum(attributedReturn) - sum(adSpend)',
+        thresholdRule: 'weighted attributed-action-value ROAS >= 1.0x',
+        verifiedLaunchRule:
+          'tool ownership is recorded or strict legacy-name-inferred AND metaCampaignId is non-empty AND launchedAt is valid',
+        maturityRule: `verified launch AND spend > 0 AND at least ${TOOL_IMPACT_MATURITY_DAYS} days since launchedAt`,
+        metricsWindow: 'campaign-lifetime',
+        warnings: methodologyWarnings,
+      },
+      cohort: {
+        ...cohort.summary,
+        campaigns: cohortRows,
+      },
+      freshness: {
+        latestMetricsAt: freshnessMs.length
+          ? new Date(Math.max(...freshnessMs)).toISOString()
+          : null,
+        oldestMetricsAt: freshnessMs.length
+          ? new Date(Math.min(...freshnessMs)).toISOString()
+          : null,
+        campaignsWithKnownFreshness: freshnessDates.length,
+        campaignsWithoutFreshness,
+        staleCampaigns,
+        staleAfterHours: STALE_METRICS_HOURS,
+        status: freshnessStatus,
+      },
       economics: {
         productName: econ.productName,
         marginPct: econ.marginPct,
@@ -425,26 +650,99 @@ export class DashboardService {
         notes: econ.notes,
       },
       automation: {
+        pipelineRuns: {
+          total: pipelineRuns.length,
+          completed: runCompleted,
+          failed: runFailed,
+          inProgress: pipelineRuns.length - runCompleted - runFailed,
+          completionRatePct:
+            pipelineRuns.length > 0
+              ? round((runCompleted / pipelineRuns.length) * 100, 1)
+              : 0,
+          failureRatePct:
+            pipelineRuns.length > 0
+              ? round((runFailed / pipelineRuns.length) * 100, 1)
+              : 0,
+        },
+        timeToApprovalReady: durationStats(
+          approvalReadyDurations,
+          'PipelineRun.startedAt → Campaign.createdAt (approval-ready proxy)',
+        ),
+        timeToLive: durationStats(
+          liveDurations,
+          'PipelineRun.startedAt → Campaign.launchedAt',
+        ),
         cyclesRun: cycles.length,
+        cyclesCompleted: (cycles as any[]).filter(
+          (cycle) => cycle.status === 'completed',
+        ).length,
+        cyclesFailed: (cycles as any[]).filter(
+          (cycle) => cycle.status === 'failed',
+        ).length,
         campaignsWatched,
         lastCycleAt: lastCycleAt ? new Date(lastCycleAt).toISOString() : null,
-        cadenceLabel: 'Every 6 hours, automatically — plus on demand',
+        cadenceLabel: 'Scheduled automatically — plus on demand',
       },
       diagnosis: {
         decisionsProposed: decisions.length,
+        decisionFunnel: {
+          proposed: decisions.length,
+          open: decisionsByStatus.shadow_review,
+          approved: decisionsByStatus.approved,
+          rejected: decisionsByStatus.rejected,
+          expired: decisionsByStatus.expired,
+          executed: (decisions as any[]).filter((d) =>
+            isFiniteDate(d.executedAt),
+          ).length,
+          executionFailed: (decisions as any[]).filter((d) =>
+            Boolean(String(d.executionError ?? '').trim()),
+          ).length,
+        },
         byStatus: decisionsByStatus,
         byActionType: [...actionTypeCounts.entries()]
           .map(([actionType, count]) => ({ actionType, count }))
           .sort((a, b) => b.count - a.count),
-        openOpportunityINR7d: round(openOpportunityINR7d, 2),
+        modelEstimates: {
+          label: 'Model estimate — not realized return',
+          openDecisionsWithEstimate: openWithEstimate.length,
+          highestExpectedProfitDeltaINR7d:
+            highestExpected == null ? null : round(highestExpected, 2),
+          areSummed: false,
+          notSummedReason:
+            'Open recommendations can be alternatives or affect the same budget, so adding them would double-count hypothetical value.',
+        },
+        observedOutcomes: {
+          label: 'Observed post-action outcomes — not causal proof',
+          recorded: executedActions.length,
+          awaiting24h: (executedActions as any[]).filter(
+            (a) => a.status === 'pending',
+          ).length,
+          measured24h: (executedActions as any[]).filter((a) =>
+            Boolean(a.metricsAtT24h),
+          ).length,
+          finalized72h,
+          conclusive72h,
+          byLabel: outcomesByLabel,
+          improvedRatePct:
+            conclusive72h > 0
+              ? round((outcomesByLabel.improved / conclusive72h) * 100, 1)
+              : null,
+          latestExecutedAt: latestExecutedAt
+            ? new Date(latestExecutedAt).toISOString()
+            : null,
+        },
         examples,
       },
       launched: {
-        totalCampaigns: managed.length,
+        totalCampaigns: launchedCampaigns.length,
         byStatus,
-        withSpend: rows.filter((r) => r.spend > 0).length,
+        withSpend: cohort.withSpend.length,
+        mature: cohort.mature.length,
+        rawOutcome,
+        matureRawOutcome,
         portfolio,
         topWinner,
+        bestRawResult,
         campaigns: rows,
       },
     };
@@ -515,7 +813,24 @@ export class DashboardService {
     now: Date,
     knownProducts: string[],
   ): DashboardCampaignRow {
-    const facets = parseCampaignName(c.name ?? c.topic, knownProducts);
+    const parsedFacets = parseCampaignName(c.name ?? c.topic, knownProducts);
+    const explicitProductName = String(c.productName ?? '').trim();
+    // campaign.productName is set from the selected product at creation and is
+    // authoritative. Name parsing exists only for legacy rows where that field
+    // predates the campaign — never let a naming heuristic override explicit
+    // provenance on the impact page (or any other dashboard surface).
+    const facets = explicitProductName
+      ? {
+          ...parsedFacets,
+          product: explicitProductName,
+          matched: [
+            ...parsedFacets.matched.filter(
+              (match) => !match.startsWith('product:'),
+            ),
+            `product:${explicitProductName}`,
+          ],
+        }
+      : parsedFacets;
     // Judge this campaign against ITS product's margin, not the account's
     // headline one. Falls back to the headline when the campaign name could
     // not be attributed to a configured product.
@@ -533,15 +848,19 @@ export class DashboardService {
     const spend = windowed.spend;
     // Campaign.revenue can lag behind roas x spend on partially-synced rows;
     // prefer the explicit revenue field and only derive when it's absent.
+    const revenueDerivedFromLegacyRoas =
+      windowed.revenue <= 0 && num(c.roas) > 0 && spend > 0;
     const revenue =
       windowed.revenue > 0
         ? windowed.revenue
-        : num(c.roas) > 0
+        : revenueDerivedFromLegacyRoas
           ? num(c.roas) * spend
           : 0;
 
-    const launchedAt = c.launchedAt ? new Date(c.launchedAt) : null;
-    const endedAt = c.stopTime ? new Date(c.stopTime) : null;
+    const launchedAt = isFiniteDate(c.launchedAt)
+      ? new Date(c.launchedAt)
+      : null;
+    const endedAt = isFiniteDate(c.stopTime) ? new Date(c.stopTime) : null;
     const ageHours = launchedAt
       ? Math.max(0, (now.getTime() - launchedAt.getTime()) / 36e5)
       : null;
@@ -575,8 +894,32 @@ export class DashboardService {
       status: c.status ?? 'unknown',
     });
     const verdict = evaluation.verdict;
+    const returnSurplus = revenue - spend;
+    const roundedReturnSurplus = round(returnSurplus, 2);
+    const rawRoasVerdict: DashboardCampaignRow['rawRoasVerdict'] =
+      !evaluation.isRevenueObjective
+        ? 'not_applicable'
+        : spend <= 0
+          ? 'no_spend'
+          : roundedReturnSurplus === 0
+            ? 'break_even'
+            : roundedReturnSurplus > 0
+              ? 'returned_more_than_spend'
+              : 'returned_less_than_spend';
+    const toolOwnership = classifyToolOwnership(c);
+    const verifiedToolLaunch = isVerifiedToolLaunch(c);
+    const toolImpactStage: DashboardCampaignRow['toolImpactStage'] =
+      !toolOwnership
+        ? 'outside_scope'
+        : !verifiedToolLaunch
+          ? 'created_unverified'
+          : spend <= 0
+            ? 'verified_zero_spend'
+            : campaignIsMature(c, now, TOOL_IMPACT_MATURITY_DAYS)
+              ? 'mature'
+              : 'with_spend_immature';
 
-    const dataAsOf = c.dataAsOf ? new Date(c.dataAsOf) : null;
+    const dataAsOf = isFiniteDate(c.dataAsOf) ? new Date(c.dataAsOf) : null;
     const dataAgeHours = dataAsOf
       ? Math.max(0, (now.getTime() - dataAsOf.getTime()) / 36e5)
       : null;
@@ -591,10 +934,31 @@ export class DashboardService {
       statusLabel: STATUS_LABELS[c.status] ?? c.status ?? '—',
       metaCampaignId: c.metaCampaignId ?? undefined,
       source: c.source ?? 'manual',
+      toolOwnership,
 
       spend: round(spend, 2),
       revenue: round(revenue, 2),
-      roas: round(roas, 3),
+      revenueBasis: revenueDerivedFromLegacyRoas
+        ? 'unknown'
+        : c.revenueBasis === 'meta_action_value' ||
+            c.revenueBasis === 'configured_conversion_value' ||
+            c.revenueBasis === 'no_attributed_revenue'
+          ? c.revenueBasis
+          : 'unknown',
+      revenueAttributionSource: c.revenueAttributionSource ?? 'unknown',
+      revenueAttributionActionTypes: Array.isArray(
+        c.revenueAttributionActionTypes,
+      )
+        ? c.revenueAttributionActionTypes
+        : [],
+      roas: round(roas, 6),
+      returnSurplus: roundedReturnSurplus,
+      isRawRoasProfitable:
+        evaluation.isRevenueObjective && spend > 0
+          ? roundedReturnSurplus >= 0
+          : null,
+      rawRoasVerdict,
+      toolImpactStage,
       conversions: num(windowed.conversions),
       clicks: num(windowed.clicks),
       impressions: num(windowed.impressions),
@@ -1249,6 +1613,20 @@ function num(v: unknown): number {
 
 function sum(xs: number[]): number {
   return xs.reduce((a, b) => a + b, 0);
+}
+
+function isFiniteDate(value: unknown): boolean {
+  if (!value) return false;
+  return Number.isFinite(new Date(value as Date | string).getTime());
+}
+
+function hoursBetween(start: unknown, end: unknown): number | null {
+  if (!isFiniteDate(start) || !isFiniteDate(end)) return null;
+  const duration =
+    (new Date(end as Date | string).getTime() -
+      new Date(start as Date | string).getTime()) /
+    36e5;
+  return Number.isFinite(duration) && duration >= 0 ? duration : null;
 }
 
 function toDateKey(d: Date): string {

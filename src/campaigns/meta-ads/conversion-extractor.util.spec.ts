@@ -1,4 +1,9 @@
-import { appEventActionTypes, extractConversions, extractActionValue } from './conversion-extractor.util';
+import {
+  appEventActionTypes,
+  extractConversions,
+  extractActionValue,
+  resolveProductConversionTypes,
+} from './conversion-extractor.util';
 
 /**
  * Covers the app-events matching gap: campaign-sync.service.ts,
@@ -12,10 +17,13 @@ import { appEventActionTypes, extractConversions, extractActionValue } from './c
  * products.
  */
 describe('appEventActionTypes', () => {
-  it('returns install + custom-event action_types for an app product', () => {
+  it('returns only the configured custom-event action_type for an app product', () => {
     expect(
-      appEventActionTypes({ metaAppId: '935762695083961', conversionEvent: 'chat_success' }),
-    ).toEqual(['mobile_app_install', 'omni_app_install', 'app_custom_event.other.chat_success']);
+      appEventActionTypes({
+        metaAppId: '935762695083961',
+        conversionEvent: 'chat_success',
+      }),
+    ).toEqual(['app_custom_event.other.chat_success']);
   });
 
   it('prefers customEventName over conversionEvent when both are set', () => {
@@ -37,20 +45,36 @@ describe('appEventActionTypes', () => {
   });
 
   it('returns the standard mobile-purchase action_types for conversionEvent=Purchase, not the OTHER shape', () => {
-    const types = appEventActionTypes({ metaAppId: '935762695083961', conversionEvent: 'Purchase' });
-    expect(types).toEqual(['mobile_app_install', 'omni_app_install', 'mobile_app_purchase', 'omni_purchase']);
+    const types = appEventActionTypes({
+      metaAppId: '935762695083961',
+      conversionEvent: 'Purchase',
+    });
+    expect(types).toEqual(['mobile_app_purchase', 'omni_purchase']);
     expect(types).not.toContain('app_custom_event.other.Purchase');
+  });
+
+  it('returns install action_types only when Install is configured', () => {
+    expect(
+      appEventActionTypes({
+        metaAppId: '935762695083961',
+        conversionEvent: 'Install',
+      }),
+    ).toEqual(['mobile_app_install', 'omni_app_install']);
   });
 });
 
 describe('extractConversions / extractActionValue — app-event actions', () => {
-  const conversionTypes = new Set(appEventActionTypes({
-    metaAppId: '935762695083961',
-    conversionEvent: 'chat_success',
-  }));
+  const conversionTypes = new Set(
+    appEventActionTypes({
+      metaAppId: '935762695083961',
+      conversionEvent: 'chat_success',
+    }),
+  );
 
-  it('counts a custom app event reported under Meta\'s prefixed action_type', () => {
-    const actions = [{ action_type: 'app_custom_event.other.chat_success', value: '7' }];
+  it("counts a custom app event reported under Meta's prefixed action_type", () => {
+    const actions = [
+      { action_type: 'app_custom_event.other.chat_success', value: '7' },
+    ];
     expect(extractConversions(actions, conversionTypes)).toBe(7);
   });
 
@@ -59,22 +83,96 @@ describe('extractConversions / extractActionValue — app-event actions', () => 
     expect(extractConversions(actions, conversionTypes)).toBe(0);
   });
 
-  it('counts a mobile app install', () => {
+  it('does not count app installs for a custom-event campaign', () => {
     const actions = [{ action_type: 'mobile_app_install', value: '3' }];
-    expect(extractConversions(actions, conversionTypes)).toBe(3);
+    expect(extractConversions(actions, conversionTypes)).toBe(0);
   });
 
   it('sums the matching action_type value for revenue via extractActionValue', () => {
-    const actionValues = [{ action_type: 'app_custom_event.other.chat_success', value: '499.5' }];
+    const actionValues = [
+      { action_type: 'app_custom_event.other.chat_success', value: '499.5' },
+    ];
     expect(extractActionValue(actionValues, conversionTypes)).toBe(499.5);
   });
 });
 
+describe('resolveProductConversionTypes', () => {
+  it('uses only a product custom conversion ID when account actions contain two products', () => {
+    const resolution = resolveProductConversionTypes({
+      customConversionId: 'product-a',
+      conversionEvent: 'Purchase',
+    });
+    const actions = [
+      {
+        action_type: 'offsite_conversion.custom.product-a',
+        value: '2',
+      },
+      {
+        action_type: 'offsite_conversion.custom.product-b',
+        value: '9',
+      },
+      { action_type: 'purchase', value: '11' },
+    ];
+
+    expect([...resolution.conversionTypes]).toEqual([
+      'offsite_conversion.custom.product-a',
+    ]);
+    expect(resolution.source).toBe('custom_conversion');
+    expect(extractConversions(actions, resolution.conversionTypes)).toBe(2);
+  });
+
+  it('maps each supported standard web event to only its exact pair', () => {
+    expect([
+      ...resolveProductConversionTypes({ conversionEvent: 'Lead' })
+        .conversionTypes,
+    ]).toEqual(['lead', 'offsite_conversion.fb_pixel_lead']);
+    expect([
+      ...resolveProductConversionTypes({ conversionEvent: 'StartTrial' })
+        .conversionTypes,
+    ]).toEqual(['start_trial', 'offsite_conversion.fb_pixel_start_trial']);
+  });
+
+  it('does not sum the supplied account set when the product is unresolved', () => {
+    const fallback = new Set(['purchase', 'lead']);
+
+    expect(resolveProductConversionTypes(undefined, fallback)).toEqual({
+      conversionTypes: new Set(),
+      source: 'unresolved',
+    });
+    expect(
+      resolveProductConversionTypes(
+        { conversionEvent: 'CustomEvent' },
+        fallback,
+      ),
+    ).toEqual({ conversionTypes: new Set(), source: 'unresolved' });
+  });
+
+  it('uses app aliases only for an app-promotion campaign', () => {
+    const appProduct = {
+      metaAppId: 'app-id',
+      conversionEvent: 'Purchase',
+    };
+
+    expect([
+      ...resolveProductConversionTypes(appProduct, new Set(), {
+        useAppEvents: true,
+      }).conversionTypes,
+    ]).toEqual(['mobile_app_purchase', 'omni_purchase']);
+    expect([
+      ...resolveProductConversionTypes(appProduct, new Set(), {
+        useAppEvents: false,
+      }).conversionTypes,
+    ]).toEqual(['purchase', 'offsite_conversion.fb_pixel_purchase']);
+  });
+});
+
 describe('extractActionValue — real wallet-recharge ROAS (conversionEvent=Purchase)', () => {
-  const conversionTypes = new Set(appEventActionTypes({
-    metaAppId: '935762695083961',
-    conversionEvent: 'Purchase',
-  }));
+  const conversionTypes = new Set(
+    appEventActionTypes({
+      metaAppId: '935762695083961',
+      conversionEvent: 'Purchase',
+    }),
+  );
 
   it('extracts recharge value when only mobile_app_purchase is reported', () => {
     const actionValues = [{ action_type: 'mobile_app_purchase', value: '999' }];

@@ -1,5 +1,9 @@
 import { ObjectiveVerdict } from './objective-evaluation';
 import { CampaignFacets } from './campaign-name.parser';
+import type {
+  CampaignRevenueAttributionSource,
+  CampaignRevenueBasis,
+} from '../campaigns/schemas/campaign.schema';
 
 /**
  * The complete tenant picture, computed server-side.
@@ -114,10 +118,35 @@ export interface DashboardCampaignRow {
   metaCampaignId?: string;
   /** 'agent' | 'human' | 'manual' — see isManagedCampaignSource for what this gates. */
   source: string;
+  /** How this record qualifies for the Agent Achievement cohort, if at all. */
+  toolOwnership: ToolImpactOwnership | null;
 
   spend: number;
   revenue: number;
+  revenueBasis: CampaignRevenueBasis;
+  revenueAttributionSource: CampaignRevenueAttributionSource;
+  revenueAttributionActionTypes: string[];
   roas: number;
+  /** Meta-attributed revenue minus ad spend. No product-margin adjustment. */
+  returnSurplus: number;
+  /**
+   * Raw ad-spend-return verdict for sales objectives. Null means ROAS is not
+   * an applicable/observable yardstick (non-sales objective or no spend).
+   */
+  isRawRoasProfitable: boolean | null;
+  rawRoasVerdict:
+    | 'returned_more_than_spend'
+    | 'break_even'
+    | 'returned_less_than_spend'
+    | 'no_spend'
+    | 'not_applicable';
+  /** Server-authoritative membership stage for the Agent Achievement ledger. */
+  toolImpactStage:
+    | 'outside_scope'
+    | 'created_unverified'
+    | 'verified_zero_spend'
+    | 'with_spend_immature'
+    | 'mature';
   conversions: number;
   clicks: number;
   impressions: number;
@@ -264,19 +293,154 @@ export interface DashboardEconomics {
 /**
  * What THIS TOOL has actually done, as opposed to the account-wide picture in
  * DashboardOverview (which includes campaigns the marketing team runs in Meta
- * directly and this system has never touched). Scoped to
- * isManagedCampaignSource campaigns only ('agent' + 'human' sources) — see
- * campaign.schema.ts for why 'manual' campaigns don't belong here.
+ * directly and this system has never touched). Defaults to autonomous
+ * `agent` campaigns; callers can request `managed` to include dashboard-
+ * authored `human` campaigns. Imported `manual` campaigns never belong here
+ * unless their strict legacy AGENT_<topic>_<date> launch marker identifies a
+ * pre-source-field autonomous launch; that weaker evidence stays disclosed.
  */
+export type ToolImpactScope = 'agent' | 'managed';
+
+export type ToolImpactOwnershipEvidence =
+  | 'persisted_agent_source'
+  | 'persisted_human_source'
+  | 'legacy_agent_name';
+
+export interface ToolImpactOwnership {
+  actor: 'agent' | 'human';
+  evidence: ToolImpactOwnershipEvidence;
+  /** Legacy names are deterministic evidence, but weaker than a stored source. */
+  confidence: 'recorded' | 'name_inferred';
+}
+
+export interface ToolImpactDurationStats {
+  sampleSize: number;
+  medianHours: number | null;
+  p90Hours: number | null;
+  /** Exact timestamp pair used; prevents a proxy being presented as fact. */
+  basis: string;
+}
+
+export interface ToolImpactCohortStageCounts {
+  created: number;
+  launched: number;
+  withSpend: number;
+  mature: number;
+}
+
+export interface ToolImpactRawOutcome {
+  /** Every verified launch in the requested tool-owned cohort. */
+  campaigns: number;
+  /** The measured population used for both numerator and denominator. */
+  campaignsWithSpend: number;
+  spend: number;
+  attributedReturn: number;
+  revenueBasis: Array<{
+    basis: CampaignRevenueBasis;
+    campaignCount: number;
+    spend: number;
+    revenue: number;
+    weightedRoas: number;
+  }>;
+  containsModeledOrUnknownRevenue: boolean;
+  weightedRoas: number;
+  returnSurplus: number;
+  returnPosition: 'above' | 'equal' | 'below' | 'no_spend';
+  /** True only when persisted attributed action value >= ad spend. */
+  metOneXActionValueThreshold: boolean;
+  thresholdRule: 'weighted_attributed_roas_gte_1';
+  nonSalesCampaigns: number;
+  nonSalesSpend: number;
+}
+
 export interface ToolImpactOverview {
   tenantId: string;
   generatedAt: string;
 
+  scope: {
+    requested: ToolImpactScope;
+    includedSources: Array<'agent' | 'human'>;
+    label: string;
+    /** The exact predicate represented by all impact figures below. */
+    cohortRule: string;
+  };
+
+  methodology: {
+    version: 'attributed_action_value_roas_v1';
+    headlineMetric: 'attributed_action_value_roas';
+    revenueLabel: string;
+    actionValueRoasFormula: 'sum(attributedReturn) / sum(adSpend)';
+    returnSurplusFormula: 'sum(attributedReturn) - sum(adSpend)';
+    thresholdRule: 'weighted attributed-action-value ROAS >= 1.0x';
+    verifiedLaunchRule: string;
+    maturityRule: string;
+    metricsWindow: 'campaign-lifetime';
+    warnings: string[];
+  };
+
+  cohort: ToolImpactCohortStageCounts & {
+    maturityDays: number;
+    bySource: {
+      agent: ToolImpactCohortStageCounts;
+      human: ToolImpactCohortStageCounts;
+    };
+    ownershipEvidence: {
+      persistedAgentSource: number;
+      persistedHumanSource: number;
+      legacyAgentName: number;
+    };
+    /**
+     * Mutually exclusive first-failed-stage buckets. Together with `mature`,
+     * these reconcile to the complete source population considered.
+     */
+    exclusions: Array<{
+      code:
+        | 'manual_source'
+        | 'unrecognized_source'
+        | 'human_outside_agent_scope'
+        | 'missing_meta_campaign_id'
+        | 'missing_launched_at'
+        | 'zero_spend'
+        | 'not_mature';
+      stage: 'scope' | 'verified_launch' | 'with_spend' | 'mature';
+      count: number;
+      description: string;
+    }>;
+    /**
+     * Complete selected-source evidence ledger, including created records that
+     * never reached a verified Meta launch. Never use this array for ROAS.
+     */
+    campaigns: DashboardCampaignRow[];
+  };
+
+  freshness: {
+    latestMetricsAt: string | null;
+    oldestMetricsAt: string | null;
+    campaignsWithKnownFreshness: number;
+    campaignsWithoutFreshness: number;
+    staleCampaigns: number;
+    staleAfterHours: number;
+    status: 'fresh' | 'partially_stale' | 'unknown';
+  };
+
   economics: DashboardEconomics;
 
   automation: {
-    /** Intelligence cycles run — one per (campaign, 6h tick or manual Prime). */
+    pipelineRuns: {
+      /** Every persisted tenant run record, including records without a campaign. */
+      total: number;
+      completed: number;
+      failed: number;
+      inProgress: number;
+      completionRatePct: number;
+      failureRatePct: number;
+    };
+    timeToApprovalReady: ToolImpactDurationStats;
+    timeToLive: ToolImpactDurationStats;
+    /** Scheduled/on-demand intelligence cycles for exact cohort campaigns. */
     cyclesRun: number;
+    cyclesCompleted: number;
+    cyclesFailed: number;
     /** Distinct campaigns that have ever gone through a cycle. */
     campaignsWatched: number;
     lastCycleAt: string | null;
@@ -285,30 +449,68 @@ export interface ToolImpactOverview {
 
   diagnosis: {
     decisionsProposed: number;
+    decisionFunnel: {
+      proposed: number;
+      open: number;
+      approved: number;
+      rejected: number;
+      expired: number;
+      executed: number;
+      executionFailed: number;
+    };
     byStatus: Record<
       'shadow_review' | 'approved' | 'rejected' | 'expired',
       number
     >;
     byActionType: Array<{ actionType: string; count: number }>;
-    /** Sum of expectedProfitDeltaINR7d across still-open (shadow_review) decisions. */
-    openOpportunityINR7d: number;
+    modelEstimates: {
+      label: 'Model estimate — not realized return';
+      openDecisionsWithEstimate: number;
+      highestExpectedProfitDeltaINR7d: number | null;
+      /** Alternatives can overlap, so their forecasts are intentionally not summed. */
+      areSummed: false;
+      notSummedReason: string;
+    };
+    observedOutcomes: {
+      label: 'Observed post-action outcomes — not causal proof';
+      recorded: number;
+      awaiting24h: number;
+      measured24h: number;
+      finalized72h: number;
+      conclusive72h: number;
+      byLabel: Record<
+        'improved' | 'worsened' | 'neutral' | 'inconclusive',
+        number
+      >;
+      improvedRatePct: number | null;
+      latestExecutedAt: string | null;
+    };
     /** A handful of the highest-impact open decisions, for the "here's what it found" beat. */
     examples: Array<{
       campaignName: string;
       actionType: string;
       reasoning: string;
       expectedProfitDeltaINR7d: number;
+      isModelEstimate: true;
       status: string;
     }>;
   };
 
   launched: {
+    /** Verified launches only: included source + Meta id + launchedAt. */
     totalCampaigns: number;
     byStatus: Record<string, number>;
     /** Campaigns that actually spent money, vs paused/failed at zero spend. */
     withSpend: number;
+    mature: number;
+    rawOutcome: ToolImpactRawOutcome;
+    /** Same raw-return calculation restricted to D7-mature launches. */
+    matureRawOutcome: ToolImpactRawOutcome;
     portfolio: PortfolioRollup;
+    /** Kept for the existing economics view; never use as this page's headline. */
     topWinner: DashboardCampaignRow | null;
+    /** Highest raw return surplus among verified launches with spend. */
+    bestRawResult: DashboardCampaignRow | null;
     campaigns: DashboardCampaignRow[];
   };
 }

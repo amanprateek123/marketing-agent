@@ -1,6 +1,17 @@
-import { Controller, Get, Param, ParseIntPipe, Query } from '@nestjs/common';
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Query,
+} from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
-import { DashboardOverview, ToolImpactOverview } from './dashboard.types';
+import {
+  DashboardOverview,
+  ToolImpactOverview,
+  ToolImpactScope,
+} from './dashboard.types';
 
 @Controller('dashboard')
 export class DashboardController {
@@ -30,20 +41,26 @@ export class DashboardController {
   }
 
   /**
-   * GET /api/v1/dashboard/:tenantId/tool-impact
+   * GET /api/v1/dashboard/:tenantId/tool-impact?scope=agent|managed
    *
-   * Scoped to campaigns THIS TOOL launched (source 'agent' + 'human') —
-   * excludes 'manual' campaigns the marketing team runs directly in Meta.
-   * getOverview's account-wide numbers are the wrong evidence for "is the
-   * tool working," since most of an account's spend and its whole portfolio
-   * ROAS can belong to campaigns the tool has never touched.
+   * Defaults to AI-pipeline campaigns (`agent`). `managed` adds campaigns a
+   * person created through the dashboard (`human`). Both scopes require
+   * verified Meta launch evidence for impact metrics and always exclude
+   * campaigns imported from Ads Manager (`manual`).
    */
   @Get(':tenantId/tool-impact')
   async getToolImpact(
     @Param('tenantId') tenantId: string,
+    @Query('scope') scope?: string,
   ): Promise<ToolImpactOverview> {
-    return this.dashboard.getToolImpact(tenantId);
+    return this.dashboard.getToolImpact(tenantId, parseToolImpactScope(scope));
   }
+}
+
+function parseToolImpactScope(scope: string | undefined): ToolImpactScope {
+  if (scope == null || scope.trim() === '') return 'agent';
+  if (scope === 'agent' || scope === 'managed') return scope;
+  throw new BadRequestException('scope must be either "agent" or "managed"');
 }
 
 /** 1-365 days. Guards against a hostile or fat-fingered window blowing up the

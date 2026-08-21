@@ -15,6 +15,11 @@ const FETCH_MAX_RETRIES = 3;
 // short delays here would just re-hit the same limit immediately.
 const FETCH_RETRY_DELAYS_MS = [3000, 10000, 25000];
 
+/** Optional out-param; existing array-returning callers remain unchanged. */
+export interface FetchCompleteness {
+  complete: boolean;
+}
+
 function isRetryableMetaError(err: any): boolean {
   const code = err?.response?.data?.error?.code;
   if (typeof code === 'number' && RATE_LIMIT_CODES.includes(code)) return true;
@@ -42,7 +47,9 @@ export async function fetchAllPages(
   label: string,
   logger: Logger,
   maxPages = 40,
+  completeness?: FetchCompleteness,
 ): Promise<any[]> {
+  if (completeness) completeness.complete = true;
   const rows: any[] = [];
   let url: string | null = initialUrl;
   let params: any = initialParams;
@@ -53,7 +60,10 @@ export async function fetchAllPages(
     let succeeded = false;
     for (let attempt = 1; attempt <= FETCH_MAX_RETRIES + 1; attempt++) {
       try {
-        const res: any = await axios.get(pageUrl, { params: pageParams, timeout: 60000 });
+        const res: any = await axios.get(pageUrl, {
+          params: pageParams,
+          timeout: 60000,
+        });
         rows.push(...(res.data?.data ?? []));
         // paging.next is a fully-qualified URL with the cursor embedded.
         url = res.data?.paging?.next ?? null;
@@ -75,11 +85,16 @@ export async function fetchAllPages(
       }
     }
     if (!succeeded) {
+      if (completeness) completeness.complete = false;
       logger.warn(
         `${label} fetch failed (page ${page}): ${lastErr?.response?.data?.error?.message ?? lastErr?.message}`,
       );
       url = null;
     }
+  }
+  if (url) {
+    if (completeness) completeness.complete = false;
+    logger.warn(`${label} fetch stopped at the ${maxPages}-page safety cap`);
   }
   logger.log(`${label}: ${rows.length} rows`);
   return rows;
@@ -97,22 +112,33 @@ export async function fetchAllPagesChunked(
   label: string,
   logger: Logger,
   chunkSize = 50,
+  completeness?: FetchCompleteness,
 ): Promise<any[]> {
+  if (completeness) completeness.complete = true;
   const allRows: any[] = [];
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize);
-    const baseFiltering = baseParams.filtering ? JSON.parse(baseParams.filtering) : [];
-    const otherFilters = baseFiltering.filter((f: any) => f.field !== filterField);
+    const baseFiltering = baseParams.filtering
+      ? JSON.parse(baseParams.filtering)
+      : [];
+    const otherFilters = baseFiltering.filter(
+      (f: any) => f.field !== filterField,
+    );
     const filtering = JSON.stringify([
       ...otherFilters,
       { field: filterField, operator: 'IN', value: chunk },
     ]);
+    const chunkCompleteness: FetchCompleteness = { complete: true };
     const rows = await fetchAllPages(
       initialUrl,
       { ...baseParams, filtering },
       `${label} chunk ${i / chunkSize + 1}/${Math.ceil(ids.length / chunkSize)}`,
       logger,
+      40,
+      chunkCompleteness,
     );
+    if (!chunkCompleteness.complete && completeness)
+      completeness.complete = false;
     allRows.push(...rows);
   }
   return allRows;

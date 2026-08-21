@@ -18,6 +18,19 @@ export type CampaignStatus =
  *   we only observe it. Never launched or safety-rail-managed by this system.
  */
 export type CampaignSource = 'agent' | 'manual' | 'human';
+export type CampaignRevenueBasis =
+  | 'meta_action_value'
+  | 'configured_conversion_value'
+  | 'no_attributed_revenue'
+  | 'unknown';
+export type CampaignRevenueAttributionSource =
+  | 'custom_conversion'
+  | 'custom_event'
+  | 'standard_event'
+  | 'app_event'
+  | 'account_fallback'
+  | 'unresolved'
+  | 'unknown';
 
 /**
  * 'agent' and 'human' campaigns were both launched BY this system (weekly
@@ -169,6 +182,43 @@ export class Campaign {
   /** Meta action_values sum (or fallback: conversions × product.conversionValue), NET of refund haircut. ₹. */
   @Prop({ default: 0 })
   revenue: number;
+
+  /**
+   * How the top-level revenue figure was produced. Historic documents predate
+   * this field and remain `unknown`; never silently present those rows as
+   * observed Meta purchase value.
+   */
+  @Prop({
+    type: String,
+    enum: [
+      'meta_action_value',
+      'configured_conversion_value',
+      'no_attributed_revenue',
+      'unknown',
+    ],
+    default: 'unknown',
+  })
+  revenueBasis: CampaignRevenueBasis;
+
+  /** How the action type(s) used for conversions/revenue were resolved. */
+  @Prop({
+    type: String,
+    enum: [
+      'custom_conversion',
+      'custom_event',
+      'standard_event',
+      'app_event',
+      'account_fallback',
+      'unresolved',
+      'unknown',
+    ],
+    default: 'unknown',
+  })
+  revenueAttributionSource: CampaignRevenueAttributionSource;
+
+  /** Exact Meta action_type aliases considered for this campaign's return. */
+  @Prop({ type: [String], default: [] })
+  revenueAttributionActionTypes: string[];
 
   @Prop({ default: 0 })
   ctr: number;

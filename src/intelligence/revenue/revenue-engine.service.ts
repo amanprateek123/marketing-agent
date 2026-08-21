@@ -9,7 +9,13 @@ import { SliceRepository } from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { RevenueData } from '../orchestrator/decision-context';
-import { Company } from '../../companies/schemas/company.schema';
+import {
+  Company,
+  CompanyDocument,
+} from '../../companies/schemas/company.schema';
+import { Campaign } from '../../campaigns/schemas/campaign.schema';
+import { tryResolveCampaignProduct } from '../../campaigns/campaign-creator/resolve-campaign-product';
+import { parseCampaignName } from '../../dashboard/campaign-name.parser';
 
 /**
  * Observed-first revenue interpretation.
@@ -48,6 +54,9 @@ export class RevenueEngine extends BaseEngine<
     @Optional()
     @InjectModel(Company.name)
     private readonly companyModel: Model<Company> | null,
+    @Optional()
+    @InjectModel(Campaign.name)
+    private readonly campaignModel: Model<Campaign> | null,
   ) {
     super(sliceRepo, eventBus, registry);
   }
@@ -107,8 +116,15 @@ export class RevenueEngine extends BaseEngine<
 
     // Load product config as PRIOR (not fact).
     const ident = this.identity.values().next().value;
-    const product = await this.loadActiveProduct(ident?.tenantId);
-    const configMarginPct = clamp(product?.contributionMargin ?? 0.4, 0.01, 0.99);
+    const product = await this.resolveProductForCampaign(
+      ident?.tenantId,
+      ident?.campaignId,
+    );
+    const configMarginPct = clamp(
+      product?.contributionMargin ?? 0.4,
+      0.01,
+      0.99,
+    );
     const configRefundPct = clamp(
       (product?.refundRatePercent ?? 0) / 100,
       0,
@@ -120,8 +136,18 @@ export class RevenueEngine extends BaseEngine<
 
     let method: RevenueDerivation['method'];
     let usedMarginPct = configMarginPct;
-    let usedRefundPct = configRefundPct;
+    const usedRefundPct = configRefundPct;
     const notes: string[] = [];
+
+    if (product?.resolutionMethod === 'fallback_first') {
+      notes.push(
+        `Product attributed by fallback (no recorded productName, name didn't match a configured product) — using "${product.name}", the tenant's first active product. Margin/breakeven below may not match what this campaign actually sells.`,
+      );
+    } else if (product?.resolutionMethod === 'name_match') {
+      notes.push(
+        `Product attributed from the campaign name ("${product.name}") — no productName was recorded at launch.`,
+      );
+    }
 
     if (enoughObserved && product) {
       method = 'observed';
@@ -157,7 +183,9 @@ export class RevenueEngine extends BaseEngine<
     // breakeven for a 45%-margin product whose breakeven is ~2.22x). 2x
     // breakeven scales correctly per product and lands almost exactly on
     // "2 ROAS" for this account's primary ~97%-margin product.
-    const targetROAS = Number.isFinite(breakevenROAS) ? breakevenROAS * 2 : Infinity;
+    const targetROAS = Number.isFinite(breakevenROAS)
+      ? breakevenROAS * 2
+      : Infinity;
 
     const netRevenue = grossRevenue; // snapshot revenue already refund-net
     const contributionMargin = netRevenue * usedMarginPct - spend;
@@ -224,9 +252,18 @@ export class RevenueEngine extends BaseEngine<
     const totalLog = Math.abs(logCtr) + Math.abs(logCvr) + Math.abs(logAov);
 
     const decomposition = {
-      ctr: { contribution: totalLog > 0 ? round(logCtr / totalLog, 3) : 0, delta: round(ctrDelta, 4) },
-      cvr: { contribution: totalLog > 0 ? round(logCvr / totalLog, 3) : 0, delta: round(cvrDelta, 4) },
-      aov: { contribution: totalLog > 0 ? round(logAov / totalLog, 3) : 0, delta: round(aovDelta, 4) },
+      ctr: {
+        contribution: totalLog > 0 ? round(logCtr / totalLog, 3) : 0,
+        delta: round(ctrDelta, 4),
+      },
+      cvr: {
+        contribution: totalLog > 0 ? round(logCvr / totalLog, 3) : 0,
+        delta: round(cvrDelta, 4),
+      },
+      aov: {
+        contribution: totalLog > 0 ? round(logAov / totalLog, 3) : 0,
+        delta: round(aovDelta, 4),
+      },
       frequency: {
         // Fatigue signature: frequency climbing while CTR falls in the same
         // window. Zero when either isn't true — this isn't a multiplicand
@@ -248,7 +285,9 @@ export class RevenueEngine extends BaseEngine<
         isProfitable,
         daysSinceBreakeven,
       },
-      targetROAS: Number.isFinite(targetROAS) ? round(targetROAS, 3) : breakevenROAS,
+      targetROAS: Number.isFinite(targetROAS)
+        ? round(targetROAS, 3)
+        : breakevenROAS,
       derivation: {
         method,
         product: product?.name ?? null,
@@ -262,37 +301,94 @@ export class RevenueEngine extends BaseEngine<
     };
   }
 
-  private async loadActiveProduct(tenantId?: string): Promise<
-    | {
-        name: string;
-        contributionMargin?: number;
-        refundRatePercent?: number;
-        conversionValue?: number;
-      }
-    | null
-  > {
+  /**
+   * Which product THIS campaign is actually selling — not "the tenant's one
+   * active product," which silently used the same margin for every campaign
+   * regardless of which of the tenant's (possibly many, differently-margined)
+   * products it advertises. On this tenant specifically: Nadi Report (97%
+   * margin, 1.03x breakeven) sits alongside Nadi Leaf Reading (45%, 2.22x) —
+   * judging a Nadi Leaf campaign against Nadi Report's breakeven understates
+   * how badly it's underperforming by more than 2x. Same bug class the
+   * dashboard already fixed (see economics.ts) for the account-wide view;
+   * this closes it for the recommendation engine specifically.
+   *
+   * Resolution order, matching resolveCampaignProduct's priority:
+   *   1. campaign.productName — authoritative when set.
+   *   2. Heuristic name match (parseCampaignName) — for older campaigns
+   *      launched before productName was recorded at create time.
+   *   3. Tenant's first active product — last resort, same as the old
+   *      behavior, now only reached when neither above applies.
+   */
+  private async resolveProductForCampaign(
+    tenantId?: string,
+    campaignId?: string,
+  ): Promise<{
+    name: string;
+    contributionMargin?: number;
+    refundRatePercent?: number;
+    conversionValue?: number;
+    resolutionMethod: 'campaign_field' | 'name_match' | 'fallback_first';
+  } | null> {
     if (!this.companyModel || !tenantId) return null;
     try {
-      const company = await this.companyModel.findOne({ tenantId }).lean().exec();
+      const company = await this.companyModel
+        .findOne({ tenantId })
+        .lean()
+        .exec();
       if (!company) return null;
-      const raw =
-        ((company as unknown as { products?: Array<Record<string, unknown>> }).products ?? []) as Array<
-          Record<string, unknown>
-        >;
-      const active = raw.find((p) => p.active !== false) ?? raw[0];
+      const products = ((
+        company as unknown as { products?: Array<Record<string, unknown>> }
+      ).products ?? []) as Array<Record<string, unknown>>;
+      if (!products.length) return null;
+
+      const campaign =
+        campaignId && this.campaignModel
+          ? await this.campaignModel
+              .findById(campaignId)
+              .select('name productName')
+              .lean()
+              .exec()
+          : null;
+      const campaignName = campaign ? String((campaign as any).name ?? '') : '';
+      const campaignProductName = campaign
+        ? String((campaign as any).productName ?? '')
+        : '';
+
+      if (campaign) {
+        const strict = tryResolveCampaignProduct(
+          company as unknown as CompanyDocument,
+          {
+            productName: campaignProductName || undefined,
+            name: campaignName || undefined,
+          },
+        );
+        if (strict.resolution) {
+          return toProductShape(strict.resolution.product, 'campaign_field');
+        }
+      }
+
+      if (campaignName) {
+        const knownNames = products
+          .map((p) => String(p.name ?? ''))
+          .filter(Boolean);
+        const facets = parseCampaignName(campaignName, knownNames);
+        const byName = products.find(
+          (p) => String(p.name ?? '') === facets.product,
+        );
+        if (byName) return toProductShape(byName, 'name_match');
+      }
+
+      const active = products.find((p) => p.active !== false) ?? products[0];
       if (!active) return null;
-      return {
-        name: String(active.name ?? 'product'),
-        contributionMargin: numOrUndef(active.contributionMargin),
-        refundRatePercent: numOrUndef(active.refundRatePercent),
-        conversionValue: numOrUndef(active.conversionValue),
-      };
+      return toProductShape(active, 'fallback_first');
     } catch {
       return null;
     }
   }
 
-  private zero(reason: string): RevenueData & { derivation: RevenueDerivation } {
+  private zero(
+    reason: string,
+  ): RevenueData & { derivation: RevenueDerivation } {
     return {
       grossRevenue: 0,
       netRevenue: 0,
@@ -325,8 +421,11 @@ export class RevenueEngine extends BaseEngine<
     data: RevenueData & { derivation: RevenueDerivation },
   ): number {
     const cm =
-      (deps.snapshot!.data as { metrics?: { campaignLevel?: Record<string, number> } })
-        .metrics?.campaignLevel ?? {};
+      (
+        deps.snapshot!.data as {
+          metrics?: { campaignLevel?: Record<string, number> };
+        }
+      ).metrics?.campaignLevel ?? {};
     const spend = num(cm.spend);
     const purchases = num(cm.purchases);
 
@@ -387,6 +486,23 @@ function num(v: unknown): number {
 }
 function numOrUndef(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+function toProductShape(
+  p: {
+    name?: unknown;
+    contributionMargin?: unknown;
+    refundRatePercent?: unknown;
+    conversionValue?: unknown;
+  },
+  resolutionMethod: 'campaign_field' | 'name_match' | 'fallback_first',
+) {
+  return {
+    name: String(p.name ?? 'product'),
+    contributionMargin: numOrUndef(p.contributionMargin),
+    refundRatePercent: numOrUndef(p.refundRatePercent),
+    conversionValue: numOrUndef(p.conversionValue),
+    resolutionMethod,
+  };
 }
 function clamp(v: number, lo: number, hi: number): number {
   if (!Number.isFinite(v)) return lo;

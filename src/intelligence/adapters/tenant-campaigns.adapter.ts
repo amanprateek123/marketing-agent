@@ -2,12 +2,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CompaniesService } from '../../companies/companies.service';
-import { Campaign } from '../../campaigns/schemas/campaign.schema';
+import {
+  Campaign,
+  CampaignSource,
+  isManagedCampaignSource,
+} from '../../campaigns/schemas/campaign.schema';
 import {
   SnapshotTarget,
   TenantCampaignsProvider,
 } from '../scheduler/tenant-campaigns.provider.interface';
 import { ProductForRevenue } from '../snapshot/snapshot.types';
+
+const MANAGED_CAMPAIGN_SOURCES: CampaignSource[] = ['agent', 'human'];
 
 /**
  * Real TenantCampaignsProvider implementation. Feeds the two BullMQ
@@ -31,6 +37,7 @@ export class TenantCampaignsAdapter implements TenantCampaignsProvider {
           tenantId,
           status: 'active',
           metaCampaignId: { $ne: '' },
+          source: { $in: MANAGED_CAMPAIGN_SOURCES },
         })
         .lean()
         .exec(),
@@ -45,7 +52,7 @@ export class TenantCampaignsAdapter implements TenantCampaignsProvider {
     const products = this.buildProducts(company.products ?? []);
 
     return campaigns
-      .filter((c) => c.metaCampaignId)
+      .filter((c) => c.metaCampaignId && isManagedCampaignSource(c.source))
       .map((c) => ({
         campaignId: String((c as { _id: unknown })._id),
         metaCampaignId: c.metaCampaignId,
