@@ -193,7 +193,13 @@ export function mapMetaObjective(raw?: string): ObjectiveKey | undefined {
   if (u.includes('TRAFFIC') || u.includes('LINK_CLICKS')) return 'traffic';
   if (u.includes('ENGAGE')) return 'engagement';
   if (u.includes('VIDEO')) return 'video_views';
-  if (u.includes('APP_INSTALL')) return 'app_installs';
+  // Meta's current ODAX objective is OUTCOME_APP_PROMOTION. Older imports can
+  // still carry APP_INSTALLS. Both are non-revenue app objectives; allowing
+  // the modern value to fall through makes the dashboard's compatibility
+  // fallback classify app spend as Sales and incorrectly mix it into ROAS.
+  if (u.includes('APP_INSTALL') || u.includes('APP_PROMOTION')) {
+    return 'app_installs';
+  }
   if (u.includes('MESSAGES')) return 'messages';
   return undefined;
 }

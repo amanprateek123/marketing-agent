@@ -59,6 +59,9 @@ describe('DashboardService.getToolImpact', () => {
         revenue: 120,
         revenueBasis: 'meta_action_value',
         conversions: 2,
+        campaignConfig: {
+          adSets: [{ optimizationGoal: 'VALUE' }],
+        },
       },
       {
         _id: 'agent-not-launched',
@@ -119,6 +122,9 @@ describe('DashboardService.getToolImpact', () => {
         budget: 50,
         spend: 50,
         revenue: 999,
+        campaignConfig: {
+          adSets: [{ optimizationGoal: 'REACH' }],
+        },
       },
       {
         _id: 'agent-unknown-objective',
@@ -191,7 +197,15 @@ describe('DashboardService.getToolImpact', () => {
             date: '2026-08-01',
             spend: 60,
             revenue: 80,
-            revenueBasis: 'meta_action_value',
+            impressions: 1_200,
+            reach: 900,
+            clicks: 48,
+            inlineLinkClicks: 40,
+            conversions: 2,
+            addToCart: 8,
+            initiateCheckout: 4,
+            landingPageView: 32,
+            revenueBasis: 'configured_conversion_value',
             revenueAttributionSource: 'custom_conversion',
             revenueAttributionActionTypes: [
               'offsite_conversion.custom.product-a',
@@ -208,6 +222,11 @@ describe('DashboardService.getToolImpact', () => {
             date: '2026-08-02',
             spend: 40,
             revenue: 40,
+            impressions: 800,
+            reach: 600,
+            clicks: 20,
+            inlineLinkClicks: 16,
+            conversions: 1,
             // A pre-provenance row: spend is valid, return is only an
             // explicitly unverified persisted value.
           },
@@ -240,12 +259,6 @@ describe('DashboardService.getToolImpact', () => {
             spend: 50,
             revenue: 999,
           },
-          {
-            metaCampaignId: 'meta-unknown-objective',
-            date: '2026-08-01',
-            spend: 10,
-            revenue: 20,
-          },
         ]),
       ),
     };
@@ -277,7 +290,9 @@ describe('DashboardService.getToolImpact', () => {
     expect(timeseriesModel.find).toHaveBeenCalledWith({
       tenantId: 'tenant-1',
       level: 'campaign',
-      metaCampaignId: { $in: ['meta-agent'] },
+      metaCampaignId: {
+        $in: ['meta-agent', 'meta-awareness', 'meta-unknown-objective'],
+      },
     });
 
     expect(result.scope.requested).toBe('agent');
@@ -364,6 +379,20 @@ describe('DashboardService.getToolImpact', () => {
         untrustedRows: 1,
         campaignsWithTrustedRows: 1,
         legacyRowsExcludedFromReturn: 1,
+        returnBasis: 'mixed',
+        returnNature: 'mixed',
+        byBasis: [
+          {
+            basis: 'configured_conversion_value',
+            rowCount: 1,
+            persistedAttributedReturn: 80,
+          },
+          {
+            basis: 'unknown',
+            rowCount: 1,
+            persistedAttributedReturn: 40,
+          },
+        ],
       },
       series: [
         {
@@ -376,6 +405,8 @@ describe('DashboardService.getToolImpact', () => {
           campaignsReporting: 1,
           trustedReturnCampaigns: 1,
           returnCoverage: 'complete',
+          returnBasis: 'configured_conversion_value',
+          returnNature: 'configured_conversion_estimate',
         },
         {
           date: '2026-08-02',
@@ -387,14 +418,192 @@ describe('DashboardService.getToolImpact', () => {
           campaignsReporting: 1,
           trustedReturnCampaigns: 0,
           returnCoverage: 'none',
+          returnBasis: 'unknown',
+          returnNature: 'unknown',
         },
       ],
     });
+    expect(
+      result.dailyPerformance.byCampaign.map((campaign) => campaign.campaignId),
+    ).toEqual(['agent-launched', 'agent-awareness', 'agent-unknown-objective']);
+    expect(result.dailyPerformance.byCampaign[0]).toMatchObject({
+      campaignId: 'agent-launched',
+      optimizationGoals: ['VALUE'],
+      isRevenueObjective: true,
+      primaryKpi: {
+        key: 'roas',
+        target: 1,
+        targetDisplay: '1.00x raw return threshold',
+        status: 'good',
+      },
+      resultMetric: {
+        key: 'attributedReturn',
+        label: 'Attributed value',
+        source: 'goal_selected_metric',
+        optimizationGoal: 'VALUE',
+      },
+      coverage: {
+        status: 'complete',
+        observedDates: 2,
+        observedSpend: 100,
+        lifetimeSpend: 100,
+        spendCoveragePct: 100,
+      },
+      returnCoverage: {
+        status: 'partial',
+        trustedRows: 1,
+        untrustedRows: 1,
+        returnBasis: 'mixed',
+        returnNature: 'mixed',
+      },
+      series: [
+        {
+          date: '2026-08-01',
+          spend: 60,
+          attributedReturn: 80,
+          rawRoas: 1.333333,
+          conversions: 2,
+          clicks: 48,
+          impressions: 1200,
+          reach: 900,
+          primaryKpiStatus: 'good',
+          objectiveResult: {
+            key: 'attributedReturn',
+            label: 'Attributed value',
+            value: 80,
+            source: 'goal_selected_metric',
+          },
+          returnCoverage: 'complete',
+          returnBasis: 'configured_conversion_value',
+          returnNature: 'configured_conversion_estimate',
+        },
+        {
+          date: '2026-08-02',
+          attributedReturn: null,
+          rawRoas: null,
+          primaryKpiStatus: 'neutral',
+          objectiveResult: {
+            key: 'attributedReturn',
+            value: null,
+          },
+          returnCoverage: 'none',
+          returnBasis: 'unknown',
+          returnNature: 'unknown',
+        },
+      ],
+    });
+    expect(result.dailyPerformance.byCampaign[1]).toMatchObject({
+      campaignId: 'agent-awareness',
+      objectiveKey: 'awareness',
+      isRevenueObjective: false,
+      optimizationGoals: ['REACH'],
+      resultMetric: {
+        key: 'reach',
+        source: 'goal_selected_metric',
+        optimizationGoal: 'REACH',
+      },
+      returnCoverage: {
+        status: 'not_applicable',
+        returnBasis: 'not_applicable',
+        returnNature: 'not_applicable',
+      },
+      series: [
+        {
+          spend: 50,
+          attributedReturn: null,
+          rawRoas: null,
+          impressions: 0,
+          reach: 0,
+          cpm: 0,
+          primaryKpiValue: 0,
+          primaryKpiDisplay: '—',
+          primaryKpiStatus: 'neutral',
+          objectiveResult: {
+            key: 'reach',
+            value: null,
+            source: 'goal_selected_metric',
+          },
+          returnCoverage: 'not_applicable',
+          returnBasis: 'not_applicable',
+          returnNature: 'not_applicable',
+        },
+      ],
+    });
+    expect(result.dailyPerformance.byCampaign[2]).toMatchObject({
+      campaignId: 'agent-unknown-objective',
+      objectiveKey: 'unknown',
+      objectiveLabel: 'Unknown objective',
+      isRevenueObjective: false,
+      coverage: {
+        status: 'none',
+        campaignDateRows: 0,
+        observedSpend: 0,
+      },
+      series: [],
+    });
+    expect(
+      result.dailyPerformance.byCampaign.some(
+        (campaign) =>
+          campaign.campaignId === 'manual-launched' ||
+          campaign.campaignId === 'human-launched',
+      ),
+    ).toBe(false);
 
     const managedResult = await service.getToolImpact('tenant-1', 'managed');
     expect(managedResult.scope.cohortRule).toBe(
       "actor=agent/human from persisted source='agent' or source='human'; impact metrics require a verified Meta launch",
     );
     expect(managedResult.scope.cohortRule).not.toContain('legacy');
+    expect(
+      new Set(
+        managedResult.dailyPerformance.byCampaign.map(
+          (campaign) => campaign.campaignId,
+        ),
+      ),
+    ).toEqual(
+      new Set([
+        'agent-launched',
+        'human-launched',
+        'agent-awareness',
+        'agent-unknown-objective',
+      ]),
+    );
+    expect(
+      managedResult.dailyPerformance.byCampaign.some(
+        (campaign) => campaign.campaignId === 'manual-launched',
+      ),
+    ).toBe(false);
+    const humanDaily = managedResult.dailyPerformance.byCampaign.find(
+      (campaign) => campaign.campaignId === 'human-launched',
+    );
+    expect(humanDaily).toMatchObject({
+      returnCoverage: {
+        status: 'complete',
+        returnBasis: 'meta_action_value',
+        returnNature: 'meta_reported_action_value',
+      },
+      series: [
+        {
+          returnBasis: 'meta_action_value',
+          returnNature: 'meta_reported_action_value',
+        },
+      ],
+    });
+    const timeseriesFindCalls = (timeseriesModel.find as jest.Mock).mock.calls;
+    const lastTimeseriesFilter = timeseriesFindCalls[
+      timeseriesFindCalls.length - 1
+    ]?.[0] as any;
+    expect(lastTimeseriesFilter).toMatchObject({
+      tenantId: 'tenant-1',
+      level: 'campaign',
+    });
+    expect(new Set(lastTimeseriesFilter.metaCampaignId.$in)).toEqual(
+      new Set([
+        'meta-agent',
+        'meta-human',
+        'meta-awareness',
+        'meta-unknown-objective',
+      ]),
+    );
   });
 });

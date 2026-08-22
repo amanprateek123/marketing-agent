@@ -5,7 +5,16 @@ import { v4 as uuidv4 } from 'uuid';
 import { Company, CompanyDocument } from './schemas/company.schema';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
-import { CompanyPrompts, CompanyLearnings, CreativeLearnings, CampaignLearnings, CausalInsight, OfferAudienceFitIssue, HotWinner } from './schemas/company.types';
+import {
+  CompanyPrompts,
+  CompanyLearnings,
+  CreativeLearnings,
+  CampaignLearnings,
+  CausalInsight,
+  OfferAudienceFitIssue,
+  HotWinner,
+  Product,
+} from './schemas/company.types';
 
 // Fields that require prompt regeneration when changed
 const PROMPT_RELEVANT_FIELDS: (keyof UpdateCompanyDto)[] = [
@@ -20,6 +29,21 @@ const PROMPT_RELEVANT_FIELDS: (keyof UpdateCompanyDto)[] = [
   'industry',
   'geography',
 ];
+
+const COPILOT_PRODUCT_FILL_FIELDS = [
+  'landingUrl',
+  'conversionEvent',
+  'conversionValue',
+  'pixelId',
+  'customConversionId',
+  'pageId',
+  'metaAppId',
+  'metaAppStoreUrl',
+] as const;
+
+type CopilotProductFillFields = Partial<
+  Pick<Product, (typeof COPILOT_PRODUCT_FILL_FIELDS)[number]>
+>;
 
 @Injectable()
 export class CompaniesService {
@@ -122,6 +146,84 @@ export class CompaniesService {
     );
 
     return { company, needsPromptRegen };
+  }
+
+  /**
+   * Atomically append a Campaign Copilot product when no equivalent Copilot
+   * key or case-insensitive exact name exists. Using $push in one database
+   * operation prevents concurrent sessions from replacing the whole products
+   * array and silently dropping each other's newly configured products.
+   */
+  async appendCopilotProductIfAbsent(
+    tenantId: string,
+    productKey: string,
+    product: Product,
+  ): Promise<CompanyDocument | null> {
+    const escapedName = product.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return this.companyModel
+      .findOneAndUpdate(
+        {
+          tenantId,
+          products: {
+            $not: {
+              $elemMatch: {
+                $or: [
+                  { copilotProductKey: productKey },
+                  { name: { $regex: `^${escapedName}$`, $options: 'i' } },
+                ],
+              },
+            },
+          },
+        },
+        {
+          $push: {
+            products: { ...product, copilotProductKey: productKey },
+          },
+        },
+        { new: true },
+      )
+      .exec();
+  }
+
+  /**
+   * Fill only missing Copilot product configuration with targeted atomic
+   * writes. This must not call document.save(): products is [Object], so a
+   * stale document save replaces the whole array and can erase a product that
+   * another Copilot session just appended.
+   */
+  async fillMissingCopilotProductFields(
+    tenantId: string,
+    productName: string,
+    fields: CopilotProductFillFields,
+  ): Promise<CompanyDocument> {
+    const entries = COPILOT_PRODUCT_FILL_FIELDS.flatMap((field) => {
+      const value = fields[field];
+      return value === undefined || value === null || value === ''
+        ? []
+        : ([[field, value]] as const);
+    });
+    await Promise.all(
+      entries.map(([field, value]) =>
+        this.companyModel.updateOne(
+          { tenantId, 'products.name': productName },
+          { $set: { [`products.$[product].${field}`]: value } },
+          {
+            arrayFilters: [
+              {
+                'product.name': productName,
+                $or: [
+                  { [`product.${field}`]: { $exists: false } },
+                  { [`product.${field}`]: null },
+                  { [`product.${field}`]: '' },
+                  { [`product.${field}`]: 0 },
+                ],
+              },
+            ],
+          },
+        ),
+      ),
+    );
+    return this.findByTenantId(tenantId);
   }
 
   /**

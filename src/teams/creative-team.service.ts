@@ -108,9 +108,12 @@ export class CreativeTeamService {
     brief: CreativeTeamBriefInput,
     company: CompanyDocument,
     runId: string,
+    options?: { forceOpenAI?: boolean },
   ): Promise<CreativeTeamOutput> {
     const tenantId = company.tenantId;
-    const teamMode = company.pipelineConfig?.teamMode ?? 'sequential';
+    const teamMode = options?.forceOpenAI
+      ? 'sequential'
+      : (company.pipelineConfig?.teamMode ?? 'sequential');
     this.logger.log(`Creative Team starting | tenant: ${tenantId} | run: ${runId} | mode: ${teamMode}`);
 
     if (teamMode === 'cli') {

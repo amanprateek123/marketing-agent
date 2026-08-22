@@ -12,7 +12,10 @@ import { ImageResizerService, ExtendRatio, RatioMap, classifyRatio } from '../..
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
-import { VALID_OPTIMIZATION_GOALS } from '../meta-ads/optimization-goals';
+import {
+  VALID_OPTIMIZATION_GOALS,
+  resolveOptimizationGoalForLaunch,
+} from '../meta-ads/optimization-goals';
 import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
@@ -25,6 +28,10 @@ import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
 import { getEffectiveConversionValue, getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
+import {
+  CampaignBudgetGuardService,
+  CampaignBudgetReservation,
+} from './campaign-budget-guard.service';
 
 @Injectable()
 export class CampaignCreatorService {
@@ -32,6 +39,7 @@ export class CampaignCreatorService {
 
   constructor(
     private readonly campaignsService: CampaignsService,
+    private readonly campaignBudgetGuard: CampaignBudgetGuardService,
     private readonly companiesService: CompaniesService,
     private readonly actionLogger: ActionLoggerService,
     private readonly campaignReviewTeam: CampaignReviewTeamService,
@@ -583,27 +591,60 @@ export class CampaignCreatorService {
       `Launch pre-flight OK: campaign=${campaignId} product="${product.name}" (via ${productResolution.source}) → ${product.landingUrl}`,
     );
 
-    // ── Atomic claim — prevents /approve double-launch race ──────────────────
-    // Was: findOne → check status → check metaCampaignId → later update.
-    // Race: two concurrent /approve calls both pass the read-then-check, both
-    // proceed into 60-90s of Meta API calls, both create live Meta campaigns,
-    // only one gets tracked in DB → orphan live campaign spending money. The
-    // single biggest production-time bug per the SRE review.
-    //
-    // Now: atomic findOneAndUpdate gates on (status=pending_approval AND
-    // metaCampaignId='') and immediately flips to 'launching'. If null
-    // returned, another /approve call already won the race — throw. Rollback
-    // path resets status to 'pending_approval' on launch failure.
-    const campaign = await this.campaignModel.findOneAndUpdate(
-      {
-        _id: campaignId,
-        tenantId: company.tenantId,
-        status: 'pending_approval',
-        $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
-      },
-      { $set: { status: 'launching' } },
-      { new: true },
-    ).exec();
+    // Complete deterministic launch validation before reserving money or
+    // claiming the campaign. These failures leave it pending and consume no
+    // tenant budget capacity.
+    SafetyChecks.checkCampaignBudget(preflight.budget, company);
+    if (!company.meta?.accessToken) {
+      throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
+    }
+    if (!product.pageId && !company.meta?.pageId) {
+      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId} or product "${product.name}". Set product.pageId or company.meta.pageId — required for ad creative creation.`);
+    }
+    const preflightConfig = (preflight as any).campaignConfig;
+    if (!preflightConfig || !preflightConfig.adSets || preflightConfig.adSets.length === 0) {
+      throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
+    }
+    SafetyChecks.checkCapCoherence({
+      dailyBudget: preflight.budget ?? preflightConfig.budget,
+      cap: (preflight as any).spendCap,
+      startTime: (preflight as any).launchedAt ?? new Date(),
+      stopTime: (preflight as any).stopTime,
+    });
+
+    // Reserve on the tenant Company before the per-campaign claim. The
+    // versioned CAS closes the distinct-campaign race across app instances;
+    // after the claim, status=launching becomes the durable commitment.
+    const budgetReservation = await this.campaignBudgetGuard.reserve(
+      company.tenantId,
+      campaignId,
+      preflight.budget,
+    );
+
+    // ── Atomic per-campaign claim — prevents double approval of one draft ────
+    let campaign: CampaignDocument | null;
+    try {
+      campaign = await this.campaignModel.findOneAndUpdate(
+        {
+          _id: campaignId,
+          tenantId: company.tenantId,
+          status: 'pending_approval',
+          budget: preflight.budget,
+          ...((preflight as any).updatedAt
+            ? { updatedAt: (preflight as any).updatedAt }
+            : {}),
+          $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
+        },
+        { $set: { status: 'launching' } },
+        { new: true },
+      ).exec();
+    } catch (err) {
+      await this.releaseBudgetReservationSafely(budgetReservation);
+      throw err;
+    }
+    // Release only after the durable launching write. Cleanup failure leaves
+    // the reservation in place, so it fails closed instead of permitting spend.
+    await this.releaseBudgetReservationSafely(budgetReservation);
     if (!campaign) {
       // Distinguish "not found" from "already launching/launched" for clearer error
       const existing = await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).select('status metaCampaignId').lean().exec();
@@ -613,6 +654,14 @@ export class CampaignCreatorService {
       }
       throw new Error(`Campaign ${campaignId} cannot be launched (status: ${existing.status} — must be pending_approval)`);
     }
+
+    // Before Meta campaign creation starts, a failure can safely restore the
+    // draft to pending. After it starts, retain a reconcilable state because a
+    // real Meta object may exist even if an API response or rollback is lost.
+    let metaCampaignCreationStarted = false;
+    let knownMetaCampaignId = '';
+    let launchFinalized = false;
+    try {
 
     // Creative brief — needed by the audience-expiry fallback path (line ~330)
     // so warm/hot stages can be detected before the audience validator decides
@@ -636,29 +685,7 @@ export class CampaignCreatorService {
       }
     }
 
-    if (!company.meta?.accessToken) {
-      throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
-    }
-
-    if (!product.pageId && !company.meta?.pageId) {
-      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId} or product "${product.name}". Set product.pageId or company.meta.pageId — required for ad creative creation.`);
-    }
-
     const config = (campaign as any).campaignConfig;
-    if (!config || !config.adSets || config.adSets.length === 0) {
-      throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
-    }
-
-    // Refuse to launch a schedule its own spend cap cannot cover. No-ops for
-    // the common agent case (open-ended run, no cap), and blocks the
-    // guaranteed-breach configuration that otherwise only surfaces as a
-    // mid-flight force-pause days later. See SafetyChecks.evaluateCapCoherence.
-    SafetyChecks.checkCapCoherence({
-      dailyBudget: (campaign as any).budget ?? config.budget,
-      cap: (campaign as any).spendCap,
-      startTime: (campaign as any).launchedAt ?? new Date(),
-      stopTime: (campaign as any).stopTime,
-    });
 
     // Landing-page A/B test campaigns are built with TWO deliberately-separate
     // ad sets that differ ONLY by destination URL (landingUrlOverride). The
@@ -773,18 +800,23 @@ export class CampaignCreatorService {
     let optGoalNormalized = false;
     for (const adSet of config.adSets as any[]) {
       const llmValue = adSet.optimizationGoal;
-      let resolved: string;
-      if (productOptGoal) {
-        resolved = productOptGoal;
+      const launchObjective = config.objective ?? campaign.objective;
+      const resolved = resolveOptimizationGoalForLaunch({
+        objective: launchObjective,
+        requested: llmValue,
+        productGoal: productOptGoal,
+      });
+      if (
+        launchObjective === 'OUTCOME_SALES' &&
+        productOptGoal &&
+        VALID_OPTIMIZATION_GOALS.has(productOptGoal)
+      ) {
         if (llmValue !== productOptGoal) {
           this.logger.warn(`Ad set "${adSet.name}": LLM output optimizationGoal="${llmValue}" overridden by product.metaOptimizationGoal="${productOptGoal}" (operator choice wins).`);
           optGoalNormalized = true;
         }
-      } else if (llmValue && VALID_OPTIMIZATION_GOALS.has(llmValue)) {
-        resolved = llmValue;
-      } else {
-        this.logger.warn(`Ad set "${adSet.name}": invalid optimizationGoal="${llmValue}" from LLM — defaulting to OFFSITE_CONVERSIONS.`);
-        resolved = 'OFFSITE_CONVERSIONS';
+      } else if (!llmValue || !VALID_OPTIMIZATION_GOALS.has(llmValue)) {
+        this.logger.warn(`Ad set "${adSet.name}": invalid optimizationGoal="${llmValue}" — defaulting to ${resolved} for objective ${launchObjective}.`);
         optGoalNormalized = true;
       }
       adSet.optimizationGoal = resolved;
@@ -793,7 +825,7 @@ export class CampaignCreatorService {
       // Persist normalized config so the audit / dashboard / re-launch path
       // all see the value Meta actually receives — not the LLM's broken output.
       await this.campaignModel.updateOne(
-        { _id: campaignId },
+        { _id: campaignId, tenantId: company.tenantId },
         { $set: { 'campaignConfig.adSets': config.adSets } },
       );
     }
@@ -1455,13 +1487,11 @@ export class CampaignCreatorService {
         product?.customConversionId,
       );
 
-    // Launch: campaign → ad sets → ads via Meta Graph API.
-    // Wrapped in try/catch so failures reset status from 'launching' back to
-    // 'pending_approval', allowing retry. Without this, an exception during
-    // Meta API calls leaves the campaign stuck in 'launching' forever and
-    // the atomic claim above blocks all future /approve attempts.
+    // Launch: campaign → ad sets → ads via Meta Graph API. From this point
+    // onward, a timeout can hide a real Meta object, so never restore pending.
     let launchResult;
     try {
+      metaCampaignCreationStarted = true;
       launchResult = await this.metaAdsService.launchCampaign({
         accountId: accountId,
         accessToken: company.meta.accessToken,
@@ -1509,20 +1539,49 @@ export class CampaignCreatorService {
         declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
         carouselCards: resolvedCarouselCards.length >= 2 ? resolvedCarouselCards : undefined,
       });
+      knownMetaCampaignId = launchResult.campaignId;
     } catch (err: any) {
-      // Reset claim so /approve can be retried
-      await this.campaignModel.updateOne(
-        { _id: campaignId, status: 'launching' },
-        { $set: { status: 'pending_approval' } },
-      );
-      this.logger.error(`Meta launch failed for campaign ${campaignId}, claim released for retry: ${err.message}`);
+      this.logger.error(`Meta launch failed for campaign ${campaignId}; status remains launching because a Meta campaign may exist and must be reconciled before retry: ${err.message}`);
       throw err;
     }
 
-    // Only activate if all expected ads were created
+    // Persist the returned Meta identity while the real campaign is still
+    // PAUSED. If activation fails, the object remains linked and reconcilable.
     const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
     const expectedAds = config.adSets.reduce((s: number, a: any) => s + (a.ads?.length ?? 0), 0);
     const fullyLaunched = totalAdsCreated >= expectedAds && totalAdsCreated > 0;
+    const launchedAt = new Date();
+    const buildPersistedAdSets = (status: 'active' | 'paused') => launchResult.adSets.map(as => ({
+      metaAdSetId: as.adSetId,
+      name: as.name,
+      budgetPercent: config.adSets.find((c: any) => c.name === as.name)?.budgetPercent ?? 0,
+      audienceType: config.adSets.find((c: any) => c.name === as.name)?.audienceType ?? '',
+      landingUrl: config.adSets.find((c: any) => c.name === as.name)?.landingUrlOverride ?? '',
+      status,
+      ads: as.ads.map(ad => ({
+        metaAdId: ad.adId,
+        copyVariantIndex: ad.copyVariantIndex,
+        hookStyle: copyVariants[ad.copyVariantIndex]?.hookStyle ?? '',
+        format: ad.format,
+        status,
+      })),
+    }));
+
+    const identityWrite = await this.campaignModel.updateOne(
+      { _id: campaignId, tenantId: company.tenantId, status: 'launching' },
+      {
+        $set: {
+          metaCampaignId: launchResult.campaignId,
+          metaAccountId: accountId,
+          launchedAt,
+          approvedAt: launchedAt,
+          adSets: buildPersistedAdSets('paused'),
+        },
+      },
+    );
+    if (identityWrite.matchedCount !== 1) {
+      throw new Error(`Could not persist Meta campaign ${launchResult.campaignId} on claimed campaign ${campaignId}`);
+    }
 
     if (fullyLaunched) {
       await this.metaAdsService.activateCampaign(
@@ -1535,35 +1594,25 @@ export class CampaignCreatorService {
       );
     }
 
-    // Save all Meta IDs to MongoDB
-    await this.campaignModel.updateOne(
-      { _id: campaignId },
+    const finalStatus = fullyLaunched ? 'active' : 'paused';
+    const finalWrite = await this.campaignModel.updateOne(
       {
-        status: fullyLaunched ? 'active' : 'paused',
+        _id: campaignId,
+        tenantId: company.tenantId,
+        status: 'launching',
         metaCampaignId: launchResult.campaignId,
-        metaAccountId: accountId,
-        launchedAt: new Date(),
-        approvedAt: new Date(),
-        adSets: launchResult.adSets.map(as => ({
-          metaAdSetId: as.adSetId,
-          name: as.name,
-          budgetPercent: config.adSets.find((c: any) => c.name === as.name)?.budgetPercent ?? 0,
-          audienceType: config.adSets.find((c: any) => c.name === as.name)?.audienceType ?? '',
-          // Record which destination URL this ad set served — empty for normal
-          // campaigns (all ad sets share product.landingUrl), set for the
-          // landing-page A/B test so the audit loop can attribute per-URL.
-          landingUrl: config.adSets.find((c: any) => c.name === as.name)?.landingUrlOverride ?? '',
-          status: 'active',
-          ads: as.ads.map(ad => ({
-            metaAdId: ad.adId,
-            copyVariantIndex: ad.copyVariantIndex,
-            hookStyle: copyVariants[ad.copyVariantIndex]?.hookStyle ?? '',
-            format: ad.format,    // 'video' | 'image' — required to attribute mixed-format performance
-            status: 'active',
-          })),
-        })),
+      },
+      {
+        $set: {
+          status: finalStatus,
+          adSets: buildPersistedAdSets(finalStatus),
+        },
       },
     );
+    if (finalWrite.matchedCount !== 1) {
+      throw new Error(`Could not finalize Meta campaign ${launchResult.campaignId} on claimed campaign ${campaignId}`);
+    }
+    launchFinalized = true;
 
     await this.actionLogger.log({
       tenantId: company.tenantId,
@@ -1580,6 +1629,55 @@ export class CampaignCreatorService {
     );
 
     return (await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).lean().exec()) as any;
+    } catch (err: any) {
+      if (!metaCampaignCreationStarted) {
+        try {
+          await this.campaignModel.updateOne(
+            {
+              _id: campaignId,
+              tenantId: company.tenantId,
+              status: 'launching',
+              $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
+            },
+            { $set: { status: 'pending_approval' } },
+          );
+        } catch (rollbackErr: any) {
+          this.logger.error(`Pre-Meta launch rollback failed for campaign ${campaignId}; leaving it launching: ${rollbackErr.message}`);
+        }
+      } else if (knownMetaCampaignId && !launchFinalized) {
+        try {
+          await this.metaAdsService.pauseCampaign(knownMetaCampaignId, company.meta.accessToken);
+          await this.campaignModel.updateOne(
+            { _id: campaignId, tenantId: company.tenantId, status: 'launching' },
+            {
+              $set: {
+                status: 'paused',
+                metaCampaignId: knownMetaCampaignId,
+                metaAccountId: accountId,
+                pauseReason: `Launch reconciliation after failure: ${err.message}`,
+                pausedAt: new Date(),
+              },
+            },
+          );
+          this.logger.error(`Launch failed after Meta campaign ${knownMetaCampaignId} was created; paused and retained for reconciliation: ${err.message}`);
+        } catch (pauseErr: any) {
+          this.logger.error(`CRITICAL: launch failed after Meta campaign ${knownMetaCampaignId} was created and automatic pause failed; campaign remains launching and counts against the cap: ${pauseErr.message}`);
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async releaseBudgetReservationSafely(
+    reservation: CampaignBudgetReservation,
+  ): Promise<void> {
+    try {
+      await this.campaignBudgetGuard.release(reservation);
+    } catch (err: any) {
+      // A leaked reservation is deliberately fail-closed: capacity is blocked,
+      // but no additional campaign is allowed to spend above the tenant cap.
+      this.logger.error(`CRITICAL: weekly budget reservation cleanup failed; capacity remains blocked safely. tenant=${reservation.tenantId} campaign=${reservation.campaignId} token=${reservation.token}: ${err.message}`);
+    }
   }
 
   /**

@@ -158,7 +158,9 @@ export function evaluateObjective(opts: {
     isRevenueObjective: revenueObjective,
     costPerResult: costPerResult != null ? round(costPerResult, 2) : null,
     costPerResultDisplay:
-      costPerResult != null ? `₹${Math.round(costPerResult).toLocaleString('en-IN')}` : null,
+      costPerResult != null
+        ? `₹${Math.round(costPerResult).toLocaleString('en-IN')}`
+        : null,
   };
 
   // Nothing has happened yet.
@@ -189,9 +191,11 @@ export function evaluateObjective(opts: {
       targetDisplay: `${econ.targetROAS.toFixed(2)}x target · ${econ.breakevenROAS.toFixed(2)}x breakeven`,
       direction: 'higher_better',
       status:
-        roas >= econ.targetROAS ? 'good'
-        : roas >= econ.breakevenROAS ? 'watch'
-        : 'bad',
+        roas >= econ.targetROAS
+          ? 'good'
+          : roas >= econ.breakevenROAS
+            ? 'watch'
+            : 'bad',
     };
 
     let verdict: ObjectiveVerdict;
@@ -256,17 +260,37 @@ function scoredMetricFor(key: ObjectiveKey): {
   switch (key) {
     case 'awareness':
     case 'video_views':
-      return { metric: 'cpm', label: 'Cost per 1,000 views', direction: 'lower_better' };
+      return {
+        metric: 'cpm',
+        label: 'Cost per 1,000 views',
+        direction: 'lower_better',
+      };
     case 'traffic':
     case 'app_installs':
-      return { metric: 'cpc', label: 'Cost per click', direction: 'lower_better' };
+      return {
+        metric: 'cpc',
+        label: 'Cost per click',
+        direction: 'lower_better',
+      };
     case 'engagement':
-      return { metric: 'ctr', label: 'Click-through rate', direction: 'higher_better' };
+      return {
+        metric: 'ctr',
+        label: 'Click-through rate',
+        direction: 'higher_better',
+      };
     case 'leads':
     case 'messages':
-      return { metric: 'cvr', label: 'Conversion rate', direction: 'higher_better' };
+      return {
+        metric: 'cvr',
+        label: 'Conversion rate',
+        direction: 'higher_better',
+      };
     default:
-      return { metric: 'cvr', label: 'Conversion rate', direction: 'higher_better' };
+      return {
+        metric: 'cvr',
+        label: 'Conversion rate',
+        direction: 'higher_better',
+      };
   }
 }
 
@@ -277,6 +301,7 @@ function buildKpi(
 ): KpiReading {
   const spec = scoredMetricFor(key);
   const value = computeMetric(spec.metric, m);
+  const available = metricIsAvailable(spec.metric, m);
 
   // Profile thresholds store rates as FRACTIONS (0.015 = 1.5%) while the
   // dashboard carries them as percentages — convert before comparing or a
@@ -291,11 +316,21 @@ function buildKpi(
   const warn = warning != null ? warning * scale : null;
 
   let status: KpiReading['status'] = 'neutral';
-  if (target != null) {
+  if (available && target != null) {
     if (spec.direction === 'lower_better') {
-      status = value <= target ? 'good' : warn != null && value <= warn ? 'watch' : 'bad';
+      status =
+        value <= target
+          ? 'good'
+          : warn != null && value <= warn
+            ? 'watch'
+            : 'bad';
     } else {
-      status = value >= target ? 'good' : warn != null && value >= warn ? 'watch' : 'bad';
+      status =
+        value >= target
+          ? 'good'
+          : warn != null && value >= warn
+            ? 'watch'
+            : 'bad';
     }
   }
 
@@ -303,14 +338,28 @@ function buildKpi(
     key: spec.metric,
     label: spec.label,
     value: round(value, 3),
-    display: formatMetric(spec.metric, value),
+    display: available ? formatMetric(spec.metric, value) : '—',
     target,
-    targetDisplay: target != null
-      ? `${spec.direction === 'lower_better' ? 'under ' : 'over '}${formatMetric(spec.metric, target)}`
-      : null,
+    targetDisplay:
+      target != null
+        ? `${spec.direction === 'lower_better' ? 'under ' : 'over '}${formatMetric(spec.metric, target)}`
+        : null,
     direction: spec.direction,
     status,
   };
+}
+
+function metricIsAvailable(metric: string, m: ObjectiveMetrics): boolean {
+  switch (metric) {
+    case 'cpm':
+    case 'ctr':
+      return m.impressions > 0;
+    case 'cpc':
+    case 'cvr':
+      return m.clicks > 0;
+    default:
+      return false;
+  }
 }
 
 function neutralKpi(
@@ -372,7 +421,9 @@ function kpiToVerdict(kpi: KpiReading): ObjectiveVerdict {
   return 'attribution_pending';
 }
 
-function revenueSeverity(v: ObjectiveVerdict): 'good' | 'watch' | 'bad' | 'neutral' {
+function revenueSeverity(
+  v: ObjectiveVerdict,
+): 'good' | 'watch' | 'bad' | 'neutral' {
   switch (v) {
     case 'profitable':
       return 'good';
@@ -394,7 +445,8 @@ function revenueAction(
 ): string | null {
   if (status === 'pending_approval') return 'Review and approve';
   if (status !== 'active') {
-    if (verdict === 'profitable') return 'Rebuild this structure — it beat target';
+    if (verdict === 'profitable')
+      return 'Rebuild this structure — it beat target';
     if (verdict === 'losing_badly' || verdict === 'no_conversions') {
       return "Don't rebuild this audience/offer combination";
     }

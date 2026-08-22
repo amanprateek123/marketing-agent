@@ -3,7 +3,10 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CompaniesService } from '../../companies/companies.service';
 import { CopyWriterService } from '../copy-writer/copy-writer.service';
-import { ImageGeneratorService } from '../image-generator/image-generator.service';
+import {
+  ImageGenerationProvider,
+  ImageGeneratorService,
+} from '../image-generator/image-generator.service';
 import { VideoGeneratorService } from '../video-generator/video-generator.service';
 import { HiggsfieldService } from '../video-generator/higgsfield.service';
 import { CreativeTeamService } from '../../teams/creative-team.service';
@@ -124,7 +127,20 @@ export class CreativeProducerService {
      * to re-produce. Existing completed package gets deleted, fresh production
      * runs. The pipeline orchestrator and resume paths keep default `false`.
      */
-    options?: { forceRegenerate?: boolean },
+    options?: {
+      forceRegenerate?: boolean;
+      /** Force the Creative Team's OpenAI sequential path even for CLI tenants. */
+      forceOpenAI?: boolean;
+      /** Per-build image renderer override; omitted callers keep tenant/global config. */
+      imageProvider?: ImageGenerationProvider;
+      /**
+       * Skip the legacy Claude vision pass. Used by Campaign Copilot so a
+       * ChatGPT-only build cannot invoke Claude indirectly. Prompt/copy safety
+       * and launch-time policy checks still run; rendered-image QA is reported
+       * as not checked by the Copilot session rather than falsely claimed.
+       */
+      skipVisionQa?: boolean;
+    },
   ): Promise<CreativePackageDocument> {
     const company = await this.companiesService.findByTenantId(tenantId);
     const forceRegenerate = options?.forceRegenerate === true;
@@ -227,7 +243,12 @@ export class CreativeProducerService {
       try {
         // ── Creative Team path (primary) ───────────────────────────────────────
         this.logger.log(`Creative Team starting for briefId=${briefId}`);
-        const teamResult = await this.creativeTeam.run(brief, company, runId);
+        const teamResult = await this.creativeTeam.run(
+          brief,
+          company,
+          runId,
+          { forceOpenAI: options?.forceOpenAI },
+        );
 
         copyPackage = {
           variants: teamResult.variants,
@@ -246,7 +267,14 @@ export class CreativeProducerService {
           this.logger.log(`Generating ${teamResult.carouselCards!.length} carousel card images: tenantId=${tenantId} briefId=${briefId}`);
           const cardResults = await Promise.allSettled(
             teamResult.carouselCards!.map((card) =>
-              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId, resolvedAspectRatio, resolvedImageResolution),
+              this.imageGenerator.generateFromPrompt(
+                card.imagePrompt,
+                company,
+                runId,
+                resolvedAspectRatio,
+                resolvedImageResolution,
+                options?.imageProvider,
+              ),
             ),
           );
           carouselCards = teamResult.carouselCards!.map((card, i) => {
@@ -282,7 +310,14 @@ export class CreativeProducerService {
               const teamImagePrompt = teamResult.imagePrompts?.[i];
               if (teamImagePrompt) {
                 // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
-                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId, resolvedAspectRatio, resolvedImageResolution);
+                return this.imageGenerator.generateFromPrompt(
+                  teamImagePrompt,
+                  company,
+                  runId,
+                  resolvedAspectRatio,
+                  resolvedImageResolution,
+                  options?.imageProvider,
+                );
               }
               // Fallback: generate image prompt from scratch for this variant
               return this.imageGenerator.generateForVariant(
@@ -293,6 +328,7 @@ export class CreativeProducerService {
                 runId,
                 resolvedAspectRatio,
                 resolvedImageResolution,
+                options?.imageProvider,
               );
             }),
           );
@@ -401,6 +437,7 @@ export class CreativeProducerService {
                 runId,
                 resolvedAspectRatio,
                 resolvedImageResolution,
+                options?.imageProvider,
               ),
             ),
           );
@@ -415,7 +452,14 @@ export class CreativeProducerService {
         } else {
           // No variants — generate one image from brief
           try {
-            const imgResult = await this.imageGenerator.generate(brief, company, runId, resolvedAspectRatio, resolvedImageResolution);
+            const imgResult = await this.imageGenerator.generate(
+              brief,
+              company,
+              runId,
+              resolvedAspectRatio,
+              resolvedImageResolution,
+              options?.imageProvider,
+            );
             images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl, originalImageUrl: imgResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution }];
           } catch (imgErr: any) {
             this.logger.error(`Image generation failed: ${imgErr.message}`);
@@ -455,20 +499,26 @@ export class CreativeProducerService {
           item.imageUrl = '';
         }
       };
-      await Promise.all([
-        ...images.map((img: any) => verifyAndMaybeDrop(
-          img,
-          copyPackage?.variants?.[img.variantIndex]?.hookStyle,
-          copyPackage?.variants?.[img.variantIndex]?.headline,
-          `variant ${img.variantIndex} image`,
-        )),
-        ...carouselCards.map((card: any) => verifyAndMaybeDrop(
-          card,
-          undefined,
-          card.headline,
-          `carousel card ${card.slotIndex}`,
-        )),
-      ]);
+      if (options?.skipVisionQa) {
+        this.logger.warn(
+          `Rendered-image vision QA skipped for ChatGPT-only build: tenantId=${tenantId} briefId=${briefId} checked=false`,
+        );
+      } else {
+        await Promise.all([
+          ...images.map((img: any) => verifyAndMaybeDrop(
+            img,
+            copyPackage?.variants?.[img.variantIndex]?.hookStyle,
+            copyPackage?.variants?.[img.variantIndex]?.headline,
+            `variant ${img.variantIndex} image`,
+          )),
+          ...carouselCards.map((card: any) => verifyAndMaybeDrop(
+            card,
+            undefined,
+            card.headline,
+            `carousel card ${card.slotIndex}`,
+          )),
+        ]);
+      }
 
       // 'completed' must mean LAUNCHABLE: copy + at least one usable visual
       // (image with a real URL, carousel cards, or a video). The old rule only

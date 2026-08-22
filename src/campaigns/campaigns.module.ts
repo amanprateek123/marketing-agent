@@ -37,11 +37,14 @@ import { DeliveryModule } from '../delivery/delivery.module';
 import { CreativePackage, CreativePackageSchema } from '../creative/schemas/creative-package.schema';
 import { QUEUES } from '../scheduler/queue.constants';
 import { GalleryModule } from '../gallery/gallery.module';
+import { Company, CompanySchema } from '../companies/schemas/company.schema';
+import { CampaignBudgetGuardService } from './campaign-creator/campaign-budget-guard.service';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Campaign.name, schema: CampaignSchema },
+      { name: Company.name, schema: CompanySchema },
       { name: AuditSnapshot.name, schema: AuditSnapshotSchema },
       { name: IntelligenceBrief.name, schema: IntelligenceBriefSchema },
       { name: CreativeBrief.name, schema: CreativeBriefSchema },
@@ -65,7 +68,7 @@ import { GalleryModule } from '../gallery/gallery.module';
     GalleryModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService, CampaignCreatorService, ManualCampaignService, CampaignApprovalPreviewService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, MetaDeepSyncService, AudienceOrchestrationService],
-  exports: [CampaignsService, CampaignCreatorService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService, MetaDeepSyncService, MetaAdsService, MetaMetricsService, AudienceOrchestrationService],
+  providers: [CampaignsService, CampaignCreatorService, CampaignBudgetGuardService, ManualCampaignService, CampaignApprovalPreviewService, CampaignAuditorService, CampaignOptimizerService, SignalDetectorService, AuditAgentService, CampaignReviewTeamService, MetaAdsService, MetaMetricsService, MetaLearningImporterService, PatternCalculatorService, CampaignSyncService, MetaDeepSyncService, AudienceOrchestrationService],
+  exports: [CampaignsService, CampaignCreatorService, ManualCampaignService, CampaignAuditorService, MetaLearningImporterService, CampaignSyncService, MetaDeepSyncService, MetaAdsService, MetaMetricsService, AudienceOrchestrationService],
 })
 export class CampaignsModule {}

@@ -11,7 +11,10 @@ import {
   TenantEconomics,
   TenantEconomicsService,
 } from '../common/economics/tenant-economics.service';
-import { Campaign } from '../campaigns/schemas/campaign.schema';
+import {
+  Campaign,
+  CampaignRevenueBasis,
+} from '../campaigns/schemas/campaign.schema';
 import { MetricTimeseries } from '../campaigns/schemas/metric-timeseries.schema';
 import { Company } from '../companies/schemas/company.schema';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
@@ -30,8 +33,12 @@ import {
   FacetRollup,
   PortfolioRollup,
   TenantActivity,
+  ToolImpactCampaignDailyPerformance,
   ToolImpactDailyPerformance,
   ToolImpactOverview,
+  ToolImpactReturnBasis,
+  ToolImpactReturnBasisBreakdown,
+  ToolImpactReturnNature,
   ToolImpactScope,
   TrendDelta,
   WindowMetrics,
@@ -407,10 +414,16 @@ export class DashboardService {
         String(campaign.productName ?? '').trim(),
       ]),
     );
+    const persistedCampaignByMetaId = new Map(
+      launchedCampaigns
+        .filter((campaign) => String(campaign.metaCampaignId ?? '').trim())
+        .map((campaign) => [String(campaign.metaCampaignId), campaign]),
+    );
     const dailyPerformance = await this.loadToolImpactDailyPerformance(
       tenantId,
-      rows.filter((row) => isKnownToolImpactRevenueObjective(row.objective)),
+      rows,
       authoritativeProductByMetaId,
+      persistedCampaignByMetaId,
     );
     const portfolio = this.rollUp(rows, econ);
     const rawOutcome = buildRawRoasOutcome(rows);
@@ -433,7 +446,10 @@ export class DashboardService {
         .sort((a, b) => b.contributionProfit - a.contributionProfit)[0] ?? null;
     const bestRawResult =
       rows
-        .filter((r) => r.spend > 0)
+        // A non-sales campaign can carry incidental/action value, but that is
+        // not the yardstick it was launched against and must never win a ROAS
+        // ranking. Keep this candidate population identical to rawOutcome.
+        .filter((r) => r.isRevenueObjective && r.spend > 0)
         .sort(
           (a, b) => b.returnSurplus - a.returnSurplus || b.roas - a.roas,
         )[0] ?? null;
@@ -590,6 +606,8 @@ export class DashboardService {
       'Figures are campaign-lifetime totals and Meta can revise recent attribution. Check freshness before quoting them.',
       'The daily chart contains only persisted campaign-day rows for verified sales launches; missing dates are omitted, not filled with zero. Legacy daily return without product-scoped provenance is disclosed separately and never counted as verified attributed return.',
       'A daily return row is verified only when its product came from an exact persisted Campaign.productName match and its Meta fetch completed. The configuration fingerprint records the conversion/value config used at sync time; this page validates its presence and shape, not equality with today’s product config.',
+      'Daily return nature is explicit: Meta-reported action value is attributed platform value, configured-conversion value is a configured estimate, and neither is proof of collected cash.',
+      'A persisted optimization goal selects the most relevant stored result metric; it does not prove the stored conversion count came from that exact event. Missing legacy metric fields are shown as unavailable, never as observed zero.',
       'Observed post-action outcomes are before/after measurements, not randomized causal proof.',
       'Executed-action outcomes are scoped to these campaign IDs, but legacy outcome records do not contain intelligence decision IDs. They are a campaign-level action track record, not a one-to-one audit of the proposals displayed above.',
       'Pipeline status includes every persisted run record, including records that failed before campaign creation. Retries can reuse and update a run record, so this is a current/final run-record distribution—not a per-attempt success rate. Duration statistics include only records joinable to an agent campaign; approval-ready time uses campaign.createdAt as the persisted proxy.',
@@ -770,11 +788,22 @@ export class DashboardService {
    */
   private async loadToolImpactDailyPerformance(
     tenantId: string,
-    salesCampaigns: DashboardCampaignRow[],
+    launchedCampaigns: DashboardCampaignRow[],
     authoritativeProductByMetaId: ReadonlyMap<string, string>,
+    persistedCampaignByMetaId: ReadonlyMap<string, any>,
   ): Promise<ToolImpactDailyPerformance> {
     const calculationVersion = 'product_scoped_v1' as const;
-    const metaCampaignIds = [
+    const allMetaCampaignIds = [
+      ...new Set(
+        launchedCampaigns
+          .map((campaign) => String(campaign.metaCampaignId ?? '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const salesCampaigns = launchedCampaigns.filter((campaign) =>
+      isKnownToolImpactRevenueObjective(campaign.objective),
+    );
+    const salesMetaCampaignIds = [
       ...new Set(
         salesCampaigns
           .map((campaign) => String(campaign.metaCampaignId ?? '').trim())
@@ -792,6 +821,15 @@ export class DashboardService {
     const empty = (
       warning: string | null,
       observedAbsenceConfirmed = false,
+      byCampaign = buildToolImpactCampaignDailyPerformance({
+        campaigns: launchedCampaigns,
+        rows: [],
+        authoritativeProductByMetaId,
+        persistedCampaignByMetaId,
+        calculationVersion,
+        rowsLoaded: observedAbsenceConfirmed,
+        loadWarning: warning,
+      }),
     ): ToolImpactDailyPerformance => ({
       source: 'metric_timeseries_campaign_daily',
       dateBasis: 'meta_ad_account_date_start',
@@ -799,9 +837,9 @@ export class DashboardService {
       calculationVersion,
       coverage: {
         status: 'none',
-        eligibleCampaigns: metaCampaignIds.length,
+        eligibleCampaigns: salesMetaCampaignIds.length,
         campaignsWithRows: 0,
-        campaignsWithoutRows: metaCampaignIds.length,
+        campaignsWithoutRows: salesMetaCampaignIds.length,
         observedDates: 0,
         campaignDateRows: 0,
         firstDate: null,
@@ -819,14 +857,20 @@ export class DashboardService {
         untrustedRows: 0,
         campaignsWithTrustedRows: 0,
         legacyRowsExcludedFromReturn: 0,
+        returnBasis:
+          salesMetaCampaignIds.length > 0 ? 'unknown' : 'not_applicable',
+        returnNature:
+          salesMetaCampaignIds.length > 0 ? 'unknown' : 'not_applicable',
+        byBasis: [],
         warning,
       },
       series: [],
+      byCampaign,
     });
 
-    if (metaCampaignIds.length === 0) {
+    if (allMetaCampaignIds.length === 0) {
       return empty(
-        'No verified sales launches are available for a daily series.',
+        'No verified tool launches are available for a daily series.',
       );
     }
 
@@ -836,10 +880,10 @@ export class DashboardService {
         .find({
           tenantId,
           level: 'campaign',
-          metaCampaignId: { $in: metaCampaignIds },
+          metaCampaignId: { $in: allMetaCampaignIds },
         })
         .select(
-          'metaCampaignId date spend revenue revenueBasis revenueAttributionSource revenueAttributionActionTypes revenueCalculationVersion revenueFetchCompleteness campaignProductName resolvedProductName productResolutionEvidence revenueConfigFingerprint',
+          'metaCampaignId date spend revenue impressions reach frequency clicks inlineLinkClicks ctr cpc cpm conversions addToCart initiateCheckout landingPageView video3s thruplay revenueBasis revenueAttributionSource revenueAttributionActionTypes revenueCalculationVersion revenueFetchCompleteness campaignProductName resolvedProductName productResolutionEvidence revenueConfigFingerprint',
         )
         .sort({ date: 1 })
         .lean()
@@ -851,16 +895,38 @@ export class DashboardService {
       return empty('Persisted daily rows could not be loaded.');
     }
 
-    const exactMetaIds = new Set(metaCampaignIds);
+    const exactMetaIds = new Set(allMetaCampaignIds);
     const validRows = rows.filter(
       (row) =>
         exactMetaIds.has(String(row.metaCampaignId ?? '')) &&
         isValidDateKey(String(row.date ?? '')),
     );
-    if (validRows.length === 0) {
+    const byCampaign = buildToolImpactCampaignDailyPerformance({
+      campaigns: launchedCampaigns,
+      rows: validRows,
+      authoritativeProductByMetaId,
+      persistedCampaignByMetaId,
+      calculationVersion,
+      rowsLoaded: true,
+      loadWarning: null,
+    });
+    if (salesMetaCampaignIds.length === 0) {
+      return empty(
+        'No verified sales launches are available for the aggregate return series. Individual objective-aware campaign series remain available.',
+        true,
+        byCampaign,
+      );
+    }
+
+    const exactSalesMetaIds = new Set(salesMetaCampaignIds);
+    const salesRows = validRows.filter((row) =>
+      exactSalesMetaIds.has(String(row.metaCampaignId ?? '')),
+    );
+    if (salesRows.length === 0) {
       return empty(
         'No persisted daily rows exist for the verified sales cohort.',
         true,
+        byCampaign,
       );
     }
 
@@ -879,6 +945,7 @@ export class DashboardService {
       trustedRows: number;
       campaigns: Set<string>;
       trustedCampaigns: Set<string>;
+      basisRows: any[];
     };
     const byDate = new Map<string, DayAccumulator>();
     const campaignsWithRows = new Set<string>();
@@ -886,7 +953,7 @@ export class DashboardService {
     let trustedRows = 0;
     let legacyRowsExcludedFromReturn = 0;
 
-    for (const row of validRows) {
+    for (const row of salesRows) {
       const metaCampaignId = String(row.metaCampaignId);
       const date = String(row.date);
       const trusted = rowIsReturnTrusted(row);
@@ -898,11 +965,13 @@ export class DashboardService {
         trustedRows: 0,
         campaigns: new Set<string>(),
         trustedCampaigns: new Set<string>(),
+        basisRows: [],
       };
       day.spend += num(row.spend);
       day.persistedAttributedReturn += num(row.revenue);
       day.rows++;
       day.campaigns.add(metaCampaignId);
+      day.basisRows.push(row);
       campaignsWithRows.add(metaCampaignId);
       if (trusted) {
         day.knownAttributedReturn += num(row.revenue);
@@ -927,6 +996,7 @@ export class DashboardService {
         returnCoverage === 'complete'
           ? round(day.knownAttributedReturn, 2)
           : null;
+      const basisSummary = summarizeReturnBasis(day.basisRows, true);
       return {
         date,
         spend: round(day.spend, 2),
@@ -940,27 +1010,30 @@ export class DashboardService {
         campaignsReporting: day.campaigns.size,
         trustedReturnCampaigns: day.trustedCampaigns.size,
         returnCoverage,
+        returnBasis: basisSummary.returnBasis,
+        returnNature: basisSummary.returnNature,
       };
     });
-    const untrustedRows = validRows.length - trustedRows;
-    const observedSpend = round(sum(validRows.map((row) => num(row.spend))), 2);
+    const untrustedRows = salesRows.length - trustedRows;
+    const observedSpend = round(sum(salesRows.map((row) => num(row.spend))), 2);
     const observedPersistedAttributedReturn = round(
-      sum(validRows.map((row) => num(row.revenue))),
+      sum(salesRows.map((row) => num(row.revenue))),
       2,
     );
     const spendReconciliationTolerance = Math.max(1, lifetimeSpend * 0.001);
     const spendReconciles =
       Math.abs(observedSpend - lifetimeSpend) <= spendReconciliationTolerance;
     const coverageStatus: 'complete' | 'partial' =
-      campaignsWithRows.size === metaCampaignIds.length && spendReconciles
+      campaignsWithRows.size === salesMetaCampaignIds.length && spendReconciles
         ? 'complete'
         : 'partial';
     const returnCoverageStatus: 'complete' | 'partial' | 'none' =
-      trustedRows === validRows.length
+      trustedRows === salesRows.length
         ? 'complete'
         : trustedRows > 0
           ? 'partial'
           : 'none';
+    const aggregateBasisSummary = summarizeReturnBasis(salesRows, true);
 
     return {
       source: 'metric_timeseries_campaign_daily',
@@ -969,11 +1042,12 @@ export class DashboardService {
       calculationVersion,
       coverage: {
         status: coverageStatus,
-        eligibleCampaigns: metaCampaignIds.length,
+        eligibleCampaigns: salesMetaCampaignIds.length,
         campaignsWithRows: campaignsWithRows.size,
-        campaignsWithoutRows: metaCampaignIds.length - campaignsWithRows.size,
+        campaignsWithoutRows:
+          salesMetaCampaignIds.length - campaignsWithRows.size,
         observedDates: series.length,
-        campaignDateRows: validRows.length,
+        campaignDateRows: salesRows.length,
         firstDate: series[0]?.date ?? null,
         lastDate: series[series.length - 1]?.date ?? null,
         observedSpend,
@@ -991,12 +1065,16 @@ export class DashboardService {
         untrustedRows,
         campaignsWithTrustedRows: campaignsWithTrustedRows.size,
         legacyRowsExcludedFromReturn,
+        returnBasis: aggregateBasisSummary.returnBasis,
+        returnNature: aggregateBasisSummary.returnNature,
+        byBasis: aggregateBasisSummary.byBasis,
         warning:
           untrustedRows > 0
             ? `${untrustedRows} campaign-day row(s) lack verified product-scoped return provenance. Their spend is shown, but their return is excluded from attributedReturn.`
             : null,
       },
       series,
+      byCampaign,
     };
   }
 
@@ -1863,6 +1941,652 @@ const TOOL_IMPACT_REVENUE_OBJECTIVES = new Set([
   'RETARGETING',
   'RETARGETING_SALES',
 ]);
+
+type CampaignDailyResultMetric =
+  ToolImpactCampaignDailyPerformance['resultMetric'];
+
+interface CampaignDayAccumulator {
+  rows: number;
+  trustedRows: number;
+  spend: number;
+  persistedAttributedReturn: number;
+  knownAttributedReturn: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  inlineLinkClicks: number;
+  conversions: number;
+  addToCart: number;
+  initiateCheckout: number;
+  landingPageView: number;
+  video3s: number;
+  thruplay: number;
+  basisRows: any[];
+  availableMetrics: Set<string>;
+}
+
+const TOOL_IMPACT_DAILY_RESULT_FIELDS = [
+  'conversions',
+  'landingPageView',
+  'inlineLinkClicks',
+  'impressions',
+  'reach',
+  'thruplay',
+  'video3s',
+  'clicks',
+] as const;
+
+function hasNumericField(row: any, key: string): boolean {
+  const value = row?.[key];
+  return (
+    Object.prototype.hasOwnProperty.call(row, key) &&
+    value !== null &&
+    value !== undefined &&
+    value !== '' &&
+    Number.isFinite(Number(value))
+  );
+}
+
+function summarizeReturnBasis(
+  rows: any[],
+  applicable: boolean,
+): {
+  returnBasis: ToolImpactReturnBasis;
+  returnNature: ToolImpactReturnNature;
+  byBasis: ToolImpactReturnBasisBreakdown[];
+} {
+  if (!applicable) {
+    return {
+      returnBasis: 'not_applicable',
+      returnNature: 'not_applicable',
+      byBasis: [],
+    };
+  }
+
+  const grouped = new Map<
+    CampaignRevenueBasis,
+    ToolImpactReturnBasisBreakdown
+  >();
+  for (const row of rows) {
+    const basis = normalizeReturnBasis(row?.revenueBasis);
+    const current = grouped.get(basis) ?? {
+      basis,
+      rowCount: 0,
+      persistedAttributedReturn: 0,
+    };
+    current.rowCount++;
+    current.persistedAttributedReturn += num(row?.revenue);
+    grouped.set(basis, current);
+  }
+  const basisOrder: CampaignRevenueBasis[] = [
+    'meta_action_value',
+    'configured_conversion_value',
+    'no_attributed_revenue',
+    'unknown',
+  ];
+  const byBasis = basisOrder
+    .map((basis) => grouped.get(basis))
+    .filter((entry): entry is ToolImpactReturnBasisBreakdown => entry != null)
+    .map((entry) => ({
+      ...entry,
+      persistedAttributedReturn: round(entry.persistedAttributedReturn, 2),
+    }));
+  const returnBasis: ToolImpactReturnBasis =
+    byBasis.length === 0
+      ? 'unknown'
+      : byBasis.length === 1
+        ? byBasis[0].basis
+        : 'mixed';
+  return {
+    returnBasis,
+    returnNature: returnNatureForBasis(returnBasis),
+    byBasis,
+  };
+}
+
+function normalizeReturnBasis(value: unknown): CampaignRevenueBasis {
+  switch (value) {
+    case 'meta_action_value':
+    case 'configured_conversion_value':
+    case 'no_attributed_revenue':
+      return value;
+    default:
+      return 'unknown';
+  }
+}
+
+function returnNatureForBasis(
+  basis: ToolImpactReturnBasis,
+): ToolImpactReturnNature {
+  switch (basis) {
+    case 'meta_action_value':
+      return 'meta_reported_action_value';
+    case 'configured_conversion_value':
+      return 'configured_conversion_estimate';
+    case 'no_attributed_revenue':
+      return 'no_attributed_return';
+    case 'mixed':
+      return 'mixed';
+    case 'not_applicable':
+      return 'not_applicable';
+    default:
+      return 'unknown';
+  }
+}
+
+function buildToolImpactCampaignDailyPerformance(opts: {
+  campaigns: DashboardCampaignRow[];
+  rows: any[];
+  authoritativeProductByMetaId: ReadonlyMap<string, string>;
+  persistedCampaignByMetaId: ReadonlyMap<string, any>;
+  calculationVersion: 'product_scoped_v1';
+  rowsLoaded: boolean;
+  loadWarning: string | null;
+}): ToolImpactCampaignDailyPerformance[] {
+  const rowsByMetaId = new Map<string, any[]>();
+  for (const row of opts.rows) {
+    const metaCampaignId = String(row.metaCampaignId ?? '');
+    const bucket = rowsByMetaId.get(metaCampaignId) ?? [];
+    bucket.push(row);
+    rowsByMetaId.set(metaCampaignId, bucket);
+  }
+
+  return opts.campaigns.map((campaign) => {
+    const metaCampaignId = String(campaign.metaCampaignId ?? '').trim();
+    const campaignRows = rowsByMetaId.get(metaCampaignId) ?? [];
+    const isRevenueObjective = isKnownToolImpactRevenueObjective(
+      campaign.objective,
+    );
+    const objectiveIsRecognized =
+      isRevenueObjective || !campaign.isRevenueObjective;
+    const optimizationGoals = extractOptimizationGoals(
+      opts.persistedCampaignByMetaId.get(metaCampaignId),
+    );
+    const resultMetric = resolveCampaignResultMetric(
+      campaign.objectiveKey,
+      isRevenueObjective,
+      optimizationGoals,
+    );
+    const primaryKpi = proofPagePrimaryKpi(
+      campaign,
+      isRevenueObjective,
+      resultMetric,
+    );
+
+    const byDate = new Map<string, CampaignDayAccumulator>();
+    let trustedRows = 0;
+    let legacyRowsExcludedFromReturn = 0;
+    for (const row of campaignRows) {
+      const date = String(row.date);
+      const trusted =
+        isRevenueObjective &&
+        isTrustedProductScopedTimeseriesRevenue(
+          row,
+          opts.authoritativeProductByMetaId.get(metaCampaignId),
+        );
+      const day = byDate.get(date) ?? emptyCampaignDay();
+      day.rows++;
+      day.spend += num(row.spend);
+      day.persistedAttributedReturn += num(row.revenue);
+      day.impressions += num(row.impressions);
+      day.reach += num(row.reach);
+      day.clicks += num(row.clicks);
+      day.inlineLinkClicks += num(row.inlineLinkClicks);
+      day.conversions += num(row.conversions);
+      day.addToCart += num(row.addToCart);
+      day.initiateCheckout += num(row.initiateCheckout);
+      day.landingPageView += num(row.landingPageView);
+      day.video3s += num(row.video3s);
+      day.thruplay += num(row.thruplay);
+      day.basisRows.push(row);
+      for (const metric of TOOL_IMPACT_DAILY_RESULT_FIELDS) {
+        if (hasNumericField(row, metric)) day.availableMetrics.add(metric);
+      }
+      if (trusted) {
+        day.trustedRows++;
+        day.knownAttributedReturn += num(row.revenue);
+        trustedRows++;
+      } else if (
+        isRevenueObjective &&
+        row.revenueCalculationVersion !== opts.calculationVersion
+      ) {
+        legacyRowsExcludedFromReturn++;
+      }
+      byDate.set(date, day);
+    }
+
+    const series = [...byDate.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, day]) => {
+        const returnCoverage:
+          | 'complete'
+          | 'partial'
+          | 'none'
+          | 'not_applicable' = !isRevenueObjective
+          ? 'not_applicable'
+          : day.trustedRows === day.rows
+            ? 'complete'
+            : day.trustedRows > 0
+              ? 'partial'
+              : 'none';
+        const basisSummary = summarizeReturnBasis(
+          day.basisRows,
+          isRevenueObjective,
+        );
+        const attributedReturn =
+          returnCoverage === 'complete'
+            ? round(day.knownAttributedReturn, 2)
+            : null;
+        const spend = round(day.spend, 2);
+        const rawRoas =
+          isRevenueObjective && attributedReturn != null && spend > 0
+            ? round(attributedReturn / spend, 6)
+            : null;
+        const impressions = Math.round(day.impressions);
+        const reach = Math.round(day.reach);
+        const clicks = Math.round(day.clicks);
+        const conversions = round(day.conversions, 4);
+        const dailyMetrics = {
+          spend,
+          revenue: attributedReturn ?? 0,
+          conversions,
+          clicks,
+          impressions,
+          reach,
+          frequency: reach > 0 ? impressions / reach : 0,
+        };
+        const dailyPrimaryKpi = proofPageDailyPrimaryKpi(
+          campaign,
+          isRevenueObjective,
+          resultMetric,
+          dailyMetrics,
+          rawRoas,
+        );
+        const objectiveResultValue = campaignResultValue(resultMetric.key, {
+          ...day,
+          attributedReturn,
+        });
+
+        return {
+          date,
+          spend,
+          attributedReturn,
+          knownAttributedReturn: round(day.knownAttributedReturn, 2),
+          persistedAttributedReturn: round(day.persistedAttributedReturn, 2),
+          rawRoas,
+          conversions,
+          clicks,
+          impressions,
+          reach,
+          frequency: round(dailyMetrics.frequency, 4),
+          inlineLinkClicks: Math.round(day.inlineLinkClicks),
+          ctr: impressions > 0 ? round((clicks / impressions) * 100, 4) : 0,
+          cpc: clicks > 0 ? round(spend / clicks, 4) : 0,
+          cpm: impressions > 0 ? round((spend / impressions) * 1000, 4) : 0,
+          addToCart: round(day.addToCart, 4),
+          initiateCheckout: round(day.initiateCheckout, 4),
+          landingPageView: round(day.landingPageView, 4),
+          video3s: round(day.video3s, 4),
+          thruplay: round(day.thruplay, 4),
+          primaryKpiValue: dailyPrimaryKpi.value,
+          primaryKpiDisplay: dailyPrimaryKpi.display,
+          primaryKpiStatus: dailyPrimaryKpi.status,
+          objectiveResult: {
+            key: resultMetric.key,
+            label: resultMetric.label,
+            value: objectiveResultValue,
+            source: resultMetric.source,
+          },
+          returnCoverage,
+          returnBasis: basisSummary.returnBasis,
+          returnNature: basisSummary.returnNature,
+        };
+      });
+
+    const observedSpend = round(
+      sum(campaignRows.map((row) => num(row.spend))),
+      2,
+    );
+    const lifetimeSpend = round(campaign.spend, 2);
+    const spendTolerance = Math.max(1, lifetimeSpend * 0.001);
+    const spendReconciles =
+      Math.abs(observedSpend - lifetimeSpend) <= spendTolerance;
+    const coverageStatus: 'complete' | 'partial' | 'none' =
+      campaignRows.length === 0
+        ? 'none'
+        : spendReconciles
+          ? 'complete'
+          : 'partial';
+    const untrustedRows = isRevenueObjective
+      ? campaignRows.length - trustedRows
+      : 0;
+    const returnCoverageStatus:
+      | 'complete'
+      | 'partial'
+      | 'none'
+      | 'not_applicable' = !isRevenueObjective
+      ? 'not_applicable'
+      : campaignRows.length === 0
+        ? 'none'
+        : trustedRows === campaignRows.length
+          ? 'complete'
+          : trustedRows > 0
+            ? 'partial'
+            : 'none';
+    const campaignBasisSummary = summarizeReturnBasis(
+      campaignRows,
+      isRevenueObjective,
+    );
+    const coverageWarning =
+      opts.loadWarning ??
+      (opts.rowsLoaded && campaignRows.length === 0 && lifetimeSpend > 0
+        ? 'No persisted campaign-day rows exist for this spending campaign.'
+        : campaignRows.length > 0 && !spendReconciles
+          ? 'Observed daily spend does not fully reconcile to the campaign lifetime total.'
+          : null);
+
+    return {
+      campaignId: campaign.id,
+      metaCampaignId,
+      campaignName: campaign.name,
+      displayName: campaign.displayName,
+      status: campaign.status,
+      objectiveKey: objectiveIsRecognized ? campaign.objectiveKey : 'unknown',
+      objectiveLabel: objectiveIsRecognized
+        ? campaign.objectiveLabel
+        : 'Unknown objective',
+      isRevenueObjective,
+      optimizationGoals,
+      primaryKpi,
+      resultMetric,
+      coverage: {
+        status: coverageStatus,
+        observedDates: series.length,
+        campaignDateRows: campaignRows.length,
+        firstDate: series[0]?.date ?? null,
+        lastDate: series[series.length - 1]?.date ?? null,
+        observedSpend,
+        lifetimeSpend,
+        spendCoveragePct:
+          opts.rowsLoaded && lifetimeSpend > 0
+            ? round((observedSpend / lifetimeSpend) * 100, 1)
+            : null,
+        warning: coverageWarning,
+      },
+      returnCoverage: {
+        status: returnCoverageStatus,
+        trustedRows,
+        untrustedRows,
+        legacyRowsExcludedFromReturn,
+        returnBasis: campaignBasisSummary.returnBasis,
+        returnNature: campaignBasisSummary.returnNature,
+        byBasis: campaignBasisSummary.byBasis,
+        warning:
+          isRevenueObjective && opts.loadWarning
+            ? opts.loadWarning
+            : untrustedRows > 0
+              ? `${untrustedRows} campaign-day row(s) lack verified product-scoped return provenance; raw ROAS is withheld for those dates.`
+              : null,
+      },
+      series,
+    };
+  });
+}
+
+function emptyCampaignDay(): CampaignDayAccumulator {
+  return {
+    rows: 0,
+    trustedRows: 0,
+    spend: 0,
+    persistedAttributedReturn: 0,
+    knownAttributedReturn: 0,
+    impressions: 0,
+    reach: 0,
+    clicks: 0,
+    inlineLinkClicks: 0,
+    conversions: 0,
+    addToCart: 0,
+    initiateCheckout: 0,
+    landingPageView: 0,
+    video3s: 0,
+    thruplay: 0,
+    basisRows: [],
+    availableMetrics: new Set<string>(),
+  };
+}
+
+function extractOptimizationGoals(campaign: any): string[] {
+  const configured = Array.isArray(campaign?.campaignConfig?.adSets)
+    ? campaign.campaignConfig.adSets
+    : [];
+  const synced = Array.isArray(campaign?.metaAdSets) ? campaign.metaAdSets : [];
+  return [
+    ...new Set(
+      [...configured, ...synced]
+        .map((adSet) => String(adSet?.optimizationGoal ?? '').trim())
+        .filter(Boolean),
+    ),
+  ].sort();
+}
+
+function resolveCampaignResultMetric(
+  objectiveKey: string,
+  isRevenueObjective: boolean,
+  optimizationGoals: string[],
+): CampaignDailyResultMetric {
+  if (optimizationGoals.length === 1) {
+    const exact = resultMetricForOptimizationGoal(optimizationGoals[0]);
+    if (exact) {
+      return {
+        ...exact,
+        source: 'goal_selected_metric',
+        optimizationGoal: optimizationGoals[0],
+      };
+    }
+  }
+
+  const proxy = resultMetricForObjective(objectiveKey, isRevenueObjective);
+  return {
+    ...proxy,
+    source: 'objective_proxy',
+    optimizationGoal:
+      optimizationGoals.length === 1 ? optimizationGoals[0] : null,
+  };
+}
+
+function resultMetricForOptimizationGoal(
+  goal: string,
+): Pick<CampaignDailyResultMetric, 'key' | 'label'> | null {
+  switch (goal.toUpperCase()) {
+    case 'VALUE':
+      return { key: 'attributedReturn', label: 'Attributed value' };
+    case 'OFFSITE_CONVERSIONS':
+    case 'LEAD_GENERATION':
+    case 'QUALITY_LEAD':
+    case 'QUALITY_CALL':
+    case 'APP_INSTALLS':
+      return {
+        key: 'conversions',
+        label: 'Stored conversions (goal-selected metric)',
+      };
+    case 'LANDING_PAGE_VIEWS':
+      return { key: 'landingPageView', label: 'Landing-page views' };
+    case 'LINK_CLICKS':
+      return { key: 'inlineLinkClicks', label: 'Inline link clicks' };
+    case 'IMPRESSIONS':
+      return { key: 'impressions', label: 'Impressions' };
+    case 'REACH':
+      return { key: 'reach', label: 'Reach' };
+    case 'THRUPLAY':
+      return { key: 'thruplay', label: 'ThruPlays' };
+    default:
+      return null;
+  }
+}
+
+function resultMetricForObjective(
+  objectiveKey: string,
+  isRevenueObjective: boolean,
+): Pick<CampaignDailyResultMetric, 'key' | 'label'> {
+  if (isRevenueObjective) {
+    return {
+      key: 'conversions',
+      label: 'Tracked conversions (objective proxy)',
+    };
+  }
+  switch (objectiveKey) {
+    case 'awareness':
+      return { key: 'reach', label: 'Reach (objective proxy)' };
+    case 'traffic':
+      return {
+        key: 'landingPageView',
+        label: 'Landing-page views (objective proxy)',
+      };
+    case 'leads':
+    case 'messages':
+    case 'app_installs':
+      return {
+        key: 'conversions',
+        label: 'Tracked results (objective proxy)',
+      };
+    case 'video_views':
+      return { key: 'thruplay', label: 'ThruPlays (objective proxy)' };
+    case 'engagement':
+      return { key: 'clicks', label: 'Clicks (engagement proxy)' };
+    default:
+      return {
+        key: 'conversions',
+        label: 'Tracked results (generic proxy)',
+      };
+  }
+}
+
+function proofPagePrimaryKpi(
+  campaign: DashboardCampaignRow,
+  isRevenueObjective: boolean,
+  resultMetric: CampaignDailyResultMetric,
+): ToolImpactCampaignDailyPerformance['primaryKpi'] {
+  if (isRevenueObjective) {
+    const value = campaign.spend > 0 ? campaign.revenue / campaign.spend : 0;
+    return {
+      key: 'roas',
+      label: 'Raw return on ad spend',
+      value: round(value, 3),
+      display: campaign.spend > 0 ? `${value.toFixed(2)}x` : '—',
+      target: 1,
+      targetDisplay: '1.00x raw return threshold',
+      direction: 'higher_better',
+      status: campaign.spend <= 0 ? 'neutral' : value >= 1 ? 'good' : 'bad',
+    };
+  }
+  if (!campaign.isRevenueObjective) return campaign.primaryKpi;
+
+  // The global dashboard intentionally falls unknown objectives back to sales
+  // for legacy compatibility. This evidence page refuses to invent that
+  // classification, so an unmapped objective gets a neutral result proxy.
+  return {
+    key: resultMetric.key,
+    label: resultMetric.label,
+    value: 0,
+    display: '—',
+    target: null,
+    targetDisplay: null,
+    direction: 'higher_better',
+    status: 'neutral',
+  };
+}
+
+function proofPageDailyPrimaryKpi(
+  campaign: DashboardCampaignRow,
+  isRevenueObjective: boolean,
+  resultMetric: CampaignDailyResultMetric,
+  metrics: {
+    spend: number;
+    revenue: number;
+    conversions: number;
+    clicks: number;
+    impressions: number;
+    reach: number;
+    frequency: number;
+  },
+  rawRoas: number | null,
+): {
+  value: number | null;
+  display: string | null;
+  status: 'good' | 'watch' | 'bad' | 'neutral';
+} {
+  if (isRevenueObjective) {
+    return {
+      value: rawRoas,
+      display: rawRoas == null ? null : `${rawRoas.toFixed(2)}x`,
+      status: rawRoas == null ? 'neutral' : rawRoas >= 1 ? 'good' : 'bad',
+    };
+  }
+  if (!campaign.isRevenueObjective) {
+    const evaluation = evaluateObjective({
+      objectiveRaw: campaign.objective,
+      metrics,
+      econ: {
+        marginPct: campaign.marginPct,
+        refundPct: 0,
+        netMarginPct: campaign.marginPct,
+        breakevenROAS: campaign.breakevenROAS,
+        targetROAS: campaign.targetROAS,
+      },
+      ageHours: null,
+      status: campaign.status,
+      attributionGraceHours: 0,
+      minSpendToJudge: 0,
+    });
+    return {
+      value: evaluation.primaryKpi.value,
+      display: evaluation.primaryKpi.display,
+      status: evaluation.primaryKpi.status,
+    };
+  }
+
+  const value = campaignResultValue(resultMetric.key, {
+    ...emptyCampaignDay(),
+    ...metrics,
+    attributedReturn: null,
+  });
+  return {
+    value,
+    display: value == null ? null : String(value),
+    status: 'neutral',
+  };
+}
+
+function campaignResultValue(
+  key: string,
+  day: CampaignDayAccumulator & { attributedReturn: number | null },
+): number | null {
+  if (key !== 'attributedReturn' && !day.availableMetrics.has(key)) {
+    return null;
+  }
+  switch (key) {
+    case 'attributedReturn':
+      return day.attributedReturn;
+    case 'conversions':
+      return round(day.conversions, 4);
+    case 'landingPageView':
+      return round(day.landingPageView, 4);
+    case 'inlineLinkClicks':
+      return round(day.inlineLinkClicks, 4);
+    case 'impressions':
+      return Math.round(day.impressions);
+    case 'reach':
+      return Math.round(day.reach);
+    case 'thruplay':
+      return round(day.thruplay, 4);
+    case 'video3s':
+      return round(day.video3s, 4);
+    case 'clicks':
+      return Math.round(day.clicks);
+    default:
+      return null;
+  }
+}
 
 /**
  * Deliberately stricter than the global dashboard evaluator, whose historical

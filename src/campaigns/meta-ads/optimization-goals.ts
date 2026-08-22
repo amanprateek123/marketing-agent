@@ -22,3 +22,39 @@ export const VALID_OPTIMIZATION_GOALS = new Set([
   'QUALITY_CALL',
   'APP_INSTALLS',
 ]);
+
+export function defaultOptimizationGoalForObjective(objective: string): string {
+  switch (objective) {
+    case 'OUTCOME_AWARENESS':
+      return 'AD_RECALL_LIFT';
+    case 'OUTCOME_TRAFFIC':
+      return 'LANDING_PAGE_VIEWS';
+    case 'OUTCOME_ENGAGEMENT':
+      return 'POST_ENGAGEMENT';
+    case 'OUTCOME_APP_PROMOTION':
+      return 'APP_INSTALLS';
+    case 'OUTCOME_LEADS':
+    case 'OUTCOME_SALES':
+    default:
+      return 'OFFSITE_CONVERSIONS';
+  }
+}
+
+/** Product-level VBB is a sales-conversion setting, not a global override. */
+export function resolveOptimizationGoalForLaunch(input: {
+  objective: string;
+  requested?: string;
+  productGoal?: string;
+}): string {
+  if (
+    input.objective === 'OUTCOME_SALES' &&
+    input.productGoal &&
+    VALID_OPTIMIZATION_GOALS.has(input.productGoal)
+  ) {
+    return input.productGoal;
+  }
+  if (input.requested && VALID_OPTIMIZATION_GOALS.has(input.requested)) {
+    return input.requested;
+  }
+  return defaultOptimizationGoalForObjective(input.objective);
+}

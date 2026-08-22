@@ -5,13 +5,15 @@ export type CampaignDocument = HydratedDocument<Campaign>;
 
 export type CampaignStatus =
   | 'pending_approval'
+  | 'launching'
   | 'active'
   | 'paused'
   | 'completed'
   | 'failed'
   | 'superseded';
 /**
- * 'agent' = full AI pipeline (scout→brief→creative→review team) launched this.
+ * 'agent' = an AI workflow prepared this, including the full autonomous
+ *   pipeline and the operator-guided ChatGPT Campaign Copilot.
  * 'human' = launched through the dashboard's manual Create Campaign form —
  *   a person supplied targeting + creative directly, no AI review team.
  * 'manual' = imported from Meta; the tenant created it directly in Ads Manager,
@@ -80,6 +82,14 @@ export class Campaign {
   // 'agent' = launched by our system, 'manual' = synced from Meta (tenant created it)
   @Prop({ default: 'agent', index: true })
   source: CampaignSource;
+
+  /** Which in-product authoring surface prepared this campaign. */
+  @Prop({ default: '', index: true })
+  authoringMode: '' | 'campaign_copilot';
+
+  /** Stable join back to the persisted Campaign Copilot conversation. */
+  @Prop({ default: '', index: true })
+  copilotSessionId: string;
 
   // Last time this campaign was synced from Meta
   @Prop()

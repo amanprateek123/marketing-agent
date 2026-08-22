@@ -43,7 +43,7 @@ export interface ManualAdSetInput {
   /** Required when audienceType is 'interest' — real Meta interest IDs (via the search endpoint), not keywords. */
   interests?: Array<{ id: string; name: string }>;
   optimizationGoal?: string;
-  creativeFormat?: 'video' | 'image' | 'both' | 'mixed';
+  creativeFormat?: 'video' | 'image' | 'both' | 'mixed' | 'carousel';
   /** Which Meta surfaces this ad set can serve on. Undefined -> 'vertical' (the long-standing default) — see placement-presets.ts. */
   placementPreset?: PlacementPreset;
   /**
@@ -129,6 +129,20 @@ export interface CreateManualCampaignDto {
     videos?: ManualCreativeVideo[];
   };
   creativePackageId?: string;
+}
+
+/**
+ * Server-only provenance for internal authoring workflows. This is a separate
+ * argument to ManualCampaignService.create(), never part of the public DTO, so
+ * a dashboard caller cannot self-attribute a manual campaign to the agent.
+ */
+export interface ManualCampaignInternalMetadata {
+  source?: 'agent';
+  runId?: string;
+  briefId?: string;
+  reviewNotes?: string;
+  authoringMode?: 'campaign_copilot';
+  copilotSessionId?: string;
 }
 
 /**

@@ -40,6 +40,12 @@ export interface Product {
   description: string;
   active: boolean;
 
+  /** Server-only provenance for retry-safe products created by Campaign Copilot. */
+  copilotSessionId?: string;
+
+  /** Normalized key used to make Campaign Copilot product inserts atomic. */
+  copilotProductKey?: string;
+
   // Product marketing data
   landingUrl?: string;               // canonical / control destination URL
   /**

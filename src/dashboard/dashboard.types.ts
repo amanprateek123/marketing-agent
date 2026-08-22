@@ -378,6 +378,26 @@ export interface ToolImpactRawOutcome {
   };
 }
 
+export type ToolImpactReturnBasis =
+  | CampaignRevenueBasis
+  | 'mixed'
+  | 'not_applicable';
+
+export type ToolImpactReturnNature =
+  | 'meta_reported_action_value'
+  | 'configured_conversion_estimate'
+  | 'no_attributed_return'
+  | 'unknown'
+  | 'mixed'
+  | 'not_applicable';
+
+export interface ToolImpactReturnBasisBreakdown {
+  basis: CampaignRevenueBasis;
+  rowCount: number;
+  /** Persisted value, not necessarily observed cash. See returnNature. */
+  persistedAttributedReturn: number;
+}
+
 export interface ToolImpactDailyPerformance {
   /** Persisted Meta daily rows only; no campaign-lifetime interpolation. */
   source: 'metric_timeseries_campaign_daily';
@@ -411,6 +431,9 @@ export interface ToolImpactDailyPerformance {
     campaignsWithTrustedRows: number;
     /** Old unstamped rows remain usable for spend, but never for return. */
     legacyRowsExcludedFromReturn: number;
+    returnBasis: ToolImpactReturnBasis;
+    returnNature: ToolImpactReturnNature;
+    byBasis: ToolImpactReturnBasisBreakdown[];
     warning: string | null;
   };
   /**
@@ -431,6 +454,97 @@ export interface ToolImpactDailyPerformance {
     campaignsReporting: number;
     trustedReturnCampaigns: number;
     returnCoverage: 'complete' | 'partial' | 'none';
+    returnBasis: ToolImpactReturnBasis;
+    returnNature: ToolImpactReturnNature;
+  }>;
+
+  /**
+   * The same persisted campaign-day evidence, kept separate for every
+   * verified tool launch. Non-sales campaigns are included and are evaluated
+   * against their own objective; they are never assigned a synthetic ROAS.
+   */
+  byCampaign: ToolImpactCampaignDailyPerformance[];
+}
+
+export interface ToolImpactCampaignDailyPerformance {
+  campaignId: string;
+  metaCampaignId: string;
+  campaignName: string;
+  displayName: string;
+  status: string;
+  objectiveKey: string;
+  objectiveLabel: string;
+  isRevenueObjective: boolean;
+  /** Exact ad-set goals when they were persisted; can contain more than one. */
+  optimizationGoals: string[];
+  /** Lifetime objective KPI, with the raw 1.00x benchmark for sales. */
+  primaryKpi: KpiReading;
+  /**
+   * Metric selected from the persisted optimization goal when supported.
+   * This is metric selection, not proof of conversion-event provenance.
+   */
+  resultMetric: {
+    key: string;
+    label: string;
+    source: 'goal_selected_metric' | 'objective_proxy';
+    optimizationGoal: string | null;
+  };
+  coverage: {
+    status: 'complete' | 'partial' | 'none';
+    observedDates: number;
+    campaignDateRows: number;
+    firstDate: string | null;
+    lastDate: string | null;
+    observedSpend: number;
+    lifetimeSpend: number;
+    spendCoveragePct: number | null;
+    warning: string | null;
+  };
+  returnCoverage: {
+    status: 'complete' | 'partial' | 'none' | 'not_applicable';
+    trustedRows: number;
+    untrustedRows: number;
+    legacyRowsExcludedFromReturn: number;
+    returnBasis: ToolImpactReturnBasis;
+    returnNature: ToolImpactReturnNature;
+    byBasis: ToolImpactReturnBasisBreakdown[];
+    warning: string | null;
+  };
+  series: Array<{
+    date: string;
+    spend: number;
+    /** Verified, product-scoped attributed return; null without provenance. */
+    attributedReturn: number | null;
+    knownAttributedReturn: number;
+    persistedAttributedReturn: number;
+    /** Raw return / spend. The proof-page benchmark is exactly 1.00x. */
+    rawRoas: number | null;
+    conversions: number;
+    clicks: number;
+    impressions: number;
+    reach: number;
+    frequency: number;
+    inlineLinkClicks: number;
+    ctr: number;
+    cpc: number;
+    cpm: number;
+    addToCart: number;
+    initiateCheckout: number;
+    landingPageView: number;
+    video3s: number;
+    thruplay: number;
+    primaryKpiValue: number | null;
+    primaryKpiDisplay: string | null;
+    primaryKpiStatus: 'good' | 'watch' | 'bad' | 'neutral';
+    objectiveResult: {
+      key: string;
+      label: string;
+      value: number | null;
+      source: 'goal_selected_metric' | 'objective_proxy';
+    };
+    returnCoverage: 'complete' | 'partial' | 'none' | 'not_applicable';
+    returnBasis: ToolImpactReturnBasis;
+    returnNature: ToolImpactReturnNature;
   }>;
 }
 
@@ -597,7 +711,7 @@ export interface ToolImpactOverview {
     portfolio: PortfolioRollup;
     /** Kept for the existing economics view; never use as this page's headline. */
     topWinner: DashboardCampaignRow | null;
-    /** Highest raw return surplus among verified launches with spend. */
+    /** Highest raw return surplus among verified sales launches with spend. */
     bestRawResult: DashboardCampaignRow | null;
     campaigns: DashboardCampaignRow[];
   };

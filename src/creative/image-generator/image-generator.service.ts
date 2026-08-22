@@ -27,6 +27,8 @@ export interface ImageResult {
   imageUrl: string;  // permanent S3 URL
 }
 
+export type ImageGenerationProvider = 'nano_banana' | 'gpt_image';
+
 @Injectable()
 export class ImageGeneratorService {
   private readonly logger = new Logger(ImageGeneratorService.name);
@@ -57,6 +59,7 @@ export class ImageGeneratorService {
     runId: string,
     aspectRatio: AspectRatio = '9:16',
     resolution: ImageResolution = '1K',
+    providerOverride?: ImageGenerationProvider,
   ): Promise<ImageResult> {
     const hookText = copyVariant.primaryText?.split('\n')[0] ?? '';
     const headline = copyVariant.headline ?? '';
@@ -86,7 +89,14 @@ export class ImageGeneratorService {
 
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio, resolution);
+      imageUrl = await this.generateAndUpload(
+        imagePrompt,
+        company.tenantId,
+        runId,
+        aspectRatio,
+        resolution,
+        providerOverride,
+      );
     } catch (err: any) {
       this.logger.error(`Image generation failed for variant ${variantIndex} (prompt saved): ${err.message}`);
     }
@@ -109,6 +119,7 @@ export class ImageGeneratorService {
     runId: string,
     aspectRatio: AspectRatio = '9:16',
     resolution: ImageResolution = '1K',
+    providerOverride?: ImageGenerationProvider,
   ): Promise<ImageResult> {
     const activeProduct = (company.products ?? []).find(p => p.active);
     const targetLanguage: CanonicalLanguage = brief.targetLanguage
@@ -138,7 +149,14 @@ export class ImageGeneratorService {
     // Step 2 — Generate image via Nano Banana + upload to S3
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio, resolution);
+      imageUrl = await this.generateAndUpload(
+        imagePrompt,
+        company.tenantId,
+        runId,
+        aspectRatio,
+        resolution,
+        providerOverride,
+      );
     } catch (err: any) {
       this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
@@ -156,12 +174,20 @@ export class ImageGeneratorService {
     runId: string,
     aspectRatio: AspectRatio = '9:16',
     resolution: ImageResolution = '1K',
+    providerOverride?: ImageGenerationProvider,
   ): Promise<ImageResult> {
     this.logger.log(`Generating image from reviewed prompt: tenantId=${company.tenantId}`);
 
     let imageUrl = '';
     try {
-      imageUrl = await this.generateAndUpload(imagePrompt, company.tenantId, runId, aspectRatio, resolution);
+      imageUrl = await this.generateAndUpload(
+        imagePrompt,
+        company.tenantId,
+        runId,
+        aspectRatio,
+        resolution,
+        providerOverride,
+      );
     } catch (err: any) {
       this.logger.error(`Image generation failed (prompt saved): ${err.message}`);
     }
@@ -473,8 +499,20 @@ Return ONLY the image prompt, nothing else.
     return Buffer.from(imagePart.inlineData.data, 'base64');
   }
 
-  private async generateAndUpload(prompt: string, tenantId: string, runId: string, aspectRatio: AspectRatio = '9:16', resolution: ImageResolution = '1K'): Promise<string> {
-    const provider = (this.configService.get<string>('imageGen.provider') ?? 'nano_banana').toLowerCase();
+  private async generateAndUpload(
+    prompt: string,
+    tenantId: string,
+    runId: string,
+    aspectRatio: AspectRatio = '9:16',
+    resolution: ImageResolution = '1K',
+    providerOverride?: ImageGenerationProvider,
+  ): Promise<string> {
+    const configuredProvider = (
+      this.configService.get<string>('imageGen.provider') ?? 'nano_banana'
+    ).toLowerCase();
+    const provider: ImageGenerationProvider =
+      providerOverride ??
+      (configuredProvider === 'gpt_image' ? 'gpt_image' : 'nano_banana');
     const imageBuffer = provider === 'gpt_image'
       ? await this.callGptImage(prompt, tenantId, aspectRatio, resolution)
       : await this.callNanoBanana(prompt, tenantId, aspectRatio, resolution);

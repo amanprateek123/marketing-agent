@@ -1,0 +1,45 @@
+import { Module } from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { MongooseModule } from '@nestjs/mongoose';
+import { ClaudeModule } from '../claude/claude.module';
+import { CompaniesModule } from '../companies/companies.module';
+import { CampaignsModule } from '../campaigns/campaigns.module';
+import { CreativeModule } from '../creative/creative.module';
+import {
+  CreativeBrief,
+  CreativeBriefSchema,
+} from '../pipeline/schemas/creative-brief.schema';
+import {
+  PipelineRun,
+  PipelineRunSchema,
+} from '../pipeline/schemas/pipeline-run.schema';
+import { CAMPAIGN_COPILOT_BUILD } from './campaign-copilot.contracts';
+import { CampaignCopilotController } from './campaign-copilot.controller';
+import { CampaignCopilotProcessor } from './campaign-copilot.processor';
+import { CampaignCopilotService } from './campaign-copilot.service';
+import {
+  CampaignCopilotSession,
+  CampaignCopilotSessionSchema,
+} from './schemas/campaign-copilot-session.schema';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([
+      {
+        name: CampaignCopilotSession.name,
+        schema: CampaignCopilotSessionSchema,
+      },
+      { name: CreativeBrief.name, schema: CreativeBriefSchema },
+      { name: PipelineRun.name, schema: PipelineRunSchema },
+    ]),
+    BullModule.registerQueue({ name: CAMPAIGN_COPILOT_BUILD }),
+    ClaudeModule,
+    CompaniesModule,
+    CampaignsModule,
+    CreativeModule,
+  ],
+  controllers: [CampaignCopilotController],
+  providers: [CampaignCopilotService, CampaignCopilotProcessor],
+  exports: [CampaignCopilotService],
+})
+export class CampaignCopilotModule {}

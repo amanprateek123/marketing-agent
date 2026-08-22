@@ -16,6 +16,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { AuthModule } from './auth/auth.module';
 import { PipelineBridgeModule } from './pipeline-bridge/pipeline-bridge.module';
+import { CampaignCopilotModule } from './campaign-copilot/campaign-copilot.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { PipelineBridgeModule } from './pipeline-bridge/pipeline-bridge.module';
     IntelligenceModule,
     DashboardModule,
     PipelineBridgeModule,
+    CampaignCopilotModule,
   ],
 })
 export class AppModule {}

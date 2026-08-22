@@ -21,6 +21,7 @@ import {
 import {
   CreateManualCampaignDto,
   ManualAdSetInput,
+  ManualCampaignInternalMetadata,
   UpdateManualCampaignConfigDto,
 } from './manual-campaign.types';
 
@@ -70,6 +71,7 @@ export class ManualCampaignService {
     tenantId: string,
     company: CompanyDocument,
     dto: CreateManualCampaignDto,
+    internal?: ManualCampaignInternalMetadata,
   ): Promise<CampaignDocument> {
     this.validate(dto);
 
@@ -107,8 +109,8 @@ export class ManualCampaignService {
     } else {
       creativePackage = await this.creativePackageModel.create({
         tenantId,
-        runId: 'manual',
-        briefId: 'manual',
+        runId: internal?.runId ?? 'manual',
+        briefId: internal?.briefId ?? 'manual',
         status: 'completed',
         copyVariants: dto.creative!.copyVariants,
         selectedCopyIndex: 0,
@@ -176,14 +178,21 @@ export class ManualCampaignService {
     const campaign = await this.campaignModel.create({
       tenantId,
       name: dto.name.trim(),
-      runId: '',
-      briefId: '',
+      runId: internal?.runId ?? '',
+      briefId: internal?.briefId ?? '',
       // The whole point: launch() must never have to re-derive this.
       productName: product.name,
-      source: 'human',
+      source: internal?.source ?? 'human',
+      authoringMode: internal?.authoringMode ?? '',
+      copilotSessionId: internal?.copilotSessionId ?? '',
+      promptsVersion:
+        internal?.source === 'agent'
+          ? ((company as any).promptsVersion ?? 1)
+          : undefined,
       status: 'pending_approval',
       budget: dto.budget,
       objective,
+      reviewNotes: internal?.reviewNotes ?? '',
       creativePackageId: String(creativePackage._id),
       campaignConfig,
       // Pre-launch intent, not yet confirmed — /approve still requires an
