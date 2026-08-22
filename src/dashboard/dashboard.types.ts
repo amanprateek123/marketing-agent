@@ -248,7 +248,7 @@ export interface DashboardInsight {
   finding: string;
   confidence: number;
   dataPoints: number;
-  /** Low-n findings are rendered with less visual weight than facts. */
+  /** Low-n model hypotheses are rendered with less visual weight. */
   strength: 'strong' | 'moderate' | 'weak';
   category: string | null;
   recommendation: string | null;
@@ -510,7 +510,7 @@ export interface ToolImpactCampaignDailyPerformance {
   isRevenueObjective: boolean;
   /** Exact ad-set goals when they were persisted; can contain more than one. */
   optimizationGoals: string[];
-  /** Lifetime objective KPI, with the raw 1.00x benchmark for sales. */
+  /** Lifetime objective-level proxy, with the raw 1.00x benchmark for sales. */
   primaryKpi: KpiReading;
   /**
    * Metric selected from the persisted optimization goal when supported.
@@ -773,10 +773,7 @@ export interface DashboardOverview {
      * silently presenting it as one is how a lifetime total ends up stacked
      * next to a 10-day table as though they were the same period.
      */
-    metricsSource:
-      | 'timeseries'
-      | 'partial-timeseries'
-      | 'campaign-lifetime';
+    metricsSource: 'timeseries' | 'partial-timeseries' | 'campaign-lifetime';
     coverage: {
       status: 'complete' | 'partial' | 'unavailable';
       eligibleCampaigns: number;

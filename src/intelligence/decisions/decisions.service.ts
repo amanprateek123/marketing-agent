@@ -73,7 +73,8 @@ export class DecisionsService {
       score: a.score,
       gatedBy: a.gatedBy,
       requiresHumanApproval: a.requiresHumanApproval,
-      evidenceSnapshot: input.signalReasoningByActionId[a.actionId] ?? undefined,
+      evidenceSnapshot:
+        input.signalReasoningByActionId[a.actionId] ?? undefined,
       reviewWindowExpiresAt: expires,
       status: 'shadow_review' as DecisionStatus,
       shadowModeOnly: true,
@@ -89,7 +90,8 @@ export class DecisionsService {
       return { written: res.length };
     } catch (err) {
       // Some docs may have failed due to duplicate key; count successes.
-      const written = (err as { insertedDocs?: unknown[] }).insertedDocs?.length ?? 0;
+      const written =
+        (err as { insertedDocs?: unknown[] }).insertedDocs?.length ?? 0;
       this.log.warn(
         `wrote ${written} shadow decisions (some duplicates skipped) for cycle=${input.cycleId}`,
       );
@@ -161,7 +163,9 @@ export class DecisionsService {
     // campaign-wide and single-ad-set budget changes are different decisions
     // and both belong on screen.
     const singleAdSetCampaigns = new Set<string>();
-    const campaignIds = [...new Set(open.map((r) => r.campaignId))].filter(Boolean);
+    const campaignIds = [...new Set(open.map((r) => r.campaignId))].filter(
+      Boolean,
+    );
     if (campaignIds.length) {
       try {
         const docs = await this.campaignModel
@@ -169,7 +173,10 @@ export class DecisionsService {
           .select('metaAdSets')
           .lean()
           .exec();
-        for (const d of docs as Array<{ _id: unknown; metaAdSets?: unknown[] }>) {
+        for (const d of docs as Array<{
+          _id: unknown;
+          metaAdSets?: unknown[];
+        }>) {
           if ((d.metaAdSets ?? []).length <= 1) {
             singleAdSetCampaigns.add(String(d._id));
           }
@@ -369,7 +376,9 @@ export class DecisionsService {
   async cycleTrace(tenantId: string, cycleId: string, includeLogs = false) {
     const slices = await this.slices.loadFull(cycleId);
     if (!slices || Object.keys(slices).length === 0) {
-      throw new NotFoundException(`No engine output found for cycle ${cycleId}`);
+      throw new NotFoundException(
+        `No engine output found for cycle ${cycleId}`,
+      );
     }
 
     const decisions = await this.model
@@ -406,7 +415,10 @@ export class DecisionsService {
   }
 
   async trace(tenantId: string, decisionId: string, includeLogs = false) {
-    const decision = await this.model.findOne({ _id: decisionId, tenantId }).lean().exec();
+    const decision = await this.model
+      .findOne({ _id: decisionId, tenantId })
+      .lean()
+      .exec();
     if (!decision) {
       throw new NotFoundException(`Decision ${decisionId} not found`);
     }

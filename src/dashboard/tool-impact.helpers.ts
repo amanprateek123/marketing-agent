@@ -279,7 +279,11 @@ export function buildRawRoasOutcome(
     'RETARGETING_SALES',
   ]);
   const isStrictSales = (row: DashboardCampaignRow) =>
-    strictSalesObjectives.has(String(row.objective ?? '').trim().toUpperCase());
+    strictSalesObjectives.has(
+      String(row.objective ?? '')
+        .trim()
+        .toUpperCase(),
+    );
   const salesRows = measuredRows.filter(isStrictSales);
   const nonSalesRows = measuredRows.filter((row) => !isStrictSales(row));
   const proofRows = salesRows.filter(
@@ -389,7 +393,10 @@ export function buildRawRoasOutcome(
     salesCampaignsWithSpend: salesRows.length,
     resolvedSalesCampaignsWithSpend: proofRows.length,
     excludedSalesCampaignsWithSpend: excludedSalesRows.length,
-    excludedSalesSpend: round(sum(excludedSalesRows.map((row) => row.spend)), 2),
+    excludedSalesSpend: round(
+      sum(excludedSalesRows.map((row) => row.spend)),
+      2,
+    ),
     returnCoverage:
       salesRows.length === 0
         ? 'no_sales_spend'

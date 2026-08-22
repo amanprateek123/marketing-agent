@@ -58,6 +58,7 @@ describe('DashboardService.getToolImpact', () => {
         spend: 100,
         revenue: 120,
         revenueBasis: 'meta_action_value',
+        revenueAttributionSource: 'custom_conversion',
         conversions: 2,
         campaignConfig: {
           adSets: [{ optimizationGoal: 'VALUE' }],

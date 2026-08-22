@@ -154,19 +154,29 @@ export class DashboardService {
       campaigns
         .filter((campaign: any) => {
           const metaId = String(campaign.metaCampaignId ?? '').trim();
-          if (!metaId || campaign.status === 'pending_approval' || campaign.status === 'failed') {
+          if (
+            !metaId ||
+            campaign.status === 'pending_approval' ||
+            campaign.status === 'failed'
+          ) {
             return false;
           }
-          if (campaign.status !== 'active' && num(campaign.spend) <= 0) return false;
+          if (campaign.status !== 'active' && num(campaign.spend) <= 0)
+            return false;
 
           const launchedAt = isFiniteDate(campaign.launchedAt)
             ? new Date(campaign.launchedAt)
             : null;
-          const endedValue = campaign.status === 'paused'
-            ? campaign.pausedAt
-            : campaign.stopTime;
-          const endedAt = isFiniteDate(endedValue) ? new Date(endedValue) : null;
-          return (!launchedAt || launchedAt <= now) && (!endedAt || endedAt >= from);
+          const endedValue =
+            campaign.status === 'paused'
+              ? campaign.pausedAt
+              : campaign.stopTime;
+          const endedAt = isFiniteDate(endedValue)
+            ? new Date(endedValue)
+            : null;
+          return (
+            (!launchedAt || launchedAt <= now) && (!endedAt || endedAt >= from)
+          );
         })
         .map((campaign: any) => String(campaign.metaCampaignId)),
     );
@@ -261,22 +271,23 @@ export class DashboardService {
 
     // Period-over-period direction is not trustworthy when the current
     // portfolio is only a covered subset.
-    const previous = metricsSource === 'timeseries'
-      ? this.baseMetrics(
-          campaigns.map((c) => {
-            const key = String(c.metaCampaignId ?? '');
-            const m = prevByCampaign.get(key);
-            return {
-              spend: m?.spend ?? 0,
-              revenue: m?.revenue ?? 0,
-              conversions: m?.conversions ?? 0,
-              clicks: m?.clicks ?? 0,
-              impressions: m?.impressions ?? 0,
-            };
-          }),
-          econ,
-        )
-      : null;
+    const previous =
+      metricsSource === 'timeseries'
+        ? this.baseMetrics(
+            campaigns.map((c) => {
+              const key = String(c.metaCampaignId ?? '');
+              const m = prevByCampaign.get(key);
+              return {
+                spend: m?.spend ?? 0,
+                revenue: m?.revenue ?? 0,
+                conversions: m?.conversions ?? 0,
+                clicks: m?.clicks ?? 0,
+                impressions: m?.impressions ?? 0,
+              };
+            }),
+            econ,
+          )
+        : null;
 
     const trend = previous ? this.buildTrend(portfolio, previous) : null;
 
@@ -1229,10 +1240,7 @@ export class DashboardService {
     // unavailable daily value) must remain zero/unavailable, not become an
     // extrapolated estimate presented as window evidence.
     const revenueDerivedFromLegacyRoas =
-      !hasTimeseries &&
-      windowed.revenue <= 0 &&
-      num(c.roas) > 0 &&
-      spend > 0;
+      !hasTimeseries && windowed.revenue <= 0 && num(c.roas) > 0 && spend > 0;
     const revenue =
       windowed.revenue > 0
         ? windowed.revenue
@@ -1815,7 +1823,8 @@ export class DashboardService {
           title: `"${r.displayName}" is at ${r.roas.toFixed(2)}x raw ROAS — recorded value is below spend`,
           detail: `Its recorded action-value shortfall is ${formatMoney(actionValueShortfall)}. This is not a contribution-profit calculation.`,
           amount: actionValueShortfall,
-          suggestedAction: 'Verify attribution, then decide whether to pause or revise it.',
+          suggestedAction:
+            'Verify attribution, then decide whether to pause or revise it.',
           href: `${base}/campaigns/${r.id}`,
           campaignId: r.id,
           campaignName: r.name,
@@ -2009,10 +2018,10 @@ export class DashboardService {
   // ─── Insights ──────────────────────────────────────────────────────────
 
   /**
-   * Causal insights, ranked and weight-tagged.
+   * Stored model-generated hypotheses, ranked and weight-tagged.
    *
    * `strength` exists so the UI can stop rendering a 60%-confidence, N=2
-   * finding at the same visual weight as an established fact.
+   * finding at the same visual weight as a higher-support hypothesis.
    */
   private buildInsights(company: any): DashboardInsight[] {
     const raw: any[] = company?.learnings?.causalInsights ?? [];
@@ -2613,7 +2622,12 @@ function proofPagePrimaryKpi(
       status: campaign.spend <= 0 ? 'neutral' : value >= 1 ? 'good' : 'bad',
     };
   }
-  if (!campaign.isRevenueObjective) return campaign.primaryKpi;
+  if (!campaign.isRevenueObjective) {
+    return {
+      ...campaign.primaryKpi,
+      label: `Objective-level proxy · ${campaign.primaryKpi.label}`,
+    };
+  }
 
   // The global dashboard intentionally falls unknown objectives back to sales
   // for legacy compatibility. This evidence page refuses to invent that

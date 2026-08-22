@@ -173,18 +173,23 @@ describe('tool impact raw return math', () => {
   it('uses weighted totals across sales campaigns only — non-sales spend never enters the ROAS math', () => {
     const result = buildRawRoasOutcome([
       row({
+        objective: 'OUTCOME_SALES',
         isRevenueObjective: true,
         spend: 100,
         revenue: 150,
         revenueBasis: 'meta_action_value',
+        revenueAttributionSource: 'custom_conversion',
       }),
       row({
+        objective: 'OUTCOME_SALES',
         isRevenueObjective: true,
         spend: 900,
         revenue: 450,
         revenueBasis: 'configured_conversion_value',
+        revenueAttributionSource: 'custom_conversion',
       }),
       row({
+        objective: 'OUTCOME_AWARENESS',
         isRevenueObjective: false,
         spend: 2_000,
         revenue: 10_000,
@@ -214,8 +219,12 @@ describe('tool impact raw return math', () => {
       campaigns: 3,
       campaignsWithSpend: 3,
       salesCampaignsWithSpend: 2,
-      spend: 1_000,
-      attributedReturn: 600,
+      resolvedSalesCampaignsWithSpend: 1,
+      excludedSalesCampaignsWithSpend: 1,
+      excludedSalesSpend: 900,
+      returnCoverage: 'partial',
+      spend: 100,
+      attributedReturn: 150,
       revenueBasis: [
         {
           basis: 'meta_action_value',
@@ -247,10 +256,10 @@ describe('tool impact raw return math', () => {
         },
       ],
       containsModeledOrUnknownRevenue: true,
-      weightedRoas: 0.6,
-      returnSurplus: -400,
-      returnPosition: 'below',
-      metOneXActionValueThreshold: false,
+      weightedRoas: 1.5,
+      returnSurplus: 50,
+      returnPosition: 'above',
+      metOneXActionValueThreshold: true,
       thresholdRule: 'weighted_attributed_roas_gte_1',
       nonSalesCampaigns: 1,
       nonSalesSpend: 2_000,
@@ -275,10 +284,12 @@ describe('tool impact raw return math', () => {
   it('meets the action-value threshold exactly at 1.0x', () => {
     const result = buildRawRoasOutcome([
       row({
+        objective: 'OUTCOME_SALES',
         isRevenueObjective: true,
         spend: 250,
         revenue: 250,
         revenueBasis: 'meta_action_value',
+        revenueAttributionSource: 'standard_event',
       }),
     ]);
 
@@ -291,16 +302,20 @@ describe('tool impact raw return math', () => {
   it('does not let a zero-spend row inflate return or evade provenance', () => {
     const result = buildRawRoasOutcome([
       row({
+        objective: 'OUTCOME_SALES',
         isRevenueObjective: true,
         spend: 100,
         revenue: 90,
         revenueBasis: 'meta_action_value',
+        revenueAttributionSource: 'standard_event',
       }),
       row({
+        objective: 'OUTCOME_SALES',
         isRevenueObjective: true,
         spend: 0,
         revenue: 10_000,
         revenueBasis: 'unknown',
+        revenueAttributionSource: 'unknown',
       }),
     ]);
 
@@ -317,6 +332,30 @@ describe('tool impact raw return math', () => {
     expect(
       result.revenueBasis.find((entry) => entry.basis === 'unknown'),
     ).toMatchObject({ campaignCount: 0, spend: 0, revenue: 0 });
+  });
+
+  it('withholds account-fallback value from campaign-level proof', () => {
+    const result = buildRawRoasOutcome([
+      row({
+        objective: 'OUTCOME_SALES',
+        isRevenueObjective: true,
+        spend: 100,
+        revenue: 500,
+        revenueBasis: 'meta_action_value',
+        revenueAttributionSource: 'account_fallback',
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      salesCampaignsWithSpend: 1,
+      resolvedSalesCampaignsWithSpend: 0,
+      excludedSalesCampaignsWithSpend: 1,
+      excludedSalesSpend: 100,
+      returnCoverage: 'unavailable',
+      spend: 0,
+      attributedReturn: 0,
+      weightedRoas: 0,
+    });
   });
 });
 
