@@ -256,18 +256,43 @@ export function buildRawRoasOutcome(
   // ROAS only means something for a campaign that was actually asked to
   // drive purchases — the same principle dashboard.service.ts's rollUp()
   // already applies account-wide ("Including awareness/app-promotion/
-  // traffic spend in the denominator drags the headline down with money
-  // that was never supposed to come back as tracked purchases"). Blending
+  // traffic spend in the denominator would drag the headline down with money
+  // that was never supposed to come back as tracked purchases). Blending
   // a ₹0-return Awareness campaign into the numerator/denominator here
   // isn't a neutral "complete portfolio test" — it's grading spend against
   // a goal nobody gave it, and makes the sales-objective spend look worse
   // than it is. Sales-only for the headline math; non-sales spend is
-  // reported separately, never folded into ROAS.
+  // reported separately, never folded into ROAS. The headline is narrower
+  // again: only sales rows with resolved Meta/no-attributed-return evidence
+  // enter the proof numerator and denominator; modeled or unresolved rows are
+  // disclosed as excluded coverage.
   const measuredRows = rows.filter((row) => row.spend > 0);
-  const salesRows = measuredRows.filter((row) => row.isRevenueObjective);
-  const nonSalesRows = measuredRows.filter((row) => !row.isRevenueObjective);
-  const spend = sum(salesRows.map((row) => row.spend));
-  const attributedReturn = sum(salesRows.map((row) => row.revenue));
+  const strictSalesObjectives = new Set([
+    'OUTCOME_SALES',
+    'SALES',
+    'CONVERSIONS',
+    'OUTCOME_CONVERSIONS',
+    'PRODUCT_CATALOG_SALES',
+    'CATALOG_SALES',
+    'OUTCOME_CATALOG_SALES',
+    'RETARGETING',
+    'RETARGETING_SALES',
+  ]);
+  const isStrictSales = (row: DashboardCampaignRow) =>
+    strictSalesObjectives.has(String(row.objective ?? '').trim().toUpperCase());
+  const salesRows = measuredRows.filter(isStrictSales);
+  const nonSalesRows = measuredRows.filter((row) => !isStrictSales(row));
+  const proofRows = salesRows.filter(
+    (row) =>
+      (row.revenueBasis === 'meta_action_value' ||
+        row.revenueBasis === 'no_attributed_revenue') &&
+      row.revenueAttributionSource !== 'unknown' &&
+      row.revenueAttributionSource !== 'unresolved' &&
+      row.revenueAttributionSource !== 'account_fallback',
+  );
+  const excludedSalesRows = salesRows.filter((row) => !proofRows.includes(row));
+  const spend = sum(proofRows.map((row) => row.spend));
+  const attributedReturn = sum(proofRows.map((row) => row.revenue));
   const weightedRoas = spend > 0 ? attributedReturn / spend : 0;
   const revenueBasis = (
     [
@@ -362,6 +387,17 @@ export function buildRawRoasOutcome(
     // population or the tile reads "₹X across Y campaigns" with Y counting
     // campaigns that contributed nothing to X.
     salesCampaignsWithSpend: salesRows.length,
+    resolvedSalesCampaignsWithSpend: proofRows.length,
+    excludedSalesCampaignsWithSpend: excludedSalesRows.length,
+    excludedSalesSpend: round(sum(excludedSalesRows.map((row) => row.spend)), 2),
+    returnCoverage:
+      salesRows.length === 0
+        ? 'no_sales_spend'
+        : proofRows.length === 0
+          ? 'unavailable'
+          : proofRows.length === salesRows.length
+            ? 'complete'
+            : 'partial',
     spend: round(spend, 2),
     attributedReturn: round(attributedReturn, 2),
     revenueBasis,

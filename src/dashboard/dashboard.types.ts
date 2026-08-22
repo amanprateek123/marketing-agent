@@ -70,6 +70,28 @@ export interface WindowMetrics {
 }
 
 export interface PortfolioRollup extends WindowMetrics {
+  /**
+   * Provenance-aware sales return coverage. Portfolio `revenue` remains the
+   * legacy aggregate for compatibility; founder-facing UI should use these
+   * verified-only values so estimates, account fallbacks and unresolved rows
+   * never look like measured campaign return.
+   */
+  returnEvidence: {
+    status:
+      | 'no_sales_spend'
+      | 'complete_meta'
+      | 'complete_configured'
+      | 'complete_mixed'
+      | 'incomplete';
+    campaignsWithSpend: number;
+    knownCampaigns: number;
+    unknownCampaigns: number;
+    knownSpend: number;
+    knownRevenue: number;
+    knownRoas: number;
+    metaCampaigns: number;
+    configuredCampaigns: number;
+  };
   isProfitable: boolean;
   /** roas - breakevenROAS. Negative means every rupee destroys value. */
   gapToBreakeven: number;
@@ -266,6 +288,9 @@ export interface TenantActivity {
     lastSyncAt: string | null;
     stalestCampaignHours: number | null;
     staleCampaignCount: number;
+    activeCampaignCount: number;
+    campaignsWithFreshness: number;
+    campaignsWithoutFreshness: number;
   };
 }
 
@@ -335,9 +360,17 @@ export interface ToolImpactRawOutcome {
   /** Every verified-launch campaign with real spend, sales + non-sales. */
   campaignsWithSpend: number;
   /** Sales-objective campaigns with spend — the population `spend` below is
-   *  actually summed over. Use this (not campaignsWithSpend) alongside it. */
+   *  eligible to be evaluated before return-provenance filtering. */
   salesCampaignsWithSpend: number;
+  /** Strict sales rows with resolved Meta return provenance used by headline math. */
+  resolvedSalesCampaignsWithSpend: number;
+  /** Sales rows withheld from headline math because return is configured or unknown. */
+  excludedSalesCampaignsWithSpend: number;
+  excludedSalesSpend: number;
+  returnCoverage: 'no_sales_spend' | 'complete' | 'partial' | 'unavailable';
+  /** Spend for resolved Meta-return rows only. */
   spend: number;
+  /** Resolved Meta attributed-action value only. */
   attributedReturn: number;
   revenueBasis: Array<{
     basis: CampaignRevenueBasis;
@@ -729,14 +762,27 @@ export interface DashboardOverview {
     to: string;
     label: string;
     /**
-     * 'timeseries' = genuinely windowed from daily MetricTimeseries rows.
+     * 'timeseries' = genuinely windowed from daily MetricTimeseries rows for
+     * every campaign expected to have delivered in the window.
+     * 'partial-timeseries' = daily rows exist, but at least one expected
+     * campaign has no row; totals are therefore a covered subset, not an
+     * account-wide result.
      * 'campaign-lifetime' = timeseries not synced, so figures are each
      * campaign's lifetime total filtered to campaigns launched in the window.
      * The UI must say which, because the second is NOT a time slice and
      * silently presenting it as one is how a lifetime total ends up stacked
      * next to a 10-day table as though they were the same period.
      */
-    metricsSource: 'timeseries' | 'campaign-lifetime';
+    metricsSource:
+      | 'timeseries'
+      | 'partial-timeseries'
+      | 'campaign-lifetime';
+    coverage: {
+      status: 'complete' | 'partial' | 'unavailable';
+      eligibleCampaigns: number;
+      campaignsWithRows: number;
+      campaignsWithoutRows: number;
+    };
   };
 
   economics: DashboardEconomics;

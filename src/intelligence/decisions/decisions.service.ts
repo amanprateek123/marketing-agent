@@ -220,9 +220,9 @@ export class DecisionsService {
   }
 
   /**
-   * Mark a decision approved. LOCAL WRITE ONLY — this does not touch
-   * Meta. Meta writes are gated by ExecutionEngine's shadow_mode flag,
-   * which stays on until you explicitly disable it.
+   * Record the human approval itself. The controller immediately follows this
+   * with executeApprovedDecision(); keeping the writes separate preserves the
+   * reviewer decision even when the live Meta call fails.
    */
   async approve(
     decisionId: string,

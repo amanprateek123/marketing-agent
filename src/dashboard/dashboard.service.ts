@@ -13,6 +13,7 @@ import {
 } from '../common/economics/tenant-economics.service';
 import {
   Campaign,
+  CampaignRevenueAttributionSource,
   CampaignRevenueBasis,
 } from '../campaigns/schemas/campaign.schema';
 import { MetricTimeseries } from '../campaigns/schemas/metric-timeseries.schema';
@@ -145,7 +146,47 @@ export class DashboardService {
     const { windowByCampaign, prevByCampaign, hasTimeseries } =
       await this.loadWindowedMetrics(tenantId, from, prevFrom, now);
 
-    const metricsSource = hasTimeseries ? 'timeseries' : 'campaign-lifetime';
+    // A tenant-wide "some daily data exists" flag is not enough to call an
+    // account view complete. Track every campaign that could have delivered
+    // during this window and disclose missing rows explicitly; otherwise one
+    // synced campaign silently turns every unsynced campaign into a zero.
+    const eligibleCampaignIds = new Set(
+      campaigns
+        .filter((campaign: any) => {
+          const metaId = String(campaign.metaCampaignId ?? '').trim();
+          if (!metaId || campaign.status === 'pending_approval' || campaign.status === 'failed') {
+            return false;
+          }
+          if (campaign.status !== 'active' && num(campaign.spend) <= 0) return false;
+
+          const launchedAt = isFiniteDate(campaign.launchedAt)
+            ? new Date(campaign.launchedAt)
+            : null;
+          const endedValue = campaign.status === 'paused'
+            ? campaign.pausedAt
+            : campaign.stopTime;
+          const endedAt = isFiniteDate(endedValue) ? new Date(endedValue) : null;
+          return (!launchedAt || launchedAt <= now) && (!endedAt || endedAt >= from);
+        })
+        .map((campaign: any) => String(campaign.metaCampaignId)),
+    );
+    const campaignsWithRows = [...eligibleCampaignIds].filter((id) =>
+      windowByCampaign.has(id),
+    ).length;
+    const campaignsWithoutRows = Math.max(
+      0,
+      eligibleCampaignIds.size - campaignsWithRows,
+    );
+    const coverageStatus = !hasTimeseries
+      ? 'unavailable'
+      : campaignsWithoutRows > 0
+        ? 'partial'
+        : 'complete';
+    const metricsSource = !hasTimeseries
+      ? 'campaign-lifetime'
+      : coverageStatus === 'partial'
+        ? 'partial-timeseries'
+        : 'timeseries';
 
     const knownProducts: string[] = (
       ((company as any)?.products ?? []) as Array<{ name?: string }>
@@ -218,7 +259,9 @@ export class DashboardService {
       isProfitable: lifetimeBase.contributionProfit >= 0,
     };
 
-    const previous = hasTimeseries
+    // Period-over-period direction is not trustworthy when the current
+    // portfolio is only a covered subset.
+    const previous = metricsSource === 'timeseries'
       ? this.baseMetrics(
           campaigns.map((c) => {
             const key = String(c.metaCampaignId ?? '');
@@ -248,7 +291,6 @@ export class DashboardService {
     );
 
     const alerts = this.buildAlerts(
-      econ,
       portfolio,
       windowRows,
       activity,
@@ -267,6 +309,12 @@ export class DashboardService {
         to: now.toISOString(),
         label: `Last ${windowDays} days`,
         metricsSource,
+        coverage: {
+          status: coverageStatus,
+          eligibleCampaigns: eligibleCampaignIds.size,
+          campaignsWithRows,
+          campaignsWithoutRows,
+        },
       },
       economics: {
         productName: econ.productName,
@@ -1120,6 +1168,7 @@ export class DashboardService {
         acc.conversions += num(r.conversions);
         acc.clicks += num(r.clicks);
         acc.impressions += num(r.impressions);
+        acc.returnRows.push(r);
         target.set(key, acc);
       }
       return { windowByCampaign, prevByCampaign, hasTimeseries: true };
@@ -1171,19 +1220,56 @@ export class DashboardService {
           conversions: num(c.conversions),
           clicks: num(c.clicks),
           impressions: num(c.impressions),
+          returnRows: [],
         };
 
     const spend = windowed.spend;
-    // Campaign.revenue can lag behind roas x spend on partially-synced rows;
-    // prefer the explicit revenue field and only derive when it's absent.
+    // Lifetime-only legacy rows can lack revenue while retaining ROAS. Never
+    // apply that lifetime ratio to a requested daily window: a real zero (or
+    // unavailable daily value) must remain zero/unavailable, not become an
+    // extrapolated estimate presented as window evidence.
     const revenueDerivedFromLegacyRoas =
-      windowed.revenue <= 0 && num(c.roas) > 0 && spend > 0;
+      !hasTimeseries &&
+      windowed.revenue <= 0 &&
+      num(c.roas) > 0 &&
+      spend > 0;
     const revenue =
       windowed.revenue > 0
         ? windowed.revenue
         : revenueDerivedFromLegacyRoas
           ? num(c.roas) * spend
           : 0;
+    const trustedTimeseriesReturn =
+      hasTimeseries &&
+      windowed.returnRows.length > 0 &&
+      windowed.returnRows.every((row) =>
+        isTrustedProductScopedTimeseriesRevenue(row, c.productName),
+      );
+    const timeseriesBases = new Set(
+      windowed.returnRows.map((row) => String(row.revenueBasis ?? 'unknown')),
+    );
+    const timeseriesSources = new Set(
+      windowed.returnRows.map((row) =>
+        String(row.revenueAttributionSource ?? 'unknown'),
+      ),
+    );
+    const resolvedRevenueBasis: CampaignRevenueBasis = hasTimeseries
+      ? trustedTimeseriesReturn && timeseriesBases.size === 1
+        ? ([...timeseriesBases][0] as CampaignRevenueBasis)
+        : 'unknown'
+      : revenueDerivedFromLegacyRoas
+        ? 'unknown'
+        : c.revenueBasis === 'meta_action_value' ||
+            c.revenueBasis === 'configured_conversion_value' ||
+            c.revenueBasis === 'no_attributed_revenue'
+          ? c.revenueBasis
+          : 'unknown';
+    const resolvedRevenueSource: CampaignRevenueAttributionSource =
+      hasTimeseries
+        ? trustedTimeseriesReturn && timeseriesSources.size === 1
+          ? ([...timeseriesSources][0] as CampaignRevenueAttributionSource)
+          : 'unknown'
+        : (c.revenueAttributionSource ?? 'unknown');
 
     const launchedAt = isFiniteDate(c.launchedAt)
       ? new Date(c.launchedAt)
@@ -1266,14 +1352,8 @@ export class DashboardService {
 
       spend: round(spend, 2),
       revenue: round(revenue, 2),
-      revenueBasis: revenueDerivedFromLegacyRoas
-        ? 'unknown'
-        : c.revenueBasis === 'meta_action_value' ||
-            c.revenueBasis === 'configured_conversion_value' ||
-            c.revenueBasis === 'no_attributed_revenue'
-          ? c.revenueBasis
-          : 'unknown',
-      revenueAttributionSource: c.revenueAttributionSource ?? 'unknown',
+      revenueBasis: resolvedRevenueBasis,
+      revenueAttributionSource: resolvedRevenueSource,
       revenueAttributionActionTypes: Array.isArray(
         c.revenueAttributionActionTypes,
       )
@@ -1470,6 +1550,26 @@ export class DashboardService {
     // far worse than it is.
     const revenueRows = rows.filter((r) => r.isRevenueObjective);
     const otherRows = rows.filter((r) => !r.isRevenueObjective);
+    const spentRevenueRows = revenueRows.filter((r) => r.spend > 0);
+    // Founder-facing raw return admits only resolved, campaign-scoped Meta
+    // evidence. Configured values are estimates, and account fallbacks are
+    // not attributable to this campaign, so both are disclosed as withheld
+    // coverage instead of entering the numerator or denominator.
+    const knownReturnRows = spentRevenueRows.filter(
+      hasVerifiedRawReturnEvidence,
+    );
+    const metaRows = knownReturnRows;
+    const configuredRows = spentRevenueRows.filter(
+      (r) => r.revenueBasis === 'configured_conversion_value',
+    );
+    const knownSpend = sum(knownReturnRows.map((r) => r.spend));
+    const knownRevenue = sum(knownReturnRows.map((r) => r.revenue));
+    const returnEvidenceStatus: PortfolioRollup['returnEvidence']['status'] =
+      spentRevenueRows.length === 0
+        ? 'no_sales_spend'
+        : knownReturnRows.length === spentRevenueRows.length
+          ? 'complete_meta'
+          : 'incomplete';
 
     const base = this.baseMetrics(
       revenueRows,
@@ -1492,6 +1592,17 @@ export class DashboardService {
 
     return {
       ...base,
+      returnEvidence: {
+        status: returnEvidenceStatus,
+        campaignsWithSpend: spentRevenueRows.length,
+        knownCampaigns: knownReturnRows.length,
+        unknownCampaigns: spentRevenueRows.length - knownReturnRows.length,
+        knownSpend: round(knownSpend, 2),
+        knownRevenue: round(knownRevenue, 2),
+        knownRoas: round(weightedROAS(knownSpend, knownRevenue), 3),
+        metaCampaigns: metaRows.length,
+        configuredCampaigns: configuredRows.length,
+      },
       totalSpendAllObjectives: round(sum(rows.map((r) => r.spend)), 2),
       nonRevenueSpend: round(sum(otherRows.map((r) => r.spend)), 2),
       nonRevenueCampaigns: otherRows.filter((r) => r.spend > 0).length,
@@ -1585,7 +1696,6 @@ export class DashboardService {
    * empty approval queue is not the same as a healthy account.
    */
   private buildAlerts(
-    econ: Economics & { method: string },
     portfolio: PortfolioRollup,
     rows: DashboardCampaignRow[],
     activity: TenantActivity,
@@ -1607,20 +1717,43 @@ export class DashboardService {
       });
     }
 
-    if (portfolio.spend > 0 && !portfolio.isProfitable) {
+    const spentSalesRows = rows.filter(
+      (row) => row.isRevenueObjective && row.spend > 0,
+    );
+    const resolvedSalesRows = spentSalesRows.filter(
+      hasVerifiedRawReturnEvidence,
+    );
+    const returnEvidenceComplete =
+      spentSalesRows.length > 0 &&
+      resolvedSalesRows.length === spentSalesRows.length;
+    const resolvedSalesSpend = sum(resolvedSalesRows.map((row) => row.spend));
+    const resolvedSalesValue = sum(resolvedSalesRows.map((row) => row.revenue));
+    const resolvedSalesRoas = weightedROAS(
+      resolvedSalesSpend,
+      resolvedSalesValue,
+    );
+    const rowsBelowSpend = resolvedSalesRows.filter(
+      (row) => row.revenue < row.spend,
+    );
+    const spendBelowRawOne = sum(rowsBelowSpend.map((row) => row.spend));
+    const rawValueShortfall = sum(
+      rowsBelowSpend.map((row) => Math.max(0, row.spend - row.revenue)),
+    );
+
+    if (returnEvidenceComplete && resolvedSalesRoas < 1) {
       alerts.push({
         kind: 'portfolio_below_breakeven',
         severity: 'critical',
-        title: `The account is below breakeven (${portfolio.roas.toFixed(2)}x vs ${econ.breakevenROAS.toFixed(2)}x)`,
+        title: `Recorded sales action value is below spend (${resolvedSalesRoas.toFixed(2)}x raw ROAS)`,
         detail:
-          `${formatPct(portfolio.pctSpendBelowBreakeven)} of sales-objective spend sits in campaigns that lose money. ` +
-          `Contribution profit for this window is ${formatMoney(portfolio.contributionProfit)}.` +
+          `${formatPct(resolvedSalesSpend > 0 ? spendBelowRawOne / resolvedSalesSpend : 0)} of resolved sales spend sits in campaigns below 1.00x raw ROAS. ` +
+          `The recorded action-value shortfall is ${formatMoney(rawValueShortfall)}; this is not contribution profit.` +
           (portfolio.nonRevenueSpend > 0
             ? ` A further ${formatMoney(portfolio.nonRevenueSpend)} sits in awareness/traffic/app campaigns, judged on their own goals and excluded from this figure.`
             : ''),
-        amount: portfolio.moneyAtRisk,
+        amount: rawValueShortfall,
         suggestedAction:
-          'Cut or fix the losing campaigns before adding new ones.',
+          'Review tracking and the campaigns below 1.00x before adding sales spend.',
         href: `${base}/campaigns`,
       });
     }
@@ -1650,15 +1783,16 @@ export class DashboardService {
       if (
         r.isRevenueObjective &&
         r.verdict === 'no_conversions' &&
-        r.spend >= ZERO_CONV_ALERT_MIN_SPEND
+        r.spend >= ZERO_CONV_ALERT_MIN_SPEND &&
+        hasVerifiedRawReturnEvidence(r)
       ) {
         alerts.push({
           kind: 'zero_conversion_spend',
           severity: 'critical',
           title: `"${r.displayName}" has spent ${formatMoney(r.spend)} with zero sales`,
           detail:
-            `Running ${r.daysRunning ?? '?'} days with no attributed revenue. ` +
-            'This is past any attribution window — it is a result, not missing data.',
+            `Running ${r.daysRunning ?? '?'} days with no recorded sales on a resolved return basis. ` +
+            'Check the event and attribution setup before treating the zero as a campaign verdict.',
           amount: r.spend,
           suggestedAction: r.nextAction ?? 'Check tracking, then pause.',
           href: `${base}/campaigns/${r.id}`,
@@ -1669,16 +1803,19 @@ export class DashboardService {
 
       if (
         r.isRevenueObjective &&
-        r.verdict === 'losing_badly' &&
-        r.status === 'active'
+        r.status === 'active' &&
+        r.spend > 0 &&
+        r.roas < 1 &&
+        hasVerifiedRawReturnEvidence(r)
       ) {
+        const actionValueShortfall = Math.max(0, r.spend - r.revenue);
         alerts.push({
           kind: 'campaign_losing_badly',
           severity: 'warning',
-          title: `"${r.displayName}" is at ${r.roas.toFixed(2)}x — less than half of breakeven`,
-          detail: `It has destroyed ${formatMoney(r.moneyAtRisk)} of contribution so far.`,
-          amount: r.moneyAtRisk,
-          suggestedAction: 'Pause it.',
+          title: `"${r.displayName}" is at ${r.roas.toFixed(2)}x raw ROAS — recorded value is below spend`,
+          detail: `Its recorded action-value shortfall is ${formatMoney(actionValueShortfall)}. This is not a contribution-profit calculation.`,
+          amount: actionValueShortfall,
+          suggestedAction: 'Verify attribution, then decide whether to pause or revise it.',
           href: `${base}/campaigns/${r.id}`,
           campaignId: r.id,
           campaignName: r.name,
@@ -1733,18 +1870,6 @@ export class DashboardService {
           campaignName: r.name,
         });
       }
-    }
-
-    if (econ.method === 'generic-default') {
-      alerts.push({
-        kind: 'no_margin_configured',
-        severity: 'warning',
-        title: 'Profit numbers are based on a guessed margin',
-        detail:
-          'No contribution margin is set for this product, so breakeven is assumed rather than known. Every profit figure here inherits that assumption.',
-        suggestedAction: 'Set the product margin in Settings.',
-        href: `${base}/settings`,
-      });
     }
 
     if (activity.queue.pendingApprovalCampaigns > 0) {
@@ -1811,14 +1936,17 @@ export class DashboardService {
       }
     }
 
-    const activeWithData = campaigns.filter(
-      (c) => c.status === 'active' && c.dataAsOf,
+    const activeCampaigns = campaigns.filter((c) => c.status === 'active');
+    const activeWithData = activeCampaigns.filter(
+      (c) => c.dataAsOf && isFiniteDate(c.dataAsOf),
     );
     const ages = activeWithData.map(
       (c) => (now.getTime() - new Date(c.dataAsOf).getTime()) / 36e5,
     );
-    const lastSync = campaigns
-      .map((c) => (c.syncedAt ? new Date(c.syncedAt).getTime() : 0))
+    // A document sync timestamp proves a job touched the row, not that Meta
+    // returned fresh metrics. Portfolio freshness is based only on dataAsOf.
+    const lastSync = activeWithData
+      .map((c) => new Date(c.dataAsOf).getTime())
       .reduce((a, b) => Math.max(a, b), 0);
 
     const pendingActions = campaigns.reduce(
@@ -1870,6 +1998,10 @@ export class DashboardService {
         lastSyncAt: lastSync > 0 ? new Date(lastSync).toISOString() : null,
         stalestCampaignHours: ages.length ? round(Math.max(...ages), 1) : null,
         staleCampaignCount: ages.filter((h) => h > STALE_METRICS_HOURS).length,
+        activeCampaignCount: activeCampaigns.length,
+        campaignsWithFreshness: activeWithData.length,
+        campaignsWithoutFreshness:
+          activeCampaigns.length - activeWithData.length,
       },
     };
   }
@@ -1928,6 +2060,8 @@ interface RawMetrics {
   conversions: number;
   clicks: number;
   impressions: number;
+  /** Daily rows retained so window return provenance can be validated. */
+  returnRows: any[];
 }
 
 const TOOL_IMPACT_REVENUE_OBJECTIVES = new Set([
@@ -2601,8 +2735,33 @@ function isKnownToolImpactRevenueObjective(value: unknown): boolean {
   );
 }
 
+/**
+ * Evidence allowed into a raw spend-versus-return proof claim.
+ *
+ * `configured_conversion_value` is a model/configuration estimate rather
+ * than recorded Meta value. `account_fallback` is not attributable to an
+ * individual campaign. Neither can support a founder-facing raw ROAS claim.
+ */
+function hasVerifiedRawReturnEvidence(row: DashboardCampaignRow): boolean {
+  const hasRecordedBasis =
+    row.revenueBasis === 'meta_action_value' ||
+    row.revenueBasis === 'no_attributed_revenue';
+  const sourceIsCampaignScoped =
+    row.revenueAttributionSource !== 'unknown' &&
+    row.revenueAttributionSource !== 'unresolved' &&
+    row.revenueAttributionSource !== 'account_fallback';
+  return hasRecordedBasis && sourceIsCampaignScoped;
+}
+
 function emptyRaw(): RawMetrics {
-  return { spend: 0, revenue: 0, conversions: 0, clicks: 0, impressions: 0 };
+  return {
+    spend: 0,
+    revenue: 0,
+    conversions: 0,
+    clicks: 0,
+    impressions: 0,
+    returnRows: [],
+  };
 }
 
 function num(v: unknown): number {
