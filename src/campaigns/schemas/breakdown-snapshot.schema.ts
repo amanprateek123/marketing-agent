@@ -51,20 +51,29 @@ export class BreakdownSnapshot {
     clicks: number;
     ctr: number;
     conversions: number;
-    revenue: number;
+    /** Null when the underlying daily rows do not have complete trusted return. */
+    revenue: number | null;
+    /** Numeric value persisted on all source rows, including legacy/untrusted. */
+    persistedRevenue?: number;
+    returnCoverage?: 'complete' | 'partial' | 'none';
     cpa: number;
-    roas: number;
+    roas: number | null;
   }>;
 
   @Prop({ required: true })
   fetchedAt: Date;
 }
 
-export const BreakdownSnapshotSchema = SchemaFactory.createForClass(BreakdownSnapshot);
+export const BreakdownSnapshotSchema =
+  SchemaFactory.createForClass(BreakdownSnapshot);
 
 // One live snapshot per entity × breakdown × window — deep-sync upserts here.
 BreakdownSnapshotSchema.index(
   { tenantId: 1, entityId: 1, breakdownType: 1, window: 1 },
   { unique: true },
 );
-BreakdownSnapshotSchema.index({ tenantId: 1, metaCampaignId: 1, breakdownType: 1 });
+BreakdownSnapshotSchema.index({
+  tenantId: 1,
+  metaCampaignId: 1,
+  breakdownType: 1,
+});

@@ -21,6 +21,7 @@ import { ExecutedAction } from '../learning/schemas/executed-action.schema';
 import { PipelineRun } from '../pipeline/schemas/pipeline-run.schema';
 import { parseCampaignName } from './campaign-name.parser';
 import { ObjectiveVerdict, evaluateObjective } from './objective-evaluation';
+import { isTrustedProductScopedTimeseriesRevenue } from '../campaigns/meta-ads/timeseries-revenue-provenance.util';
 import {
   DashboardAlert,
   DashboardCampaignRow,
@@ -29,6 +30,7 @@ import {
   FacetRollup,
   PortfolioRollup,
   TenantActivity,
+  ToolImpactDailyPerformance,
   ToolImpactOverview,
   ToolImpactScope,
   TrendDelta,
@@ -399,6 +401,17 @@ export class DashboardService {
     );
     const launchedIdSet = new Set(exactCampaignIds);
     const rows = cohortRows.filter((row) => launchedIdSet.has(row.id));
+    const authoritativeProductByMetaId = new Map(
+      launchedCampaigns.map((campaign) => [
+        String(campaign.metaCampaignId ?? ''),
+        String(campaign.productName ?? '').trim(),
+      ]),
+    );
+    const dailyPerformance = await this.loadToolImpactDailyPerformance(
+      tenantId,
+      rows.filter((row) => isKnownToolImpactRevenueObjective(row.objective)),
+      authoritativeProductByMetaId,
+    );
     const portfolio = this.rollUp(rows, econ);
     const rawOutcome = buildRawRoasOutcome(rows);
     const matureIdSet = new Set(
@@ -575,14 +588,11 @@ export class DashboardService {
       'Return provenance is disclosed per campaign: Meta-reported action_value for the configured conversion action (refund-adjusted where configured), Meta-attributed conversions multiplied by configured product value, no attributed return, or unknown derivation. Meta action_value can represent a purchase or an assigned value for another conversion; it is not proof of collected cash.',
       'Persisted attributed return is not reconciled company-ledger cash. Reconcile unknown rows and any external founder claim with Ads Manager and your order ledger.',
       'Figures are campaign-lifetime totals and Meta can revise recent attribution. Check freshness before quoting them.',
+      'The daily chart contains only persisted campaign-day rows for verified sales launches; missing dates are omitted, not filled with zero. Legacy daily return without product-scoped provenance is disclosed separately and never counted as verified attributed return.',
+      'A daily return row is verified only when its product came from an exact persisted Campaign.productName match and its Meta fetch completed. The configuration fingerprint records the conversion/value config used at sync time; this page validates its presence and shape, not equality with today’s product config.',
       'Observed post-action outcomes are before/after measurements, not randomized causal proof.',
       'Executed-action outcomes are scoped to these campaign IDs, but legacy outcome records do not contain intelligence decision IDs. They are a campaign-level action track record, not a one-to-one audit of the proposals displayed above.',
       'Pipeline status includes every persisted run record, including records that failed before campaign creation. Retries can reuse and update a run record, so this is a current/final run-record distribution—not a per-attempt success rate. Duration statistics include only records joinable to an agent campaign; approval-ready time uses campaign.createdAt as the persisted proxy.',
-      ...(cohort.summary.ownershipEvidence.legacyAgentName > 0
-        ? [
-            `${cohort.summary.ownershipEvidence.legacyAgentName} legacy campaign record(s) are included as AI-owned because their Meta names match Meridian’s deterministic AGENT_<topic>_<date> convention. Their stored source is manual and no run linkage survives locally, so this is name-inferred evidence until explicitly reconciled/backfilled.`,
-          ]
-        : []),
     ];
 
     return {
@@ -597,8 +607,8 @@ export class DashboardService {
             : 'All campaigns launched through Meridian',
         cohortRule:
           scope === 'agent'
-            ? "actor=agent from persisted source='agent' OR strict legacy AGENT_<topic>_<date> name evidence; impact metrics require a verified Meta launch"
-            : 'actor=agent/human from persisted source OR strict legacy AGENT_<topic>_<date> name evidence; impact metrics require a verified Meta launch',
+            ? "actor=agent from persisted source='agent'; impact metrics require a verified Meta launch"
+            : "actor=agent/human from persisted source='agent' or source='human'; impact metrics require a verified Meta launch",
       },
       methodology: {
         version: 'attributed_action_value_roas_v1',
@@ -609,7 +619,7 @@ export class DashboardService {
         returnSurplusFormula: 'sum(attributedReturn) - sum(adSpend)',
         thresholdRule: 'weighted attributed-action-value ROAS >= 1.0x',
         verifiedLaunchRule:
-          'tool ownership is recorded or strict legacy-name-inferred AND metaCampaignId is non-empty AND launchedAt is valid',
+          "tool ownership is recorded in persisted source='agent' or source='human' AND metaCampaignId is non-empty AND launchedAt is valid",
         maturityRule: `verified launch AND spend > 0 AND at least ${TOOL_IMPACT_MATURITY_DAYS} days since launchedAt`,
         metricsWindow: 'campaign-lifetime',
         warnings: methodologyWarnings,
@@ -649,6 +659,7 @@ export class DashboardService {
         })),
         notes: econ.notes,
       },
+      dailyPerformance,
       automation: {
         pipelineRuns: {
           total: pipelineRuns.length,
@@ -749,6 +760,245 @@ export class DashboardService {
   }
 
   // ─── Metrics loading ───────────────────────────────────────────────────
+
+  /**
+   * Daily evidence for the exact verified sales-launch cohort. The campaign
+   * documents remain the lifetime source of truth above; this method exposes
+   * only real persisted campaign-day rows and never manufactures missing
+   * dates. Rows written before product-scoped attribution was introduced are
+   * still valid spend observations, but their return is deliberately withheld.
+   */
+  private async loadToolImpactDailyPerformance(
+    tenantId: string,
+    salesCampaigns: DashboardCampaignRow[],
+    authoritativeProductByMetaId: ReadonlyMap<string, string>,
+  ): Promise<ToolImpactDailyPerformance> {
+    const calculationVersion = 'product_scoped_v1' as const;
+    const metaCampaignIds = [
+      ...new Set(
+        salesCampaigns
+          .map((campaign) => String(campaign.metaCampaignId ?? '').trim())
+          .filter(Boolean),
+      ),
+    ];
+    const lifetimeSpend = round(
+      sum(salesCampaigns.map((campaign) => campaign.spend)),
+      2,
+    );
+    const lifetimeAttributedReturn = round(
+      sum(salesCampaigns.map((campaign) => campaign.revenue)),
+      2,
+    );
+    const empty = (
+      warning: string | null,
+      observedAbsenceConfirmed = false,
+    ): ToolImpactDailyPerformance => ({
+      source: 'metric_timeseries_campaign_daily',
+      dateBasis: 'meta_ad_account_date_start',
+      cohort: 'verified_sales_launches',
+      calculationVersion,
+      coverage: {
+        status: 'none',
+        eligibleCampaigns: metaCampaignIds.length,
+        campaignsWithRows: 0,
+        campaignsWithoutRows: metaCampaignIds.length,
+        observedDates: 0,
+        campaignDateRows: 0,
+        firstDate: null,
+        lastDate: null,
+        observedSpend: 0,
+        lifetimeSpend,
+        spendCoveragePct:
+          observedAbsenceConfirmed && lifetimeSpend > 0 ? 0 : null,
+        observedPersistedAttributedReturn: 0,
+        lifetimeAttributedReturn,
+      },
+      returnCoverage: {
+        status: 'none',
+        trustedRows: 0,
+        untrustedRows: 0,
+        campaignsWithTrustedRows: 0,
+        legacyRowsExcludedFromReturn: 0,
+        warning,
+      },
+      series: [],
+    });
+
+    if (metaCampaignIds.length === 0) {
+      return empty(
+        'No verified sales launches are available for a daily series.',
+      );
+    }
+
+    let rows: any[];
+    try {
+      rows = (await this.timeseriesModel
+        .find({
+          tenantId,
+          level: 'campaign',
+          metaCampaignId: { $in: metaCampaignIds },
+        })
+        .select(
+          'metaCampaignId date spend revenue revenueBasis revenueAttributionSource revenueAttributionActionTypes revenueCalculationVersion revenueFetchCompleteness campaignProductName resolvedProductName productResolutionEvidence revenueConfigFingerprint',
+        )
+        .sort({ date: 1 })
+        .lean()
+        .exec()) as any[];
+    } catch (err: any) {
+      this.logger.warn(
+        `Tool impact daily series failed for ${tenantId}: ${err.message}`,
+      );
+      return empty('Persisted daily rows could not be loaded.');
+    }
+
+    const exactMetaIds = new Set(metaCampaignIds);
+    const validRows = rows.filter(
+      (row) =>
+        exactMetaIds.has(String(row.metaCampaignId ?? '')) &&
+        isValidDateKey(String(row.date ?? '')),
+    );
+    if (validRows.length === 0) {
+      return empty(
+        'No persisted daily rows exist for the verified sales cohort.',
+        true,
+      );
+    }
+
+    const rowIsReturnTrusted = (row: any): boolean => {
+      return isTrustedProductScopedTimeseriesRevenue(
+        row,
+        authoritativeProductByMetaId.get(String(row.metaCampaignId ?? '')),
+      );
+    };
+
+    type DayAccumulator = {
+      spend: number;
+      knownAttributedReturn: number;
+      persistedAttributedReturn: number;
+      rows: number;
+      trustedRows: number;
+      campaigns: Set<string>;
+      trustedCampaigns: Set<string>;
+    };
+    const byDate = new Map<string, DayAccumulator>();
+    const campaignsWithRows = new Set<string>();
+    const campaignsWithTrustedRows = new Set<string>();
+    let trustedRows = 0;
+    let legacyRowsExcludedFromReturn = 0;
+
+    for (const row of validRows) {
+      const metaCampaignId = String(row.metaCampaignId);
+      const date = String(row.date);
+      const trusted = rowIsReturnTrusted(row);
+      const day = byDate.get(date) ?? {
+        spend: 0,
+        knownAttributedReturn: 0,
+        persistedAttributedReturn: 0,
+        rows: 0,
+        trustedRows: 0,
+        campaigns: new Set<string>(),
+        trustedCampaigns: new Set<string>(),
+      };
+      day.spend += num(row.spend);
+      day.persistedAttributedReturn += num(row.revenue);
+      day.rows++;
+      day.campaigns.add(metaCampaignId);
+      campaignsWithRows.add(metaCampaignId);
+      if (trusted) {
+        day.knownAttributedReturn += num(row.revenue);
+        day.trustedRows++;
+        day.trustedCampaigns.add(metaCampaignId);
+        campaignsWithTrustedRows.add(metaCampaignId);
+        trustedRows++;
+      } else if (row.revenueCalculationVersion !== calculationVersion) {
+        legacyRowsExcludedFromReturn++;
+      }
+      byDate.set(date, day);
+    }
+
+    const series = [...byDate.entries()].map(([date, day]) => {
+      const returnCoverage: 'complete' | 'partial' | 'none' =
+        day.trustedRows === day.rows
+          ? 'complete'
+          : day.trustedRows > 0
+            ? 'partial'
+            : 'none';
+      const attributedReturn =
+        returnCoverage === 'complete'
+          ? round(day.knownAttributedReturn, 2)
+          : null;
+      return {
+        date,
+        spend: round(day.spend, 2),
+        attributedReturn,
+        knownAttributedReturn: round(day.knownAttributedReturn, 2),
+        persistedAttributedReturn: round(day.persistedAttributedReturn, 2),
+        weightedRoas:
+          attributedReturn != null && day.spend > 0
+            ? round(attributedReturn / day.spend, 6)
+            : null,
+        campaignsReporting: day.campaigns.size,
+        trustedReturnCampaigns: day.trustedCampaigns.size,
+        returnCoverage,
+      };
+    });
+    const untrustedRows = validRows.length - trustedRows;
+    const observedSpend = round(sum(validRows.map((row) => num(row.spend))), 2);
+    const observedPersistedAttributedReturn = round(
+      sum(validRows.map((row) => num(row.revenue))),
+      2,
+    );
+    const spendReconciliationTolerance = Math.max(1, lifetimeSpend * 0.001);
+    const spendReconciles =
+      Math.abs(observedSpend - lifetimeSpend) <= spendReconciliationTolerance;
+    const coverageStatus: 'complete' | 'partial' =
+      campaignsWithRows.size === metaCampaignIds.length && spendReconciles
+        ? 'complete'
+        : 'partial';
+    const returnCoverageStatus: 'complete' | 'partial' | 'none' =
+      trustedRows === validRows.length
+        ? 'complete'
+        : trustedRows > 0
+          ? 'partial'
+          : 'none';
+
+    return {
+      source: 'metric_timeseries_campaign_daily',
+      dateBasis: 'meta_ad_account_date_start',
+      cohort: 'verified_sales_launches',
+      calculationVersion,
+      coverage: {
+        status: coverageStatus,
+        eligibleCampaigns: metaCampaignIds.length,
+        campaignsWithRows: campaignsWithRows.size,
+        campaignsWithoutRows: metaCampaignIds.length - campaignsWithRows.size,
+        observedDates: series.length,
+        campaignDateRows: validRows.length,
+        firstDate: series[0]?.date ?? null,
+        lastDate: series[series.length - 1]?.date ?? null,
+        observedSpend,
+        lifetimeSpend,
+        spendCoveragePct:
+          lifetimeSpend > 0
+            ? round((observedSpend / lifetimeSpend) * 100, 1)
+            : null,
+        observedPersistedAttributedReturn,
+        lifetimeAttributedReturn,
+      },
+      returnCoverage: {
+        status: returnCoverageStatus,
+        trustedRows,
+        untrustedRows,
+        campaignsWithTrustedRows: campaignsWithTrustedRows.size,
+        legacyRowsExcludedFromReturn,
+        warning:
+          untrustedRows > 0
+            ? `${untrustedRows} campaign-day row(s) lack verified product-scoped return provenance. Their spend is shown, but their return is excluded from attributedReturn.`
+            : null,
+      },
+      series,
+    };
+  }
 
   /**
    * True windowed metrics from daily rows when the timeseries has been
@@ -1602,6 +1852,31 @@ interface RawMetrics {
   impressions: number;
 }
 
+const TOOL_IMPACT_REVENUE_OBJECTIVES = new Set([
+  'OUTCOME_SALES',
+  'SALES',
+  'CONVERSIONS',
+  'OUTCOME_CONVERSIONS',
+  'PRODUCT_CATALOG_SALES',
+  'CATALOG_SALES',
+  'OUTCOME_CATALOG_SALES',
+  'RETARGETING',
+  'RETARGETING_SALES',
+]);
+
+/**
+ * Deliberately stricter than the global dashboard evaluator, whose historical
+ * compatibility fallback treats an unmapped objective as sales. Founder
+ * evidence admits only an explicit, known revenue objective.
+ */
+function isKnownToolImpactRevenueObjective(value: unknown): boolean {
+  return TOOL_IMPACT_REVENUE_OBJECTIVES.has(
+    String(value ?? '')
+      .trim()
+      .toUpperCase(),
+  );
+}
+
 function emptyRaw(): RawMetrics {
   return { spend: 0, revenue: 0, conversions: 0, clicks: 0, impressions: 0 };
 }
@@ -1618,6 +1893,12 @@ function sum(xs: number[]): number {
 function isFiniteDate(value: unknown): boolean {
   if (!value) return false;
   return Number.isFinite(new Date(value as Date | string).getTime());
+}
+
+function isValidDateKey(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && toDateKey(date) === value;
 }
 
 function hoursBetween(start: unknown, end: unknown): number | null {

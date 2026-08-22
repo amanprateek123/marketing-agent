@@ -1,5 +1,9 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument } from 'mongoose';
+import {
+  CampaignRevenueAttributionSource,
+  CampaignRevenueBasis,
+} from './campaign.schema';
 
 export type MetricTimeseriesDocument = HydratedDocument<MetricTimeseries>;
 
@@ -46,6 +50,47 @@ export class MetricTimeseries {
   @Prop({ default: 0 }) cpm: number;
   @Prop({ default: 0 }) conversions: number;
   @Prop({ default: 0 }) revenue: number;
+
+  /**
+   * Daily return provenance. Rows written before these fields existed used an
+   * account-wide union of conversion events and must not be presented as
+   * product-scoped attributed return. `revenueCalculationVersion` is the
+   * explicit trust boundary used by the Tool Impact chart.
+   */
+  @Prop({ default: 'unknown' })
+  revenueBasis: CampaignRevenueBasis;
+
+  @Prop({ default: 'unknown' })
+  revenueAttributionSource: CampaignRevenueAttributionSource;
+
+  @Prop({ type: [String], default: [] })
+  revenueAttributionActionTypes: string[];
+
+  @Prop({ default: '' })
+  revenueCalculationVersion: string;
+
+  /** Complete means every requested Meta page/chunk succeeded before write. */
+  @Prop({ default: 'unknown' })
+  revenueFetchCompleteness: string;
+
+  /** Raw product identity explicitly persisted on Campaign.productName. */
+  @Prop({ default: '' })
+  campaignProductName: string;
+
+  /** Canonical configured product name; blank when exact resolution failed. */
+  @Prop({ default: '' })
+  resolvedProductName: string;
+
+  @Prop({ default: '' })
+  productResolutionEvidence: string;
+
+  /**
+   * SHA-256 of the non-secret product conversion/value configuration at sync
+   * time. Presence does not prove that the product still has this config.
+   */
+  @Prop({ default: '' })
+  revenueConfigFingerprint: string;
+
   @Prop({ default: 0 }) addToCart: number;
   @Prop({ default: 0 }) initiateCheckout: number;
   @Prop({ default: 0 }) landingPageView: number;
@@ -56,7 +101,8 @@ export class MetricTimeseries {
   syncedAt?: Date;
 }
 
-export const MetricTimeseriesSchema = SchemaFactory.createForClass(MetricTimeseries);
+export const MetricTimeseriesSchema =
+  SchemaFactory.createForClass(MetricTimeseries);
 
 // One row per entity per day — deep-sync upserts on this key.
 MetricTimeseriesSchema.index(
@@ -64,4 +110,9 @@ MetricTimeseriesSchema.index(
   { unique: true },
 );
 // Series reads: "last N days for this campaign at level X".
-MetricTimeseriesSchema.index({ tenantId: 1, metaCampaignId: 1, level: 1, date: 1 });
+MetricTimeseriesSchema.index({
+  tenantId: 1,
+  metaCampaignId: 1,
+  level: 1,
+  date: 1,
+});

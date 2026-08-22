@@ -295,21 +295,22 @@ export interface DashboardEconomics {
  * DashboardOverview (which includes campaigns the marketing team runs in Meta
  * directly and this system has never touched). Defaults to autonomous
  * `agent` campaigns; callers can request `managed` to include dashboard-
- * authored `human` campaigns. Imported `manual` campaigns never belong here
- * unless their strict legacy AGENT_<topic>_<date> launch marker identifies a
- * pre-source-field autonomous launch; that weaker evidence stays disclosed.
+ * authored `human` campaigns. Imported `manual` campaigns never belong here;
+ * a legacy AGENT_<topic>_<date> name is only a reconciliation signal and is
+ * never treated as ownership provenance.
  */
 export type ToolImpactScope = 'agent' | 'managed';
 
 export type ToolImpactOwnershipEvidence =
   | 'persisted_agent_source'
   | 'persisted_human_source'
+  /** @deprecated Response compatibility only; the backend no longer emits it. */
   | 'legacy_agent_name';
 
 export interface ToolImpactOwnership {
   actor: 'agent' | 'human';
   evidence: ToolImpactOwnershipEvidence;
-  /** Legacy names are deterministic evidence, but weaker than a stored source. */
+  /** `name_inferred` is retained for response compatibility and is not emitted. */
   confidence: 'recorded' | 'name_inferred';
 }
 
@@ -377,6 +378,62 @@ export interface ToolImpactRawOutcome {
   };
 }
 
+export interface ToolImpactDailyPerformance {
+  /** Persisted Meta daily rows only; no campaign-lifetime interpolation. */
+  source: 'metric_timeseries_campaign_daily';
+  /** Meta's date_start, expressed in the ad account's timezone. */
+  dateBasis: 'meta_ad_account_date_start';
+  cohort: 'verified_sales_launches';
+  calculationVersion: 'product_scoped_v1';
+  coverage: {
+    /** Complete only when every eligible campaign has rows and observed spend
+     * reconciles to lifetime spend within the server's small rounding tolerance. */
+    status: 'complete' | 'partial' | 'none';
+    eligibleCampaigns: number;
+    campaignsWithRows: number;
+    campaignsWithoutRows: number;
+    observedDates: number;
+    campaignDateRows: number;
+    firstDate: string | null;
+    lastDate: string | null;
+    /** Reconciles the finite daily window to campaign-lifetime headline data. */
+    observedSpend: number;
+    lifetimeSpend: number;
+    spendCoveragePct: number | null;
+    observedPersistedAttributedReturn: number;
+    lifetimeAttributedReturn: number;
+  };
+  returnCoverage: {
+    /** Provenance coverage of the observed campaign-day rows, not lifetime coverage. */
+    status: 'complete' | 'partial' | 'none';
+    trustedRows: number;
+    untrustedRows: number;
+    campaignsWithTrustedRows: number;
+    /** Old unstamped rows remain usable for spend, but never for return. */
+    legacyRowsExcludedFromReturn: number;
+    warning: string | null;
+  };
+  /**
+   * Only dates present in metric_timeseries are emitted. Missing dates are not
+   * synthesized as zeros. `attributedReturn` is null whenever even one row on
+   * the date lacks product-scoped provenance; `knownAttributedReturn` is the
+   * explicitly labelled subtotal from trusted rows only. The persisted value
+   * remains available for a visually distinct legacy/unverified line; it must
+   * not be relabelled as verified return.
+   */
+  series: Array<{
+    date: string;
+    spend: number;
+    attributedReturn: number | null;
+    knownAttributedReturn: number;
+    persistedAttributedReturn: number;
+    weightedRoas: number | null;
+    campaignsReporting: number;
+    trustedReturnCampaigns: number;
+    returnCoverage: 'complete' | 'partial' | 'none';
+  }>;
+}
+
 export interface ToolImpactOverview {
   tenantId: string;
   generatedAt: string;
@@ -411,6 +468,7 @@ export interface ToolImpactOverview {
     ownershipEvidence: {
       persistedAgentSource: number;
       persistedHumanSource: number;
+      /** Compatibility counter; always 0 because names do not prove ownership. */
       legacyAgentName: number;
     };
     /**
@@ -452,6 +510,8 @@ export interface ToolImpactOverview {
   };
 
   economics: DashboardEconomics;
+
+  dailyPerformance: ToolImpactDailyPerformance;
 
   automation: {
     pipelineRuns: {

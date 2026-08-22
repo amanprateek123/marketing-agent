@@ -105,6 +105,37 @@ describe('DashboardService.getToolImpact', () => {
         revenue: 0,
       },
       {
+        _id: 'agent-awareness',
+        tenantId: 'tenant-1',
+        source: 'agent',
+        productName: 'Product A',
+        name: 'Agent reach campaign',
+        metaCampaignId: 'meta-awareness',
+        launchedAt: new Date('2026-08-01T12:00:00.000Z'),
+        createdAt: new Date('2026-08-01T10:00:00.000Z'),
+        dataAsOf: new Date('2026-08-21T10:00:00.000Z'),
+        status: 'active',
+        objective: 'OUTCOME_AWARENESS',
+        budget: 50,
+        spend: 50,
+        revenue: 999,
+      },
+      {
+        _id: 'agent-unknown-objective',
+        tenantId: 'tenant-1',
+        source: 'agent',
+        productName: 'Product A',
+        name: 'Future objective campaign',
+        metaCampaignId: 'meta-unknown-objective',
+        launchedAt: new Date('2026-08-01T12:00:00.000Z'),
+        createdAt: new Date('2026-08-01T10:00:00.000Z'),
+        status: 'paused',
+        objective: 'OUTCOME_FUTURE_UNKNOWN',
+        budget: 50,
+        spend: 0,
+        revenue: 0,
+      },
+      {
         _id: 'manual-launched',
         tenantId: 'tenant-1',
         source: 'manual',
@@ -150,12 +181,80 @@ describe('DashboardService.getToolImpact', () => {
     const executedActionModel = {
       find: jest.fn(() => queryReturning([])),
     };
+    const timeseriesModel = {
+      // Return extra rows deliberately: the service must enforce the exact
+      // verified-sales Meta id set even if a model/mock over-returns.
+      find: jest.fn(() =>
+        queryReturning([
+          {
+            metaCampaignId: 'meta-agent',
+            date: '2026-08-01',
+            spend: 60,
+            revenue: 80,
+            revenueBasis: 'meta_action_value',
+            revenueAttributionSource: 'custom_conversion',
+            revenueAttributionActionTypes: [
+              'offsite_conversion.custom.product-a',
+            ],
+            revenueCalculationVersion: 'product_scoped_v1',
+            revenueFetchCompleteness: 'complete',
+            campaignProductName: 'Product A',
+            resolvedProductName: 'Product A',
+            productResolutionEvidence: 'persisted_campaign_product_exact',
+            revenueConfigFingerprint: 'a'.repeat(64),
+          },
+          {
+            metaCampaignId: 'meta-agent',
+            date: '2026-08-02',
+            spend: 40,
+            revenue: 40,
+            // A pre-provenance row: spend is valid, return is only an
+            // explicitly unverified persisted value.
+          },
+          {
+            metaCampaignId: 'meta-human',
+            date: '2026-08-01',
+            spend: 1_000,
+            revenue: 5_000,
+            revenueBasis: 'meta_action_value',
+            revenueAttributionSource: 'custom_conversion',
+            revenueAttributionActionTypes: [
+              'offsite_conversion.custom.product-a',
+            ],
+            revenueCalculationVersion: 'product_scoped_v1',
+            revenueFetchCompleteness: 'complete',
+            campaignProductName: 'Product A',
+            resolvedProductName: 'Product A',
+            productResolutionEvidence: 'persisted_campaign_product_exact',
+            revenueConfigFingerprint: 'b'.repeat(64),
+          },
+          {
+            metaCampaignId: 'meta-manual',
+            date: '2026-08-01',
+            spend: 5_000,
+            revenue: 10_000,
+          },
+          {
+            metaCampaignId: 'meta-awareness',
+            date: '2026-08-01',
+            spend: 50,
+            revenue: 999,
+          },
+          {
+            metaCampaignId: 'meta-unknown-objective',
+            date: '2026-08-01',
+            spend: 10,
+            revenue: 20,
+          },
+        ]),
+      ),
+    };
 
     const service = new DashboardService(
       economics as any,
       campaignModel as any,
       companyModel as any,
-      {} as any,
+      timeseriesModel as any,
       runModel as any,
       {} as any,
       decisionModel as any,
@@ -167,24 +266,45 @@ describe('DashboardService.getToolImpact', () => {
 
     const expectedFilter = {
       tenantId: 'tenant-1',
-      campaignId: { $in: ['agent-launched'] },
+      campaignId: {
+        $in: ['agent-launched', 'agent-awareness', 'agent-unknown-objective'],
+      },
     };
     expect(decisionModel.find).toHaveBeenCalledWith(expectedFilter);
     expect(cycleModel.find).toHaveBeenCalledWith(expectedFilter);
     expect(executedActionModel.find).toHaveBeenCalledWith(expectedFilter);
     expect(runModel.find).toHaveBeenCalledWith({ tenantId: 'tenant-1' });
+    expect(timeseriesModel.find).toHaveBeenCalledWith({
+      tenantId: 'tenant-1',
+      level: 'campaign',
+      metaCampaignId: { $in: ['meta-agent'] },
+    });
 
     expect(result.scope.requested).toBe('agent');
+    expect(result.scope.cohortRule).toBe(
+      "actor=agent from persisted source='agent'; impact metrics require a verified Meta launch",
+    );
+    expect(result.methodology.verifiedLaunchRule).toBe(
+      "tool ownership is recorded in persisted source='agent' or source='human' AND metaCampaignId is non-empty AND launchedAt is valid",
+    );
+    expect(result.methodology.warnings.join(' ')).not.toContain(
+      'included as AI-owned',
+    );
+    expect(result.methodology.warnings.join(' ')).not.toContain(
+      'name-inferred evidence',
+    );
     expect(result.cohort).toMatchObject({
-      created: 3,
-      launched: 1,
-      withSpend: 1,
-      mature: 1,
+      created: 5,
+      launched: 3,
+      withSpend: 2,
+      mature: 2,
     });
     expect(result.cohort.campaigns.map((campaign) => campaign.id)).toEqual([
       'agent-launched',
       'agent-not-launched',
       'agent-invalid-launch-date',
+      'agent-awareness',
+      'agent-unknown-objective',
     ]);
     expect(result.cohort.campaigns[2]).toMatchObject({
       launchedAt: null,
@@ -192,6 +312,8 @@ describe('DashboardService.getToolImpact', () => {
     });
     expect(result.launched.campaigns.map((campaign) => campaign.id)).toEqual([
       'agent-launched',
+      'agent-awareness',
+      'agent-unknown-objective',
     ]);
     expect(result.launched.rawOutcome).toMatchObject({
       spend: 100,
@@ -220,5 +342,59 @@ describe('DashboardService.getToolImpact', () => {
       rawRoasVerdict: 'returned_more_than_spend',
       facets: { product: 'Product A' },
     });
+    expect(result.dailyPerformance).toMatchObject({
+      source: 'metric_timeseries_campaign_daily',
+      cohort: 'verified_sales_launches',
+      coverage: {
+        status: 'complete',
+        eligibleCampaigns: 1,
+        campaignsWithRows: 1,
+        campaignsWithoutRows: 0,
+        observedDates: 2,
+        campaignDateRows: 2,
+        observedSpend: 100,
+        lifetimeSpend: 100,
+        spendCoveragePct: 100,
+        observedPersistedAttributedReturn: 120,
+        lifetimeAttributedReturn: 120,
+      },
+      returnCoverage: {
+        status: 'partial',
+        trustedRows: 1,
+        untrustedRows: 1,
+        campaignsWithTrustedRows: 1,
+        legacyRowsExcludedFromReturn: 1,
+      },
+      series: [
+        {
+          date: '2026-08-01',
+          spend: 60,
+          attributedReturn: 80,
+          knownAttributedReturn: 80,
+          persistedAttributedReturn: 80,
+          weightedRoas: 1.333333,
+          campaignsReporting: 1,
+          trustedReturnCampaigns: 1,
+          returnCoverage: 'complete',
+        },
+        {
+          date: '2026-08-02',
+          spend: 40,
+          attributedReturn: null,
+          knownAttributedReturn: 0,
+          persistedAttributedReturn: 40,
+          weightedRoas: null,
+          campaignsReporting: 1,
+          trustedReturnCampaigns: 0,
+          returnCoverage: 'none',
+        },
+      ],
+    });
+
+    const managedResult = await service.getToolImpact('tenant-1', 'managed');
+    expect(managedResult.scope.cohortRule).toBe(
+      "actor=agent/human from persisted source='agent' or source='human'; impact metrics require a verified Meta launch",
+    );
+    expect(managedResult.scope.cohortRule).not.toContain('legacy');
   });
 });
