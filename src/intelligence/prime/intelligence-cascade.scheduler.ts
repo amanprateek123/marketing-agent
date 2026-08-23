@@ -33,7 +33,7 @@ export class IntelligenceCascadeScheduler {
     private readonly prime: PrimeService,
   ) {}
 
-  @Cron(process.env.INTELLIGENCE_CASCADE_CRON || '0 */6 * * *')
+  @Cron(process.env.INTELLIGENCE_CASCADE_CRON || '0 */3 * * *')
   async runForAllTenants(): Promise<void> {
     if (this.running) {
       this.log.warn(
