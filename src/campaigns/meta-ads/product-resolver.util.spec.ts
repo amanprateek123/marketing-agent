@@ -91,6 +91,64 @@ describe('buildProductResolver', () => {
     expect(resolve('wish')).toBe(products[0]);
   });
 
+  it('resolves the historical Nadi Leaf alias to an inactive configured product', async () => {
+    const products = [
+      { name: 'Nadi Report', active: true },
+      {
+        name: 'Nadi Leaf Reading',
+        active: false,
+        contributionMargin: 0.45,
+        refundRatePercent: 12,
+      },
+    ];
+    const campaignModel = {
+      find: jest.fn(() =>
+        queryReturning([
+          {
+            metaCampaignId: 'nadi-leaf',
+            name: 'Nadi Leaf - New Batch_2026-07-20 - TAT',
+          },
+        ]),
+      ),
+    };
+    const briefModel = { find: jest.fn(() => queryReturning([])) };
+
+    const resolve = await buildProductResolver(
+      campaignModel as any,
+      briefModel as any,
+      'tenant-1',
+      ['nadi-leaf'],
+      products,
+    );
+
+    expect(resolve('nadi-leaf')).toBe(products[1]);
+  });
+
+  it('does not guess when two products share the same two-token alias', async () => {
+    const products = [
+      { name: 'Nadi Leaf Reading', active: false },
+      { name: 'Nadi Leaf Premium', active: true },
+    ];
+    const campaignModel = {
+      find: jest.fn(() =>
+        queryReturning([
+          { metaCampaignId: 'ambiguous-leaf', name: 'Nadi Leaf - New Batch' },
+        ]),
+      ),
+    };
+    const briefModel = { find: jest.fn(() => queryReturning([])) };
+
+    const resolve = await buildProductResolver(
+      campaignModel as any,
+      briefModel as any,
+      'tenant-1',
+      ['ambiguous-leaf'],
+      products,
+    );
+
+    expect(resolve('ambiguous-leaf')).toBeUndefined();
+  });
+
   it('returns unresolved for a campaign with no unique match when multiple products are active', async () => {
     const products = [
       { name: 'Wish Letter', active: true },

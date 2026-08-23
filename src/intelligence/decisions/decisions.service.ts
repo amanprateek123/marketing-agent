@@ -1,5 +1,11 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { randomUUID } from 'crypto';
 import { Model } from 'mongoose';
 import { RecommendedAction } from '../orchestrator/decision-context';
 import { SliceRepository } from '../shared/slice-repository.service';
@@ -13,9 +19,33 @@ import {
   IntelligenceDecision,
   IntelligenceDecisionDocument,
 } from './intelligence-decision.schema';
-import { Campaign } from '../../campaigns/schemas/campaign.schema';
+import {
+  Campaign,
+  isManagedCampaignSource,
+} from '../../campaigns/schemas/campaign.schema';
 
 const REVIEW_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+type ExecutableTargetType = 'campaign' | 'adset' | 'ad';
+
+/**
+ * The legacy executor is action-specific: several levers only understand a
+ * Meta ad/ad-set id even though an old recommendation may have been stored at
+ * campaign scope. Keep that distinction explicit at the final write boundary
+ * so an internal campaign id can never be sent to an ad-set/ad Meta endpoint.
+ */
+const EXECUTABLE_ACTION_SCOPE: Record<string, ExecutableTargetType> = {
+  pause_ad: 'ad',
+  pause_adset: 'adset',
+  scale_adset: 'adset',
+  replace_creative: 'ad',
+  add_creative: 'adset',
+  add_adset: 'campaign',
+  shift_budget_between_adsets: 'adset',
+  reduce_total_budget: 'campaign',
+  narrow_placement: 'adset',
+  dayparting: 'adset',
+};
 
 @Injectable()
 export class DecisionsService {
@@ -45,10 +75,19 @@ export class DecisionsService {
     cycleId: string;
     metaCampaignId?: string;
     snapshotId?: string;
+    decisionContext?: {
+      objective: string;
+      primaryKPI: string;
+      financialDataAvailable?: boolean;
+    };
     actions: RecommendedAction[];
     signalReasoningByActionId: Record<
       string,
-      { kind: string; reasoning: string; metrics: Record<string, number> }
+      {
+        signalKind: string;
+        signalReasoning: string;
+        metrics: Record<string, number>;
+      }
     >;
   }): Promise<{ written: number }> {
     if (input.actions.length === 0) return { written: 0 };
@@ -66,11 +105,19 @@ export class DecisionsService {
       targetType: a.targetType,
       targetId: a.targetId,
       parameters: a.parameters,
+      decisionContractVersion: input.decisionContext
+        ? ('goal_aware_v1' as const)
+        : undefined,
+      objective: input.decisionContext?.objective,
+      primaryKPI: input.decisionContext?.primaryKPI,
+      expectedImpact: input.decisionContext ? a.expectedImpact : undefined,
+      financialDataAvailable: input.decisionContext?.financialDataAvailable,
       expectedProfitDeltaINR7d: a.expectedProfitDeltaINR7d,
       reasoning: a.reasoning,
       evidenceChain: a.evidenceChain,
       risk: a.risk,
       score: a.score,
+      confidence: a.expectedImpact.confidence,
       gatedBy: a.gatedBy,
       requiresHumanApproval: a.requiresHumanApproval,
       evidenceSnapshot:
@@ -78,6 +125,8 @@ export class DecisionsService {
       reviewWindowExpiresAt: expires,
       status: 'shadow_review' as DecisionStatus,
       shadowModeOnly: true,
+      executionStatus: 'pending' as const,
+      executionAttempts: 0,
     }));
 
     try {
@@ -232,18 +281,37 @@ export class DecisionsService {
    * reviewer decision even when the live Meta call fails.
    */
   async approve(
+    tenantId: string,
     decisionId: string,
     reviewer?: string,
     notes?: string,
   ): Promise<IntelligenceDecision> {
-    const doc = await this.model.findById(decisionId).exec();
-    if (!doc) throw new NotFoundException(`decision ${decisionId} not found`);
-    doc.status = 'approved';
-    doc.humanReviewedAt = new Date();
-    if (reviewer) doc.humanReviewedBy = reviewer;
-    if (notes) doc.humanReviewNotes = notes;
-    await doc.save();
-    return doc.toObject();
+    const now = new Date();
+    const set: Record<string, unknown> = {
+      status: 'approved',
+      humanReviewedAt: now,
+      executionStatus: 'pending',
+    };
+    if (reviewer) set.humanReviewedBy = reviewer;
+    if (notes) set.humanReviewNotes = notes;
+
+    // Compare-and-set is intentional: two simultaneous reviewers cannot both
+    // transition the same proposal and therefore cannot both reach Meta.
+    const doc = await this.model
+      .findOneAndUpdate(
+        {
+          _id: decisionId,
+          tenantId,
+          status: 'shadow_review',
+          reviewWindowExpiresAt: { $gt: now },
+        },
+        { $set: set },
+        { new: true },
+      )
+      .exec();
+    if (doc) return doc.toObject();
+
+    return this.reviewTransitionFailure(tenantId, decisionId, 'approved', now);
   }
 
   /**
@@ -254,16 +322,88 @@ export class DecisionsService {
    * caller-supplied one) so this can only ever touch the campaign the
    * decision was actually generated for.
    */
-  async executeApprovedDecision(decisionId: string): Promise<{
+  async executeApprovedDecision(
+    tenantId: string,
+    decisionId: string,
+    options: { retryFailed?: boolean } = {},
+  ): Promise<{
     executed: boolean;
     error?: string;
   }> {
-    const doc = await this.model.findById(decisionId).exec();
-    if (!doc) throw new NotFoundException(`decision ${decisionId} not found`);
-    if (!doc.campaignId) {
-      doc.executionError = 'Decision has no campaignId — cannot execute';
-      await doc.save();
-      return { executed: false, error: doc.executionError };
+    const claimToken = randomUUID();
+    const claimedAt = new Date();
+    const claimableExecutionStates: Array<Record<string, unknown>> = [
+      { executionStatus: { $exists: false } }, // approved legacy rows
+      { executionStatus: 'pending' },
+    ];
+    if (options.retryFailed) {
+      claimableExecutionStates.push({ executionStatus: 'failed' });
+    }
+
+    // Claim BEFORE any mutable external work. Only the request that wins this
+    // conditional update may call the executor; every concurrent request sees
+    // in_progress/succeeded and exits without touching Meta.
+    const doc = await this.model
+      .findOneAndUpdate(
+        {
+          _id: decisionId,
+          tenantId,
+          status: 'approved',
+          executedAt: { $exists: false },
+          $or: claimableExecutionStates,
+        },
+        {
+          $set: {
+            executionStatus: 'in_progress',
+            executionClaimedAt: claimedAt,
+            executionClaimToken: claimToken,
+          },
+          $unset: { executionError: 1 },
+          $inc: { executionAttempts: 1 },
+        },
+        { new: true },
+      )
+      .exec();
+    if (!doc) {
+      return this.executionClaimFailure(
+        tenantId,
+        decisionId,
+        Boolean(options.retryFailed),
+      );
+    }
+
+    let campaign: Campaign | null;
+    try {
+      campaign = doc.campaignId
+        ? await this.campaignModel
+            .findOne({ _id: doc.campaignId, tenantId: doc.tenantId })
+            .lean()
+            .exec()
+        : null;
+    } catch (err) {
+      const executionError = `Execution preflight failed: ${(err as Error).message}`;
+      await this.finishExecutionClaim(
+        tenantId,
+        decisionId,
+        claimToken,
+        'failed',
+        executionError,
+      );
+      return { executed: false, error: executionError };
+    }
+    const validationError = this.validateForExecution(doc, campaign);
+    if (validationError) {
+      await this.finishExecutionClaim(
+        tenantId,
+        decisionId,
+        claimToken,
+        'blocked',
+        validationError,
+      );
+      this.log.warn(
+        `Execution blocked for decision ${decisionId}: ${validationError}`,
+      );
+      return { executed: false, error: validationError };
     }
 
     try {
@@ -279,37 +419,406 @@ export class DecisionsService {
           metrics: (doc.parameters ?? {}) as Record<string, unknown>,
         },
       );
-      doc.executedAt = new Date();
-      doc.executionError = undefined;
-      doc.shadowModeOnly = false;
-      await doc.save();
+      const completedAt = new Date();
+      const completed = await this.model
+        .findOneAndUpdate(
+          {
+            _id: decisionId,
+            tenantId,
+            executionStatus: 'in_progress',
+            executionClaimToken: claimToken,
+          },
+          {
+            $set: {
+              executionStatus: 'succeeded',
+              executedAt: completedAt,
+              shadowModeOnly: false,
+            },
+            $unset: {
+              executionError: 1,
+              executionClaimToken: 1,
+            },
+          },
+          { new: true },
+        )
+        .exec();
+      if (!completed) {
+        // Do not release/retry an uncertain claim: Meta may already have
+        // applied the mutation. Leaving it in_progress forces reconciliation
+        // and, importantly, prevents a second blind Meta call.
+        const error =
+          'Meta call completed but the execution record could not be finalized; manual reconciliation is required';
+        this.log.error(`Execution uncertain for decision ${decisionId}`);
+        return { executed: false, error };
+      }
       this.log.log(
         `Executed decision ${decisionId} (${doc.actionType} on ${doc.targetId}) for tenant=${doc.tenantId}`,
       );
       return { executed: true };
     } catch (err) {
-      doc.executionError = (err as Error).message;
-      await doc.save();
-      this.log.error(
-        `Execution failed for decision ${decisionId}: ${doc.executionError}`,
+      const executionError = (err as Error).message;
+      await this.finishExecutionClaim(
+        tenantId,
+        decisionId,
+        claimToken,
+        'failed',
+        executionError,
       );
-      return { executed: false, error: doc.executionError };
+      this.log.error(
+        `Execution failed for decision ${decisionId}: ${executionError}`,
+      );
+      return { executed: false, error: executionError };
     }
   }
 
+  /**
+   * Retry is deliberately explicit. A normal duplicate approve/execute request
+   * cannot retry a failed Meta call because a network error may have an
+   * ambiguous outcome. An operator must request this path knowingly; the same
+   * atomic claim still allows only one retry request through.
+   */
+  async retryFailedExecution(
+    tenantId: string,
+    decisionId: string,
+  ): Promise<{ executed: boolean; error?: string }> {
+    return this.executeApprovedDecision(tenantId, decisionId, {
+      retryFailed: true,
+    });
+  }
+
+  private async finishExecutionClaim(
+    tenantId: string,
+    decisionId: string,
+    claimToken: string,
+    status: 'failed' | 'blocked',
+    error: string,
+  ): Promise<void> {
+    await this.model
+      .updateOne(
+        {
+          _id: decisionId,
+          tenantId,
+          executionStatus: 'in_progress',
+          executionClaimToken: claimToken,
+        },
+        {
+          $set: { executionStatus: status, executionError: error },
+          $unset: { executionClaimToken: 1 },
+        },
+      )
+      .exec();
+  }
+
+  private async executionClaimFailure(
+    tenantId: string,
+    decisionId: string,
+    retryFailed: boolean,
+  ): Promise<{ executed: false; error: string }> {
+    const doc = await this.model
+      .findOne({ _id: decisionId, tenantId })
+      .lean()
+      .exec();
+    if (!doc) throw new NotFoundException(`decision ${decisionId} not found`);
+    if (doc.status !== 'approved') {
+      return {
+        executed: false,
+        error: `Decision is ${doc.status}; only approved decisions can execute`,
+      };
+    }
+    if (doc.executedAt || doc.executionStatus === 'succeeded') {
+      return { executed: false, error: 'Decision was already executed' };
+    }
+    if (doc.executionStatus === 'in_progress') {
+      return {
+        executed: false,
+        error: 'Decision execution is already in progress',
+      };
+    }
+    if (doc.executionStatus === 'blocked') {
+      return {
+        executed: false,
+        error: doc.executionError || 'Decision execution is blocked',
+      };
+    }
+    if (doc.executionStatus === 'failed' && !retryFailed) {
+      return {
+        executed: false,
+        error:
+          'Previous execution failed; use the explicit retry-execution endpoint after checking Meta',
+      };
+    }
+    return {
+      executed: false,
+      error: 'Decision could not be claimed for execution',
+    };
+  }
+
+  /**
+   * Validate the stored proposal against the campaign as it exists NOW.
+   *
+   * This deliberately runs immediately before the executor is called. A
+   * recommendation can sit in review for 48h, during which its campaign or
+   * target may be paused, replaced or re-synced. Invalid input returns a
+   * human-readable error and, critically, does not enqueue a pending action or
+   * call Meta.
+   */
+  private validateForExecution(
+    doc: IntelligenceDecisionDocument,
+    campaign: Campaign | null,
+  ): string | undefined {
+    if (!doc.campaignId) return 'Decision has no campaignId — cannot execute';
+    if (!campaign) {
+      return `Campaign ${doc.campaignId} was not found in tenant ${doc.tenantId}`;
+    }
+    if (!isManagedCampaignSource(campaign.source)) {
+      return 'Decision targets a Meta-imported/manual campaign; it is read-only';
+    }
+    if (campaign.status !== 'active') {
+      return `Campaign is ${campaign.status}; only active campaigns can be mutated`;
+    }
+    if (!campaign.metaCampaignId) {
+      return 'Campaign has no Meta campaign id';
+    }
+    if (
+      doc.metaCampaignId &&
+      String(doc.metaCampaignId) !== String(campaign.metaCampaignId)
+    ) {
+      return `Decision Meta campaign ${doc.metaCampaignId} no longer matches campaign ${campaign.metaCampaignId}`;
+    }
+
+    const expectedTargetType = EXECUTABLE_ACTION_SCOPE[doc.actionType];
+    if (!expectedTargetType) {
+      return `Unsupported action type: ${doc.actionType}`;
+    }
+    if (doc.targetType !== expectedTargetType) {
+      const expectedLabel =
+        expectedTargetType === 'adset' ? 'ad-set' : expectedTargetType;
+      const article = expectedTargetType === 'adset' ? 'an' : 'a';
+      return `${doc.actionType} requires ${article} ${expectedLabel} target, not ${doc.targetType}`;
+    }
+    if (!doc.targetId || !String(doc.targetId).trim()) {
+      return `${doc.actionType} has no target id`;
+    }
+
+    const legacyAdSets = (campaign.adSets ?? []) as Array<{
+      metaAdSetId?: string;
+      ads?: Array<{ metaAdId?: string }>;
+    }>;
+    const syncedAdSets = (campaign.metaAdSets ?? []) as Array<{
+      id?: string;
+      ads?: Array<{ id?: string }>;
+    }>;
+    const adSetIds = new Set([
+      ...legacyAdSets.map((adSet) => String(adSet.metaAdSetId ?? '')),
+      ...syncedAdSets.map((adSet) => String(adSet.id ?? '')),
+    ]);
+    const adIds = new Set([
+      ...legacyAdSets.flatMap((adSet) =>
+        (adSet.ads ?? []).map((ad) => String(ad.metaAdId ?? '')),
+      ),
+      ...syncedAdSets.flatMap((adSet) =>
+        (adSet.ads ?? []).map((ad) => String(ad.id ?? '')),
+      ),
+    ]);
+    const targetId = String(doc.targetId);
+
+    if (expectedTargetType === 'campaign') {
+      const campaignIds = new Set([
+        String((campaign as Campaign & { _id?: unknown })._id ?? ''),
+        String(campaign.metaCampaignId),
+        String(doc.campaignId),
+      ]);
+      if (!campaignIds.has(targetId)) {
+        return `Campaign target ${targetId} does not belong to decision campaign ${doc.campaignId}`;
+      }
+    } else if (expectedTargetType === 'adset' && !adSetIds.has(targetId)) {
+      return `Ad set ${targetId} does not belong to decision campaign ${doc.campaignId}`;
+    } else if (expectedTargetType === 'ad' && !adIds.has(targetId)) {
+      return `Ad ${targetId} does not belong to decision campaign ${doc.campaignId}`;
+    }
+
+    return this.validateActionParameters(doc.actionType, doc.parameters ?? {}, {
+      adSetIds,
+      targetId,
+    });
+  }
+
+  private validateActionParameters(
+    actionType: string,
+    parameters: Record<string, unknown>,
+    scope: { adSetIds: Set<string>; targetId: string },
+  ): string | undefined {
+    if (actionType === 'add_adset') {
+      // The legacy executor still derives/falls back across audience, product,
+      // landing-page and creative data. Until the recommendation contract
+      // carries every one of those immutable launch inputs, executing it would
+      // mean inventing high-impact campaign configuration at approval time.
+      return 'add_adset is review-only: the required audience, product, landing-page, budget, and creative launch contract is not complete';
+    }
+
+    if (actionType === 'shift_budget_between_adsets') {
+      const toAdSetId =
+        typeof parameters.toAdSetId === 'string'
+          ? parameters.toAdSetId.trim()
+          : '';
+      const shiftPercent = Number(parameters.shiftPercent);
+      if (!toAdSetId) return 'shift_budget_between_adsets needs toAdSetId';
+      if (!scope.adSetIds.has(toAdSetId)) {
+        return `Recipient ad set ${toAdSetId} does not belong to this campaign`;
+      }
+      if (toAdSetId === scope.targetId) {
+        return 'Budget-shift donor and recipient must be different ad sets';
+      }
+      if (
+        !Number.isFinite(shiftPercent) ||
+        shiftPercent <= 0 ||
+        shiftPercent > 50
+      ) {
+        return 'shift_budget_between_adsets needs shiftPercent in (0, 50]';
+      }
+    }
+
+    if (actionType === 'reduce_total_budget') {
+      const reductionPercent = Number(parameters.reductionPercent);
+      if (
+        !Number.isFinite(reductionPercent) ||
+        reductionPercent <= 0 ||
+        reductionPercent > 50
+      ) {
+        return 'reduce_total_budget needs reductionPercent in (0, 50]';
+      }
+    }
+
+    if (actionType === 'narrow_placement') {
+      const publisherPlatforms = parameters.publisherPlatforms;
+      if (
+        !Array.isArray(publisherPlatforms) ||
+        publisherPlatforms.length === 0 ||
+        publisherPlatforms.some(
+          (platform) =>
+            typeof platform !== 'string' || platform.trim().length === 0,
+        )
+      ) {
+        return 'narrow_placement needs at least one publisher platform';
+      }
+    }
+
+    if (actionType === 'dayparting') {
+      const schedule = parameters.schedule;
+      const validSlot = (slot: unknown): boolean => {
+        if (!slot || typeof slot !== 'object') return false;
+        const value = slot as Record<string, unknown>;
+        const startMinute = Number(value.startMinute);
+        const endMinute = Number(value.endMinute);
+        const days = value.days;
+        return (
+          Number.isInteger(startMinute) &&
+          Number.isInteger(endMinute) &&
+          startMinute >= 0 &&
+          endMinute <= 1440 &&
+          startMinute < endMinute &&
+          Array.isArray(days) &&
+          days.length > 0 &&
+          days.every(
+            (day) =>
+              Number.isInteger(Number(day)) &&
+              Number(day) >= 0 &&
+              Number(day) <= 6,
+          )
+        );
+      };
+      if (
+        !Array.isArray(schedule) ||
+        schedule.length === 0 ||
+        !schedule.every(validSlot)
+      ) {
+        return 'dayparting needs valid schedule slots (minutes 0..1440, days 0..6)';
+      }
+    }
+
+    return undefined;
+  }
+
   async reject(
+    tenantId: string,
     decisionId: string,
     reason: string,
     reviewer?: string,
   ): Promise<IntelligenceDecision> {
-    const doc = await this.model.findById(decisionId).exec();
+    const now = new Date();
+    const set: Record<string, unknown> = {
+      status: 'rejected',
+      humanReviewedAt: now,
+      humanReviewNotes: reason,
+    };
+    if (reviewer) set.humanReviewedBy = reviewer;
+
+    // A rejection is legal only from the open review state. In particular it
+    // cannot overwrite an approval while that approval is executing.
+    const doc = await this.model
+      .findOneAndUpdate(
+        {
+          _id: decisionId,
+          tenantId,
+          status: 'shadow_review',
+          reviewWindowExpiresAt: { $gt: now },
+        },
+        { $set: set },
+        { new: true },
+      )
+      .exec();
+    if (doc) return doc.toObject();
+
+    return this.reviewTransitionFailure(tenantId, decisionId, 'rejected', now);
+  }
+
+  private async reviewTransitionFailure(
+    tenantId: string,
+    decisionId: string,
+    requestedStatus: 'approved' | 'rejected',
+    now: Date,
+  ): Promise<never> {
+    let doc = await this.model
+      .findOne({ _id: decisionId, tenantId })
+      .lean()
+      .exec();
     if (!doc) throw new NotFoundException(`decision ${decisionId} not found`);
-    doc.status = 'rejected';
-    doc.humanReviewedAt = new Date();
-    if (reviewer) doc.humanReviewedBy = reviewer;
-    doc.humanReviewNotes = reason;
-    await doc.save();
-    return doc.toObject();
+
+    if (
+      doc.status === 'shadow_review' &&
+      new Date(doc.reviewWindowExpiresAt).getTime() <= now.getTime()
+    ) {
+      const expired = await this.model
+        .findOneAndUpdate(
+          {
+            _id: decisionId,
+            tenantId,
+            status: 'shadow_review',
+            reviewWindowExpiresAt: { $lte: now },
+          },
+          { $set: { status: 'expired' } },
+          { new: true },
+        )
+        .exec();
+      if (expired) {
+        throw new BadRequestException(
+          `decision ${decisionId} review window has expired`,
+        );
+      }
+
+      // Another legal transition won between the read and expiry attempt.
+      doc = await this.model
+        .findOne({ _id: decisionId, tenantId })
+        .lean()
+        .exec();
+      if (!doc) {
+        throw new NotFoundException(`decision ${decisionId} not found`);
+      }
+    }
+
+    throw new BadRequestException(
+      `decision ${decisionId} is ${doc.status}; only shadow_review decisions can be ${requestedStatus}`,
+    );
   }
 
   /** Summary: counts by status, ordered by most recent. */
@@ -374,7 +883,16 @@ export class DecisionsService {
    * in so the decision-specific highlighting still appears.
    */
   async cycleTrace(tenantId: string, cycleId: string, includeLogs = false) {
-    const slices = await this.slices.loadFull(cycleId);
+    // Authorize the cycle identity before loading any slice payload. Without
+    // the tenant predicate, a caller who learned another tenant's cycle UUID
+    // could read its full diagnosis even though decision rows were scoped.
+    const identity = await this.slices.identityForCycle(cycleId, tenantId);
+    if (!identity) {
+      throw new NotFoundException(
+        `No engine output found for cycle ${cycleId}`,
+      );
+    }
+    const slices = await this.slices.loadFull(cycleId, tenantId);
     if (!slices || Object.keys(slices).length === 0) {
       throw new NotFoundException(
         `No engine output found for cycle ${cycleId}`,
@@ -387,6 +905,15 @@ export class DecisionsService {
       .lean()
       .exec();
     const top = decisions[0];
+    let campaignName = top?.campaignName ?? '';
+    if (!campaignName && identity.campaignId) {
+      const campaign = await this.campaignModel
+        .findOne({ _id: identity.campaignId, tenantId })
+        .select({ name: 1 })
+        .lean()
+        .exec();
+      campaignName = campaign?.name ?? '';
+    }
 
     const steps = buildDecisionTrace({
       slices,
@@ -405,7 +932,7 @@ export class DecisionsService {
 
     return {
       cycleId,
-      campaignName: top?.campaignName ?? '',
+      campaignName,
       decisionsInCycle: decisions.length,
       topDecisionId: top ? String((top as { _id: unknown })._id) : null,
       stepsWithData: steps.filter((s) => s.status === 'ok').length,
@@ -423,7 +950,7 @@ export class DecisionsService {
       throw new NotFoundException(`Decision ${decisionId} not found`);
     }
 
-    const slices = await this.slices.loadFull(decision.cycleId);
+    const slices = await this.slices.loadFull(decision.cycleId, tenantId);
     const steps = buildDecisionTrace({
       slices,
       decision: {

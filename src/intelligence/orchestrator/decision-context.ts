@@ -3,11 +3,22 @@ import { EngineContext } from '../shared/engine-context';
 // ── Slice payload types ──────────────────────────────────────────────────
 // SnapshotData lives in snapshot.types.ts (imports fully typed there);
 // re-declared loosely here to avoid a circular import at the DC level.
-export type SnapshotData = { snapshotId: string; collectedAt: Date } & Record<string, unknown>;
+export type SnapshotData = { snapshotId: string; collectedAt: Date } & Record<
+  string,
+  unknown
+>;
 
 export type ObjectiveKey =
-  | 'sales' | 'leads' | 'awareness' | 'traffic' | 'engagement'
-  | 'video_views' | 'app_installs' | 'messages' | 'catalog_sales' | 'retargeting';
+  | 'sales'
+  | 'leads'
+  | 'awareness'
+  | 'traffic'
+  | 'engagement'
+  | 'video_views'
+  | 'app_installs'
+  | 'messages'
+  | 'catalog_sales'
+  | 'retargeting';
 
 export interface ObjectiveData {
   objective: ObjectiveKey;
@@ -29,9 +40,17 @@ export interface ObjectiveData {
 }
 
 export type LifecycleStage =
-  | 'draft' | 'pending_approval' | 'launching' | 'learning'
-  | 'growing' | 'scaling' | 'stable' | 'fatigue'
-  | 'recovery' | 'retirement' | 'unknown';
+  | 'draft'
+  | 'pending_approval'
+  | 'launching'
+  | 'learning'
+  | 'growing'
+  | 'scaling'
+  | 'stable'
+  | 'fatigue'
+  | 'recovery'
+  | 'retirement'
+  | 'unknown';
 
 export interface LifecycleData {
   stage: LifecycleStage;
@@ -68,12 +87,47 @@ export interface TrendData {
   overallDirection: 'improving' | 'stable' | 'declining' | 'volatile';
   stabilityScore: number;
   anomalies: Array<{ metric: string; zScore: number; note: string }>;
+  /**
+   * Number of daily observations used by the trend math. This is deliberately
+   * separate from the number of raw snapshots: a three-hour scheduler can
+   * produce eight raw documents without creating eight days of evidence.
+   */
+  observationCount?: number;
+  /** Real elapsed time covered by the daily observations in this trend. */
+  windowElapsedDays?: number;
+  /** Real elapsed time since the campaign's oldest stored snapshot. */
+  historyDepthDays?: number;
+  /** Distinct observed UTC dates inside the trailing seven-day window. */
+  recentCoverageDays?: number;
+  /** Share of UTC dates covered from the oldest recent observation to now. */
+  recentCoverageRatio?: number;
+  /** Largest gap in UTC calendar days between adjacent observations. */
+  maxGapDays?: number;
+  /** True only when history is elapsed, recent, and adequately contiguous. */
+  trendReady?: boolean;
 }
 
 export interface RevenueData {
   grossRevenue: number;
   netRevenue: number;
   contributionMargin: number;
+  /**
+   * True only when this campaign is mapped to one configured product and that
+   * product has valid contribution-margin inputs. A false value means every
+   * breakeven/profit field is intentionally withheld rather than guessed.
+   */
+  economicsAvailable: boolean;
+  /**
+   * True only when the campaign's stored return has campaign-scoped,
+   * machine-readable provenance. This distinguishes observed/config-derived
+   * return from legacy values whose derivation is unknown.
+   */
+  revenueEvidenceAvailable: boolean;
+  /**
+   * Convenience gate for downstream financial decisions. Recommendation and
+   * scale/pause logic must require this, not merely a non-zero ROAS.
+   */
+  financialDataAvailable: boolean;
   attributedByAdSet: Record<string, number>;
   attributedByProduct: Record<string, number>;
   roasDecomposition: {
@@ -87,19 +141,27 @@ export interface RevenueData {
     isProfitable: boolean;
     daysSinceBreakeven: number;
   };
-  /** The profit GOAL, not just the loss-avoidance floor — derived as
-   *  breakeven.roas * 2, so it scales correctly per product margin instead
-   *  of being one flat number that's meaningless for low-margin products.
-   *  Winner detection and scale-up reasoning measure progress against this. */
+  /** System scale-planning heuristic, not an observed company target. It is
+   *  currently derived as breakeven.roas * 2 so the planning threshold scales
+   *  with product margin. */
   targetROAS: number;
 }
 
 export type SignalKind =
-  | 'creative_fatigue' | 'audience_saturation' | 'budget_saturation'
-  | 'delivery_stalled' | 'frequency_ceiling' | 'ctr_decay'
-  | 'cvr_collapse' | 'placement_leak' | 'hook_burn'
-  | 'unprofitable_run' | 'winner_emerging' | 'winner_confirmed'
-  | 'audience_exhaustion' | 'learning_limited_locked';
+  | 'creative_fatigue'
+  | 'audience_saturation'
+  | 'budget_saturation'
+  | 'delivery_stalled'
+  | 'frequency_ceiling'
+  | 'ctr_decay'
+  | 'cvr_collapse'
+  | 'placement_leak'
+  | 'hook_burn'
+  | 'unprofitable_run'
+  | 'winner_emerging'
+  | 'winner_confirmed'
+  | 'audience_exhaustion'
+  | 'learning_limited_locked';
 
 export interface Signal {
   kind: SignalKind;
@@ -124,15 +186,32 @@ export interface SignalData {
 export interface DiagnosisData {
   rootCauses: Array<{
     hypothesis: string;
+    /**
+     * The exact entity whose evidence supports this hypothesis. Optional only
+     * so historical persisted slices remain readable; every new diagnosis
+     * writes both fields and recommendations fail closed when they are absent.
+     */
+    targetType?: Signal['targetType'];
+    targetId?: string;
     evidenceSignals: SignalKind[];
     supportingTrends: string[];
     confidence: number;
-    suggestedFocus: 'creative' | 'audience' | 'budget' | 'placement' | 'objective_mismatch';
+    suggestedFocus:
+      | 'creative'
+      | 'audience'
+      | 'budget'
+      | 'placement'
+      | 'objective_mismatch';
   }>;
   leakDiagnosis:
-    | 'creative_leak' | 'audience_lp_leak' | 'chronic_unprofitable'
-    | 'auction_leak' | 'data_gap' | 'creative_diversity_leak'
-    | 'fragmentation' | 'none';
+    | 'creative_leak'
+    | 'audience_lp_leak'
+    | 'chronic_unprofitable'
+    | 'auction_leak'
+    | 'data_gap'
+    | 'creative_diversity_leak'
+    | 'fragmentation'
+    | 'none';
   narrative: string;
 }
 
@@ -148,7 +227,10 @@ export interface BusinessData {
     perCampaignCapINR: number;
   };
   forbiddenTopics: string[];
-  daypartingConstraints?: Record<string, { startHour: number; endHour: number }>;
+  daypartingConstraints?: Record<
+    string,
+    { startHour: number; endHour: number }
+  >;
 }
 
 export interface PortfolioData {
@@ -159,7 +241,11 @@ export interface PortfolioData {
     delta: number;
     reason: string;
   }>;
-  ranking: Array<{ campaignId: string; score: number; tier: 'A' | 'B' | 'C' | 'D' }>;
+  ranking: Array<{
+    campaignId: string;
+    score: number;
+    tier: 'A' | 'B' | 'C' | 'D';
+  }>;
   totalPortfolioROAS: number;
   concentration: number;
 }
@@ -185,13 +271,23 @@ export interface ForecastData {
     next30d: ForecastPoint;
   };
   method: 'ema_projection' | 'linear' | 'seasonal' | 'insufficient_history';
+  /** The real calendar evidence that selected `method`. */
+  history?: {
+    observationCount: number;
+    elapsedDays: number;
+    minimumObservationCount: number;
+    minimumElapsedDays: number;
+  };
 }
 
 export interface ConfidenceData {
   overall: number;
   perEngine: Record<string, number>;
   quality: {
+    /** Seconds between source sync and analysis; -1 means unknown. */
     dataFreshnessSec: number;
+    /** Explicit action gate; historical rows may omit it. */
+    sourceDataFresh?: boolean;
     snapshotCoverage: number;
     historyDepthDays: number;
     statisticalPower: number;
@@ -223,7 +319,11 @@ export interface MemoryData {
     confidence: number;
     isolatedVariable: string;
   }>;
-  similarPastCycles: Array<{ cycleId: string; similarity: number; outcome: string }>;
+  similarPastCycles: Array<{
+    cycleId: string;
+    similarity: number;
+    outcome: string;
+  }>;
   companyLearnings: {
     winningHooks: string[];
     losingHooks: string[];
@@ -233,9 +333,16 @@ export interface MemoryData {
 }
 
 export type CampaignActionType =
-  | 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative'
-  | 'add_creative' | 'add_adset' | 'shift_budget_between_adsets'
-  | 'reduce_total_budget' | 'narrow_placement' | 'dayparting';
+  | 'pause_ad'
+  | 'pause_adset'
+  | 'scale_adset'
+  | 'replace_creative'
+  | 'add_creative'
+  | 'add_adset'
+  | 'shift_budget_between_adsets'
+  | 'reduce_total_budget'
+  | 'narrow_placement'
+  | 'dayparting';
 
 export interface RecommendedAction {
   actionId: string;

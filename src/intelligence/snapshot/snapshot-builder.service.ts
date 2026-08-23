@@ -25,7 +25,10 @@ export class SnapshotBuilder {
   }): SnapshotData {
     const now = input.now ?? new Date();
     const snapshotId = `snap-${randomUUID()}`;
-    const campaignMetrics = this.normalizeCampaign(input.bundle.campaign, input.products);
+    const campaignMetrics = this.normalizeCampaign(
+      input.bundle.campaign,
+      input.products,
+    );
     const adSetMetrics: Record<string, MetricSet> = {};
     for (const [id, raw] of Object.entries(input.bundle.adSets ?? {})) {
       adSetMetrics[id] = this.normalizeAdSet(raw, input.products);
@@ -34,10 +37,14 @@ export class SnapshotBuilder {
     for (const [id, raw] of Object.entries(input.bundle.ads ?? {})) {
       adMetrics[id] = this.normalizeAd(raw, input.products);
     }
-    const freshnessSec = Math.max(
-      0,
-      Math.round((now.getTime() - input.bundle.metaWindowEnd.getTime()) / 1000),
-    );
+    const freshnessSource =
+      input.bundle.sourceMetricsSyncedAt === null
+        ? undefined
+        : (input.bundle.sourceMetricsSyncedAt ?? input.bundle.metaWindowEnd);
+    const freshnessSourceMs = freshnessSource?.getTime();
+    const freshnessSec = Number.isFinite(freshnessSourceMs)
+      ? Math.max(0, Math.round((now.getTime() - freshnessSourceMs!) / 1000))
+      : -1;
     return {
       snapshotId,
       collectedAt: now,
@@ -48,16 +55,22 @@ export class SnapshotBuilder {
         adLevel: adMetrics,
       },
       meta: {
-        learningStage: this.mapLearningStage(input.bundle.campaign.learning_stage),
+        learningStage: this.mapLearningStage(
+          input.bundle.campaign.learning_stage,
+        ),
         deliveryStatus: input.bundle.campaign.effective_status,
         accountId: input.bundle.campaign.account_id ?? '',
         objective: input.bundle.campaign.objective || undefined,
+        metricScope: input.bundle.metricScope,
       },
       missingFields: this.detectMissingFields(campaignMetrics, adSetMetrics),
     };
   }
 
-  private normalizeCampaign(raw: RawMetaCampaign, products: ProductForRevenue[]): MetricSet {
+  private normalizeCampaign(
+    raw: RawMetaCampaign,
+    products: ProductForRevenue[],
+  ): MetricSet {
     const base = this.baseMetrics(raw.insights);
     base.revenue = this.computeRevenue(raw.insights, products);
     base.cvr = this.safeDiv(base.purchases, base.clicks);
@@ -66,7 +79,10 @@ export class SnapshotBuilder {
     return base;
   }
 
-  private normalizeAdSet(raw: RawMetaAdSet, products: ProductForRevenue[]): MetricSet {
+  private normalizeAdSet(
+    raw: RawMetaAdSet,
+    products: ProductForRevenue[],
+  ): MetricSet {
     const base = this.baseMetrics(raw.insights);
     base.revenue = this.computeRevenue(raw.insights, products);
     base.roas = this.safeDiv(base.revenue, base.spend);
@@ -74,7 +90,10 @@ export class SnapshotBuilder {
     return base;
   }
 
-  private normalizeAd(raw: RawMetaAd, products: ProductForRevenue[]): AdMetricSet {
+  private normalizeAd(
+    raw: RawMetaAd,
+    products: ProductForRevenue[],
+  ): AdMetricSet {
     const base = this.baseMetrics(raw.insights);
     base.revenue = this.computeRevenue(raw.insights, products);
     base.roas = this.safeDiv(base.revenue, base.spend);
@@ -106,7 +125,10 @@ export class SnapshotBuilder {
       cvr: 0,
       purchases: this.actionValue(insights?.actions, 'purchase'),
       addToCart: this.actionValue(insights?.actions, 'add_to_cart'),
-      initiateCheckout: this.actionValue(insights?.actions, 'initiate_checkout'),
+      initiateCheckout: this.actionValue(
+        insights?.actions,
+        'initiate_checkout',
+      ),
       roas: 0,
       aov: 0,
       frequency: this.toNumber(insights?.frequency),
@@ -148,17 +170,26 @@ export class SnapshotBuilder {
     adSets: Record<string, MetricSet>,
   ): string[] {
     const missing: string[] = [];
-    if (campaign.spend === 0 && campaign.impressions === 0) missing.push('spend');
+    if (campaign.spend === 0 && campaign.impressions === 0)
+      missing.push('spend');
     if (campaign.impressions === 0) missing.push('impressions');
-    if (campaign.frequency === 0 && campaign.impressions > 0) missing.push('frequency');
+    if (campaign.frequency === 0 && campaign.impressions > 0)
+      missing.push('frequency');
     if (Object.keys(adSets).length === 0) missing.push('ad_set_breakdown');
     return missing;
   }
 
-  private mapLearningStage(raw?: string): SnapshotData['meta']['learningStage'] {
+  private mapLearningStage(
+    raw?: string,
+  ): SnapshotData['meta']['learningStage'] {
     if (!raw) return undefined;
     const upper = raw.toUpperCase();
-    if (upper === 'LEARNING' || upper === 'LEARNING_LIMITED' || upper === 'ACTIVE' || upper === 'NOT_DELIVERING') {
+    if (
+      upper === 'LEARNING' ||
+      upper === 'LEARNING_LIMITED' ||
+      upper === 'ACTIVE' ||
+      upper === 'NOT_DELIVERING'
+    ) {
       return upper;
     }
     return undefined;
@@ -167,13 +198,19 @@ export class SnapshotBuilder {
   private mapRanking(raw?: string): AdMetricSet['qualityRanking'] {
     if (!raw) return undefined;
     const upper = raw.toUpperCase();
-    if (upper === 'ABOVE_AVERAGE' || upper === 'AVERAGE' || upper === 'BELOW_AVERAGE') {
+    if (
+      upper === 'ABOVE_AVERAGE' ||
+      upper === 'AVERAGE' ||
+      upper === 'BELOW_AVERAGE'
+    ) {
       return upper;
     }
     return undefined;
   }
 
-  private pickFirstValue(arr?: Array<{ value: number | string }>): number | undefined {
+  private pickFirstValue(
+    arr?: Array<{ value: number | string }>,
+  ): number | undefined {
     if (!arr?.length) return undefined;
     return this.toNumber(arr[0].value);
   }

@@ -722,10 +722,21 @@ export interface ToolImpactOverview {
     };
     /** A handful of the highest-impact open decisions, for the "here's what it found" beat. */
     examples: Array<{
+      decisionId: string;
+      campaignId: string;
       campaignName: string;
       actionType: string;
       reasoning: string;
       expectedProfitDeltaINR7d: number;
+      decisionContractVersion?: string;
+      objective?: string;
+      primaryKPI?: string;
+      expectedImpact?: {
+        metric: string;
+        deltaPct: number;
+        confidence: number;
+      };
+      confidence?: number;
       isModelEstimate: true;
       status: string;
     }>;

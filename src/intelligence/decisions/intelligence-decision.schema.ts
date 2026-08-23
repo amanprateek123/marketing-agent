@@ -1,9 +1,29 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Schema as MongooseSchema } from 'mongoose';
 
-export type IntelligenceDecisionDocument = HydratedDocument<IntelligenceDecision>;
+export type IntelligenceDecisionDocument =
+  HydratedDocument<IntelligenceDecision>;
 
-export type DecisionStatus = 'shadow_review' | 'approved' | 'rejected' | 'expired';
+export type DecisionStatus =
+  | 'shadow_review'
+  | 'approved'
+  | 'rejected'
+  | 'expired';
+
+export type DecisionExecutionStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'succeeded'
+  | 'failed'
+  | 'blocked';
+
+export type IntelligenceDecisionContractVersion = 'goal_aware_v1';
+
+export interface IntelligenceDecisionExpectedImpact {
+  metric: string;
+  deltaPct: number;
+  confidence: number;
+}
 
 /**
  * intelligence_decisions — one document per proposed action from the
@@ -39,7 +59,23 @@ export class IntelligenceDecision {
   @Prop({ required: true }) actionType!: string;
   @Prop({ required: true }) targetType!: string;
   @Prop({ required: true }) targetId!: string;
-  @Prop({ type: MongooseSchema.Types.Mixed }) parameters?: Record<string, unknown>;
+  @Prop({ type: MongooseSchema.Types.Mixed }) parameters?: Record<
+    string,
+    unknown
+  >;
+
+  /**
+   * Goal-aware decision contract. These fields are optional so historical
+   * rows remain readable, but every new Recommendation Engine write includes
+   * them. The UI uses the version marker—not guessed legacy reasoning—to
+   * decide whether objective/KPI claims are safe to show.
+   */
+  @Prop() decisionContractVersion?: IntelligenceDecisionContractVersion;
+  @Prop() objective?: string;
+  @Prop() primaryKPI?: string;
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  expectedImpact?: IntelligenceDecisionExpectedImpact;
+  @Prop() financialDataAvailable?: boolean;
 
   /** Expected ₹ profit delta over 7 days if applied. */
   @Prop({ required: true, default: 0 }) expectedProfitDeltaINR7d!: number;
@@ -62,8 +98,12 @@ export class IntelligenceDecision {
 
   /** Original snapshot of what fired this decision — for review. */
   @Prop({ type: MongooseSchema.Types.Mixed }) evidenceSnapshot?: {
-    signalKind: string;
-    signalReasoning: string;
+    /** Canonical v1 field names. Optional for malformed historical rows. */
+    signalKind?: string;
+    signalReasoning?: string;
+    /** Legacy Recommendation v1.3 rows accidentally used these names. */
+    kind?: string;
+    reasoning?: string;
     metrics: Record<string, number>;
   };
 
@@ -93,6 +133,22 @@ export class IntelligenceDecision {
 
   /** Set once executeApprovedDecision successfully applies this to Meta. */
   @Prop() executedAt?: Date;
+  /**
+   * Separate from the human-review status: an approved decision can be
+   * pending, claimed by one executor, successfully applied, transiently
+   * failed, or permanently blocked by validation. The atomic in_progress
+   * claim is what prevents concurrent approval requests from calling Meta
+   * twice for the same decision.
+   */
+  @Prop({
+    enum: ['pending', 'in_progress', 'succeeded', 'failed', 'blocked'],
+    default: 'pending',
+  })
+  executionStatus?: DecisionExecutionStatus;
+  @Prop({ default: 0 }) executionAttempts?: number;
+  @Prop() executionClaimedAt?: Date;
+  /** Internal compare-and-set token; never include it in normal query output. */
+  @Prop({ select: false }) executionClaimToken?: string;
   /** Error message from the last failed execution attempt, if any. */
   @Prop() executionError?: string;
 }

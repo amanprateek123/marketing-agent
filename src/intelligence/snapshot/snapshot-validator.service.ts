@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { SnapshotData } from './snapshot.types';
+import {
+  isSourceMetricsFresh,
+  MAX_ACTIONABLE_SOURCE_FRESHNESS_SEC,
+} from './snapshot-freshness';
 
 export interface ValidationResult {
   ok: boolean;
@@ -33,14 +37,18 @@ export class SnapshotValidator {
     const missing = [...snapshot.missingFields];
     const warnings: string[] = [];
 
-    if (snapshot.freshnessSec > 3600) warnings.push('stale_snapshot');
+    if (!isSourceMetricsFresh(snapshot.freshnessSec))
+      warnings.push('stale_snapshot');
     if (
       Object.keys(snapshot.metrics.adLevel).length === 0 &&
       Object.keys(snapshot.metrics.adSetLevel).length > 0
     ) {
       warnings.push('ad_breakdown_missing');
     }
-    if (snapshot.metrics.campaignLevel.revenue === 0 && snapshot.metrics.campaignLevel.purchases > 0) {
+    if (
+      snapshot.metrics.campaignLevel.revenue === 0 &&
+      snapshot.metrics.campaignLevel.purchases > 0
+    ) {
       warnings.push('revenue_zero_but_purchases_present');
     }
 
@@ -71,16 +79,21 @@ export class SnapshotValidator {
   private scoreCompleteness(missing: string[]): number {
     const totalExpected = SnapshotValidator.EXPECTED_CAMPAIGN_FIELDS.length;
     const overlap = missing.filter((f) =>
-      (SnapshotValidator.EXPECTED_CAMPAIGN_FIELDS as readonly string[]).includes(f),
+      (
+        SnapshotValidator.EXPECTED_CAMPAIGN_FIELDS as readonly string[]
+      ).includes(f),
     ).length;
     return Math.max(0, 1 - overlap / totalExpected);
   }
 
   /** 1.0 while ≤ 15 min old, decays to 0 at 60 min. */
   private scoreFreshness(freshnessSec: number): number {
+    if (!Number.isFinite(freshnessSec) || freshnessSec < 0) return 0;
     if (freshnessSec <= 900) return 1;
-    if (freshnessSec >= 3600) return 0;
-    return 1 - (freshnessSec - 900) / (3600 - 900);
+    if (freshnessSec >= MAX_ACTIONABLE_SOURCE_FRESHNESS_SEC) return 0;
+    return (
+      1 - (freshnessSec - 900) / (MAX_ACTIONABLE_SOURCE_FRESHNESS_SEC - 900)
+    );
   }
 
   private scoreMetaStatus(status?: string): number {

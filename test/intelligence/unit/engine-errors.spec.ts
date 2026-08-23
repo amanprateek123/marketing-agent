@@ -2,13 +2,19 @@ import {
   ComputeError,
   DagValidationError,
   EngineError,
+  IdentityResolutionError,
   MissingDependencyError,
   SkipError,
 } from '../../../src/intelligence/shared/engine.errors';
 
 describe('engine.errors', () => {
   it('EngineError carries engine + reason + fatal flag', () => {
-    const err = new EngineError('snapshot', 'meta_5xx', 'meta returned 500', true);
+    const err = new EngineError(
+      'snapshot',
+      'meta_5xx',
+      'meta returned 500',
+      true,
+    );
     expect(err).toBeInstanceOf(Error);
     expect(err.engine).toBe('snapshot');
     expect(err.reason).toBe('meta_5xx');
@@ -21,6 +27,14 @@ describe('engine.errors', () => {
     expect(err.fatal).toBe(true);
     expect(err.reason).toBe('missing_dependency');
     expect(err.message).toMatch(/missing snapshot/);
+  });
+
+  it('IdentityResolutionError fails closed when cycle identity is unavailable', () => {
+    const err = new IdentityResolutionError('execution', 'cycle-1');
+    expect(err.fatal).toBe(true);
+    expect(err.reason).toBe('missing_cycle_identity');
+    expect(err.message).toMatch(/execution/);
+    expect(err.message).toMatch(/cycle-1/);
   });
 
   it('SkipError sets fatal=false', () => {

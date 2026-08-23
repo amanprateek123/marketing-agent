@@ -37,8 +37,12 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
     // business.module.ts. Every other @Optional() injection in this
     // codebase already sidesteps this via an explicit token (@InjectModel);
     // this does the same for plain service classes.
-    @Optional() @Inject(CompaniesService) private readonly companies: CompaniesService | null,
-    @Optional() @Inject(CampaignsService) private readonly campaigns: CampaignsService | null,
+    @Optional()
+    @Inject(CompaniesService)
+    private readonly companies: CompaniesService | null,
+    @Optional()
+    @Inject(CampaignsService)
+    private readonly campaigns: CampaignsService | null,
   ) {
     super(sliceRepo, eventBus, registry);
   }
@@ -64,7 +68,10 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
     return this.identity.get(cycleId) ?? { tenantId: '', campaignId: '' };
   }
 
-  protected async compute(deps: ComputeDeps<'business'>): Promise<BusinessData> {
+  protected async compute(
+    deps: ComputeDeps<'business'>,
+    cycleId: string,
+  ): Promise<BusinessData> {
     // deps carries only engine-slice outputs, never identity fields — the
     // previous `deps as unknown as {tenantId}` cast always resolved to
     // undefined, so tenantId was always '' here. That meant `company` never
@@ -72,21 +79,24 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
     // real getWeeklySpend() call was never even attempted — silently
     // re-breaking the weekly-cap enforcement this engine exists to provide,
     // via a different path than the original hardcoded-0 bug.
-    const ident = this.identity.values().next().value;
+    const ident = this.identity.get(cycleId);
     const tenantId = ident?.tenantId ?? '';
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)
         : null;
-    const co = (company as
-      | {
-          weeklyBudgetCap?: number;
-          maxBudgetPerCampaign?: number;
-          activePromotions?: Array<{ name?: string; expiresAt?: string | Date; details?: string }>;
-          forbiddenTopics?: string[];
-          calendarContext?: string;
-        }
-      | null) ?? {};
+    const co =
+      (company as {
+        weeklyBudgetCap?: number;
+        maxBudgetPerCampaign?: number;
+        activePromotions?: Array<{
+          name?: string;
+          expiresAt?: string | Date;
+          details?: string;
+        }>;
+        forbiddenTopics?: string[];
+        calendarContext?: string;
+      } | null) ?? {};
 
     const now = Date.now();
     const activePromotions = (co.activePromotions ?? [])
@@ -120,7 +130,9 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
         weeklyCapRemainingINR: Math.max(0, weeklyCap - weeklyCapUsedINR),
         perCampaignCapINR: perCampaignCap,
       },
-      forbiddenTopics: Array.isArray(co.forbiddenTopics) ? co.forbiddenTopics : [],
+      forbiddenTopics: Array.isArray(co.forbiddenTopics)
+        ? co.forbiddenTopics
+        : [],
     };
   }
 

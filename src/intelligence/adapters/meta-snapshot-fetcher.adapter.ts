@@ -94,7 +94,9 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       [input.metaCampaignId],
       company.products,
     );
-    const refundFactor = getRefundFactor(productByCampaign(input.metaCampaignId));
+    const refundFactor = getRefundFactor(
+      productByCampaign(input.metaCampaignId),
+    );
     const toGross = (netRevenue: number) => netRevenue / refundFactor;
 
     const c = campaign as any;
@@ -103,7 +105,12 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
     // a real freshness signal (SnapshotValidator's freshness score was
     // previously always ~1.0 because the old adapter synthesized "now" as
     // the window end regardless of how stale the underlying fetch was).
-    const metaWindowEnd = c.syncedAt ? new Date(c.syncedAt) : now;
+    const syncedAtCandidate = c.syncedAt ? new Date(c.syncedAt) : undefined;
+    const sourceMetricsSyncedAt =
+      syncedAtCandidate && Number.isFinite(syncedAtCandidate.getTime())
+        ? syncedAtCandidate
+        : null;
+    const metaWindowEnd = sourceMetricsSyncedAt ?? now;
     // campaign-level insights are lifetime ('maximum' date_preset in
     // campaign-sync) — windowStart is best-effort, matching the old
     // adapter's own 90-day proxy since launchedAt isn't always set.
@@ -134,7 +141,12 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
     const adSetStages: string[] = ((c.metaAdSets ?? []) as any[])
       .map((as) => as?.learningStage)
       .filter(Boolean);
-    const stagePriority = ['NOT_DELIVERING', 'LEARNING_LIMITED', 'LEARNING', 'ACTIVE'];
+    const stagePriority = [
+      'NOT_DELIVERING',
+      'LEARNING_LIMITED',
+      'LEARNING',
+      'ACTIVE',
+    ];
     const learningStage =
       stagePriority.find((p) => adSetStages.includes(p)) ?? adSetStages[0];
 
@@ -209,6 +221,8 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       ads: rawAds,
       metaWindowStart,
       metaWindowEnd,
+      sourceMetricsSyncedAt,
+      metricScope: 'lifetime',
     };
   }
 

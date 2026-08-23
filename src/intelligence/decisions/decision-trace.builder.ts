@@ -20,6 +20,16 @@ import {
   SignalData,
   TrendData,
 } from '../orchestrator/decision-context';
+import {
+  isSourceMetricsFresh,
+  sourceFreshnessLabel,
+} from '../snapshot/snapshot-freshness';
+import {
+  hasEnoughElapsedTrendHistory,
+  MAX_TREND_GAP_DAYS,
+  MIN_TREND_RECENT_COVERAGE_DAYS,
+  MIN_TREND_RECENT_COVERAGE_RATIO,
+} from '../trend/trend-readiness';
 
 /**
  * Renders a finished cycle's 16 engine slices as plain-English steps, so an
@@ -90,7 +100,8 @@ const pct = (n: number | undefined): string =>
   n === undefined || !Number.isFinite(n) ? '—' : `${Math.round(n * 100)}%`;
 
 /** "budget_saturation" -> "budget saturation" — engine enums are snake_case. */
-const words = (s: string | undefined): string => (s ?? '').replace(/[_-]+/g, ' ').trim();
+const words = (s: string | undefined): string =>
+  (s ?? '').replace(/[_-]+/g, ' ').trim();
 
 const STAGE_PLAIN: Record<string, string> = {
   draft: 'not launched yet',
@@ -124,7 +135,12 @@ const LOG_MAX_DEPTH = 4;
 const LOG_MAX_VALUE_CHARS = 300;
 
 /** Flattens an engine slice to `a.b[0].c = value` lines, in key order. */
-function flattenSlice(value: unknown, prefix = '', depth = 0, out: string[] = []): string[] {
+function flattenSlice(
+  value: unknown,
+  prefix = '',
+  depth = 0,
+  out: string[] = [],
+): string[] {
   if (out.length >= LOG_MAX_LINES) return out;
 
   if (value === null || value === undefined) {
@@ -137,11 +153,15 @@ function flattenSlice(value: unknown, prefix = '', depth = 0, out: string[] = []
   }
   if (typeof value !== 'object') {
     const s = String(value);
-    out.push(`${prefix} = ${s.length > LOG_MAX_VALUE_CHARS ? `${s.slice(0, LOG_MAX_VALUE_CHARS)}…` : s}`);
+    out.push(
+      `${prefix} = ${s.length > LOG_MAX_VALUE_CHARS ? `${s.slice(0, LOG_MAX_VALUE_CHARS)}…` : s}`,
+    );
     return out;
   }
   if (depth >= LOG_MAX_DEPTH) {
-    out.push(`${prefix} = ${Array.isArray(value) ? `[${value.length} items]` : '{…}'} (nested too deep to show)`);
+    out.push(
+      `${prefix} = ${Array.isArray(value) ? `[${value.length} items]` : '{…}'} (nested too deep to show)`,
+    );
     return out;
   }
   if (Array.isArray(value)) {
@@ -174,21 +194,29 @@ function sliceLogs(ctx: EngineContext<unknown> | undefined): string[] {
   if (!ctx) return ['(this step wrote no output for this cycle)'];
 
   const header: string[] = [];
-  if (ctx.computedAt) header.push(`computedAt = ${new Date(ctx.computedAt).toISOString()}`);
-  if (Number.isFinite(ctx.confidence)) header.push(`engineConfidence = ${ctx.confidence}`);
+  if (ctx.computedAt)
+    header.push(`computedAt = ${new Date(ctx.computedAt).toISOString()}`);
+  if (Number.isFinite(ctx.confidence))
+    header.push(`engineConfidence = ${ctx.confidence}`);
   if (Number.isFinite(ctx.ms)) header.push(`tookMs = ${ctx.ms}`);
   if (ctx.version) header.push(`engineVersion = ${ctx.version}`);
   header.push(`deterministic = ${ctx.deterministic}`);
   if (ctx.degraded) {
-    header.push(`degraded = ${ctx.degraded.mode} (fullDataAvailable = ${ctx.degraded.fullDataAvailable})`);
+    header.push(
+      `degraded = ${ctx.degraded.mode} (fullDataAvailable = ${ctx.degraded.fullDataAvailable})`,
+    );
   }
   for (const [i, e] of (ctx.evidence ?? []).entries()) {
-    header.push(`evidence[${i}] = ${e.kind}:${e.ref} (weight ${e.weight})${e.note ? ` — ${e.note}` : ''}`);
+    header.push(
+      `evidence[${i}] = ${e.kind}:${e.ref} (weight ${e.weight})${e.note ? ` — ${e.note}` : ''}`,
+    );
   }
 
   const lines = [...header, '—', ...flattenSlice(ctx.data)];
   if (lines.length >= LOG_MAX_LINES) {
-    lines.push(`… truncated at ${LOG_MAX_LINES} lines — the full slice is stored in intelligence_engine_outputs.`);
+    lines.push(
+      `… truncated at ${LOG_MAX_LINES} lines — the full slice is stored in intelligence_engine_outputs.`,
+    );
   }
   return lines;
 }
@@ -212,7 +240,7 @@ export interface TraceInput {
     expectedProfitDeltaINR7d: number;
     confidence?: number;
     gatedBy?: string[];
-    evidenceSnapshot?: { signalKind?: string };
+    evidenceSnapshot?: { signalKind?: string; kind?: string };
   };
 }
 
@@ -241,7 +269,11 @@ export function buildDecisionTrace(input: TraceInput): DecisionTraceStep[] {
     targetId: '',
     expectedProfitDeltaINR7d: 0,
   };
-  const firedSignal = decision.evidenceSnapshot?.signalKind;
+  // `kind` was accidentally persisted by early goal-aware rows while the
+  // schema/trace contract expected `signalKind`. Read both so historical
+  // decisions regain causal highlighting; all new writes use signalKind.
+  const firedSignal =
+    decision.evidenceSnapshot?.signalKind ?? decision.evidenceSnapshot?.kind;
 
   const steps: StepBody[] = [
     snapshotStep(slices.snapshot?.data),
@@ -252,11 +284,15 @@ export function buildDecisionTrace(input: TraceInput): DecisionTraceStep[] {
     signalStep(slices.signal?.data, firedSignal),
     diagnosisStep(slices.diagnosis?.data),
     businessStep(slices.business?.data),
-    portfolioStep(slices.portfolio?.data),
-    forecastStep(slices.forecast?.data),
-    confidenceStep(slices.confidence?.data),
+    portfolioStep(slices.portfolio?.data, slices.objective?.data),
+    forecastStep(slices.forecast?.data, slices.objective?.data),
+    confidenceStep(slices.confidence?.data, slices.objective?.data),
     memoryStep(slices.memory?.data, decision.actionType),
-    recommendationStep(slices.recommendation?.data, decision),
+    recommendationStep(
+      slices.recommendation?.data,
+      decision,
+      slices.objective?.data,
+    ),
     explainabilityStep(slices.explainability?.data, decision.actionId),
     executionStep(slices.execution?.data, decision.actionId),
     learningStep(slices.learning?.data),
@@ -265,7 +301,9 @@ export function buildDecisionTrace(input: TraceInput): DecisionTraceStep[] {
   return steps
     .sort((a, b) => a.step - b.step)
     .map((body) => {
-      const ctx = (slices as Record<string, EngineContext<unknown> | undefined>)[body.engine];
+      const ctx = (
+        slices as Record<string, EngineContext<unknown> | undefined>
+      )[body.engine];
       return {
         ...body,
         label: `Step ${body.step} → ${body.title}`,
@@ -273,7 +311,9 @@ export function buildDecisionTrace(input: TraceInput): DecisionTraceStep[] {
         meta: ctx
           ? {
               engineConfidence: ctx.confidence,
-              computedAt: ctx.computedAt ? new Date(ctx.computedAt).toISOString() : undefined,
+              computedAt: ctx.computedAt
+                ? new Date(ctx.computedAt).toISOString()
+                : undefined,
               ms: ctx.ms,
               deterministic: ctx.deterministic,
               // A degraded engine still produces output — surfacing this stops
@@ -308,18 +348,72 @@ function blank(
 }
 
 function snapshotStep(s: SnapshotData | undefined): StepBody {
-  const title = 'The numbers we pulled from Meta';
+  const title = 'The numbers assembled for analysis';
   const question = 'What did we actually measure, and when?';
-  if (!s) return blank('snapshot', title, question, 'No snapshot was recorded for this cycle.');
+  if (!s)
+    return blank(
+      'snapshot',
+      title,
+      question,
+      'No snapshot was recorded for this cycle.',
+    );
 
   const raw = s as Record<string, unknown>;
-  const spend = typeof raw.spend === 'number' ? raw.spend : undefined;
-  const collected = s.collectedAt ? new Date(s.collectedAt) : undefined;
+  const campaignMetrics = (
+    raw.metrics as { campaignLevel?: Record<string, unknown> } | undefined
+  )?.campaignLevel;
+  const spend =
+    typeof campaignMetrics?.spend === 'number'
+      ? campaignMetrics.spend
+      : typeof raw.spend === 'number'
+        ? raw.spend
+        : undefined;
+  const collectedCandidate = s.collectedAt
+    ? new Date(s.collectedAt)
+    : undefined;
+  const collected =
+    collectedCandidate && Number.isFinite(collectedCandidate.getTime())
+      ? collectedCandidate
+      : undefined;
+  const freshnessSec =
+    typeof raw.freshnessSec === 'number' &&
+    Number.isFinite(raw.freshnessSec) &&
+    raw.freshnessSec >= 0
+      ? raw.freshnessSec
+      : undefined;
+  const freshnessKnown = freshnessSec !== undefined;
+  const sourceFresh = isSourceMetricsFresh(freshnessSec);
+  const snapshotMeta = raw.meta as { metricScope?: string } | undefined;
+  const lifetimeTotals = snapshotMeta?.metricScope === 'lifetime';
+  const sourceSyncedAt =
+    collected && freshnessKnown
+      ? new Date(collected.getTime() - freshnessSec * 1000)
+      : undefined;
 
   const details: string[] = [];
-  if (collected) details.push(`Figures were read from Meta at ${collected.toLocaleString('en-IN')}.`);
-  if (spend !== undefined) details.push(`Spend in the measured window: ${money(spend)}.`);
-  details.push('Every later step reads only from this snapshot, so the whole decision is based on one consistent set of numbers rather than figures that shifted mid-analysis.');
+  if (sourceSyncedAt)
+    details.push(
+      `Underlying campaign metrics were last synchronized from Meta at ${sourceSyncedAt.toLocaleString('en-IN')} — ${sourceFreshnessLabel(freshnessSec)} before this analysis.`,
+    );
+  else
+    details.push(
+      'The source synchronization time was not recorded, so metric freshness is unknown.',
+    );
+  if (spend !== undefined) {
+    details.push(
+      lifetimeTotals
+        ? `Lifetime-to-date campaign spend: ${money(spend)}.`
+        : `Campaign spend recorded in this source snapshot: ${money(spend)}.`,
+    );
+  }
+  details.push(
+    lifetimeTotals
+      ? 'Campaign-level spend, return and conversion totals in this snapshot are lifetime-to-date, not daily or seven-day totals.'
+      : 'The source did not label these campaign totals as lifetime or window-scoped, so the trace does not infer a time range.',
+  );
+  details.push(
+    'Every later step reads only from this snapshot, so the whole decision is based on one consistent set of numbers rather than figures that shifted mid-analysis.',
+  );
 
   return {
     step: ENGINE_STEP.snapshot,
@@ -327,8 +421,8 @@ function snapshotStep(s: SnapshotData | undefined): StepBody {
     title,
     question,
     headline: collected
-      ? `Live campaign figures were captured from Meta at ${collected.toLocaleString('en-IN')}.`
-      : 'Live campaign figures were captured from Meta.',
+      ? `Analysis snapshot assembled at ${collected.toLocaleString('en-IN')} from stored campaign metrics${sourceFresh ? '.' : '; source metrics are stale or their freshness is unknown.'}`
+      : 'Analysis snapshot assembled from stored campaign metrics; assembly time or source freshness is unavailable.',
     details,
     status: 'ok',
     decisive: false,
@@ -338,7 +432,13 @@ function snapshotStep(s: SnapshotData | undefined): StepBody {
 function objectiveStep(o: ObjectiveData | undefined): StepBody {
   const title = 'What this campaign is being judged on';
   const question = 'What counts as success here?';
-  if (!o) return blank('objective', title, question, 'No objective was resolved for this campaign.');
+  if (!o)
+    return blank(
+      'objective',
+      title,
+      question,
+      'No objective was resolved for this campaign.',
+    );
 
   const sourcePlain: Record<string, string> = {
     campaign_field: 'set explicitly on the campaign',
@@ -358,7 +458,9 @@ function objectiveStep(o: ObjectiveData | undefined): StepBody {
       o.supportingKPIs?.length
         ? `Also watched: ${o.supportingKPIs.map(words).join(', ')}.`
         : 'No secondary metrics are being watched.',
-      o.policy?.scaleBudgetIf ? `Rule for spending more: ${o.policy.scaleBudgetIf}.` : '',
+      o.policy?.scaleBudgetIf
+        ? `Rule for spending more: ${o.policy.scaleBudgetIf}.`
+        : '',
       o.policy?.pauseIf ? `Rule for stopping: ${o.policy.pauseIf}.` : '',
     ].filter(Boolean),
     status: 'ok',
@@ -366,14 +468,26 @@ function objectiveStep(o: ObjectiveData | undefined): StepBody {
   };
 }
 
-function lifecycleStep(l: LifecycleData | undefined, actionType: string): StepBody {
+function lifecycleStep(
+  l: LifecycleData | undefined,
+  actionType: string,
+): StepBody {
   const title = 'How settled this campaign is';
   const question = 'Is it old enough and stable enough to touch?';
-  if (!l) return blank('lifecycle', title, question, 'No lifecycle stage was recorded.');
+  if (!l)
+    return blank(
+      'lifecycle',
+      title,
+      question,
+      'No lifecycle stage was recorded.',
+    );
 
   const blocked = (l.blockedActions ?? []).find((b) => b.action === actionType);
   const days = Math.floor((l.ageHours ?? 0) / 24);
-  const age = days >= 1 ? `${days} day${days === 1 ? '' : 's'}` : `${Math.round(l.ageHours ?? 0)} hours`;
+  const age =
+    days >= 1
+      ? `${days} day${days === 1 ? '' : 's'}`
+      : `${Math.round(l.ageHours ?? 0)} hours`;
 
   return {
     step: ENGINE_STEP.lifecycle,
@@ -391,7 +505,9 @@ function lifecycleStep(l: LifecycleData | undefined, actionType: string): StepBo
           : `so "${words(actionType)}" is allowed`
     }.`,
     details: [
-      l.metaLearningStage ? `Meta says this is in "${words(l.metaLearningStage)}".` : '',
+      l.metaLearningStage
+        ? `Meta says this is in "${words(l.metaLearningStage)}".`
+        : '',
       `Budget increases are ${l.gates?.canScale ? 'permitted' : 'not permitted'} at this stage; pausing is ${l.gates?.canPause ? 'permitted' : 'not permitted'}.`,
       blocked ? `Blocked because: ${blocked.reason}.` : '',
       `Next stage expected: ${STAGE_PLAIN[l.nextExpectedStage] ?? words(l.nextExpectedStage)}.`,
@@ -406,16 +522,54 @@ function lifecycleStep(l: LifecycleData | undefined, actionType: string): StepBo
 function trendStep(t: TrendData | undefined): StepBody {
   const title = 'Which way the numbers are moving';
   const question = 'Is this getting better or worse over time?';
-  if (!t) return blank('trend', title, question, 'Not enough history to read a trend.');
+  if (!t)
+    return blank(
+      'trend',
+      title,
+      question,
+      'Not enough history to read a trend.',
+    );
 
-  const details: string[] = [];
+  const observationCount = t.observationCount ?? 0;
+  const elapsedDays = t.windowElapsedDays ?? 0;
+  const trendReady = hasEnoughElapsedTrendHistory(t);
+  if (!trendReady) {
+    return {
+      step: ENGINE_STEP.trend,
+      engine: 'trend',
+      title,
+      question,
+      headline:
+        'Trend withheld — there is not enough elapsed daily history yet.',
+      details: [
+        observationCount > 0
+          ? `${observationCount} daily observation${observationCount === 1 ? '' : 's'} currently span ${elapsedDays.toFixed(1)} elapsed day(s). Repeated intraday runs do not count as extra days.`
+          : 'This slice predates calendar-history metadata, so the system will not infer a trend from snapshot count alone.',
+        typeof t.recentCoverageDays === 'number' &&
+        typeof t.recentCoverageRatio === 'number' &&
+        typeof t.maxGapDays === 'number'
+          ? `Recent coverage: ${t.recentCoverageDays} observed UTC date(s), ${pct(t.recentCoverageRatio)} coverage, largest gap ${t.maxGapDays} day(s).`
+          : 'This slice has no recent-coverage or maximum-gap metadata, so it fails closed.',
+        `Readiness requires at least 3 observations spanning 2 elapsed days, at least ${MIN_TREND_RECENT_COVERAGE_DAYS} recent dates at ${pct(MIN_TREND_RECENT_COVERAGE_RATIO)} coverage, and no gap above ${MAX_TREND_GAP_DAYS} days.`,
+      ],
+      status: 'ok',
+      decisive: false,
+    };
+  }
+
+  const details: string[] = [
+    `Based on ${observationCount} daily observations spanning ${elapsedDays.toFixed(1)} real elapsed day(s).`,
+    `Recent coverage is ${t.recentCoverageDays} observed UTC date(s) at ${pct(t.recentCoverageRatio)}, with a largest gap of ${t.maxGapDays} day(s).`,
+  ];
   // A slope is meaningless to read raw; state direction per metric instead.
   for (const [metric, r] of Object.entries(t.perMetric ?? {}).slice(0, 5)) {
     const dir = r.slope7d > 0 ? 'rising' : r.slope7d < 0 ? 'falling' : 'flat';
     const vs = Number.isFinite(r.vsBaseline)
-      ? ` (${r.vsBaseline >= 0 ? '+' : ''}${Math.round(r.vsBaseline * 100)}% vs its own baseline)`
+      ? ` (${Math.round((r.vsBaseline - 1) * 100)}% vs the oldest daily observation in this window)`
       : '';
-    details.push(`${words(metric)} is ${dir} over 7 days${vs}.`);
+    details.push(
+      `${words(metric)} is ${dir} across the most recent ${Math.min(7, r.windowSize)} daily observation(s)${vs}.`,
+    );
   }
   for (const a of (t.anomalies ?? []).slice(0, 3)) {
     details.push(`Unusual: ${a.note}`);
@@ -446,14 +600,21 @@ function revenueStep(
 ): StepBody {
   const title = 'Whether it is actually making money';
   const question = 'After costs, is this profitable?';
-  if (!r) return blank('revenue', title, question, 'No revenue figures were available.');
+  if (!r)
+    return blank(
+      'revenue',
+      title,
+      question,
+      'No revenue figures were available.',
+    );
 
   // A traffic/awareness/app campaign has no purchase expectation, so its
   // breakeven is 0 and every comparison against it is meaningless — this read
   // "below the 0.00x needed to break even", which sounds like a failure and
   // is really just the wrong question for this campaign.
   const revenueObjective =
-    !o?.objective || ['sales', 'catalog_sales', 'retargeting'].includes(o.objective);
+    !o?.objective ||
+    ['sales', 'catalog_sales', 'retargeting'].includes(o.objective);
   if (!revenueObjective) {
     return {
       step: ENGINE_STEP.revenue,
@@ -472,20 +633,41 @@ function revenueStep(
     };
   }
 
+  if (r.financialDataAvailable === false || r.economicsAvailable === false) {
+    const missing: string[] = [];
+    if (r.economicsAvailable === false)
+      missing.push('campaign-to-product economics');
+    if (r.revenueEvidenceAvailable === false)
+      missing.push('campaign-scoped return provenance');
+    return {
+      step: ENGINE_STEP.revenue,
+      engine: 'revenue',
+      title,
+      question,
+      headline:
+        'Profit judgment withheld — the financial evidence is not complete enough.',
+      details: [
+        missing.length
+          ? `Still unresolved: ${missing.join(' and ')}.`
+          : 'The engine deliberately returned no breakeven result instead of borrowing an unrelated product or legacy return estimate.',
+        'Spend remains observable, but no pause/scale suggestion may use profit until this mapping is verified.',
+      ],
+      status: 'ok',
+      decisive: true,
+    };
+  }
+
   const d = r.roasDecomposition;
   const details: string[] = [
-    `Revenue ${money(r.grossRevenue)} gross, ${money(r.netRevenue)} after refunds and costs.`,
+    `Tracked return ${money(r.grossRevenue)}; net attributed return ${money(r.netRevenue)} after configured refunds, if any. Product costs and ad spend are not deducted from revenue — they are accounted for in contribution profit below.`,
     // RevenueData.contributionMargin is a CURRENCY AMOUNT — the engine defines
     // it as `netRevenue * marginPct - spend` (revenue-engine.service.ts:163),
     // i.e. profit in rupees, not a ratio. Rendering it with pct() multiplied a
     // ₹8,338 profit by 100 and printed "833829%" on the one step whose entire
     // job is answering "is this making money?".
     `Contribution profit ${money(r.contributionMargin)} — what's left from sales after product costs and ad spend.`,
-    `Break-even is ${times(r.breakeven?.roas)}; the profit target is ${times(r.targetROAS)} (twice break-even, so it scales with this product's margin instead of being one flat number).`,
+    `Break-even is ${times(r.breakeven?.roas)}; the system's scale-planning heuristic is ${times(r.targetROAS)} (configured as twice break-even, not an observed company target).`,
   ];
-  if (r.breakeven?.isProfitable && r.breakeven?.daysSinceBreakeven > 0) {
-    details.push(`It has been above break-even for ${r.breakeven.daysSinceBreakeven} day(s).`);
-  }
   if (d) {
     // Which lever is carrying (or dragging) ROAS — the actionable part.
     const parts = Object.entries(d)
@@ -493,7 +675,8 @@ function revenueStep(
       .sort((a, b) => Math.abs(b[1].delta) - Math.abs(a[1].delta))
       .slice(0, 2)
       .map(([k, v]) => `${words(k)} ${v.delta >= 0 ? 'helped' : 'hurt'}`);
-    if (parts.length) details.push(`Biggest movers behind the return: ${parts.join(', ')}.`);
+    if (parts.length)
+      details.push(`Biggest movers behind the return: ${parts.join(', ')}.`);
   }
 
   return {
@@ -513,13 +696,40 @@ function revenueStep(
 function signalStep(s: SignalData | undefined, firedSignal?: string): StepBody {
   const title = 'Specific things worth reacting to';
   const question = 'What stood out as unusual or actionable?';
-  if (!s || !(s.signals ?? []).length) {
-    return blank('signal', title, question, 'Nothing crossed a threshold this cycle.');
+  if (!s) {
+    return blank(
+      'signal',
+      title,
+      question,
+      'No signal analysis was recorded for this cycle.',
+    );
+  }
+
+  if (!(s.signals ?? []).length) {
+    return {
+      step: ENGINE_STEP.signal,
+      engine: 'signal',
+      title,
+      question,
+      headline: 'Nothing crossed a threshold this cycle.',
+      details: [
+        'The signal engine completed its checks; none of the measured conditions exceeded a configured threshold.',
+      ],
+      status: 'ok',
+      decisive: false,
+    };
   }
 
   const signals = s.signals;
+  const firedSignals = new Set(
+    String(firedSignal ?? '')
+      .split('+')
+      .filter(Boolean),
+  );
   const details = signals.slice(0, 6).map((sig) => {
-    const mine = sig.kind === firedSignal ? ' ← this is the one that triggered this suggestion' : '';
+    const mine = firedSignals.has(sig.kind)
+      ? ' ← this is the one that triggered this suggestion'
+      : '';
     return `${words(sig.kind)} (${sig.severity}, ${pct(sig.strength)} sure): ${sig.reasoning}${mine}`;
   });
   details.push(
@@ -537,21 +747,29 @@ function signalStep(s: SignalData | undefined, firedSignal?: string): StepBody {
       .join(', ')}${signals.length > 3 ? '…' : ''}.`,
     details,
     status: 'ok',
-    decisive: !!firedSignal && signals.some((x) => x.kind === firedSignal),
+    decisive: signals.some((signal) => firedSignals.has(signal.kind)),
   };
 }
 
 function diagnosisStep(d: DiagnosisData | undefined): StepBody {
   const title = 'Why it is happening';
   const question = 'What does the system think the underlying cause is?';
-  if (!d) return blank('diagnosis', title, question, 'No root-cause analysis was recorded.');
+  if (!d)
+    return blank(
+      'diagnosis',
+      title,
+      question,
+      'No root-cause analysis was recorded.',
+    );
 
   const top = (d.rootCauses ?? [])[0];
   const details: string[] = [];
   for (const rc of (d.rootCauses ?? []).slice(0, 3)) {
     details.push(
       `${rc.hypothesis} — ${pct(rc.confidence)} confident, points at ${words(rc.suggestedFocus)}${
-        rc.evidenceSignals?.length ? `, based on: ${rc.evidenceSignals.map(words).join(', ')}` : ''
+        rc.evidenceSignals?.length
+          ? `, based on: ${rc.evidenceSignals.map(words).join(', ')}`
+          : ''
       }.`,
     );
   }
@@ -567,7 +785,7 @@ function diagnosisStep(d: DiagnosisData | undefined): StepBody {
     question,
     headline: top
       ? `Most likely cause: ${top.hypothesis} (${pct(top.confidence)} confident) — the fix belongs in ${words(top.suggestedFocus)}.`
-      : 'No single cause stood out.',
+      : 'No supported root cause emerged from the available evidence.',
     details,
     status: 'ok',
     decisive: true,
@@ -577,7 +795,8 @@ function diagnosisStep(d: DiagnosisData | undefined): StepBody {
 function businessStep(b: BusinessData | undefined): StepBody {
   const title = 'Your rules and spending limits';
   const question = 'What is the system allowed to do with your money?';
-  if (!b) return blank('business', title, question, 'No business rules were loaded.');
+  if (!b)
+    return blank('business', title, question, 'No business rules were loaded.');
 
   const p = b.budgetPolicy;
   const details: string[] = [];
@@ -585,14 +804,20 @@ function businessStep(b: BusinessData | undefined): StepBody {
     details.push(
       `Weekly cap ${money(p.weeklyCapINR)}, of which ${money(p.weeklyCapUsedINR)} is used — ${money(p.weeklyCapRemainingINR)} left.`,
     );
-    details.push(`No single campaign may exceed ${money(p.perCampaignCapINR)}.`);
+    details.push(
+      `No single campaign may exceed ${money(p.perCampaignCapINR)}.`,
+    );
   }
   if (b.activePromotions?.length) {
-    details.push(`Live promotions: ${b.activePromotions.map((x) => x.name).join(', ')}.`);
+    details.push(
+      `Live promotions: ${b.activePromotions.map((x) => x.name).join(', ')}.`,
+    );
   }
   if (b.seasonalContext) details.push(`Season: ${b.seasonalContext}.`);
   if (b.inventoryStatus) details.push(`Stock: ${words(b.inventoryStatus)}.`);
-  details.push('These are hard limits enforced in code — the AI cannot talk its way past them.');
+  details.push(
+    'These are hard limits enforced in code — the AI cannot talk its way past them.',
+  );
 
   return {
     step: ENGINE_STEP.business,
@@ -608,20 +833,36 @@ function businessStep(b: BusinessData | undefined): StepBody {
   };
 }
 
-function portfolioStep(p: PortfolioData | undefined): StepBody {
+function portfolioStep(
+  p: PortfolioData | undefined,
+  o: ObjectiveData | undefined,
+): StepBody {
   const title = 'How it compares to your other campaigns';
   const question = 'Is this the best place for the next rupee?';
-  if (!p) return blank('portfolio', title, question, 'No cross-campaign comparison was made.');
+  if (!p)
+    return blank(
+      'portfolio',
+      title,
+      question,
+      'No cross-campaign comparison was made.',
+    );
 
   const details: string[] = [];
   for (const prop of (p.budgetProposals ?? []).slice(0, 4)) {
     const dir = prop.delta > 0 ? 'more' : 'less';
     details.push(
-      `${prop.campaignId}: ${money(prop.currentINR)} → ${money(prop.proposedINR)} (${money(Math.abs(prop.delta))} ${dir}) — ${prop.reason}`,
+      prop.delta === 0
+        ? `Budget for ${prop.campaignId} held at ${money(prop.currentINR)} — ${prop.reason}`
+        : `Budget for ${prop.campaignId}: ${money(prop.currentINR)} → ${money(prop.proposedINR)} (${money(Math.abs(prop.delta))} ${dir}) — ${prop.reason}`,
     );
   }
   if (p.ranking?.length) {
-    details.push(`Ranked tiers: ${p.ranking.slice(0, 5).map((r) => `${r.campaignId} = ${r.tier}`).join(', ')}.`);
+    details.push(
+      `Ranked tiers: ${p.ranking
+        .slice(0, 5)
+        .map((r) => `${r.campaignId} = ${r.tier}`)
+        .join(', ')}.`,
+    );
   }
   details.push(
     `Concentration ${pct(p.concentration)} — ${
@@ -631,41 +872,77 @@ function portfolioStep(p: PortfolioData | undefined): StepBody {
     }.`,
   );
 
+  const revenueObjective =
+    !o?.objective ||
+    ['sales', 'catalog_sales', 'retargeting'].includes(o.objective);
+
   return {
     step: ENGINE_STEP.portfolio,
     engine: 'portfolio',
     title,
     question,
-    headline: `Across everything running, blended return is ${times(p.totalPortfolioROAS)}.`,
+    headline: revenueObjective
+      ? `Across comparable sales campaigns, blended return is ${times(p.totalPortfolioROAS)}.`
+      : `Compared only with other ${words(o!.objective)} campaigns using ${words(o!.primaryKPI)} — ROAS is not used for this goal.`,
     details,
     status: 'ok',
     decisive: false,
   };
 }
 
-function forecastStep(f: ForecastData | undefined): StepBody {
+function forecastStep(
+  f: ForecastData | undefined,
+  o: ObjectiveData | undefined,
+): StepBody {
   const title = 'Where this is heading if nothing changes';
   const question = 'What happens over the next week?';
-  if (!f) return blank('forecast', title, question, 'Not enough history to project forward.');
+  if (!f)
+    return blank(
+      'forecast',
+      title,
+      question,
+      'Not enough history to project forward.',
+    );
+
+  const revenueObjective =
+    !o?.objective ||
+    ['sales', 'catalog_sales', 'retargeting'].includes(o.objective);
 
   if (f.method === 'insufficient_history') {
+    const history = f.history;
     return {
       step: ENGINE_STEP.forecast,
       engine: 'forecast',
       title,
       question,
-      headline: "Too little history to project — the campaign hasn't run long enough.",
-      details: ['Any ₹ estimate on this suggestion is therefore a rough one.'],
+      headline: 'Too little elapsed daily history to project a trend.',
+      details: [
+        history
+          ? `${history.observationCount} daily observation(s) span ${history.elapsedDays.toFixed(1)} elapsed day(s); ${history.minimumObservationCount} observations across ${history.minimumElapsedDays} elapsed days are required. Intraday reruns do not advance this clock.`
+          : 'This older forecast slice has no elapsed-calendar metadata, so it is withheld rather than treating snapshot count as days.',
+        revenueObjective
+          ? 'Any modeled revenue or profit effect is therefore highly uncertain.'
+          : `Any modeled ${words(o?.primaryKPI ?? 'goal KPI')} change is therefore highly uncertain.`,
+      ],
       status: 'ok',
       decisive: false,
     };
   }
 
   const d7 = f.horizons?.next7d;
+  const resultLabel =
+    o?.objective === 'awareness' || o?.objective === 'video_views'
+      ? 'impressions'
+      : ['traffic', 'engagement', 'app_installs'].includes(o?.objective ?? '')
+        ? 'clicks'
+        : ['leads', 'messages'].includes(o?.objective ?? '')
+          ? 'recorded goal events'
+          : 'purchases';
   const methodPlain: Record<string, string> = {
-    ema_projection: 'recent days weighted more heavily than older ones',
-    linear: 'a straight line through recent days',
-    seasonal: 'recent days adjusted for weekly seasonality',
+    ema_projection:
+      'recent daily observations weighted more heavily than older ones',
+    linear: 'a straight line through recent daily observations',
+    seasonal: 'daily observations adjusted for weekly seasonality',
   };
 
   return {
@@ -674,13 +951,20 @@ function forecastStep(f: ForecastData | undefined): StepBody {
     title,
     question,
     headline: d7
-      ? `Over 7 days: about ${money(d7.spend)} spent, ${money(d7.revenue)} back — roughly ${times(d7.roas)}.`
+      ? revenueObjective
+        ? `Over 7 days: about ${money(d7.spend)} spent, ${money(d7.revenue)} back — roughly ${times(d7.roas)}.`
+        : `Over 7 days at the current pace: about ${money(d7.spend)} spent and ${Math.round(d7.conversions).toLocaleString('en-IN')} ${resultLabel}.`
       : 'A projection was made.',
     details: [
-      d7?.band
+      revenueObjective && d7?.band
         ? `Realistic range on revenue: ${money(d7.band.lowRevenue)} to ${money(d7.band.highRevenue)}. The spread is the honest uncertainty, not a rounding error.`
         : '',
-      d7?.conversions !== undefined ? `Expected purchases: about ${Math.round(d7.conversions)}.` : '',
+      revenueObjective && d7?.conversions !== undefined
+        ? `Expected purchases: about ${Math.round(d7.conversions)}.`
+        : '',
+      !revenueObjective
+        ? `Revenue and ROAS are intentionally omitted because ${words(o!.primaryKPI)} is the campaign goal.`
+        : '',
       `Projected using ${methodPlain[f.method] ?? words(f.method)}.`,
     ].filter(Boolean),
     status: 'ok',
@@ -688,31 +972,51 @@ function forecastStep(f: ForecastData | undefined): StepBody {
   };
 }
 
-function confidenceStep(c: ConfidenceData | undefined): StepBody {
+function confidenceStep(
+  c: ConfidenceData | undefined,
+  o: ObjectiveData | undefined,
+): StepBody {
   const title = 'How sure the system is';
   const question = 'Is the data good enough to act on?';
-  if (!c) return blank('confidence', title, question, 'No confidence assessment was recorded.');
+  if (!c)
+    return blank(
+      'confidence',
+      title,
+      question,
+      'No confidence assessment was recorded.',
+    );
 
   const q = c.quality;
   const details: string[] = [];
+  const sourceDataFresh = q
+    ? (q.sourceDataFresh ?? isSourceMetricsFresh(q.dataFreshnessSec))
+    : false;
   if (q) {
-    details.push(`Data is ${Math.round((q.dataFreshnessSec ?? 0) / 60)} minutes old.`);
-    details.push(`History depth ${q.historyDepthDays} day(s); coverage of the campaign ${pct(q.snapshotCoverage)}.`);
+    details.push(
+      q.dataFreshnessSec >= 0
+        ? `Source metrics are ${sourceFreshnessLabel(q.dataFreshnessSec)} old${sourceDataFresh ? '.' : ' — too stale to support a new suggestion.'}`
+        : 'Source metric freshness is unknown, so a new suggestion is blocked.',
+    );
+    details.push(
+      `History depth ${q.historyDepthDays} day(s); coverage of the campaign ${pct(q.snapshotCoverage)}.`,
+    );
     details.push(
       `Statistical power ${pct(q.statisticalPower)} — ${
         (q.statisticalPower ?? 0) > 0.7
-          ? 'enough conversions for this not to be noise'
-          : 'thin data, so this could still be noise'
+          ? `enough ${words(o?.primaryKPI ?? 'goal')} observations for this not to be noise`
+          : `thin ${words(o?.primaryKPI ?? 'goal')} evidence, so this could still be noise`
       }.`,
     );
   }
   if (c.gates?.reasonsBlocked?.length) {
-    details.push(`Held back by: ${c.gates.reasonsBlocked.map(words).join(', ')}.`);
+    details.push(
+      `Held back by: ${c.gates.reasonsBlocked.map(words).join(', ')}.`,
+    );
   }
   details.push(
-    `Allowed to suggest: ${c.gates?.okToRecommend ? 'yes' : 'no'}. Allowed to act on its own: ${
-      c.gates?.okToExecute ? 'yes' : 'no'
-    }.`,
+    `Allowed to suggest: ${c.gates?.okToRecommend && sourceDataFresh ? 'yes' : 'no'}. Evidence threshold for a human-approved action: ${
+      c.gates?.okToExecute && sourceDataFresh ? 'yes' : 'no'
+    }. Automatic application is disabled; human approval is always required.`,
   );
 
   return {
@@ -721,7 +1025,11 @@ function confidenceStep(c: ConfidenceData | undefined): StepBody {
     title,
     question,
     headline: `${pct(c.overall)} confident overall${
-      c.gates?.okToExecute === false ? ' — not enough to act without you' : ''
+      !sourceDataFresh
+        ? ' — source metrics are stale or freshness is unknown, so action readiness is withheld'
+        : c.gates?.okToExecute === false
+          ? ' — below the evidence threshold for an approved action'
+          : ' — ready for human review'
     }.`,
     details,
     status: 'ok',
@@ -732,19 +1040,38 @@ function confidenceStep(c: ConfidenceData | undefined): StepBody {
 function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
   const title = 'What happened last time';
   const question = 'Have we tried this before, and did it work?';
-  if (!m) return blank('memory', title, question, 'No past history was consulted.');
+  if (!m)
+    return blank('memory', title, question, 'No past history was consulted.');
 
-  const same = (m.pastActions ?? []).filter((a) => a.actionType === actionType);
+  const campaignActions = m.pastActions ?? [];
+  const same = actionType
+    ? campaignActions.filter((a) => a.actionType === actionType)
+    : [];
+  const relevantAccountInsights = actionType
+    ? (m.causalInsights ?? []).filter((insight) =>
+        memoryInsightMatchesAction(insight, actionType),
+      )
+    : [];
   const details: string[] = [];
-  for (const a of same.slice(0, 4)) {
+  for (const a of same.slice(0, 2)) {
     details.push(
-      `${new Date(a.executedAt).toLocaleDateString('en-IN')}: ${words(a.actionType)} on ${a.targetId} → ${a.outcomeLabel}. ${a.context}`,
+      `Campaign-specific: ${new Date(a.executedAt).toLocaleDateString('en-IN')} — ${words(a.actionType)} on ${a.targetId} → ${a.outcomeLabel}. ${a.context}`,
     );
   }
-  for (const ci of (m.causalInsights ?? []).slice(0, 3)) {
-    details.push(`Learned: ${ci.finding} (${pct(ci.confidence)} confident, isolated on ${words(ci.isolatedVariable)}).`);
+  for (const ci of relevantAccountInsights.slice(0, 2)) {
+    details.push(
+      `Account-wide context (not causal proof for this campaign): ${ci.finding} (${pct(ci.confidence)} confident, isolated on ${words(ci.isolatedVariable)}).`,
+    );
   }
-  if (!details.length) details.push('No directly comparable past action to learn from.');
+  const withheldAccountInsights =
+    (m.causalInsights ?? []).length - relevantAccountInsights.length;
+  if (withheldAccountInsights > 0) {
+    details.push(
+      `${withheldAccountInsights} unrelated account-wide learning(s) were withheld from this campaign trace.`,
+    );
+  }
+  if (!same.length && !relevantAccountInsights.length)
+    details.unshift('No directly comparable campaign action to learn from.');
 
   const improved = same.filter((a) => a.outcomeLabel === 'improved').length;
   const worsened = same.filter((a) => a.outcomeLabel === 'worsened').length;
@@ -755,7 +1082,7 @@ function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
     title,
     question,
     headline: !actionType
-      ? `${(m.pastActions ?? []).length} past action(s) on record for this campaign.`
+      ? `${campaignActions.length} measured past action(s) on record for this campaign; account-wide lessons are not treated as campaign evidence.`
       : same.length
         ? `"${words(actionType)}" has been tried ${same.length} time(s) on this campaign — ${improved} helped, ${worsened} backfired.`
         : `"${words(actionType)}" has not been tried on this campaign before.`,
@@ -765,19 +1092,52 @@ function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
   };
 }
 
+const MEMORY_ACTION_TERMS: Partial<Record<string, string[]>> = {
+  replace_creative: ['creative', 'hook', 'copy', 'image', 'video'],
+  add_creative: ['creative', 'hook', 'copy', 'image', 'video'],
+  scale_adset: ['budget', 'scale', 'spend'],
+  reduce_total_budget: ['budget', 'spend', 'cost'],
+  shift_budget_between_adsets: ['budget', 'spend', 'allocation'],
+  narrow_placement: ['placement', 'publisher', 'platform'],
+  dayparting: ['daypart', 'schedule', 'hour', 'time'],
+  pause_ad: ['pause ad', 'creative', 'hook'],
+  pause_adset: ['pause adset', 'audience', 'budget'],
+  add_adset: ['audience', 'adset', 'ad set'],
+};
+
+function memoryInsightMatchesAction(
+  insight: MemoryData['causalInsights'][number],
+  actionType: string,
+): boolean {
+  const haystack =
+    `${insight.isolatedVariable} ${insight.finding}`.toLowerCase();
+  return (MEMORY_ACTION_TERMS[actionType] ?? [words(actionType)]).some((term) =>
+    haystack.includes(term),
+  );
+}
+
 function recommendationStep(
   r: RecommendationData | undefined,
   decision: TraceDecision,
+  o: ObjectiveData | undefined,
 ): StepBody {
   const title = 'What it decided to suggest';
   const question = 'Of everything it could do, why this?';
-  if (!r) return blank('recommendation', title, question, 'No recommendation slice was recorded.');
+  if (!r)
+    return blank(
+      'recommendation',
+      title,
+      question,
+      'No recommendation slice was recorded.',
+    );
 
   const mine = (r.actions ?? []).find((a) => a.actionId === decision.actionId);
   const details: string[] = [];
 
   if (r.candidatesConsidered !== undefined) {
-    details.push(`${r.candidatesConsidered} possible action(s) were considered; ${(r.actions ?? []).length} survived the filters.`);
+    details.push(
+      `${r.candidatesConsidered} possible action(s) were considered; ${(r.actions ?? []).length} survived the filters.`,
+    );
   }
   if (r.gateReasonCounts && Object.keys(r.gateReasonCounts).length) {
     details.push(
@@ -787,19 +1147,30 @@ function recommendationStep(
     );
   }
   if (mine) {
-    details.push(`Expected effect: ${words(mine.expectedImpact?.metric)} ${mine.expectedImpact?.deltaPct >= 0 ? 'up' : 'down'} ${Math.abs(Math.round(mine.expectedImpact?.deltaPct ?? 0))}%.`);
-    details.push(`Risk rated ${mine.risk}; priority score ${mine.score?.toFixed?.(2) ?? mine.score}.`);
-    if (mine.gatedBy?.length) details.push(`Flagged by: ${mine.gatedBy.map(words).join(', ')}.`);
+    details.push(
+      `Expected effect: ${words(mine.expectedImpact?.metric)} ${mine.expectedImpact?.deltaPct >= 0 ? 'up' : 'down'} ${Math.abs(Math.round(mine.expectedImpact?.deltaPct ?? 0))}%.`,
+    );
+    details.push(
+      `Risk rated ${mine.risk}; priority score ${mine.score?.toFixed?.(2) ?? mine.score}.`,
+    );
+    if (mine.gatedBy?.length)
+      details.push(`Flagged by: ${mine.gatedBy.map(words).join(', ')}.`);
     for (const e of (mine.evidenceChain ?? []).slice(0, 6)) {
       details.push(`Evidence — ${e.step}: ${e.source}`);
     }
   }
-  const others = (r.actions ?? []).filter((a) => a.actionId !== decision.actionId);
+  const others = (r.actions ?? []).filter(
+    (a) => a.actionId !== decision.actionId,
+  );
   if (others.length) {
     details.push(
       `Also proposed alongside this: ${others.map((a) => `${words(a.type)} (${money(a.expectedProfitDeltaINR7d)})`).join(', ')}.`,
     );
   }
+
+  const revenueObjective =
+    !o?.objective ||
+    ['sales', 'catalog_sales', 'retargeting'].includes(o.objective);
 
   return {
     step: ENGINE_STEP.recommendation,
@@ -807,9 +1178,13 @@ function recommendationStep(
     title,
     question,
     headline: decision.actionType
-      ? `${words(decision.actionType)} on ${decision.targetId} — worth about ${money(
-          decision.expectedProfitDeltaINR7d,
-        )} of extra profit over 7 days.`
+      ? revenueObjective
+        ? `${words(decision.actionType)} on ${decision.targetId} — worth about ${money(
+            decision.expectedProfitDeltaINR7d,
+          )} of extra profit over 7 days.`
+        : `${words(decision.actionType)} on ${decision.targetId} to improve ${words(
+            mine?.expectedImpact?.metric ?? o?.primaryKPI,
+          )}${mine ? ` by about ${Math.abs(Math.round(mine.expectedImpact.deltaPct))}%` : ''}.`
       : (r.actions ?? []).length
         ? `${(r.actions ?? []).length} action(s) proposed: ${(r.actions ?? [])
             .map((a) => words(a.type))
@@ -827,11 +1202,37 @@ function explainabilityStep(
 ): StepBody {
   const title = 'The reasoning, in its own words';
   const question = 'How does the system justify this?';
-  if (!e) return blank('explainability', title, question, 'No written explanation was produced.');
+  if (!e)
+    return blank(
+      'explainability',
+      title,
+      question,
+      'No written explanation was produced.',
+    );
+
+  if (!actionId) {
+    return {
+      step: ENGINE_STEP.explainability,
+      engine: 'explainability',
+      title,
+      question,
+      headline: 'No action-specific explanation was needed this cycle.',
+      details: [
+        'No recommendation passed the evidence and safety gates, so there is no proposed action to justify.',
+      ],
+      status: 'ok',
+      decisive: false,
+    };
+  }
 
   const mine = e.perAction?.[actionId];
   if (!mine) {
-    return blank('explainability', title, question, 'No written explanation for this specific action.');
+    return blank(
+      'explainability',
+      title,
+      question,
+      'No written explanation for this specific action.',
+    );
   }
 
   return {
@@ -844,17 +1245,38 @@ function explainabilityStep(
       mine.reasoning || '',
       // The counterfactual is the most decision-useful line here: it says what
       // is expected to happen if you decline.
-      mine.counterfactual ? `If you do nothing instead: ${mine.counterfactual}` : '',
-      mine.llmRendered && mine.llmRendered !== mine.reasoning ? mine.llmRendered : '',
+      mine.counterfactual
+        ? `If you do nothing instead: ${mine.counterfactual}`
+        : '',
+      mine.llmRendered && mine.llmRendered !== mine.reasoning
+        ? mine.llmRendered
+        : '',
     ].filter(Boolean),
     status: 'ok',
     decisive: true,
   };
 }
 
-function executionStep(x: ExecutionData | undefined, actionId: string): StepBody {
+function executionStep(
+  x: ExecutionData | undefined,
+  actionId: string,
+): StepBody {
   const title = 'Whether anything was actually changed';
   const question = 'Did the system touch my live campaign?';
+  if (!actionId) {
+    return {
+      step: ENGINE_STEP.execution,
+      engine: 'execution',
+      title,
+      question,
+      headline: 'Nothing was proposed, so nothing was changed.',
+      details: [
+        'The campaign remained untouched because no candidate passed every evidence and safety gate.',
+      ],
+      status: 'ok',
+      decisive: false,
+    };
+  }
   if (!x) {
     return {
       step: ENGINE_STEP.execution,
@@ -862,7 +1284,9 @@ function executionStep(x: ExecutionData | undefined, actionId: string): StepBody
       title,
       question,
       headline: 'Nothing was changed — this is waiting for your approval.',
-      details: ['The automatic cascade never writes to Meta. Only your approval does.'],
+      details: [
+        'The automatic cascade never writes to Meta. Only your approval does.',
+      ],
       status: 'ok',
       decisive: false,
     };
@@ -877,14 +1301,18 @@ function executionStep(x: ExecutionData | undefined, actionId: string): StepBody
   if (applied) {
     headline = `Applied to Meta at ${new Date(applied.appliedAt).toLocaleString('en-IN')}.`;
     details.push(
-      applied.rollback?.supported ? 'This change can be rolled back.' : 'This change cannot be automatically rolled back.',
+      applied.rollback?.supported
+        ? 'This change can be rolled back.'
+        : 'This change cannot be automatically rolled back.',
     );
   } else if (failed) {
     headline = `Tried and failed: ${failed.error}`;
     details.push(`Rollback: ${words(failed.rollback)}.`);
   } else if (deferred) {
     headline = `Held back — ${deferred.reason}.`;
-    details.push('The automatic cascade never writes to Meta; every action it produces is deferred by design.');
+    details.push(
+      'The automatic cascade never writes to Meta; every action it produces is deferred by design.',
+    );
   }
 
   return {
@@ -903,7 +1331,12 @@ function learningStep(l: LearningData | undefined): StepBody {
   const title = 'What it learned afterwards';
   const question = 'Did past predictions turn out to be right?';
   if (!l) {
-    return blank('learning', title, question, 'Nothing to learn from yet — this measures actions after they run.');
+    return blank(
+      'learning',
+      title,
+      question,
+      'Nothing to learn from yet — this measures actions after they run.',
+    );
   }
 
   const details: string[] = [];
@@ -918,9 +1351,12 @@ function learningStep(l: LearningData | undefined): StepBody {
     );
   }
   for (const u of (l.updates ?? []).slice(0, 4)) {
-    details.push(`Adjusted ${words(u.target)} "${words(u.key)}": ${String(u.oldValue)} → ${String(u.newValue)} because ${u.reason}.`);
+    details.push(
+      `Adjusted ${words(u.target)} "${words(u.key)}": ${String(u.oldValue)} → ${String(u.newValue)} because ${u.reason}.`,
+    );
   }
-  if (!details.length) details.push('No completed actions to measure yet in this cycle.');
+  if (!details.length)
+    details.push('No completed actions to measure yet in this cycle.');
 
   return {
     step: ENGINE_STEP.learning,

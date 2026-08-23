@@ -28,6 +28,7 @@ export async function buildProductResolver(
   products: any[] | undefined,
   detectedProductNameByCampaignId?: ReadonlyMap<string, string>,
 ): Promise<(metaCampaignId: string) => any | undefined> {
+  const ambiguousNameMatch = Symbol('ambiguous-product-name-match');
   const productList = products ?? [];
   const activeProducts = productList.filter((p: any) => p.active);
   const soleActiveProduct =
@@ -47,18 +48,59 @@ export async function buildProductResolver(
   };
   const findUniqueNameMatch = (
     campaignName: string | undefined,
-  ): any | undefined => {
+  ): any | typeof ambiguousNameMatch | undefined => {
     const normalizedCampaign = normalizeName(campaignName);
     if (!normalizedCampaign) return undefined;
     const paddedCampaign = ` ${normalizedCampaign} `;
-    const matches = productList.filter((product: any) => {
-      const normalizedProduct = normalizeName(product?.name);
-      return (
-        normalizedProduct.length >= 3 &&
-        paddedCampaign.includes(` ${normalizedProduct} `)
+    const candidates = productList
+      .map((product: any) => ({
+        product,
+        tokens: normalizeName(product?.name).split(' ').filter(Boolean),
+      }))
+      .filter((candidate: { tokens: string[] }) => candidate.tokens.length > 0);
+
+    // Prefer the uniquely most-specific complete product name. This keeps a
+    // configured child such as "Nadi Leaf Reading" ahead of "Nadi Leaf" when
+    // both happen to occur in a descriptive campaign name.
+    const fullMatches = candidates.filter(({ tokens }: { tokens: string[] }) =>
+      paddedCampaign.includes(` ${tokens.join(' ')} `),
+    );
+    if (fullMatches.length > 0) {
+      const longest = Math.max(
+        ...fullMatches.map((match) => match.tokens.length),
       );
-    });
-    return matches.length === 1 ? matches[0] : undefined;
+      const best = fullMatches.filter(
+        (match) => match.tokens.length === longest,
+      );
+      return best.length === 1 ? best[0].product : ambiguousNameMatch;
+    }
+
+    // Historical names often omit a generic configured suffix: campaigns say
+    // "Nadi Leaf - New Batch…" while the product is "Nadi Leaf Reading".
+    // Accept a leading alias of at least two whole tokens, but only when there
+    // is one unique best match. Thus a shared one-word "Nadi" never resolves,
+    // and two products sharing "Nadi Leaf" remain deliberately ambiguous.
+    const prefixMatches = candidates
+      .map((candidate) => {
+        let matchedTokens = 0;
+        for (let size = candidate.tokens.length - 1; size >= 2; size--) {
+          const prefix = candidate.tokens.slice(0, size).join(' ');
+          if (paddedCampaign.includes(` ${prefix} `)) {
+            matchedTokens = size;
+            break;
+          }
+        }
+        return { ...candidate, matchedTokens };
+      })
+      .filter((candidate) => candidate.matchedTokens >= 2);
+    if (prefixMatches.length === 0) return undefined;
+    const bestTokenCount = Math.max(
+      ...prefixMatches.map((match) => match.matchedTokens),
+    );
+    const best = prefixMatches.filter(
+      (match) => match.matchedTokens === bestTokenCount,
+    );
+    return best.length === 1 ? best[0].product : ambiguousNameMatch;
   };
   if (metaCampaignIds.length === 0) {
     return () => soleActiveProduct;
@@ -113,6 +155,10 @@ export async function buildProductResolver(
     const campaignNameProduct = findUniqueNameMatch(
       campaignNameByCampaign.get(metaCampaignId),
     );
+    // A name that positively matches multiple configured products is not the
+    // same thing as a name with no product evidence. Do not let the sole-active
+    // fallback silently pick one of those conflicting matches.
+    if (campaignNameProduct === ambiguousNameMatch) return undefined;
     return (
       explicitProduct ??
       briefProduct ??

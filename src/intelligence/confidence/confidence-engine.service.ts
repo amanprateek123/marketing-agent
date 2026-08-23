@@ -6,13 +6,76 @@ import { EngineRegistry } from '../shared/engine-registry';
 import { SliceRepository } from '../shared/slice-repository.service';
 import { Evidence, weightedConfidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
-import { ConfidenceData } from '../orchestrator/decision-context';
+import {
+  ConfidenceData,
+  ObjectiveKey,
+  TrendData,
+} from '../orchestrator/decision-context';
+import { isRevenueObjective } from '../objective/kpi-profiles';
+import {
+  isSourceMetricsFresh,
+  MAX_ACTIONABLE_SOURCE_FRESHNESS_SEC,
+} from '../snapshot/snapshot-freshness';
+
+type PowerMetrics = Partial<
+  Record<'impressions' | 'reach' | 'clicks' | 'purchases', number>
+>;
+
+const powerRatio = (value: number | undefined, target: number): number => {
+  const safe = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return Math.min(1, Math.max(0, safe) / target);
+};
+
+/**
+ * Measures whether a campaign has enough observations for ITS objective.
+ *
+ * A purchase floor is meaningful for a sales decision, but it makes an
+ * awareness or traffic campaign look permanently data-starved even when it
+ * has delivered thousands of reach/click observations. Each objective uses
+ * the numerator and denominator needed by its own primary KPI instead.
+ */
+export function statisticalPowerForObjective(
+  objective: ObjectiveKey,
+  metrics: PowerMetrics,
+): number {
+  const impressionPower = powerRatio(metrics.impressions, 3000);
+
+  switch (objective) {
+    case 'awareness':
+    case 'video_views':
+      // Reach efficiency/frequency need both delivered impressions and a
+      // meaningful number of distinct people; purchases are irrelevant.
+      return Math.min(impressionPower, powerRatio(metrics.reach, 2000));
+
+    case 'traffic':
+    case 'engagement':
+    case 'app_installs':
+      // CPC/CTR need click volume plus the impression denominator.
+      return Math.min(impressionPower, powerRatio(metrics.clicks, 100));
+
+    case 'leads':
+    case 'messages':
+      // Lead/message CVR needs both response events and click opportunity.
+      return Math.min(
+        powerRatio(metrics.clicks, 100),
+        powerRatio(metrics.purchases, 25),
+      );
+
+    case 'sales':
+    case 'catalog_sales':
+    case 'retargeting':
+    default:
+      // Sales decisions retain both conversion and impression evidence: a
+      // purchase count alone cannot validate CTR/creative conclusions.
+      return Math.min(impressionPower, powerRatio(metrics.purchases, 25));
+  }
+}
 
 @Injectable()
 export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
   readonly name = 'confidence' as const;
   readonly step = 11;
-  readonly version = '1.0.0';
+  readonly version = '1.2.0';
   readonly dependsOn = [
     'snapshot',
     'objective',
@@ -103,15 +166,20 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
     return this.identity.get(cycleId) ?? { tenantId: '', campaignId: '' };
   }
 
-  protected async compute(deps: ComputeDeps<'confidence'>): Promise<ConfidenceData> {
+  protected async compute(
+    deps: ComputeDeps<'confidence'>,
+  ): Promise<ConfidenceData> {
     const perEngine: Record<string, number> = {};
     for (const k of this.dependsOn) {
       const slice = (deps as Record<string, { confidence?: number }>)[k];
       perEngine[k] = slice?.confidence ?? 0;
     }
-    const meanConf = weightedConfidence(
-      Object.values(perEngine).map((v) => ({ value: v, weight: 1 })),
-    );
+    const objective = deps.objective!.data.objective;
+    const revenueObjective = isRevenueObjective(objective);
+    const relevantConfidence = Object.entries(perEngine)
+      .filter(([engine]) => revenueObjective || engine !== 'revenue')
+      .map(([, value]) => ({ value, weight: 1 }));
+    const meanConf = weightedConfidence(relevantConfidence);
 
     // Worst-of-core floor — scoped to the engines whose weakness genuinely
     // means "we don't understand what's happening" (snapshot/revenue/
@@ -123,7 +191,9 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
     // engine permanently dragged every decision's confidence down by up to
     // 30 points, regardless of whether that engine's weakness had anything
     // to do with the action being considered.
-    const CORE_ENGINES = ['snapshot', 'revenue', 'signal', 'diagnosis'] as const;
+    const CORE_ENGINES = revenueObjective
+      ? (['snapshot', 'revenue', 'signal', 'diagnosis'] as const)
+      : (['snapshot', 'signal', 'diagnosis'] as const);
     const minCore = Math.min(...CORE_ENGINES.map((k) => perEngine[k] ?? 0));
 
     const snap = deps.snapshot!.data as {
@@ -131,32 +201,37 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
       missingFields?: string[];
       metrics?: { campaignLevel?: Record<string, number> };
     };
-    const freshnessSec = snap.freshnessSec ?? 0;
-    const snapshotCoverage = 1 - Math.min(1, (snap.missingFields?.length ?? 0) / 5);
+    const freshnessKnown =
+      typeof snap.freshnessSec === 'number' &&
+      Number.isFinite(snap.freshnessSec) &&
+      snap.freshnessSec >= 0;
+    const freshnessSec = freshnessKnown ? snap.freshnessSec! : -1;
+    const sourceDataFresh = isSourceMetricsFresh(snap.freshnessSec);
+    const snapshotCoverage =
+      1 - Math.min(1, (snap.missingFields?.length ?? 0) / 5);
 
-    // Statistical power: previously purchases-count alone, which ignores
-    // traffic volume entirely — a campaign can clear a purchases threshold
-    // on a tiny, noisy sample of impressions (CTR-based signals like
-    // ctr_decay/hook_burn/creative_fatigue would then be trusted on thin
-    // data) just as easily as on a well-trafficked one. Power is only as
-    // strong as its WEAKEST evidentiary leg, so this takes the min of the
-    // purchase-volume read (CVR/ROAS evidence) and the impression-volume
-    // read (CTR evidence) rather than either one alone.
-    const purchases = (snap.metrics?.campaignLevel?.purchases as number) ?? 0;
-    const impressions = (snap.metrics?.campaignLevel?.impressions as number) ?? 0;
-    const purchasePower = Math.min(1, purchases / 25);
-    const impressionPower = Math.min(1, impressions / 3000);
-    const statisticalPower = Math.min(purchasePower, impressionPower);
+    const campaignMetrics = snap.metrics?.campaignLevel ?? {};
+    const statisticalPower = statisticalPowerForObjective(
+      objective,
+      campaignMetrics,
+    );
 
-    // Real history depth from the trend window (days of snapshot history
-    // actually available) — previously hardcoded to 0 always, itself a
-    // false-confidence stub inside the engine that's supposed to catch them.
-    const trend = deps.trend?.data;
+    // Trend emits elapsed calendar time separately from windowSize (which is
+    // a count of sampled snapshots and must never be presented as "days").
+    // Old persisted trend slices do not have this field, so fail closed at 0.
+    const trend = deps.trend?.data as
+      | (TrendData & { historyDepthDays?: number })
+      | undefined;
+    const reportedHistoryDepth = trend?.historyDepthDays;
     const historyDepthDays =
-      trend?.perMetric.roas?.windowSize ?? trend?.perMetric.spend?.windowSize ?? 0;
+      typeof reportedHistoryDepth === 'number' &&
+      Number.isFinite(reportedHistoryDepth)
+        ? Math.max(0, reportedHistoryDepth)
+        : 0;
 
     const quality = {
       dataFreshnessSec: freshnessSec,
+      sourceDataFresh,
       snapshotCoverage,
       historyDepthDays,
       statisticalPower,
@@ -164,29 +239,66 @@ export class ConfidenceEngine extends BaseEngine<'confidence', ConfidenceData> {
     const qualityScore =
       snapshotCoverage * 0.4 +
       statisticalPower * 0.4 +
-      (freshnessSec < 1800 ? 0.2 : freshnessSec < 3600 ? 0.1 : 0);
+      (sourceDataFresh ? (freshnessSec < 1800 ? 0.2 : 0.1) : 0);
 
     const overall = 0.3 * minCore + 0.4 * meanConf + 0.3 * qualityScore;
 
     const stage = deps.lifecycle!.data.stage;
-    const stageForbidsExec = ['learning', 'launching', 'unknown', 'draft', 'pending_approval'].includes(
-      stage,
-    );
+    const stageForbidsExec = [
+      'learning',
+      'launching',
+      'unknown',
+      'draft',
+      'pending_approval',
+    ].includes(stage);
 
-    const okToRecommend = overall >= 0.5 && perEngine.snapshot >= 0.6;
-    const okToExecute =
-      overall >= 0.7 &&
+    const diagnosisConfidence = deps.diagnosis?.confidence ?? 0;
+    const okToRecommend =
+      overall >= 0.5 &&
+      sourceDataFresh &&
+      perEngine.snapshot >= 0.6 &&
       quality.statisticalPower >= 0.5 &&
+      diagnosisConfidence >= 0.5;
+    const okToExecute =
+      okToRecommend &&
+      overall >= 0.7 &&
+      quality.statisticalPower >= 0.7 &&
       !stageForbidsExec &&
-      (deps.diagnosis?.confidence ?? 0) >= 0.55;
+      diagnosisConfidence >= 0.55;
 
     const reasonsBlocked: string[] = [];
-    if (overall < 0.7) reasonsBlocked.push(`overall<0.7 (${overall.toFixed(2)})`);
+    if (overall < 0.5)
+      reasonsBlocked.push(`recommend:overall<0.5 (${overall.toFixed(2)})`);
+    if (!sourceDataFresh) {
+      reasonsBlocked.push(
+        freshnessKnown
+          ? `recommend:source_metrics_stale (${freshnessSec}s>=${MAX_ACTIONABLE_SOURCE_FRESHNESS_SEC}s)`
+          : 'recommend:source_metrics_freshness_unknown',
+      );
+    }
+    if (perEngine.snapshot < 0.6)
+      reasonsBlocked.push(
+        `recommend:snapshot<0.6 (${perEngine.snapshot.toFixed(2)})`,
+      );
     if (quality.statisticalPower < 0.5)
-      reasonsBlocked.push(`power<0.5 (${quality.statisticalPower.toFixed(2)})`);
-    if (stageForbidsExec) reasonsBlocked.push(`lifecycle=${stage}`);
-    if ((deps.diagnosis?.confidence ?? 0) < 0.55)
-      reasonsBlocked.push(`diagnosis<0.55`);
+      reasonsBlocked.push(
+        `recommend:power<0.5 (${quality.statisticalPower.toFixed(2)})`,
+      );
+    if (diagnosisConfidence < 0.5)
+      reasonsBlocked.push(
+        `recommend:diagnosis<0.5 (${diagnosisConfidence.toFixed(2)})`,
+      );
+    if (overall >= 0.5 && overall < 0.7)
+      reasonsBlocked.push(`execute:overall<0.7 (${overall.toFixed(2)})`);
+    if (quality.statisticalPower >= 0.5 && quality.statisticalPower < 0.7)
+      reasonsBlocked.push(
+        `execute:power<0.7 (${quality.statisticalPower.toFixed(2)})`,
+      );
+    if (stageForbidsExec) reasonsBlocked.push(`execute:lifecycle=${stage}`);
+    if (diagnosisConfidence >= 0.5 && diagnosisConfidence < 0.55)
+      reasonsBlocked.push(
+        `execute:diagnosis<0.55 (${diagnosisConfidence.toFixed(2)})`,
+      );
 
     return {
       overall: Number(overall.toFixed(3)),

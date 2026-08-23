@@ -1,11 +1,22 @@
 import { Logger, OnModuleInit } from '@nestjs/common';
-import { DecisionContext, EngineSliceKey } from '../orchestrator/decision-context';
+import {
+  DecisionContext,
+  EngineSliceKey,
+} from '../orchestrator/decision-context';
 import { EngineContext, Evidence, clampConfidence } from './engine-context';
 import { Engine, ComputeDeps } from './engine.interface';
 import { EngineEventBus } from './engine-event-bus.service';
 import { EngineRegistry } from './engine-registry';
-import { ComputeError, MissingDependencyError } from './engine.errors';
-import { SliceRepository } from './slice-repository.service';
+import {
+  ComputeError,
+  IdentityResolutionError,
+  MissingDependencyError,
+} from './engine.errors';
+import {
+  isValidSliceIdentity,
+  SliceIdentity,
+  SliceRepository,
+} from './slice-repository.service';
 
 /**
  * Every intelligence engine extends this. Handles the four cross-cutting
@@ -58,7 +69,11 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
    */
   async execute(cycleId: string): Promise<void> {
     // Load dependencies
-    const deps = await this.sliceRepo.loadMany(cycleId, this.dependsOn);
+    const loaded = await this.sliceRepo.loadManyWithIdentity(
+      cycleId,
+      this.dependsOn,
+    );
+    const deps = loaded.slices;
     for (const dep of this.dependsOn) {
       if (deps[dep] === undefined) {
         this.eventBus.emitFailed({
@@ -73,8 +88,15 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
       }
     }
 
-    // Load cycle identity from any dep slice (or engine 1 fills it)
-    const identity = await this.identityFromDeps(cycleId, deps);
+    // Persisted dependency identity is authoritative. Event handlers keep a
+    // short-lived identity map for the first engine and as a fast-path hint,
+    // but duplicate same-cycle events can overlap and delete that map while a
+    // second invocation is still running. Never persist the empty fallback.
+    const identity = await this.resolveCycleIdentity(
+      cycleId,
+      deps,
+      loaded.identity,
+    );
 
     // Check optional skip predicate
     if (this.canRun && !(await this.canRun(cycleId))) {
@@ -91,10 +113,17 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
 
     const start = Date.now();
     try {
-      const data = await this.compute(deps as ComputeDeps<K>);
+      // Pass the immutable invocation identity all the way into compute().
+      // Nest providers are singletons and EventEmitter can overlap two
+      // campaign cycles on the same engine instance; subclasses must never
+      // infer "the current cycle" from shared mutable state or the first
+      // entry in an identity map.
+      const data = await this.compute(deps as ComputeDeps<K>, cycleId);
       const slice: EngineContext<TData> = {
         data,
-        confidence: clampConfidence(this.computeConfidence(deps as ComputeDeps<K>, data)),
+        confidence: clampConfidence(
+          this.computeConfidence(deps as ComputeDeps<K>, data),
+        ),
         evidence: this.buildEvidence(deps as ComputeDeps<K>, data),
         version: `${this.name}@${this.version}`,
         computedAt: new Date(),
@@ -103,7 +132,11 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
       };
 
       await this.sliceRepo.write(
-        { cycleId, tenantId: identity.tenantId, campaignId: identity.campaignId },
+        {
+          cycleId,
+          tenantId: identity.tenantId,
+          campaignId: identity.campaignId,
+        },
         this.name,
         slice,
       );
@@ -132,19 +165,62 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
 
   canRun?(cycleId: string): Promise<boolean>;
 
+  private async resolveCycleIdentity(
+    cycleId: string,
+    deps: Partial<DecisionContext>,
+    dependencyIdentity: SliceIdentity | null,
+  ): Promise<SliceIdentity> {
+    const eventIdentity = await this.identityFromDeps(cycleId, deps);
+
+    if (isValidSliceIdentity(dependencyIdentity)) {
+      if (
+        isValidSliceIdentity(eventIdentity) &&
+        (eventIdentity.tenantId !== dependencyIdentity.tenantId ||
+          eventIdentity.campaignId !== dependencyIdentity.campaignId)
+      ) {
+        this.logger.warn(
+          `Ignoring mismatched event identity for cycle ${cycleId}; using persisted dependency identity`,
+        );
+      }
+      return dependencyIdentity;
+    }
+
+    // A dependency with an invalid legacy identity cannot establish the next
+    // slice's identity. Recover from another valid slice in the same cycle.
+    if (this.dependsOn.length > 0) {
+      const persistedIdentity = await this.sliceRepo.identityForCycle(cycleId);
+      if (isValidSliceIdentity(persistedIdentity)) return persistedIdentity;
+      throw new IdentityResolutionError(this.name, cycleId);
+    }
+
+    // Snapshot is the first slice, so only its cycle-start payload can supply
+    // identity. Reject an empty payload rather than creating corrupt history.
+    if (isValidSliceIdentity(eventIdentity)) return eventIdentity;
+    throw new IdentityResolutionError(this.name, cycleId);
+  }
+
   /** Subclasses override to `false` for non-deterministic engines (Snapshot). */
   protected isDeterministic(): boolean {
     return true;
   }
 
   /** The engine-specific pure function. */
-  protected abstract compute(deps: ComputeDeps<K>): Promise<TData>;
+  protected abstract compute(
+    deps: ComputeDeps<K>,
+    cycleId: string,
+  ): Promise<TData>;
 
   /** Confidence formula per each guide's §10. Default is 1.0 if all deps present. */
-  protected abstract computeConfidence(deps: ComputeDeps<K>, data: TData): number;
+  protected abstract computeConfidence(
+    deps: ComputeDeps<K>,
+    data: TData,
+  ): number;
 
   /** Traceable inputs. */
-  protected abstract buildEvidence(deps: ComputeDeps<K>, data: TData): Evidence[];
+  protected abstract buildEvidence(
+    deps: ComputeDeps<K>,
+    data: TData,
+  ): Evidence[];
 
   /**
    * Load (tenantId, campaignId) from a dep slice. If this engine has no
@@ -155,6 +231,8 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
     cycleId: string,
     _deps: Partial<DecisionContext>,
   ): Promise<{ tenantId: string; campaignId: string }> {
+    void cycleId;
+    void _deps;
     // Default: fetch the cycle doc for identity. Subclasses may override
     // to skip this DB round-trip when they already have identity in-hand.
     return { tenantId: '', campaignId: '' };

@@ -14,8 +14,13 @@ import { ActionOutcomeService } from '../../learning/action-outcome.service';
 export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
   readonly name = 'memory' as const;
   readonly step = 12;
-  readonly version = '1.0.0';
-  readonly dependsOn = ['snapshot', 'objective', 'diagnosis', 'confidence'] as const;
+  readonly version = '1.1.0';
+  readonly dependsOn = [
+    'snapshot',
+    'objective',
+    'diagnosis',
+    'confidence',
+  ] as const;
 
   private readonly identity = new Map<
     string,
@@ -31,8 +36,12 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     // with null can erase to `Object` in emitted design:paramtypes
     // metadata, so @Optional() silently resolves to null even when the
     // module correctly provides the service).
-    @Optional() @Inject(CompaniesService) private readonly companies: CompaniesService | null,
-    @Optional() @Inject(ActionOutcomeService) private readonly actionOutcomes: ActionOutcomeService | null,
+    @Optional()
+    @Inject(CompaniesService)
+    private readonly companies: CompaniesService | null,
+    @Optional()
+    @Inject(ActionOutcomeService)
+    private readonly actionOutcomes: ActionOutcomeService | null,
   ) {
     super(sliceRepo, eventBus, registry);
   }
@@ -58,35 +67,37 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     return this.identity.get(cycleId) ?? { tenantId: '', campaignId: '' };
   }
 
-  protected async compute(deps: ComputeDeps<'memory'>): Promise<MemoryData> {
+  protected async compute(
+    deps: ComputeDeps<'memory'>,
+    cycleId: string,
+  ): Promise<MemoryData> {
     // deps carries only engine-slice outputs, never identity fields — the
     // previous `deps as unknown as {tenantId}` cast always resolved to
     // undefined, so tenantId was always '' and `company` (hence every real
     // causalInsight/companyLearnings field below) never loaded.
-    const ident = this.identity.values().next().value;
+    const ident = this.identity.get(cycleId);
     const tenantId = ident?.tenantId ?? '';
     const campaignId = ident?.campaignId ?? '';
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)
         : null;
-    const co = (company as
-      | {
-          learnings?: {
-            causalInsights?: Array<{
-              finding?: string;
-              confidence?: number;
-              isolatedVariable?: string;
-            }>;
-            creative?: {
-              winningHooks?: string[];
-              losingHooks?: string[];
-              winningExemplars?: Array<{ hookLine?: string; ctr?: number }>;
-              audienceHookSaturation?: Record<string, Record<string, number>>;
-            };
+    const co =
+      (company as {
+        learnings?: {
+          causalInsights?: Array<{
+            finding?: string;
+            confidence?: number;
+            isolatedVariable?: string;
+          }>;
+          creative?: {
+            winningHooks?: string[];
+            losingHooks?: string[];
+            winningExemplars?: Array<{ hookLine?: string; ctr?: number }>;
+            audienceHookSaturation?: Record<string, Record<string, number>>;
           };
-        }
-      | null) ?? {};
+        };
+      } | null) ?? {};
 
     const causalInsights = (co.learnings?.causalInsights ?? []).map((c) => ({
       finding: c.finding ?? '',
@@ -103,18 +114,23 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     // account-wide, unscoped history — every campaign saw every other
     // campaign's failures as equally relevant caution, and no per-target
     // signal was available at all).
-    const recentExecuted = this.actionOutcomes && tenantId && campaignId
-      ? await this.actionOutcomes
-          .listRecentForCampaign(tenantId, campaignId, 30)
-          .catch(() => [])
-      : [];
+    const recentExecuted =
+      this.actionOutcomes && tenantId && campaignId
+        ? await this.actionOutcomes
+            .listRecentForCampaign(tenantId, campaignId, 30)
+            .catch(() => [])
+        : [];
     const pastActions = recentExecuted
       .filter((a) => a.outcomeLabel != null)
       .map((a) => ({
         actionType: a.action.type,
         targetId: a.action.targetId ?? '',
         executedAt: a.executedAt,
-        outcomeLabel: a.outcomeLabel as 'improved' | 'worsened' | 'neutral' | 'inconclusive',
+        outcomeLabel: a.outcomeLabel as
+          | 'improved'
+          | 'worsened'
+          | 'neutral'
+          | 'inconclusive',
         context: [
           a.action.targetName ?? a.action.targetId,
           a.context?.ageDays != null ? `day ${a.context.ageDays}` : null,
@@ -134,7 +150,10 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
         losingHooks: creative.losingHooks ?? [],
         winningExemplars: (creative.winningExemplars ?? [])
           .slice(0, 5)
-          .map((e) => ({ hookLine: e.hookLine ?? '', ctr: Number(e.ctr ?? 0) })),
+          .map((e) => ({
+            hookLine: e.hookLine ?? '',
+            ctr: Number(e.ctr ?? 0),
+          })),
         audienceHookSaturation: creative.audienceHookSaturation ?? {},
       },
     };
@@ -144,13 +163,38 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
     _deps: ComputeDeps<'memory'>,
     data: MemoryData,
   ): number {
-    const hasInsights = data.causalInsights.length > 0 ? 0.3 : 0;
-    const hasExemplars = data.companyLearnings.winningExemplars.length > 0 ? 0.2 : 0;
-    const hasPastActions = data.pastActions.length > 0 ? 0.2 : 0;
-    return 0.3 + hasInsights + hasExemplars + hasPastActions;
+    // Only measured actions from this campaign strengthen campaign-specific
+    // memory confidence. Tenant-wide causal insights and creative exemplars
+    // remain useful context, but they cannot make an untested campaign look
+    // historically validated.
+    if (data.pastActions.length === 0) return 0.2;
+    return Math.min(1, 0.5 + data.pastActions.length * 0.1);
   }
 
-  protected buildEvidence(): Evidence[] {
-    return [{ kind: 'memory', ref: 'company.learnings', weight: 1 }];
+  protected buildEvidence(
+    _deps: ComputeDeps<'memory'>,
+    data: MemoryData,
+  ): Evidence[] {
+    const evidence: Evidence[] = [];
+    if (data.pastActions.length > 0) {
+      evidence.push({
+        kind: 'memory',
+        ref: 'action_outcomes:campaign',
+        weight: 1,
+        note: `${data.pastActions.length} campaign-scoped measured action(s)`,
+      });
+    }
+    if (
+      data.causalInsights.length > 0 ||
+      data.companyLearnings.winningExemplars.length > 0
+    ) {
+      evidence.push({
+        kind: 'context',
+        ref: 'company.learnings',
+        weight: 0,
+        note: 'account-wide context only; not causal evidence for this campaign',
+      });
+    }
+    return evidence;
   }
 }

@@ -22,6 +22,10 @@ import { CampaignsService } from '../../campaigns/campaigns.service';
  *   there. Only an explicit human approval through this endpoint reaches
  *   Meta.
  * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/reject
+ * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/retry-execution
+ *   Explicitly retries a previously failed Meta call. A normal duplicate
+ *   approval never retries automatically because the prior outcome may need
+ *   checking in Meta first.
  * GET /api/v1/intelligence/:tenantId/decisions/summary
  * GET /api/v1/intelligence/:tenantId/cycles
  *   Query params: campaignId, limit — recent cascade cycles for this
@@ -116,10 +120,9 @@ export class DecisionsController {
     // Cycle docs only carry campaignId/metaCampaignId — resolve names in one
     // batch query so the "which campaign is this about" question the
     // dashboard needs has an actual answer instead of a raw Mongo/Meta id.
-    const names = await this.campaignsService.findNamesByIds(
-      tenantId,
-      [...new Set(cycles.map((c) => c.campaignId))],
-    );
+    const names = await this.campaignsService.findNamesByIds(tenantId, [
+      ...new Set(cycles.map((c) => c.campaignId)),
+    ]);
     const enriched = cycles.map((c) => ({
       ...c,
       campaignName: names.get(c.campaignId) ?? '',
@@ -129,16 +132,20 @@ export class DecisionsController {
 
   @Post(':tenantId/decisions/:decisionId/approve')
   async approve(
-    @Param('tenantId') _tenantId: string,
+    @Param('tenantId') tenantId: string,
     @Param('decisionId') decisionId: string,
     @Body() body: { reviewer?: string; notes?: string },
   ) {
     const doc = await this.service.approve(
+      tenantId,
       decisionId,
       body?.reviewer,
       body?.notes,
     );
-    const result = await this.service.executeApprovedDecision(decisionId);
+    const result = await this.service.executeApprovedDecision(
+      tenantId,
+      decisionId,
+    );
     return {
       ok: true,
       message: result.executed
@@ -152,7 +159,7 @@ export class DecisionsController {
 
   @Post(':tenantId/decisions/:decisionId/reject')
   async reject(
-    @Param('tenantId') _tenantId: string,
+    @Param('tenantId') tenantId: string,
     @Param('decisionId') decisionId: string,
     @Body() body: { reason: string; reviewer?: string },
   ) {
@@ -160,6 +167,7 @@ export class DecisionsController {
       throw new BadRequestException('reason is required');
     }
     const doc = await this.service.reject(
+      tenantId,
       decisionId,
       body.reason,
       body.reviewer,
@@ -168,6 +176,25 @@ export class DecisionsController {
       ok: true,
       message: 'Decision rejected locally. Feedback recorded for learning.',
       decision: doc,
+    };
+  }
+
+  @Post(':tenantId/decisions/:decisionId/retry-execution')
+  async retryExecution(
+    @Param('tenantId') tenantId: string,
+    @Param('decisionId') decisionId: string,
+  ) {
+    const result = await this.service.retryFailedExecution(
+      tenantId,
+      decisionId,
+    );
+    return {
+      ok: result.executed,
+      message: result.executed
+        ? 'Decision retry applied to the live Meta campaign.'
+        : `Decision retry was not applied: ${result.error}`,
+      executed: result.executed,
+      executionError: result.error,
     };
   }
 }

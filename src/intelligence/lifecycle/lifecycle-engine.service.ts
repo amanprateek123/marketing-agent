@@ -71,12 +71,19 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     return this.identity.get(cycleId) ?? { tenantId: '', campaignId: '' };
   }
 
-  protected async compute(deps: ComputeDeps<'lifecycle'>): Promise<LifecycleData> {
+  protected async compute(
+    deps: ComputeDeps<'lifecycle'>,
+    cycleId: string,
+  ): Promise<LifecycleData> {
     const snapshot = deps.snapshot!;
     const data = snapshot.data as {
       collectedAt: Date;
       metrics?: { campaignLevel?: Record<string, number> };
-      meta?: { learningStage?: string; deliveryStatus?: string; objective?: string };
+      meta?: {
+        learningStage?: string;
+        deliveryStatus?: string;
+        objective?: string;
+      };
     };
     const cm = data.metrics?.campaignLevel ?? {};
     const learningStage = data.meta?.learningStage;
@@ -88,7 +95,7 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     // classify() only applies its age-based floor when age is genuinely known.
     let ageHours = 0;
     if (this.campaignModel) {
-      const ident = this.identity.values().next().value;
+      const ident = this.identity.get(cycleId);
       if (ident?.campaignId) {
         try {
           const c = await this.campaignModel
@@ -160,10 +167,16 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     ageHours: number;
   }): LifecycleStage {
     if (input.deliveryStatus === 'NOT_DELIVERING') return 'retirement';
-    if (input.learningStage === 'LEARNING' || input.learningStage === 'LEARNING_LIMITED') {
+    if (
+      input.learningStage === 'LEARNING' ||
+      input.learningStage === 'LEARNING_LIMITED'
+    ) {
       return 'learning';
     }
-    if (input.deliveryStatus === 'PENDING' || input.deliveryStatus === 'PENDING_REVIEW') {
+    if (
+      input.deliveryStatus === 'PENDING' ||
+      input.deliveryStatus === 'PENDING_REVIEW'
+    ) {
       return 'pending_approval';
     }
     // "Delivering but nothing has landed yet" — measured in whatever this
@@ -216,9 +229,17 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
 
   private progressionScore(stage: LifecycleStage): number {
     const order: LifecycleStage[] = [
-      'draft', 'pending_approval', 'launching', 'learning',
-      'growing', 'scaling', 'stable', 'fatigue',
-      'recovery', 'retirement', 'unknown',
+      'draft',
+      'pending_approval',
+      'launching',
+      'learning',
+      'growing',
+      'scaling',
+      'stable',
+      'fatigue',
+      'recovery',
+      'retirement',
+      'unknown',
     ];
     const idx = order.indexOf(stage);
     return idx < 0 ? 0 : idx / (order.length - 1);
@@ -242,7 +263,9 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
         kind: 'snapshot',
         ref: `lifecycle:${data.stage}`,
         weight: 1,
-        note: data.metaLearningStage ? `meta=${data.metaLearningStage}` : 'inferred',
+        note: data.metaLearningStage
+          ? `meta=${data.metaLearningStage}`
+          : 'inferred',
       },
     ];
   }

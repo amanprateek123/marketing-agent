@@ -26,6 +26,17 @@ export class MissingDependencyError extends EngineError {
   }
 }
 
+export class IdentityResolutionError extends EngineError {
+  constructor(engine: string, cycleId: string) {
+    super(
+      engine,
+      'missing_cycle_identity',
+      `${engine} cannot run: no complete persisted identity for cycle ${cycleId}`,
+      true,
+    );
+  }
+}
+
 export class SkipError extends EngineError {
   constructor(engine: string, reason: string) {
     super(engine, reason, `${engine} skipped: ${reason}`, false);
@@ -35,7 +46,13 @@ export class SkipError extends EngineError {
 export class ComputeError extends EngineError {
   constructor(engine: string, reason: string, cause?: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause ?? '');
-    super(engine, reason, `${engine} compute failed: ${reason}${detail ? ` (${detail})` : ''}`, false, cause);
+    super(
+      engine,
+      reason,
+      `${engine} compute failed: ${reason}${detail ? ` (${detail})` : ''}`,
+      false,
+      cause,
+    );
   }
 }
 

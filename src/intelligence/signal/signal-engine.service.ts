@@ -16,24 +16,38 @@ import {
   SignalKind,
   TrendData,
 } from '../orchestrator/decision-context';
+import { isRevenueObjective } from '../objective/kpi-profiles';
+import { hasEnoughElapsedTrendHistory } from '../trend/trend-readiness';
+
+/**
+ * These rules read purchases, ROAS or product breakeven. They are not merely
+ * unhelpful for reach/click/engagement objectives; they can invert the truth
+ * by calling a successful awareness campaign a failure for having no sales.
+ */
+const REVENUE_EVIDENCE_SIGNALS = new Set<SignalKind>([
+  'cvr_collapse',
+  'unprofitable_run',
+  'winner_emerging',
+  'winner_confirmed',
+  'budget_saturation',
+  'audience_exhaustion',
+  'placement_leak',
+]);
 
 /**
  * Signals fired from observation, not from cached rules.
  *
- * For each rule we compare the CURRENT observation against THIS CAMPAIGN'S
- * OWN 7-day baseline (via Trend Engine EMAs and slopes) rather than a
- * global threshold. Every signal ships with a human-readable `reasoning`
- * string built at fire-time explaining exactly what evidence triggered it.
- *
- * Fallback: when we don't have enough history (< 3 snapshots), we compare
- * against a conservative default. Signals fired via fallback have lower
- * strength (0.5-0.7) so downstream engines weight them accordingly.
+ * For trend-derived rules we compare the CURRENT observation against this
+ * campaign's own recent DAILY observations. Repeated intraday scheduler ticks
+ * are collapsed by TrendEngine and cannot unlock these rules. Every signal
+ * ships with a human-readable `reasoning` string built at fire-time explaining
+ * exactly what evidence triggered it.
  */
 @Injectable()
 export class SignalEngine extends BaseEngine<'signal', SignalData> {
   readonly name = 'signal' as const;
   readonly step = 6;
-  readonly version = '1.1.0';
+  readonly version = '1.3.0';
   readonly dependsOn = [
     'snapshot',
     'objective',
@@ -46,7 +60,6 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     string,
     { tenantId: string; campaignId: string }
   >();
-  private currentCycleId?: string;
 
   constructor(
     sliceRepo: SliceRepository,
@@ -72,12 +85,10 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       tenantId: payload.tenantId,
       campaignId: payload.campaignId,
     });
-    this.currentCycleId = payload.cycleId;
     try {
       await this.execute(payload.cycleId);
     } finally {
       this.identity.delete(payload.cycleId);
-      this.currentCycleId = undefined;
     }
   }
 
@@ -85,27 +96,33 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     return this.identity.get(cycleId) ?? { tenantId: '', campaignId: '' };
   }
 
-  protected async compute(deps: ComputeDeps<'signal'>): Promise<SignalData> {
+  protected async compute(
+    deps: ComputeDeps<'signal'>,
+    cycleId: string,
+  ): Promise<SignalData> {
     const snap = deps.snapshot!;
     const lifecycle = deps.lifecycle!;
     const trend = deps.trend! as { data: TrendData };
     const revenue = deps.revenue!;
     const objective = deps.objective!;
-    const metrics = (snap.data as {
-      metrics?: {
-        campaignLevel?: Record<string, number>;
-        adSetLevel?: Record<string, Record<string, number>>;
-        adLevel?: Record<string, Record<string, number> & { format?: string }>;
-      };
-    }).metrics;
+    const metrics = (
+      snap.data as {
+        metrics?: {
+          campaignLevel?: Record<string, number>;
+          adSetLevel?: Record<string, Record<string, number>>;
+          adLevel?: Record<
+            string,
+            Record<string, number> & { format?: string }
+          >;
+        };
+      }
+    ).metrics;
     const cm = metrics?.campaignLevel ?? {};
     const adSetLevel = metrics?.adSetLevel ?? {};
     const adLevel = metrics?.adLevel ?? {};
 
     const ignored = new Set(objective.data.policy.ignoreSignals ?? []);
-    const ident = this.currentCycleId
-      ? this.identity.get(this.currentCycleId)
-      : undefined;
+    const ident = this.identity.get(cycleId);
     const targetId = ident?.campaignId ?? 'unknown';
     const signals: Signal[] = [];
 
@@ -122,21 +139,24 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     const revenueData = revenue.data as {
       breakeven: { roas: number; isProfitable: boolean };
       targetROAS?: number;
+      financialDataAvailable?: boolean;
       derivation?: {
         method: string;
         breakevenROAS: number;
         marginPct: number;
       };
     };
+    const revenueObjective = isRevenueObjective(objective.data.objective);
+    const financialDataAvailable = revenueData.financialDataAvailable === true;
     const breakevenROAS = revenueData.breakeven.roas;
-    // Profit GOAL (2x breakeven, per product — see RevenueEngine), not just
-    // the loss-avoidance floor. Falls back to breakeven*2 for older/replayed
+    // System scale heuristic (2x breakeven, per product — see RevenueEngine),
+    // not an observed company target. Falls back to breakeven*2 for older
     // slices computed before this field existed.
     const targetROAS = revenueData.targetROAS ?? breakevenROAS * 2;
     const isProfitable = revenueData.breakeven.isProfitable;
-    const derivationMethod = revenueData.derivation?.method ?? 'unknown';
-
-    // Trend baselines — THIS CAMPAIGN'S own past-7-day EMA + slopes
+    // Trend baselines — this campaign's own daily observations. Field names
+    // retain their historical *7d/*3d suffix for persisted-contract
+    // compatibility, but their unit is now daily observation, not raw tick.
     const emaCTR7 = trend.data.perMetric.ctr?.ema7d ?? 0;
     const emaFreq7 = trend.data.perMetric.frequency?.ema7d ?? 0;
     const emaReach7 = trend.data.perMetric.reach?.ema7d ?? 0;
@@ -144,8 +164,9 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     const slopeROAS7 = trend.data.perMetric.roas?.slope7d ?? 0;
     const slopeSpend7 = trend.data.perMetric.spend?.slope7d ?? 0;
     const slopeReach7 = trend.data.perMetric.reach?.slope7d ?? 0;
-    const historyWindow = trend.data.perMetric.ctr?.windowSize ?? 1;
-    const hasBaseline = historyWindow >= 3;
+    const hasBaseline = hasEnoughElapsedTrendHistory(trend.data);
+    const trendObservationCount = trend.data.observationCount ?? 0;
+    const trendElapsedDays = trend.data.windowElapsedDays ?? 0;
 
     const push = (
       kind: SignalKind,
@@ -160,6 +181,12 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       },
     ) => {
       if (ignored.has(kind)) return;
+      // Fail closed twice: first on campaign goal, then on attribution and
+      // product economics. This also protects old objective profiles whose
+      // ignoreSignals list did not enumerate every revenue-derived rule.
+      if (REVENUE_EVIDENCE_SIGNALS.has(kind)) {
+        if (!revenueObjective || !financialDataAvailable) return;
+      }
       signals.push({
         kind,
         severity: opts.severity,
@@ -197,7 +224,8 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
 
     // Skip performance signals while in early stages
     const skipPerfStage =
-      lifecycle.data.stage === 'learning' || lifecycle.data.stage === 'launching';
+      lifecycle.data.stage === 'learning' ||
+      lifecycle.data.stage === 'launching';
 
     // ── creative_fatigue — freq up vs OWN baseline AND CTR declining
     if (!skipPerfStage) {
@@ -207,24 +235,22 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
         const ratio = freq / emaFreq7;
         push('creative_fatigue', {
           severity: freq > 4 ? 'critical' : 'warn',
-          strength: Math.min(1, (ratio - 1) * 0.8 + Math.min(1, Math.abs(slopeCTR3) * 40)),
-          trigger: 'freq/base>=1.4 AND slopeCTR3d<-0.005',
+          strength: Math.min(
+            1,
+            (ratio - 1) * 0.8 + Math.min(1, Math.abs(slopeCTR3) * 40),
+          ),
+          trigger:
+            'freq/recentDailyBaseline>=1.4 AND recentDailyCTRTrend<-0.005',
           metricEvidence: {
             frequency: freq,
             frequencyBaseline: emaFreq7,
-            ctrSlope3d: slopeCTR3,
+            ctrSlopePerDailyObservation: slopeCTR3,
+            trendObservationCount,
+            trendElapsedDays,
           },
           // slopeCTR3 is already in ctr's own percentage-point units (Meta's
           // convention: 0.95 means 0.95%) — no *100 needed to label it "pp".
-          reasoning: `Frequency ${freq.toFixed(1)} is ${((ratio - 1) * 100).toFixed(0)}% above this campaign's own 7-day baseline of ${emaFreq7.toFixed(1)}, and CTR has been dropping ${Math.abs(slopeCTR3).toFixed(2)}pp per day for 3 days. The audience is seeing these creatives too often — CTR loss confirms it.`,
-        });
-      } else if (!hasBaseline && freq > 4 && slopeCTR3 < -0.01) {
-        push('creative_fatigue', {
-          severity: 'warn',
-          strength: 0.55,
-          trigger: 'freq>4 AND slopeCTR3d<-0.01 (baseline unavailable)',
-          metricEvidence: { frequency: freq, ctrSlope3d: slopeCTR3 },
-          reasoning: `Frequency ${freq.toFixed(1)} is high and CTR is falling ${Math.abs(slopeCTR3).toFixed(2)}pp/day. Not enough history for this campaign to compare against its own baseline — confidence moderate.`,
+          reasoning: `Frequency ${freq.toFixed(1)} is ${((ratio - 1) * 100).toFixed(0)}% above this campaign's recent daily-observation baseline of ${emaFreq7.toFixed(1)}, and CTR fell ${Math.abs(slopeCTR3).toFixed(2)} percentage points per daily observation across ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. The audience is seeing these creatives too often — CTR loss confirms it.`,
         });
       }
     }
@@ -240,22 +266,24 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       });
     }
 
-    // ── ctr_decay — CTR falling fast vs OWN 7d baseline ─────────────
+    // ── ctr_decay — CTR falling fast vs recent daily baseline ────────
     if (!skipPerfStage && hasBaseline && emaCTR7 > 0 && ctr > 0) {
       const drop = 1 - ctr / emaCTR7;
       if (drop >= 0.35) {
         push('ctr_decay', {
           severity: drop >= 0.5 ? 'critical' : 'warn',
           strength: Math.min(1, drop),
-          trigger: 'ctr<0.65*baseline',
+          trigger: 'ctr<0.65*recentDailyBaseline',
           metricEvidence: {
             ctr,
             ctrBaseline: emaCTR7,
             dropPct: round(drop, 3),
+            trendObservationCount,
+            trendElapsedDays,
           },
           // ctr/emaCTR7 are already percentage-point numbers (Meta's own
           // convention: 0.95 means 0.95%), not a 0-1 fraction — no *100 here.
-          reasoning: `CTR is ${ctr.toFixed(2)}%, ${(drop * 100).toFixed(0)}% below this campaign's own 7-day baseline of ${emaCTR7.toFixed(2)}%. People are clicking less than they did on the same ad recently.`,
+          reasoning: `CTR is ${ctr.toFixed(2)}%, ${(drop * 100).toFixed(0)}% below this campaign's recent daily-observation baseline of ${emaCTR7.toFixed(2)}%, based on ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. People are clicking less than they did on the same ad recently.`,
         });
       }
     }
@@ -280,16 +308,18 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       roas > 0
     ) {
       const gap = breakevenROAS - roas;
+      const relativeGap = gap / breakevenROAS;
       const contribMarginProxy = revenueData.derivation?.marginPct ?? 0.4;
       const lossPerRupee = gap * contribMarginProxy;
       push('unprofitable_run', {
-        severity: 'critical',
-        strength: Math.min(1, gap / breakevenROAS),
+        severity: relativeGap >= 0.3 ? 'critical' : 'warn',
+        strength: Math.min(1, relativeGap),
         trigger: 'roas<breakevenROAS AND spend>500',
         metricEvidence: {
           roas,
           breakevenROAS,
           gap: round(gap, 3),
+          relativeGap: round(relativeGap, 3),
           spend,
         },
         reasoning:
@@ -299,24 +329,33 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       });
     }
 
-    // ── winner_emerging — clearly above breakeven, making real progress toward the profit target
+    // ── winner_emerging — clearly above breakeven and moving toward the
+    // system's scale heuristic
     if (roas >= breakevenROAS * 1.3 && purchases >= 5 && breakevenROAS > 0) {
       const marginPct = revenueData.derivation?.marginPct ?? 0.4;
       const profitPerRupee = (roas - breakevenROAS) * marginPct;
-      const pctToTarget = targetROAS > breakevenROAS
-        ? Math.min(1, (roas - breakevenROAS) / (targetROAS - breakevenROAS))
-        : 1;
+      const pctToTarget =
+        targetROAS > breakevenROAS
+          ? Math.min(1, (roas - breakevenROAS) / (targetROAS - breakevenROAS))
+          : 1;
       push('winner_emerging', {
         severity: 'info',
         strength: Math.min(1, roas / breakevenROAS / 2),
         trigger: 'roas>=breakevenROAS*1.3 AND purchases>=5',
-        metricEvidence: { roas, breakevenROAS, targetROAS, purchases, slopeROAS7 },
-        reasoning: `ROAS ${roas.toFixed(2)}× is 30% or more above breakeven ${breakevenROAS.toFixed(2)}× with ${purchases} conversions — ${Math.round(pctToTarget * 100)}% of the way to the ${targetROAS.toFixed(2)}× profit target. Each ₹1 in creates roughly ₹${profitPerRupee.toFixed(2)} of contribution profit. Scale candidate.`,
+        metricEvidence: {
+          roas,
+          breakevenROAS,
+          targetROAS,
+          purchases,
+        },
+        reasoning: `ROAS ${roas.toFixed(2)}× is 30% or more above breakeven ${breakevenROAS.toFixed(2)}× with ${purchases} conversions — ${Math.round(pctToTarget * 100)}% of the way to the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Each ₹1 in creates roughly ₹${profitPerRupee.toFixed(2)} of contribution profit. Scale candidate.`,
       });
     }
 
-    // ── winner_confirmed — actually AT the profit target (not a breakeven multiple), sustained volume + non-negative slope
+    // ── winner_confirmed — at the system's scale heuristic, sustained
+    // volume, and non-negative trend backed by real elapsed daily history.
     if (
+      hasBaseline &&
       roas >= targetROAS &&
       purchases >= 20 &&
       breakevenROAS > 0 &&
@@ -325,9 +364,18 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       push('winner_confirmed', {
         severity: 'info',
         strength: 1,
-        trigger: 'roas>=targetROAS AND purchases>=20 AND slopeROAS7d>=0',
-        metricEvidence: { roas, breakevenROAS, targetROAS, purchases, slopeROAS7 },
-        reasoning: `${purchases} conversions at ${roas.toFixed(2)}× ROAS — at or above the ${targetROAS.toFixed(2)}× profit target (not just breakeven-safe) — with ROAS trend non-negative over 7 days. Confirmed winner — protect and scale.`,
+        trigger:
+          'roas>=systemScaleHeuristic AND purchases>=20 AND recentDailyROASTrend>=0',
+        metricEvidence: {
+          roas,
+          breakevenROAS,
+          targetROAS,
+          purchases,
+          roasSlopePerDailyObservation: slopeROAS7,
+          trendObservationCount,
+          trendElapsedDays,
+        },
+        reasoning: `${purchases} conversions at ${roas.toFixed(2)}× ROAS — at or above the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target) — with ROAS non-declining across ${trendObservationCount} daily observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. Confirmed scale candidate.`,
       });
     }
 
@@ -352,12 +400,14 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       push('audience_exhaustion', {
         severity: 'warn',
         strength: Math.min(1, Math.abs(slopeROAS7)),
-        trigger: 'slopeROAS7d<-0.05 AND slopeSpend7d>0',
+        trigger: 'recentDailyROASTrend<-0.05 AND recentDailySpendTrend>0',
         metricEvidence: {
-          slopeROAS7d: slopeROAS7,
-          slopeSpend7d: slopeSpend7,
+          roasSlopePerDailyObservation: slopeROAS7,
+          spendSlopePerDailyObservation: slopeSpend7,
+          trendObservationCount,
+          trendElapsedDays,
         },
-        reasoning: `ROAS is dropping at ${(Math.abs(slopeROAS7) * 100).toFixed(1)}% per day while spend continues to grow. Meta is reaching further into the audience pool to spend the budget — the cheap high-intent buyers are exhausted.`,
+        reasoning: `ROAS is falling across ${trendObservationCount} daily observations spanning ${trendElapsedDays.toFixed(1)} elapsed days while spend continues to grow. Meta is reaching further into the audience pool to spend the budget — the cheap high-intent buyers may be exhausted.`,
       });
     }
 
@@ -380,14 +430,17 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       push('audience_saturation', {
         severity: freq >= 4 ? 'critical' : 'warn',
         strength: Math.min(1, (freq - 2.5) / 3),
-        trigger: 'reach flat vs baseline AND freq>=2.5 AND slopeSpend7d>0',
+        trigger:
+          'reach flat across recentDailyObservations AND freq>=2.5 AND recentDailySpendTrend>0',
         metricEvidence: {
           reach: emaReach7,
-          slopeReach7d: slopeReach7,
+          reachSlopePerDailyObservation: slopeReach7,
           frequency: freq,
-          slopeSpend7d: slopeSpend7,
+          spendSlopePerDailyObservation: slopeSpend7,
+          trendObservationCount,
+          trendElapsedDays,
         },
-        reasoning: `Reach has stopped growing (~${emaReach7.toFixed(0)} people, flat over 7 days) while frequency is already ${freq.toFixed(1)} and spend keeps rising. The extra budget is buying repeat impressions on the same audience, not new people.`,
+        reasoning: `Reach stayed near ${emaReach7.toFixed(0)} people across ${trendObservationCount} daily observations spanning ${trendElapsedDays.toFixed(1)} elapsed days while frequency is ${freq.toFixed(1)} and spend keeps rising. The extra budget is buying repeat impressions on the same audience, not new people.`,
       });
     }
 
@@ -409,10 +462,14 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
           .findById(ident.campaignId)
           .select('metaAdSets metaCampaignId')
           .lean()
-          .exec()) as { metaAdSets?: Array<{ id?: string; status?: string }>; metaCampaignId?: string } | null;
+          .exec()) as {
+          metaAdSets?: Array<{ id?: string; status?: string }>;
+          metaCampaignId?: string;
+        } | null;
         metaCampaignId = c?.metaCampaignId;
         for (const as of c?.metaAdSets ?? []) {
-          if (as.id && as.status) adSetStatuses.set(as.id, String(as.status).toUpperCase());
+          if (as.id && as.status)
+            adSetStatuses.set(as.id, String(as.status).toUpperCase());
         }
       } catch {
         // non-fatal — we just won't be able to filter by status
@@ -439,10 +496,11 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
         // unprofitable_run — adset below breakeven with meaningful spend
         if (asSpend > 300 && asRoas > 0 && asRoas < breakevenROAS) {
           const gap = breakevenROAS - asRoas;
+          const relativeGap = gap / breakevenROAS;
           const lossPerRupee = gap * marginPct;
           push('unprofitable_run', {
-            severity: gap > 0.3 ? 'critical' : 'warn',
-            strength: Math.min(1, gap / breakevenROAS),
+            severity: relativeGap >= 0.3 ? 'critical' : 'warn',
+            strength: Math.min(1, relativeGap),
             targetType: 'adset',
             target: adSetId,
             trigger: 'adset.roas<breakevenROAS AND adset.spend>300',
@@ -450,6 +508,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
               roas: asRoas,
               breakevenROAS,
               gap: round(gap, 3),
+              relativeGap: round(relativeGap, 3),
               spend: asSpend,
               purchases: asPurchases,
             },
@@ -457,12 +516,17 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
           });
         }
 
-        // winner_emerging — adset clearly above breakeven, making progress toward the profit target
+        // winner_emerging — adset clearly above breakeven, making progress
+        // toward the system's scale heuristic
         if (asRoas >= breakevenROAS * 1.3 && asPurchases >= 3) {
           const profitPerRupee = (asRoas - breakevenROAS) * marginPct;
-          const pctToTarget = targetROAS > breakevenROAS
-            ? Math.min(1, (asRoas - breakevenROAS) / (targetROAS - breakevenROAS))
-            : 1;
+          const pctToTarget =
+            targetROAS > breakevenROAS
+              ? Math.min(
+                  1,
+                  (asRoas - breakevenROAS) / (targetROAS - breakevenROAS),
+                )
+              : 1;
           push('winner_emerging', {
             severity: 'info',
             strength: Math.min(1, asRoas / breakevenROAS / 2),
@@ -476,11 +540,12 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
               purchases: asPurchases,
               spend: asSpend,
             },
-            reasoning: `This ad group is at ${asRoas.toFixed(2)}× ROAS with ${asPurchases} purchases — 30%+ above breakeven ${breakevenROAS.toFixed(2)}×, ${Math.round(pctToTarget * 100)}% of the way to the ${targetROAS.toFixed(2)}× profit target. Each ₹1 here creates roughly ₹${profitPerRupee.toFixed(2)} of contribution profit. Scale candidate.`,
+            reasoning: `This ad group is at ${asRoas.toFixed(2)}× ROAS with ${asPurchases} purchases — 30%+ above breakeven ${breakevenROAS.toFixed(2)}×, ${Math.round(pctToTarget * 100)}% of the way to the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Each ₹1 here creates roughly ₹${profitPerRupee.toFixed(2)} of contribution profit. Scale candidate.`,
           });
         }
 
-        // winner_confirmed — actually AT the profit target at adset level, sustained volume
+        // winner_confirmed — at the system scale heuristic at adset level,
+        // with sustained volume
         if (asRoas >= targetROAS && asPurchases >= 10) {
           push('winner_confirmed', {
             severity: 'info',
@@ -494,7 +559,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
               targetROAS,
               purchases: asPurchases,
             },
-            reasoning: `Ad group has ${asPurchases} purchases at ${asRoas.toFixed(2)}× ROAS — at or above the ${targetROAS.toFixed(2)}× profit target. Confirmed winner.`,
+            reasoning: `Ad group has ${asPurchases} purchases at ${asRoas.toFixed(2)}× ROAS — at or above the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Confirmed scale candidate.`,
           });
         }
 
@@ -549,7 +614,13 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
         // No per-adset historical baseline exists, so the campaign-wide
         // emaCTR7 is used as the comparison point: this adset is under-
         // performing what this campaign's creatives typically do.
-        if (!skipPerfStage && hasBaseline && emaCTR7 > 0 && asImpressions >= 500 && asCtr > 0) {
+        if (
+          !skipPerfStage &&
+          hasBaseline &&
+          emaCTR7 > 0 &&
+          asImpressions >= 500 &&
+          asCtr > 0
+        ) {
           const asDrop = 1 - asCtr / emaCTR7;
           if (asDrop >= 0.35) {
             push('ctr_decay', {
@@ -557,15 +628,18 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
               strength: Math.min(1, asDrop),
               targetType: 'adset',
               target: adSetId,
-              trigger: 'adset.ctr<0.65*campaignBaseline AND adset.impressions>=500',
+              trigger:
+                'adset.ctr<0.65*campaignRecentDailyBaseline AND adset.impressions>=500',
               metricEvidence: {
                 ctr: asCtr,
                 ctrBaseline: emaCTR7,
                 dropPct: round(asDrop, 3),
                 impressions: asImpressions,
+                trendObservationCount,
+                trendElapsedDays,
               },
               // asCtr/emaCTR7 are already percentage-point numbers — no *100.
-              reasoning: `This ad group's CTR is ${asCtr.toFixed(2)}%, ${(asDrop * 100).toFixed(0)}% below the campaign's own 7-day baseline of ${emaCTR7.toFixed(2)}%. Its creative is underperforming what this campaign typically gets.`,
+              reasoning: `This ad group's CTR is ${asCtr.toFixed(2)}%, ${(asDrop * 100).toFixed(0)}% below the campaign's recent daily-observation baseline of ${emaCTR7.toFixed(2)}%, based on ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. Its creative is underperforming what this campaign recently gets.`,
             });
           }
         }
@@ -573,21 +647,33 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
         // creative_fatigue — adset frequency elevated vs campaign baseline
         // AND campaign-wide CTR trend declining. Same baseline-proxy
         // reasoning as ctr_decay above: no per-adset EMA exists yet.
-        if (!skipPerfStage && hasBaseline && emaFreq7 > 0 && asFreq / emaFreq7 >= 1.4 && slopeCTR3 < -0.005) {
+        if (
+          !skipPerfStage &&
+          hasBaseline &&
+          emaFreq7 > 0 &&
+          asFreq / emaFreq7 >= 1.4 &&
+          slopeCTR3 < -0.005
+        ) {
           const asRatio = asFreq / emaFreq7;
           push('creative_fatigue', {
             severity: asFreq > 4 ? 'critical' : 'warn',
-            strength: Math.min(1, (asRatio - 1) * 0.8 + Math.min(1, Math.abs(slopeCTR3) * 40)),
+            strength: Math.min(
+              1,
+              (asRatio - 1) * 0.8 + Math.min(1, Math.abs(slopeCTR3) * 40),
+            ),
             targetType: 'adset',
             target: adSetId,
-            trigger: 'adset.freq/campaignBase>=1.4 AND campaign.slopeCTR3d<-0.005',
+            trigger:
+              'adset.freq/campaignRecentDailyBase>=1.4 AND campaign.recentDailyCTRTrend<-0.005',
             metricEvidence: {
               frequency: asFreq,
               frequencyBaseline: emaFreq7,
-              ctrSlope3d: slopeCTR3,
+              ctrSlopePerDailyObservation: slopeCTR3,
+              trendObservationCount,
+              trendElapsedDays,
             },
             // slopeCTR3 is already in ctr's own percentage-point units — no *100.
-            reasoning: `This ad group's frequency is ${asFreq.toFixed(1)}, ${((asRatio - 1) * 100).toFixed(0)}% above the campaign's own 7-day baseline of ${emaFreq7.toFixed(1)}, while campaign-wide CTR is dropping ${Math.abs(slopeCTR3).toFixed(2)}pp/day. This group's audience is likely seeing its creative too often.`,
+            reasoning: `This ad group's frequency is ${asFreq.toFixed(1)}, ${((asRatio - 1) * 100).toFixed(0)}% above the campaign's recent daily-observation baseline of ${emaFreq7.toFixed(1)}, while campaign-wide CTR fell ${Math.abs(slopeCTR3).toFixed(2)} percentage points per daily observation across ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. This group's audience is likely seeing its creative too often.`,
           });
         }
       }
@@ -636,7 +722,14 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     // Uses breakdown_snapshots (populated by the separate deep-sync cron,
     // not re-fetched here) rather than a live Meta call — this data already
     // exists, no reason to hit the API again for it.
-    if (!skipPerfStage && this.breakdownModel && ident?.tenantId && metaCampaignId && roas > 0 && spend > 0) {
+    if (
+      !skipPerfStage &&
+      this.breakdownModel &&
+      ident?.tenantId &&
+      metaCampaignId &&
+      roas > 0 &&
+      spend > 0
+    ) {
       try {
         const bd = await this.breakdownModel
           .findOne({
@@ -660,7 +753,8 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
             push('placement_leak', {
               severity: rowRoas < breakevenROAS * 0.5 ? 'critical' : 'warn',
               strength: Math.min(1, (roas - rowRoas) / roas),
-              trigger: 'placement.spendShare>=0.15 AND placement.roas<campaignROAS*0.5',
+              trigger:
+                'placement.spendShare>=0.15 AND placement.roas<campaignROAS*0.5',
               metricEvidence: {
                 placementRoas: rowRoas,
                 placementSpend: rowSpend,
@@ -689,7 +783,10 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     return Math.max(0.55, avgStrength);
   }
 
-  protected buildEvidence(_deps: ComputeDeps<'signal'>, data: SignalData): Evidence[] {
+  protected buildEvidence(
+    _deps: ComputeDeps<'signal'>,
+    data: SignalData,
+  ): Evidence[] {
     return [
       {
         kind: 'snapshot',

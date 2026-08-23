@@ -48,7 +48,11 @@ export interface SnapshotData {
     adLevel: Record<string, AdMetricSet>;
   };
   meta: {
-    learningStage?: 'LEARNING' | 'LEARNING_LIMITED' | 'ACTIVE' | 'NOT_DELIVERING';
+    learningStage?:
+      | 'LEARNING'
+      | 'LEARNING_LIMITED'
+      | 'ACTIVE'
+      | 'NOT_DELIVERING';
     deliveryStatus?: string;
     accountId: string;
     /**
@@ -63,6 +67,8 @@ export interface SnapshotData {
      * exist precisely so they are NOT scored on ROAS.
      */
     objective?: string;
+    /** Scope of campaign-level totals supplied by the source adapter. */
+    metricScope?: 'lifetime' | 'window';
   };
   missingFields: string[];
 }
@@ -127,6 +133,13 @@ export interface RawMetaBundle {
   ads: Record<string, RawMetaAd>;
   metaWindowStart: Date;
   metaWindowEnd: Date;
+  /**
+   * When the persisted source metrics were actually synchronized. `null`
+   * explicitly means unknown; absence preserves the legacy/live-fetch
+   * contract where metaWindowEnd is the source timestamp.
+   */
+  sourceMetricsSyncedAt?: Date | null;
+  metricScope?: 'lifetime' | 'window';
 }
 
 /**

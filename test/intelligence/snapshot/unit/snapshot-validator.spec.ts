@@ -29,7 +29,11 @@ function makeSnapshot(overrides: Partial<SnapshotData> = {}): SnapshotData {
       adSetLevel: {},
       adLevel: {},
     },
-    meta: { accountId: 'act', learningStage: 'ACTIVE', deliveryStatus: 'ACTIVE' },
+    meta: {
+      accountId: 'act',
+      learningStage: 'ACTIVE',
+      deliveryStatus: 'ACTIVE',
+    },
     missingFields: [],
     ...overrides,
   };
@@ -48,7 +52,9 @@ describe('SnapshotValidator.validate', () => {
   });
 
   it('completeness score reflects fraction of expected fields missing', () => {
-    const r = v.validate(makeSnapshot({ missingFields: ['spend', 'impressions'] }));
+    const r = v.validate(
+      makeSnapshot({ missingFields: ['spend', 'impressions'] }),
+    );
     // 5 expected, 2 missing → completeness = 0.6
     expect(r.scores.completeness).toBeCloseTo(0.6, 3);
     expect(r.ok).toBe(false);
@@ -70,9 +76,15 @@ describe('SnapshotValidator.validate', () => {
     expect(r.scores.freshness).toBeLessThan(0.6);
   });
 
-  it('emits stale warning when > 60min old', () => {
-    const r = v.validate(makeSnapshot({ freshnessSec: 5000 }));
+  it('emits stale warning at the 60-minute action boundary', () => {
+    const r = v.validate(makeSnapshot({ freshnessSec: 3600 }));
     expect(r.warnings).toContain('stale_snapshot');
+  });
+
+  it('scores explicitly unknown source freshness as zero', () => {
+    const r = v.validate(makeSnapshot({ freshnessSec: -1 }));
+    expect(r.warnings).toContain('stale_snapshot');
+    expect(r.scores.freshness).toBe(0);
   });
 
   it('emits ad_breakdown_missing when adset level populated but ad level empty', () => {

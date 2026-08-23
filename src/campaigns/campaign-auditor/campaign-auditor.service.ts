@@ -168,14 +168,28 @@ export class CampaignAuditorService {
     const freshCampaign = await this.campaignModel
       .findOne({ _id: campaign._id })
       .exec();
-    if (!freshCampaign) return;
+    if (!freshCampaign) {
+      throw new Error(`Campaign ${campaign._id} not found during execution`);
+    }
 
     const pendingActions = (freshCampaign as any).pendingActions ?? [];
     const action = pendingActions.find((a: any) => a.actionId === actionId);
-    if (!action || action.status !== 'executed') return;
+    if (!action) throw new Error(`Approved action ${actionId} not found`);
+    if (action.status !== 'executed') {
+      throw new Error(
+        `Approved action ${actionId} is ${action.status}, not ready to execute`,
+      );
+    }
 
     // Re-run executePendingActions — it will pick up this action since status is 'executed'
-    await this.executePendingActions(freshCampaign, company);
+    const applied = await this.executePendingActions(
+      freshCampaign,
+      company,
+      actionId,
+    );
+    if (!applied) {
+      throw new Error(`Approved action ${actionId} was not applied`);
+    }
   }
 
   /**
@@ -203,6 +217,12 @@ export class CampaignAuditorService {
       metrics: Record<string, unknown>;
     },
   ): Promise<void> {
+    if (action.type === 'add_adset') {
+      throw new Error(
+        'add_adset is review-only: the required audience, product, landing-page, budget, and creative launch contract is not complete',
+      );
+    }
+
     const campaign = await this.campaignModel
       .findOne({ tenantId, _id: campaignId })
       .exec();
@@ -232,12 +252,25 @@ export class CampaignAuditorService {
       );
     }
 
-    await this.campaignsService.executeAction(
-      tenantId,
-      campaignId,
-      action.actionId,
-    );
-    await this.executeApprovedAction(campaign, company, action.actionId);
+    try {
+      await this.campaignsService.executeAction(
+        tenantId,
+        campaignId,
+        action.actionId,
+      );
+      await this.executeApprovedAction(campaign, company, action.actionId);
+    } catch (err) {
+      // `executeAction` uses status='executed' as a pre-execution approval
+      // marker. If the actual Meta operation fails or is skipped, remove the
+      // external bridge row so campaign history cannot claim it executed and a
+      // later audit cannot auto-run it behind the review endpoint's back. The
+      // IntelligenceDecision remains the authoritative failed-attempt record.
+      await this.campaignModel.updateOne(
+        { tenantId, _id: campaignId },
+        { $pull: { pendingActions: { actionId: action.actionId } } },
+      );
+      throw err;
+    }
   }
 
   async audit(tenantId: string): Promise<AuditResult> {
@@ -467,9 +500,21 @@ export class CampaignAuditorService {
 
     const full = buildFullMetricsFromPersisted(campaign);
     const [byPlacement, byHour, byDayOfWeek] = await Promise.all([
-      readPlacementBreakdown(this.breakdownModel, company.tenantId, campaign.metaCampaignId),
-      readHourlyBreakdown(this.breakdownModel, company.tenantId, campaign.metaCampaignId),
-      readDayOfWeekBreakdown(this.breakdownModel, company.tenantId, campaign.metaCampaignId),
+      readPlacementBreakdown(
+        this.breakdownModel,
+        company.tenantId,
+        campaign.metaCampaignId,
+      ),
+      readHourlyBreakdown(
+        this.breakdownModel,
+        company.tenantId,
+        campaign.metaCampaignId,
+      ),
+      readDayOfWeekBreakdown(
+        this.breakdownModel,
+        company.tenantId,
+        campaign.metaCampaignId,
+      ),
     ]);
 
     // ── Data-staleness gate ───────────────────────────────────────────────────
@@ -924,7 +969,6 @@ export class CampaignAuditorService {
         const isAdditive = action.type === 'add_creative';
         const isAllocationGrowth =
           action.type === 'scale_adset' || action.type === 'add_adset';
-        const isCreativeFix = action.type === 'replace_creative';
         // Throttle = less destructive than pause. The auditor prompt explicitly tells the LLM
         // to use these for safety-rail breaches in day 0-3 (e.g. budget cap creep). If a
         // high-priority pause is allowed through, a high-priority throttle must be too —
@@ -1058,7 +1102,7 @@ export class CampaignAuditorService {
 
       // Send Slack digest for "act" verdict
       try {
-        await this.sendAuditDigest(campaign, company, verdict, signals);
+        await this.sendAuditDigest(campaign, company, verdict);
       } catch (slackErr: any) {
         this.logger.error(
           `Audit Slack digest failed — actions still created: ${slackErr.message}`,
@@ -1741,12 +1785,15 @@ export class CampaignAuditorService {
   private async executePendingActions(
     campaign: CampaignDocument,
     company: CompanyDocument,
-  ): Promise<void> {
+    requestedActionId?: string,
+  ): Promise<boolean> {
     const pendingActions = (campaign as any).pendingActions ?? [];
     const now = new Date();
     let updated = false;
+    let requestedActionApplied = false;
 
     for (const action of pendingActions) {
+      if (requestedActionId && action.actionId !== requestedActionId) continue;
       if (action.status !== 'pending' && action.status !== 'executed') continue;
       // Only execute if manually triggered (status = 'executed') or grace period expired
       const graceExpired = new Date(action.executeAt) <= now;
@@ -1789,9 +1836,10 @@ export class CampaignAuditorService {
           const toAdSetId = action.metrics?.toAdSetId;
           const shiftPercent = Number(action.metrics?.shiftPercent);
           if (!toAdSetId) {
-            this.logger.warn(
-              `shift_budget action missing metrics.toAdSetId — skipping`,
-            );
+            const message =
+              'shift_budget action missing metrics.toAdSetId — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.shiftBudgetBetweenAdSets(
@@ -1806,9 +1854,10 @@ export class CampaignAuditorService {
           // so it's lower-risk than scale_adset; explicit cap of 50% reduction in optimizer.
           const reductionPct = Number(action.metrics?.reductionPercent);
           if (!Number.isFinite(reductionPct) || reductionPct <= 0) {
-            this.logger.warn(
-              `reduce_total_budget missing/invalid reductionPercent — skipping`,
-            );
+            const message =
+              'reduce_total_budget missing/invalid reductionPercent — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.reduceTotalBudget(
@@ -1823,9 +1872,10 @@ export class CampaignAuditorService {
             !Array.isArray(publisherPlatforms) ||
             publisherPlatforms.length === 0
           ) {
-            this.logger.warn(
-              `narrow_placement missing publisherPlatforms — skipping`,
-            );
+            const message =
+              'narrow_placement missing publisherPlatforms — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.narrowAdSetPlacement(
@@ -1845,7 +1895,9 @@ export class CampaignAuditorService {
           // Restrict delivery hours — reversible (schedule can be cleared).
           const schedule = action.metrics?.schedule;
           if (!Array.isArray(schedule) || schedule.length === 0) {
-            this.logger.warn(`dayparting missing schedule — skipping`);
+            const message = 'dayparting missing schedule — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.daypartAdSet(
@@ -1864,9 +1916,10 @@ export class CampaignAuditorService {
           const sourceCtrTrend =
             action.metrics?.sourceCtrTrend ?? 'insufficient_data';
           if (!newAudienceId && !useAdvantagePlus) {
-            this.logger.warn(
-              `refresh_audience missing newAudienceId / useAdvantagePlus — skipping`,
-            );
+            const message =
+              'refresh_audience missing newAudienceId / useAdvantagePlus — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.refreshAudience(
@@ -1994,8 +2047,10 @@ export class CampaignAuditorService {
           // conversion) and for the new ad's landing page, so this can't
           // point at a different product's pixel or URL the way
           // `products.find(p => p.active)` used to (see note further down).
-          const { resolution: adSetProductResolution, error: adSetProductError } =
-            tryResolveCampaignProduct(company, campaign as any, null);
+          const {
+            resolution: adSetProductResolution,
+            error: adSetProductError,
+          } = tryResolveCampaignProduct(company, campaign as any, null);
           const adSetProduct = adSetProductResolution?.product;
 
           // For retarget: find an existing retarget/custom audience from the product
@@ -2050,16 +2105,16 @@ export class CampaignAuditorService {
             (campaign as any).campaignConfig?.adSets?.[0]?.creativeFormat ===
               'carousel';
           if (sourceWasCarousel) {
-            this.logger.warn(
-              `Skipping add_adset on carousel campaign ${campaign._id} — auto-clone of carousel ad sets not yet supported. Operator should clone manually if desired.`,
-            );
+            const message = `Skipping add_adset on carousel campaign ${campaign._id} — auto-clone of carousel ad sets not yet supported. Operator should clone manually if desired.`;
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
 
           if (!bestVariant) {
-            this.logger.warn(
-              `No copy variant ${bestVariantIndex} found for add_adset — skipping`,
-            );
+            const message = `No copy variant ${bestVariantIndex} found for add_adset — skipping`;
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
 
@@ -2204,11 +2259,14 @@ export class CampaignAuditorService {
           this.logger.log(
             `New ${audienceType} ad set created: ${newAdSetId}${newAdId ? ` with ad ${newAdId}` : ' (no ad — missing image, or product unresolved; see errors above)'}`,
           );
+        } else {
+          throw new Error(`Unsupported pending action type: ${action.type}`);
         }
 
         action.status = 'executed';
         action.executedAt = now;
         updated = true;
+        if (requestedActionId) requestedActionApplied = true;
 
         // Measure what this action actually did: anchor metrics now, re-measure
         // at +24h/+72h via the shadow-eval job, label improved/worsened. Without
@@ -2281,6 +2339,7 @@ export class CampaignAuditorService {
         );
       } catch (err: any) {
         this.logger.error(`Failed to execute pending action: ${err.message}`);
+        if (requestedActionId) throw err;
       }
     }
 
@@ -2290,6 +2349,7 @@ export class CampaignAuditorService {
         { pendingActions, adSets: (campaign as any).adSets },
       );
     }
+    return requestedActionApplied;
   }
 
   /**
@@ -2340,7 +2400,6 @@ ${lines}
     campaign: CampaignDocument,
     company: CompanyDocument,
     verdict: AuditVerdict,
-    signals: any,
   ): Promise<void> {
     const slackWebhook = company.delivery?.slackWebhook;
     if (!slackWebhook) return;

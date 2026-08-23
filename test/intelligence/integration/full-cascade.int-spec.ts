@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { BullRegistrar } from '@nestjs/bullmq';
 import { MongooseModule } from '@nestjs/mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -82,7 +83,10 @@ describe('Full 16-engine cascade (integration)', () => {
         MongooseModule.forRoot(mongo.getUri()),
         IntelligenceSharedModule,
         SnapshotModule.forFeature({
-          fetcherProvider: { provide: META_SNAPSHOT_FETCHER, useValue: stubFetcher },
+          fetcherProvider: {
+            provide: META_SNAPSHOT_FETCHER,
+            useValue: stubFetcher,
+          },
         }),
         ObjectiveModule,
         LifecycleModule,
@@ -100,7 +104,14 @@ describe('Full 16-engine cascade (integration)', () => {
         ExecutionModule,
         LearningModule,
       ],
-    }).compile();
+    })
+      // BusinessModule and MemoryModule reach legacy modules that register
+      // BullMQ processors. The cascade is driven directly through its event
+      // bus in this test, so prevent those unrelated workers from connecting
+      // to an external Redis instance during module initialisation.
+      .overrideProvider(BullRegistrar)
+      .useValue({ onModuleInit: () => undefined })
+      .compile();
     await moduleRef.init();
 
     orchestrator = moduleRef.get(IntelligenceOrchestrator);
@@ -137,16 +148,18 @@ describe('Full 16-engine cascade (integration)', () => {
   });
 
   it('cascades an opened cycle through all 16 engines', async () => {
-    const cycleCompleted = new Promise<{ cycleId: string }>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('timeout waiting for cycle.completed')),
-        15000,
-      );
-      emitter.once('intelligence.cycle.completed', (p) => {
-        clearTimeout(timer);
-        resolve(p);
-      });
-    });
+    const cycleCompleted = new Promise<{ cycleId: string }>(
+      (resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('timeout waiting for cycle.completed')),
+          15000,
+        );
+        emitter.once('intelligence.cycle.completed', (p) => {
+          clearTimeout(timer);
+          resolve(p);
+        });
+      },
+    );
 
     const dc = await orchestrator.openCycle({
       tenantId: 'astro',

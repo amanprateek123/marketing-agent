@@ -539,18 +539,39 @@ export class DashboardService {
           ...openWithEstimate.map((d) => Number(d.expectedProfitDeltaINR7d)),
         )
       : null;
-    const examples = openWithEstimate
+    const examples = (decisions as any[])
+      .filter((d) => d.status === 'shadow_review')
       .sort(
         (a, b) =>
-          Number(b.expectedProfitDeltaINR7d) -
-          Number(a.expectedProfitDeltaINR7d),
+          Number(b.decisionContractVersion === 'goal_aware_v1') -
+            Number(a.decisionContractVersion === 'goal_aware_v1') ||
+          Number(b.score ?? 0) - Number(a.score ?? 0),
       )
       .slice(0, 5)
       .map((d) => ({
+        decisionId: String(d._id),
+        campaignId: String(d.campaignId),
         campaignName: d.campaignName ?? 'Unknown campaign',
         actionType: d.actionType,
         reasoning: d.reasoning ?? '',
         expectedProfitDeltaINR7d: round(Number(d.expectedProfitDeltaINR7d), 2),
+        decisionContractVersion: d.decisionContractVersion,
+        objective: d.objective,
+        primaryKPI: d.primaryKPI,
+        expectedImpact:
+          d.expectedImpact &&
+          typeof d.expectedImpact.metric === 'string' &&
+          Number.isFinite(Number(d.expectedImpact.deltaPct)) &&
+          Number.isFinite(Number(d.expectedImpact.confidence))
+            ? {
+                metric: d.expectedImpact.metric,
+                deltaPct: round(Number(d.expectedImpact.deltaPct), 2),
+                confidence: round(Number(d.expectedImpact.confidence), 4),
+              }
+            : undefined,
+        confidence: Number.isFinite(Number(d.confidence))
+          ? round(Number(d.confidence), 4)
+          : undefined,
         isModelEstimate: true as const,
         status: d.status,
       }));

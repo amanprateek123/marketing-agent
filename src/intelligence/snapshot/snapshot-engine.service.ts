@@ -36,10 +36,7 @@ import { ProductForRevenue, SnapshotData } from './snapshot.types';
  * will call.
  */
 @Injectable()
-export class SnapshotEngine extends BaseEngine<
-  'snapshot',
-  SnapshotData
-> {
+export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
   readonly name = 'snapshot' as const;
   readonly step = 1;
   readonly version = '1.0.0';
@@ -50,13 +47,13 @@ export class SnapshotEngine extends BaseEngine<
   // captureForCycle, drained in its finally block.
   private readonly identity = new Map<
     string,
-    { tenantId: string; campaignId: string; metaCampaignId: string; products: ProductForRevenue[] }
+    {
+      tenantId: string;
+      campaignId: string;
+      metaCampaignId: string;
+      products: ProductForRevenue[];
+    }
   >();
-
-  // The cycleId currently in-flight for this instance. compute() reads
-  // this to look up its identity. BullMQ processes jobs serially per
-  // worker so a single field is safe.
-  private currentCycleId?: string;
 
   constructor(
     sliceRepo: SliceRepository,
@@ -132,12 +129,10 @@ export class SnapshotEngine extends BaseEngine<
       metaCampaignId: input.metaCampaignId,
       products: input.products,
     });
-    this.currentCycleId = input.cycleId;
     try {
       await this.execute(input.cycleId);
     } finally {
       this.identity.delete(input.cycleId);
-      this.currentCycleId = undefined;
     }
   }
 
@@ -158,16 +153,20 @@ export class SnapshotEngine extends BaseEngine<
     await this.captureForCycle(payload);
   }
 
-  protected async compute(): Promise<SnapshotData> {
-    // Identity for the current cycleId was stored by captureForCycle.
-    // BaseEngine.execute() runs single-threaded per invocation on a
-    // given engine instance, so currentCycleId is the right anchor.
-    if (!this.currentCycleId) {
+  protected async compute(
+    _deps: unknown,
+    cycleId: string,
+  ): Promise<SnapshotData> {
+    // Identity for this exact invocation was stored by captureForCycle.
+    // Do not use a singleton "current cycle": Nest event handlers can
+    // overlap even when a Bull worker normally processes serially.
+    const identity = this.identity.get(cycleId);
+    if (!identity) {
       throw new Error('SnapshotEngine.compute called without cycle identity');
     }
     const anyCycle = {
-      cycleId: this.currentCycleId,
-      ...this.identity.get(this.currentCycleId)!,
+      cycleId,
+      ...identity,
     };
     const bundle = await this.fetcher.fetch({
       tenantId: anyCycle.tenantId,

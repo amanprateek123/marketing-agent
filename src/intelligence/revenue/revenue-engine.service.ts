@@ -13,7 +13,11 @@ import {
   Company,
   CompanyDocument,
 } from '../../companies/schemas/company.schema';
-import { Campaign } from '../../campaigns/schemas/campaign.schema';
+import {
+  Campaign,
+  CampaignRevenueAttributionSource,
+  CampaignRevenueBasis,
+} from '../../campaigns/schemas/campaign.schema';
 import { tryResolveCampaignProduct } from '../../campaigns/campaign-creator/resolve-campaign-product';
 import { parseCampaignName } from '../../dashboard/campaign-name.parser';
 
@@ -26,7 +30,9 @@ import { parseCampaignName } from '../../dashboard/campaign-name.parser';
  *      Requires ≥3 purchases + ≥₹100 spend for stability.
  *   2. CONFIG — product.contributionMargin + refundRatePercent from the
  *      Company doc. Used when observed data is too thin.
- *   3. GENERIC — 40% margin, 0% refund. Last-resort default.
+ *   3. UNAVAILABLE — product identity or contribution margin is unresolved.
+ *      Financial judgements are withheld; the engine never substitutes the
+ *      tenant's first product or a generic margin.
  *
  * The `derivation` field in the output tells downstream engines which
  * rung of the ladder produced these numbers, so signals + recommendations
@@ -39,7 +45,7 @@ export class RevenueEngine extends BaseEngine<
 > {
   readonly name = 'revenue' as const;
   readonly step = 5;
-  readonly version = '1.2.0';
+  readonly version = '1.3.0';
   readonly dependsOn = ['snapshot', 'objective', 'trend'] as const;
 
   private readonly identity = new Map<
@@ -89,6 +95,7 @@ export class RevenueEngine extends BaseEngine<
 
   protected async compute(
     deps: ComputeDeps<'revenue'>,
+    cycleId: string,
   ): Promise<RevenueData & { derivation: RevenueDerivation }> {
     const snap = deps.snapshot!;
     const objective = deps.objective!;
@@ -114,87 +121,158 @@ export class RevenueEngine extends BaseEngine<
     const observedAOV = purchases > 0 ? grossRevenue / purchases : 0;
     const observedCAC = purchases > 0 ? spend / purchases : Infinity;
 
-    // Load product config as PRIOR (not fact).
-    const ident = this.identity.values().next().value;
-    const product = await this.resolveProductForCampaign(
+    const attributedByAdSet: Record<string, number> = {};
+    for (const [id, m] of Object.entries(data.metrics?.adSetLevel ?? {})) {
+      attributedByAdSet[id] = num(m.revenue);
+    }
+
+    // Product identity and stored-return provenance are both decision inputs.
+    // Neither may be inferred from array position: differently-margined
+    // products can coexist within the same tenant.
+    const ident = this.identity.get(cycleId);
+    const resolution = await this.resolveProductForCampaign(
       ident?.tenantId,
       ident?.campaignId,
     );
-    const configMarginPct = clamp(
-      product?.contributionMargin ?? 0.4,
-      0.01,
-      0.99,
+    const product = resolution.product;
+    const revenueQuality = classifyRevenueEvidence(
+      resolution.revenueBasis,
+      resolution.revenueAttributionSource,
+      grossRevenue,
     );
-    const configRefundPct = clamp(
-      (product?.refundRatePercent ?? 0) / 100,
-      0,
-      0.95,
-    );
+    const revenueEvidenceAvailable = revenueQuality !== 'unavailable';
+
+    if (!product) {
+      return this.unavailableEconomics({
+        grossRevenue,
+        purchases,
+        spend,
+        attributedByAdSet,
+        resolution,
+        revenueQuality,
+        reason:
+          resolution.productResolutionError ??
+          'Campaign product could not be resolved without guessing.',
+      });
+    }
+
+    const rawMarginPct = product.contributionMargin;
+    if (
+      rawMarginPct == null ||
+      !Number.isFinite(rawMarginPct) ||
+      rawMarginPct <= 0 ||
+      rawMarginPct > 1
+    ) {
+      return this.unavailableEconomics({
+        grossRevenue,
+        purchases,
+        spend,
+        attributedByAdSet,
+        resolution,
+        revenueQuality,
+        reason:
+          rawMarginPct == null
+            ? `Product "${product.name}" has no contributionMargin configured.`
+            : `Product "${product.name}" has invalid contributionMargin ${String(rawMarginPct)}; expected a decimal greater than 0 and at most 1.`,
+      });
+    }
+
+    const rawRefundRatePercent = product.refundRatePercent ?? 0;
+    if (
+      !Number.isFinite(rawRefundRatePercent) ||
+      rawRefundRatePercent < 0 ||
+      rawRefundRatePercent > 95
+    ) {
+      return this.unavailableEconomics({
+        grossRevenue,
+        purchases,
+        spend,
+        attributedByAdSet,
+        resolution,
+        revenueQuality,
+        reason: `Product "${product.name}" has invalid refundRatePercent ${String(rawRefundRatePercent)}; expected 0 to 95.`,
+      });
+    }
+
+    const configMarginPct = rawMarginPct;
+    const configRefundPct = rawRefundRatePercent / 100;
 
     // Decide rung. Observation is trustworthy when we have enough evidence.
     const enoughObserved = purchases >= 3 && spend >= 100;
 
-    let method: RevenueDerivation['method'];
-    let usedMarginPct = configMarginPct;
+    const method: RevenueDerivation['method'] = enoughObserved
+      ? 'observed'
+      : 'config';
+    const usedMarginPct = configMarginPct;
     const usedRefundPct = configRefundPct;
     const notes: string[] = [];
 
-    if (product?.resolutionMethod === 'fallback_first') {
+    if (resolution.productResolution === 'name_match') {
       notes.push(
-        `Product attributed by fallback (no recorded productName, name didn't match a configured product) — using "${product.name}", the tenant's first active product. Margin/breakeven below may not match what this campaign actually sells.`,
+        `Product attributed from the legacy campaign name ("${product.name}") because no productName was recorded at launch.`,
       );
-    } else if (product?.resolutionMethod === 'name_match') {
+    } else if (resolution.productResolution === 'sole_active') {
       notes.push(
-        `Product attributed from the campaign name ("${product.name}") — no productName was recorded at launch.`,
+        `Product attributed to "${product.name}" because it is the tenant's only active product.`,
       );
     }
 
-    if (enoughObserved && product) {
-      method = 'observed';
-      if (configMarginPct < 0.05) {
-        notes.push(
-          `Config margin ${(configMarginPct * 100).toFixed(1)}% below 5% floor — clamped for safety.`,
-        );
-        usedMarginPct = 0.05;
-      }
+    appendRevenueEvidenceNote(
+      notes,
+      revenueQuality,
+      resolution.revenueBasis,
+      resolution.revenueAttributionSource,
+    );
+    if (usedRefundPct > 0) {
+      notes.push(
+        `Snapshot return is already net of the configured ${(usedRefundPct * 100).toFixed(1)}% refund rate; breakeven does not apply that haircut a second time.`,
+      );
+    }
+
+    if (enoughObserved) {
       notes.push(
         `AOV observed = ₹${observedAOV.toFixed(0)} from ${purchases} purchases.`,
       );
       notes.push(
         `CAC observed = ₹${observedCAC.toFixed(0)}; observed ROAS ${observedROAS.toFixed(2)}×.`,
       );
-    } else if (product) {
-      method = 'config';
+    } else {
       notes.push(
         `Live data too thin (${purchases} purchases / ₹${spend.toFixed(0)} spend). Using product config as prior.`,
       );
-    } else {
-      method = 'generic';
-      notes.push(
-        'No product config found — using generic 40% margin default. Recommendation confidence will be capped.',
-      );
     }
 
-    // Breakeven ROAS = 1 / (net margin).
-    const netMarginPct = usedMarginPct * (1 - usedRefundPct);
-    const breakevenROAS = netMarginPct > 0 ? 1 / netMarginPct : Infinity;
-    // The profit GOAL — not a flat company-wide number (that's meaningless
-    // across products with different margins: a flat 2.0x would sit BELOW
-    // breakeven for a 45%-margin product whose breakeven is ~2.22x). 2x
-    // breakeven scales correctly per product and lands almost exactly on
-    // "2 ROAS" for this account's primary ~97%-margin product.
+    // Snapshot revenue and ROAS are already refund-net: SnapshotBuilder applies
+    // the product refund haircut before this engine runs. Applying it again in
+    // breakeven would double-count refunds (e.g. a 50% margin / 20% refund
+    // product would be judged against 2.50x even though net-return ROAS breaks
+    // even at 2.00x). Therefore breakeven divides by contribution margin only.
+    const breakevenROAS = usedMarginPct > 0 ? 1 / usedMarginPct : Infinity;
+    // System scale-planning heuristic — not a measured or company-configured
+    // target. A flat account-wide number is meaningless across products with
+    // different margins, so the current heuristic uses 2x breakeven. Keep the
+    // distinction explicit anywhere this value is surfaced to an operator.
     const targetROAS = Number.isFinite(breakevenROAS)
       ? breakevenROAS * 2
       : Infinity;
 
     const netRevenue = grossRevenue; // snapshot revenue already refund-net
-    const contributionMargin = netRevenue * usedMarginPct - spend;
+    const financialDataAvailable = revenueEvidenceAvailable;
+    const contributionMargin = financialDataAvailable
+      ? netRevenue * usedMarginPct - spend
+      : 0;
 
-    const isProfitable = observedROAS > 0 && observedROAS >= breakevenROAS;
-    const daysSinceBreakeven = isProfitable ? 1 : 0;
+    const isProfitable =
+      financialDataAvailable &&
+      observedROAS > 0 &&
+      observedROAS >= breakevenROAS;
+    // A single cumulative snapshot can tell us whether the campaign is above
+    // breakeven now, but not how long it has stayed there. Leave duration at
+    // zero until a dedicated daily profitability series actually derives it.
+    const daysSinceBreakeven = 0;
 
     // Reasoning line — attached for the review UI.
-    if (observedROAS > 0) {
+    if (financialDataAvailable && observedROAS > 0) {
       const gap = observedROAS - breakevenROAS;
       if (isProfitable) {
         notes.push(
@@ -208,21 +286,17 @@ export class RevenueEngine extends BaseEngine<
       if (Number.isFinite(targetROAS)) {
         if (observedROAS >= targetROAS) {
           notes.push(
-            `At or above the ${targetROAS.toFixed(2)}× profit target — a scale candidate, not just breakeven-safe.`,
+            `At or above the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target) — a scale candidate, not just breakeven-safe.`,
           );
         } else {
           const toGo = targetROAS - observedROAS;
           notes.push(
-            `${toGo.toFixed(2)}× short of the ${targetROAS.toFixed(2)}× profit target (2× breakeven).`,
+            `${toGo.toFixed(2)}× short of the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target).`,
           );
         }
       }
     }
 
-    const attributedByAdSet: Record<string, number> = {};
-    for (const [id, m] of Object.entries(data.metrics?.adSetLevel ?? {})) {
-      attributedByAdSet[id] = num(m.revenue);
-    }
     const attributedByProduct: Record<string, number> = product?.name
       ? { [product.name]: grossRevenue }
       : {};
@@ -277,6 +351,9 @@ export class RevenueEngine extends BaseEngine<
       grossRevenue: round(grossRevenue, 2),
       netRevenue: round(netRevenue, 2),
       contributionMargin: round(contributionMargin, 2),
+      economicsAvailable: true,
+      revenueEvidenceAvailable,
+      financialDataAvailable,
       attributedByAdSet,
       attributedByProduct,
       roasDecomposition: decomposition,
@@ -291,6 +368,11 @@ export class RevenueEngine extends BaseEngine<
       derivation: {
         method,
         product: product?.name ?? null,
+        productResolution: resolution.productResolution,
+        productResolutionError: resolution.productResolutionError,
+        revenueBasis: resolution.revenueBasis,
+        revenueAttributionSource: resolution.revenueAttributionSource,
+        revenueQuality,
         marginPct: round(usedMarginPct, 4),
         refundPct: round(usedRefundPct, 4),
         observedAOV: purchases > 0 ? round(observedAOV, 2) : null,
@@ -312,59 +394,87 @@ export class RevenueEngine extends BaseEngine<
    * dashboard already fixed (see economics.ts) for the account-wide view;
    * this closes it for the recommendation engine specifically.
    *
-   * Resolution order, matching resolveCampaignProduct's priority:
+   * Fail-closed resolution order:
    *   1. campaign.productName — authoritative when set.
    *   2. Heuristic name match (parseCampaignName) — for older campaigns
    *      launched before productName was recorded at create time.
-   *   3. Tenant's first active product — last resort, same as the old
-   *      behavior, now only reached when neither above applies.
+   *   3. Tenant's sole active product — only when there is exactly one choice.
+   * Anything ambiguous returns an explicit unresolved result. An invalid
+   * recorded productName is not allowed to fall through to a name heuristic.
    */
   private async resolveProductForCampaign(
     tenantId?: string,
     campaignId?: string,
-  ): Promise<{
-    name: string;
-    contributionMargin?: number;
-    refundRatePercent?: number;
-    conversionValue?: number;
-    resolutionMethod: 'campaign_field' | 'name_match' | 'fallback_first';
-  } | null> {
-    if (!this.companyModel || !tenantId) return null;
+  ): Promise<RevenueResolutionContext> {
+    if (!this.companyModel) {
+      return unresolvedContext('Company model is unavailable.');
+    }
+    if (!tenantId) {
+      return unresolvedContext('Tenant identity is unavailable.');
+    }
     try {
       const company = await this.companyModel
         .findOne({ tenantId })
         .lean()
         .exec();
-      if (!company) return null;
+      if (!company) {
+        return unresolvedContext(`Tenant "${tenantId}" was not found.`);
+      }
       const products = ((
         company as unknown as { products?: Array<Record<string, unknown>> }
       ).products ?? []) as Array<Record<string, unknown>>;
-      if (!products.length) return null;
+      if (!products.length) {
+        return unresolvedContext(
+          `Tenant "${tenantId}" has no products configured.`,
+        );
+      }
 
       const campaign =
         campaignId && this.campaignModel
           ? await this.campaignModel
-              .findById(campaignId)
-              .select('name productName')
+              .findOne({ _id: campaignId, tenantId })
+              .select('name productName revenueBasis revenueAttributionSource')
               .lean()
               .exec()
           : null;
-      const campaignName = campaign ? String((campaign as any).name ?? '') : '';
+      const campaignDoc = campaign as {
+        name?: unknown;
+        productName?: unknown;
+        revenueBasis?: unknown;
+        revenueAttributionSource?: unknown;
+      } | null;
+      const campaignName = String(campaignDoc?.name ?? '').trim();
       const campaignProductName = campaign
-        ? String((campaign as any).productName ?? '')
+        ? String(campaignDoc?.productName ?? '').trim()
         : '';
+      const provenance = {
+        revenueBasis: normalizeRevenueBasis(campaignDoc?.revenueBasis),
+        revenueAttributionSource: normalizeRevenueAttributionSource(
+          campaignDoc?.revenueAttributionSource,
+        ),
+      };
 
-      if (campaign) {
+      if (campaignProductName) {
         const strict = tryResolveCampaignProduct(
           company as unknown as CompanyDocument,
           {
-            productName: campaignProductName || undefined,
+            productName: campaignProductName,
             name: campaignName || undefined,
           },
         );
         if (strict.resolution) {
-          return toProductShape(strict.resolution.product, 'campaign_field');
+          return {
+            product: toProductShape(strict.resolution.product),
+            productResolution: 'campaign_field',
+            productResolutionError: null,
+            ...provenance,
+          };
         }
+        return unresolvedContext(
+          strict.error ??
+            `Recorded product "${campaignProductName}" could not be resolved.`,
+          provenance,
+        );
       }
 
       if (campaignName) {
@@ -375,15 +485,102 @@ export class RevenueEngine extends BaseEngine<
         const byName = products.find(
           (p) => String(p.name ?? '') === facets.product,
         );
-        if (byName) return toProductShape(byName, 'name_match');
+        if (byName) {
+          return {
+            product: toProductShape(byName),
+            productResolution: 'name_match',
+            productResolutionError: null,
+            ...provenance,
+          };
+        }
       }
 
-      const active = products.find((p) => p.active !== false) ?? products[0];
-      if (!active) return null;
-      return toProductShape(active, 'fallback_first');
-    } catch {
-      return null;
+      const active = products.filter((p) => p.active !== false);
+      if (active.length === 1) {
+        return {
+          product: toProductShape(active[0]),
+          productResolution: 'sole_active',
+          productResolutionError: null,
+          ...provenance,
+        };
+      }
+
+      const names = active
+        .map((p) => `"${String(p.name ?? 'unnamed')}"`)
+        .join(', ');
+      return unresolvedContext(
+        `Campaign has no recorded product and its name does not match a configured product. Tenant has ${active.length} active products (${names || 'none'}); refusing to guess.`,
+        provenance,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Revenue product resolution failed for tenant=${tenantId} campaign=${campaignId ?? 'unknown'}: ${message}`,
+      );
+      return unresolvedContext(`Product resolution failed: ${message}`);
     }
+  }
+
+  private unavailableEconomics(input: {
+    grossRevenue: number;
+    purchases: number;
+    spend: number;
+    attributedByAdSet: Record<string, number>;
+    resolution: RevenueResolutionContext;
+    revenueQuality: RevenueEvidenceQuality;
+    reason: string;
+  }): RevenueData & { derivation: RevenueDerivation } {
+    const {
+      grossRevenue,
+      purchases,
+      spend,
+      attributedByAdSet,
+      resolution,
+      revenueQuality,
+      reason,
+    } = input;
+    const product = resolution.product;
+    const notes = [
+      `${reason} Breakeven, contribution profit, and financial recommendations are withheld.`,
+    ];
+    appendRevenueEvidenceNote(
+      notes,
+      revenueQuality,
+      resolution.revenueBasis,
+      resolution.revenueAttributionSource,
+    );
+    const revenueEvidenceAvailable = revenueQuality !== 'unavailable';
+
+    return {
+      grossRevenue: round(grossRevenue, 2),
+      netRevenue: round(grossRevenue, 2),
+      contributionMargin: 0,
+      economicsAvailable: false,
+      revenueEvidenceAvailable,
+      financialDataAvailable: false,
+      attributedByAdSet,
+      attributedByProduct: product?.name
+        ? { [product.name]: round(grossRevenue, 2) }
+        : {},
+      roasDecomposition: zeroDecomposition(),
+      breakeven: { roas: 0, isProfitable: false, daysSinceBreakeven: 0 },
+      targetROAS: 0,
+      derivation: {
+        method: 'unavailable',
+        product: product?.name ?? null,
+        productResolution: resolution.productResolution,
+        productResolutionError: resolution.productResolutionError ?? reason,
+        revenueBasis: resolution.revenueBasis,
+        revenueAttributionSource: resolution.revenueAttributionSource,
+        revenueQuality,
+        marginPct: 0,
+        refundPct: round((product?.refundRatePercent ?? 0) / 100, 4),
+        observedAOV: purchases > 0 ? round(grossRevenue / purchases, 2) : null,
+        observedCAC: purchases > 0 ? round(spend / purchases, 2) : null,
+        breakevenROAS: 0,
+        notes,
+      },
+    };
   }
 
   private zero(
@@ -393,19 +590,22 @@ export class RevenueEngine extends BaseEngine<
       grossRevenue: 0,
       netRevenue: 0,
       contributionMargin: 0,
+      economicsAvailable: false,
+      revenueEvidenceAvailable: false,
+      financialDataAvailable: false,
       attributedByAdSet: {},
       attributedByProduct: {},
-      roasDecomposition: {
-        ctr: { contribution: 0, delta: 0 },
-        cvr: { contribution: 0, delta: 0 },
-        aov: { contribution: 0, delta: 0 },
-        frequency: { contribution: 0, delta: 0 },
-      },
+      roasDecomposition: zeroDecomposition(),
       breakeven: { roas: 0, isProfitable: false, daysSinceBreakeven: 0 },
       targetROAS: 0,
       derivation: {
         method: 'skipped',
         product: null,
+        productResolution: 'not_applicable',
+        productResolutionError: null,
+        revenueBasis: 'unknown',
+        revenueAttributionSource: 'unknown',
+        revenueQuality: 'unavailable',
         marginPct: 0,
         refundPct: 0,
         observedAOV: null,
@@ -429,20 +629,36 @@ export class RevenueEngine extends BaseEngine<
     const spend = num(cm.spend);
     const purchases = num(cm.purchases);
 
+    let confidence: number;
     switch (data.derivation.method) {
       case 'observed':
-        if (spend >= 5000 && purchases >= 20) return 0.95;
-        if (spend >= 1000 && purchases >= 10) return 0.85;
-        return 0.7;
+        if (spend >= 5000 && purchases >= 20) confidence = 0.95;
+        else if (spend >= 1000 && purchases >= 10) confidence = 0.85;
+        else confidence = 0.7;
+        break;
       case 'config':
-        return 0.55;
-      case 'generic':
-        return 0.3;
+        confidence = 0.55;
+        break;
+      case 'unavailable':
+        return 0;
       case 'skipped':
         return 0.5;
       default:
-        return 0.5;
+        return 0;
     }
+
+    if (data.derivation.productResolution === 'name_match') {
+      confidence = Math.min(confidence, 0.65);
+    } else if (data.derivation.productResolution === 'sole_active') {
+      confidence = Math.min(confidence, 0.8);
+    }
+
+    if (data.derivation.revenueQuality === 'configured_estimate') {
+      confidence = Math.min(confidence, 0.6);
+    } else if (data.derivation.revenueQuality === 'unavailable') {
+      confidence = Math.min(confidence, 0.2);
+    }
+    return confidence;
   }
 
   protected buildEvidence(
@@ -452,15 +668,20 @@ export class RevenueEngine extends BaseEngine<
     const ev: Evidence[] = [
       {
         kind: 'snapshot',
-        ref: `revenue-observed:${data.derivation.method}`,
-        weight: 1,
+        ref: `revenue:${data.derivation.revenueBasis}:${data.derivation.revenueAttributionSource}`,
+        weight:
+          data.derivation.revenueQuality === 'observed'
+            ? 1
+            : data.derivation.revenueQuality === 'configured_estimate'
+              ? 0.6
+              : 0.1,
         note: data.derivation.notes[0] ?? '',
       },
     ];
     if (data.derivation.product) {
       ev.push({
         kind: 'company_config',
-        ref: `product:${data.derivation.product}`,
+        ref: `product:${data.derivation.product}:${data.derivation.productResolution}`,
         weight: data.derivation.method === 'observed' ? 0.4 : 1,
       });
     }
@@ -470,14 +691,46 @@ export class RevenueEngine extends BaseEngine<
 
 // ── Reasoning surface for downstream engines ─────────────────────────
 export interface RevenueDerivation {
-  method: 'observed' | 'config' | 'generic' | 'skipped';
+  method: 'observed' | 'config' | 'unavailable' | 'skipped';
   product: string | null;
+  productResolution: ProductResolutionMethod;
+  productResolutionError: string | null;
+  revenueBasis: CampaignRevenueBasis;
+  revenueAttributionSource: CampaignRevenueAttributionSource;
+  revenueQuality: RevenueEvidenceQuality;
   marginPct: number;
   refundPct: number;
   observedAOV: number | null;
   observedCAC: number | null;
   breakevenROAS: number;
   notes: string[];
+}
+
+export type ProductResolutionMethod =
+  | 'campaign_field'
+  | 'name_match'
+  | 'sole_active'
+  | 'unresolved'
+  | 'not_applicable';
+
+export type RevenueEvidenceQuality =
+  | 'observed'
+  | 'configured_estimate'
+  | 'unavailable';
+
+interface ResolvedRevenueProduct {
+  name: string;
+  contributionMargin?: number;
+  refundRatePercent?: number;
+  conversionValue?: number;
+}
+
+interface RevenueResolutionContext {
+  product: ResolvedRevenueProduct | null;
+  productResolution: ProductResolutionMethod;
+  productResolutionError: string | null;
+  revenueBasis: CampaignRevenueBasis;
+  revenueAttributionSource: CampaignRevenueAttributionSource;
 }
 
 // ── Utility helpers ──────────────────────────────────────────────────
@@ -487,26 +740,102 @@ function num(v: unknown): number {
 function numOrUndef(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
-function toProductShape(
-  p: {
-    name?: unknown;
-    contributionMargin?: unknown;
-    refundRatePercent?: unknown;
-    conversionValue?: unknown;
-  },
-  resolutionMethod: 'campaign_field' | 'name_match' | 'fallback_first',
-) {
+function toProductShape(p: {
+  name?: unknown;
+  contributionMargin?: unknown;
+  refundRatePercent?: unknown;
+  conversionValue?: unknown;
+}): ResolvedRevenueProduct {
   return {
     name: String(p.name ?? 'product'),
     contributionMargin: numOrUndef(p.contributionMargin),
     refundRatePercent: numOrUndef(p.refundRatePercent),
     conversionValue: numOrUndef(p.conversionValue),
-    resolutionMethod,
   };
 }
-function clamp(v: number, lo: number, hi: number): number {
-  if (!Number.isFinite(v)) return lo;
-  return Math.min(hi, Math.max(lo, v));
+
+function unresolvedContext(
+  reason: string,
+  provenance: Pick<
+    RevenueResolutionContext,
+    'revenueBasis' | 'revenueAttributionSource'
+  > = {
+    revenueBasis: 'unknown',
+    revenueAttributionSource: 'unknown',
+  },
+): RevenueResolutionContext {
+  return {
+    product: null,
+    productResolution: 'unresolved',
+    productResolutionError: reason,
+    ...provenance,
+  };
+}
+
+function normalizeRevenueBasis(value: unknown): CampaignRevenueBasis {
+  return value === 'meta_action_value' ||
+    value === 'configured_conversion_value' ||
+    value === 'no_attributed_revenue'
+    ? value
+    : 'unknown';
+}
+
+function normalizeRevenueAttributionSource(
+  value: unknown,
+): CampaignRevenueAttributionSource {
+  return value === 'custom_conversion' ||
+    value === 'custom_event' ||
+    value === 'standard_event' ||
+    value === 'app_event' ||
+    value === 'account_fallback' ||
+    value === 'unresolved'
+    ? value
+    : 'unknown';
+}
+
+function classifyRevenueEvidence(
+  basis: CampaignRevenueBasis,
+  source: CampaignRevenueAttributionSource,
+  revenue: number,
+): RevenueEvidenceQuality {
+  const campaignScoped =
+    source === 'custom_conversion' ||
+    source === 'custom_event' ||
+    source === 'standard_event' ||
+    source === 'app_event';
+  if (!campaignScoped) return 'unavailable';
+  if (basis === 'meta_action_value') return 'observed';
+  if (basis === 'configured_conversion_value') return 'configured_estimate';
+  if (basis === 'no_attributed_revenue' && revenue === 0) return 'observed';
+  return 'unavailable';
+}
+
+function appendRevenueEvidenceNote(
+  notes: string[],
+  quality: RevenueEvidenceQuality,
+  basis: CampaignRevenueBasis,
+  source: CampaignRevenueAttributionSource,
+): void {
+  if (quality === 'observed') {
+    notes.push(`Return provenance: ${basis} via ${source}.`);
+  } else if (quality === 'configured_estimate') {
+    notes.push(
+      `Return is estimated from configured conversion value via ${source}; it is not recorded Meta action value.`,
+    );
+  } else {
+    notes.push(
+      `Return provenance is unavailable (${basis} via ${source}); profitability and financial actions are withheld.`,
+    );
+  }
+}
+
+function zeroDecomposition(): RevenueData['roasDecomposition'] {
+  return {
+    ctr: { contribution: 0, delta: 0 },
+    cvr: { contribution: 0, delta: 0 },
+    aov: { contribution: 0, delta: 0 },
+    frequency: { contribution: 0, delta: 0 },
+  };
 }
 function round(v: number, dp: number): number {
   const m = Math.pow(10, dp);

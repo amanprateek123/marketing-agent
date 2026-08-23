@@ -3,10 +3,20 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CampaignSyncService } from '../../campaigns/meta-ads/campaign-sync.service';
+import { buildProductResolver } from '../../campaigns/meta-ads/product-resolver.util';
 import { CompaniesService } from '../../companies/companies.service';
-import { Campaign, CampaignSource, isManagedCampaignSource } from '../../campaigns/schemas/campaign.schema';
+import {
+  Campaign,
+  CampaignSource,
+  isManagedCampaignSource,
+} from '../../campaigns/schemas/campaign.schema';
+import {
+  IntelligenceBrief,
+  IntelligenceBriefDocument,
+} from '../../pipeline/schemas/intelligence-brief.schema';
 import { IntelligenceOrchestrator } from '../orchestrator/intelligence-orchestrator.service';
 import { SnapshotEngine } from '../snapshot/snapshot-engine.service';
+import { ProductForRevenue } from '../snapshot/snapshot.types';
 import { DecisionsService } from '../decisions/decisions.service';
 
 export interface PrimeOptions {
@@ -79,9 +89,14 @@ export class PrimeService {
     private readonly emitter: EventEmitter2,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<Campaign>,
+    @InjectModel(IntelligenceBrief.name)
+    private readonly briefModel: Model<IntelligenceBriefDocument>,
   ) {}
 
-  async runFor(tenantId: string, opts: PrimeOptions = {}): Promise<PrimeResult> {
+  async runFor(
+    tenantId: string,
+    opts: PrimeOptions = {},
+  ): Promise<PrimeResult> {
     const skipSync = !!opts.skipSync;
     const maxCampaigns = Math.min(20, Math.max(1, opts.maxCampaigns ?? 5));
 
@@ -129,8 +144,12 @@ export class PrimeService {
     // dashboard's manual-create form). Excludes 'manual' — campaigns a
     // tenant created directly in Meta Ads Manager, synced in for visibility
     // only — see isManagedCampaignSource() in campaign.schema.ts.
-    const explicitIds = (opts.campaignIds ?? []).map((s) => String(s).trim()).filter(Boolean);
-    const managedSources = (['agent', 'manual', 'human'] as CampaignSource[]).filter(isManagedCampaignSource);
+    const explicitIds = (opts.campaignIds ?? [])
+      .map((s) => String(s).trim())
+      .filter(Boolean);
+    const managedSources = (
+      ['agent', 'manual', 'human'] as CampaignSource[]
+    ).filter(isManagedCampaignSource);
 
     const activeCampaigns = explicitIds.length
       ? await this.campaignModel
@@ -149,9 +168,15 @@ export class PrimeService {
           .exec()
       : await (() => {
           const q = this.campaignModel
-            .find({ tenantId, status: 'active', source: { $in: managedSources } })
+            .find({
+              tenantId,
+              status: 'active',
+              source: { $in: managedSources },
+            })
             .sort({ spend: -1 });
-          return opts.analyzeAll ? q.lean().exec() : q.limit(maxCampaigns).lean().exec();
+          return opts.analyzeAll
+            ? q.lean().exec()
+            : q.limit(maxCampaigns).lean().exec();
         })();
 
     if (explicitIds.length && activeCampaigns.length < explicitIds.length) {
@@ -163,7 +188,9 @@ export class PrimeService {
       );
       const missing = explicitIds.filter((id) => !found.has(id));
       if (missing.length) {
-        this.log.warn(`[${tenantId}] requested campaigns not found: ${missing.join(', ')}`);
+        this.log.warn(
+          `[${tenantId}] requested campaigns not found: ${missing.join(', ')}`,
+        );
       }
     }
 
@@ -181,18 +208,25 @@ export class PrimeService {
       };
     }
 
-    // ── 3. Reduce products to SnapshotEngine input shape ──────────
-    const products = (
+    // ── 3. Resolve one product per campaign ──────────────────────
+    // SnapshotBuilder reads products[0], so passing the tenant's entire
+    // catalogue makes the manual prime path silently use whichever product
+    // happens to be first. Use the same resolver as scheduled cycles and
+    // pass exactly one product, or none when the mapping is ambiguous.
+    const companyProducts =
       (company as unknown as { products?: Array<Record<string, unknown>> })
-        .products ?? []
-    )
-      .filter((p) => p.active !== false && p.name)
-      .map((p) => ({
-        name: String(p.name),
-        conversionValue: numOrUndef(p.conversionValue),
-        contributionMargin: numOrUndef(p.contributionMargin),
-        refundRatePercent: numOrUndef(p.refundRatePercent),
-      }));
+        .products ?? [];
+    const resolveProduct = await buildProductResolver(
+      this.campaignModel as unknown as Parameters<
+        typeof buildProductResolver
+      >[0],
+      this.briefModel,
+      tenantId,
+      activeCampaigns
+        .map((campaign) => campaign.metaCampaignId)
+        .filter((id): id is string => Boolean(id)),
+      companyProducts,
+    );
 
     // ── 4. Fire cascade sequentially per campaign ──────────────────
     const results: CampaignCascadeResult[] = [];
@@ -200,6 +234,10 @@ export class PrimeService {
       const campaignId = String((c as { _id: unknown })._id);
       const metaCampaignId = c.metaCampaignId ?? '';
       const name = c.name ?? c.topic ?? 'campaign';
+      const resolvedProduct = resolveProduct(metaCampaignId);
+      const products = resolvedProduct
+        ? toSnapshotProducts([resolvedProduct])
+        : [];
       try {
         const dc = await this.orchestrator.openCycle({
           tenantId,
@@ -274,6 +312,23 @@ export class PrimeService {
       results,
     };
   }
+}
+
+function toSnapshotProducts(
+  products: Array<Record<string, unknown>>,
+): ProductForRevenue[] {
+  return (
+    products
+      // Product activation is a launch-selection gate, not a measurement gate.
+      // Historical campaigns retain their resolved product's value/economics.
+      .filter((product) => product.name)
+      .map((product) => ({
+        name: String(product.name),
+        conversionValue: numOrUndef(product.conversionValue),
+        contributionMargin: numOrUndef(product.contributionMargin),
+        refundRatePercent: numOrUndef(product.refundRatePercent),
+      }))
+  );
 }
 
 function numOrUndef(v: unknown): number | undefined {

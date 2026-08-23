@@ -130,6 +130,36 @@ describe('SnapshotBuilder', () => {
     expect(data.freshnessSec).toBe(300);
   });
 
+  it('marks source freshness unknown when a persisted adapter explicitly lacks sync time', () => {
+    const data = builder.build({
+      bundle: bundle({ sourceMetricsSyncedAt: null }),
+      products: [product],
+      now,
+    });
+
+    expect(data.freshnessSec).toBe(-1);
+  });
+
+  it('marks an invalid source synchronization timestamp as unknown', () => {
+    const data = builder.build({
+      bundle: bundle({ sourceMetricsSyncedAt: new Date('invalid') }),
+      products: [product],
+      now,
+    });
+
+    expect(data.freshnessSec).toBe(-1);
+  });
+
+  it('carries the source metric scope into the analysis snapshot', () => {
+    const data = builder.build({
+      bundle: bundle({ metricScope: 'lifetime' }),
+      products: [product],
+      now,
+    });
+
+    expect(data.meta.metricScope).toBe('lifetime');
+  });
+
   it('maps learning_stage to canonical enum', () => {
     const data = builder.build({ bundle: bundle(), products: [product], now });
     expect(data.meta.learningStage).toBe('ACTIVE');
