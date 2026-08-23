@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { CampaignCopilotService } from './campaign-copilot.service';
+import { CampaignInsightsService } from './campaign-insights.service';
 import {
   CreateCampaignCopilotSessionDto,
   SendCampaignCopilotMessageDto,
@@ -7,7 +8,36 @@ import {
 
 @Controller('campaign-copilot/:tenantId')
 export class CampaignCopilotController {
-  constructor(private readonly campaignCopilot: CampaignCopilotService) {}
+  constructor(
+    private readonly campaignCopilot: CampaignCopilotService,
+    private readonly campaignInsights: CampaignInsightsService,
+  ) {}
+
+  /**
+   * Queries mode — ask about campaigns that already ran. Deliberately
+   * stateless: the planner's session machinery stays untouched, and the
+   * client keeps the transcript.
+   */
+  @Get('insights/campaigns')
+  listInsightCampaigns(@Param('tenantId') tenantId: string) {
+    return this.campaignInsights.listCampaigns(tenantId);
+  }
+
+  @Post('insights/ask')
+  askInsights(
+    @Param('tenantId') tenantId: string,
+    @Body()
+    dto: {
+      question: string;
+      campaignId?: string;
+      history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    },
+  ) {
+    return this.campaignInsights.ask(tenantId, dto.question, {
+      campaignId: dto.campaignId,
+      history: dto.history,
+    });
+  }
 
   @Post('sessions')
   createSession(

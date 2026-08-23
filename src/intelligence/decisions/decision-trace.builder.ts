@@ -236,7 +236,14 @@ export interface TraceInput {
   decision?: {
     actionId: string;
     actionType: string;
+    targetType?: string;
     targetId: string;
+    campaignSource?: 'agent' | 'human' | 'manual';
+    expectedImpact?: {
+      metric: string;
+      deltaPct: number;
+      confidence: number;
+    };
     expectedProfitDeltaINR7d: number;
     confidence?: number;
     gatedBy?: string[];
@@ -274,27 +281,49 @@ export function buildDecisionTrace(input: TraceInput): DecisionTraceStep[] {
   // decisions regain causal highlighting; all new writes use signalKind.
   const firedSignal =
     decision.evidenceSnapshot?.signalKind ?? decision.evidenceSnapshot?.kind;
+  const recommendedAction = (slices.recommendation?.data?.actions ?? []).find(
+    (action) => action.actionId === decision.actionId,
+  );
+  const lossContainmentOnly =
+    decision.actionType === 'reduce_total_budget' &&
+    (decision.expectedImpact?.metric ??
+      recommendedAction?.expectedImpact?.metric) === 'losses_avoided' &&
+    (recommendedAction?.evidenceChain ?? []).some(
+      (evidence) => evidence.source === 'safety_policy',
+    );
 
   const steps: StepBody[] = [
     snapshotStep(slices.snapshot?.data),
     objectiveStep(slices.objective?.data),
-    lifecycleStep(slices.lifecycle?.data, decision.actionType),
+    lifecycleStep(slices.lifecycle?.data, decision, lossContainmentOnly),
     trendStep(slices.trend?.data),
     revenueStep(slices.revenue?.data, slices.objective?.data),
-    signalStep(slices.signal?.data, firedSignal),
-    diagnosisStep(slices.diagnosis?.data),
+    signalStep(slices.signal?.data, decision, firedSignal),
+    diagnosisStep(slices.diagnosis?.data, decision),
     businessStep(slices.business?.data),
     portfolioStep(slices.portfolio?.data, slices.objective?.data),
     forecastStep(slices.forecast?.data, slices.objective?.data),
-    confidenceStep(slices.confidence?.data, slices.objective?.data),
-    memoryStep(slices.memory?.data, decision.actionType),
+    confidenceStep(
+      slices.confidence?.data,
+      slices.objective?.data,
+      lossContainmentOnly,
+    ),
+    memoryStep(slices.memory?.data, decision.actionType, lossContainmentOnly),
     recommendationStep(
       slices.recommendation?.data,
       decision,
       slices.objective?.data,
     ),
-    explainabilityStep(slices.explainability?.data, decision.actionId),
-    executionStep(slices.execution?.data, decision.actionId),
+    explainabilityStep(
+      slices.explainability?.data,
+      decision,
+      lossContainmentOnly,
+    ),
+    executionStep(
+      slices.execution?.data,
+      decision.actionId,
+      decision.campaignSource,
+    ),
     learningStep(slices.learning?.data),
   ];
 
@@ -470,7 +499,8 @@ function objectiveStep(o: ObjectiveData | undefined): StepBody {
 
 function lifecycleStep(
   l: LifecycleData | undefined,
-  actionType: string,
+  decision: TraceDecision,
+  lossContainmentOnly: boolean,
 ): StepBody {
   const title = 'How settled this campaign is';
   const question = 'Is it old enough and stable enough to touch?';
@@ -482,7 +512,11 @@ function lifecycleStep(
       'No lifecycle stage was recorded.',
     );
 
+  const { actionType } = decision;
   const blocked = (l.blockedActions ?? []).find((b) => b.action === actionType);
+  const explicitlyAllowed = (l.allowedActions ?? []).includes(actionType);
+  const usesLearningContainmentException =
+    lossContainmentOnly && l.stage === 'learning' && !explicitlyAllowed;
   const days = Math.floor((l.ageHours ?? 0) / 24);
   const age =
     days >= 1
@@ -502,20 +536,29 @@ function lifecycleStep(
         ? `permitted here: ${(l.allowedActions ?? []).map(words).join(', ') || 'nothing'}`
         : blocked
           ? `which BLOCKS "${words(actionType)}"`
-          : `so "${words(actionType)}" is allowed`
+          : explicitlyAllowed
+            ? `so "${words(actionType)}" is ordinarily allowed`
+            : usesLearningContainmentException
+              ? 'normal optimization changes remain protected; this uses a strict loss-containment exception'
+              : `"${words(actionType)}" is not ordinarily permitted at this stage`
     }.`,
     details: [
       l.metaLearningStage
         ? `Meta says this is in "${words(l.metaLearningStage)}".`
         : '',
-      `Budget increases are ${l.gates?.canScale ? 'permitted' : 'not permitted'} at this stage; pausing is ${l.gates?.canPause ? 'permitted' : 'not permitted'}.`,
+      `Budget increases are ${l.gates?.canScale ? 'permitted' : 'not permitted'} at this stage; budget reductions are ${l.gates?.canReduceBudget ? 'permitted' : 'not ordinarily permitted'}; pausing is ${l.gates?.canPause ? 'permitted' : 'not permitted'}.`,
+      usesLearningContainmentException
+        ? 'The Recommendation step may still surface a bounded reduction when verified loss, age, spend, purchase volume, freshness, and confidence all pass its stricter containment checks. It remains a human decision.'
+        : '',
       blocked ? `Blocked because: ${blocked.reason}.` : '',
       `Next stage expected: ${STAGE_PLAIN[l.nextExpectedStage] ?? words(l.nextExpectedStage)}.`,
       `Being re-checked roughly every ${l.monitoringCadenceMinutes} minutes.`,
     ].filter(Boolean),
     status: 'ok',
-    // Only decisive when it actually constrained this action.
-    decisive: !!blocked,
+    // A lifecycle exception is as decision-shaping as a hard block.
+    decisive:
+      !!actionType &&
+      (!!blocked || !explicitlyAllowed || usesLearningContainmentException),
   };
 }
 
@@ -693,7 +736,11 @@ function revenueStep(
   };
 }
 
-function signalStep(s: SignalData | undefined, firedSignal?: string): StepBody {
+function signalStep(
+  s: SignalData | undefined,
+  decision: TraceDecision,
+  firedSignal?: string,
+): StepBody {
   const title = 'Specific things worth reacting to';
   const question = 'What stood out as unusual or actionable?';
   if (!s) {
@@ -726,11 +773,16 @@ function signalStep(s: SignalData | undefined, firedSignal?: string): StepBody {
       .split('+')
       .filter(Boolean),
   );
+  const isDecisionSignal = (signal: SignalData['signals'][number]): boolean =>
+    firedSignals.has(signal.kind) &&
+    !!decision.targetId &&
+    signal.targetId === decision.targetId &&
+    (!decision.targetType || signal.targetType === decision.targetType);
   const details = signals.slice(0, 6).map((sig) => {
-    const mine = firedSignals.has(sig.kind)
-      ? ' ← this is the one that triggered this suggestion'
+    const mine = isDecisionSignal(sig)
+      ? ' ← this exact target triggered this suggestion'
       : '';
-    return `${words(sig.kind)} (${sig.severity}, ${pct(sig.strength)} sure): ${sig.reasoning}${mine}`;
+    return `${words(sig.kind)} on ${words(sig.targetType)} ${sig.targetId} (${sig.severity}, ${pct(sig.strength)} sure): ${sig.reasoning}${mine}`;
   });
   details.push(
     'Each of these is a rule firing on measured numbers, not a judgement call — the rule that fired is shown above.',
@@ -747,11 +799,14 @@ function signalStep(s: SignalData | undefined, firedSignal?: string): StepBody {
       .join(', ')}${signals.length > 3 ? '…' : ''}.`,
     details,
     status: 'ok',
-    decisive: signals.some((signal) => firedSignals.has(signal.kind)),
+    decisive: signals.some(isDecisionSignal),
   };
 }
 
-function diagnosisStep(d: DiagnosisData | undefined): StepBody {
+function diagnosisStep(
+  d: DiagnosisData | undefined,
+  decision: TraceDecision,
+): StepBody {
   const title = 'Why it is happening';
   const question = 'What does the system think the underlying cause is?';
   if (!d)
@@ -762,19 +817,36 @@ function diagnosisStep(d: DiagnosisData | undefined): StepBody {
       'No root-cause analysis was recorded.',
     );
 
-  const top = (d.rootCauses ?? [])[0];
+  const allRootCauses = d.rootCauses ?? [];
+  const exactRootCauses = decision.targetId
+    ? allRootCauses.filter(
+        (rootCause) =>
+          rootCause.targetId === decision.targetId &&
+          (!decision.targetType ||
+            !rootCause.targetType ||
+            rootCause.targetType === decision.targetType),
+      )
+    : allRootCauses;
+  const top = exactRootCauses[0];
   const details: string[] = [];
-  for (const rc of (d.rootCauses ?? []).slice(0, 3)) {
+  for (const rc of exactRootCauses.slice(0, 3)) {
     details.push(
-      `${rc.hypothesis} — ${pct(rc.confidence)} confident, points at ${words(rc.suggestedFocus)}${
+      `${rc.targetType ? `${words(rc.targetType)} ${rc.targetId}: ` : ''}${rc.hypothesis} — ${pct(rc.confidence)} confident, points at ${words(rc.suggestedFocus)}${
         rc.evidenceSignals?.length
           ? `, based on: ${rc.evidenceSignals.map(words).join(', ')}`
           : ''
       }.`,
     );
   }
+  if (decision.targetId && allRootCauses.length > exactRootCauses.length) {
+    details.push(
+      `${allRootCauses.length - exactRootCauses.length} diagnosis result(s) for other targets were not used to justify this action.`,
+    );
+  }
   if (d.leakDiagnosis && d.leakDiagnosis !== 'none') {
-    details.push(`Where money is leaking: ${words(d.leakDiagnosis)}.`);
+    details.push(
+      `Observed diagnostic pattern (not a proven cause): ${words(d.leakDiagnosis)}.`,
+    );
   }
   if (d.narrative) details.push(d.narrative);
 
@@ -785,10 +857,12 @@ function diagnosisStep(d: DiagnosisData | undefined): StepBody {
     question,
     headline: top
       ? `Most likely cause: ${top.hypothesis} (${pct(top.confidence)} confident) — the fix belongs in ${words(top.suggestedFocus)}.`
-      : 'No supported root cause emerged from the available evidence.',
+      : decision.targetId
+        ? 'No supported root cause emerged for this exact target.'
+        : 'No supported root cause emerged from the available evidence.',
     details,
     status: 'ok',
-    decisive: true,
+    decisive: !!top,
   };
 }
 
@@ -975,6 +1049,7 @@ function forecastStep(
 function confidenceStep(
   c: ConfidenceData | undefined,
   o: ObjectiveData | undefined,
+  lossContainmentOnly: boolean,
 ): StepBody {
   const title = 'How sure the system is';
   const question = 'Is the data good enough to act on?';
@@ -1002,7 +1077,7 @@ function confidenceStep(
     );
     details.push(
       `Statistical power ${pct(q.statisticalPower)} — ${
-        (q.statisticalPower ?? 0) > 0.7
+        (q.statisticalPower ?? 0) >= 0.7
           ? `enough ${words(o?.primaryKPI ?? 'goal')} observations for this not to be noise`
           : `thin ${words(o?.primaryKPI ?? 'goal')} evidence, so this could still be noise`
       }.`,
@@ -1013,11 +1088,17 @@ function confidenceStep(
       `Held back by: ${c.gates.reasonsBlocked.map(words).join(', ')}.`,
     );
   }
-  details.push(
-    `Allowed to suggest: ${c.gates?.okToRecommend && sourceDataFresh ? 'yes' : 'no'}. Evidence threshold for a human-approved action: ${
-      c.gates?.okToExecute && sourceDataFresh ? 'yes' : 'no'
-    }. Automatic application is disabled; human approval is always required.`,
-  );
+  if (lossContainmentOnly && sourceDataFresh) {
+    details.push(
+      'Standard causal optimization recommendation: held. Strict verified-loss containment: eligible for human review only. Nothing is applied without explicit approval.',
+    );
+  } else {
+    details.push(
+      `Allowed to suggest: ${c.gates?.okToRecommend && sourceDataFresh ? 'yes' : 'no'}. Evidence threshold for a human-approved action: ${
+        c.gates?.okToExecute && sourceDataFresh ? 'yes' : 'no'
+      }. Automatic application is disabled; human approval is always required.`,
+    );
+  }
 
   return {
     step: ENGINE_STEP.confidence,
@@ -1027,9 +1108,11 @@ function confidenceStep(
     headline: `${pct(c.overall)} confident overall${
       !sourceDataFresh
         ? ' — source metrics are stale or freshness is unknown, so action readiness is withheld'
-        : c.gates?.okToExecute === false
-          ? ' — below the evidence threshold for an approved action'
-          : ' — ready for human review'
+        : lossContainmentOnly && c.gates?.okToRecommend === false
+          ? ' — causal optimization is held; a strict loss-containment action is available for human review'
+          : c.gates?.okToExecute === false
+            ? ' — below the evidence threshold for an approved action'
+            : ' — ready for human review'
     }.`,
     details,
     status: 'ok',
@@ -1037,9 +1120,13 @@ function confidenceStep(
   };
 }
 
-function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
+function memoryStep(
+  m: MemoryData | undefined,
+  actionType: string,
+  lossContainmentOnly: boolean,
+): StepBody {
   const title = 'What happened last time';
-  const question = 'Have we tried this before, and did it work?';
+  const question = 'What was observed after similar past actions?';
   if (!m)
     return blank('memory', title, question, 'No past history was consulted.');
 
@@ -1047,15 +1134,16 @@ function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
   const same = actionType
     ? campaignActions.filter((a) => a.actionType === actionType)
     : [];
-  const relevantAccountInsights = actionType
-    ? (m.causalInsights ?? []).filter((insight) =>
-        memoryInsightMatchesAction(insight, actionType),
-      )
-    : [];
+  const relevantAccountInsights =
+    actionType && !lossContainmentOnly
+      ? (m.causalInsights ?? []).filter((insight) =>
+          memoryInsightMatchesAction(insight, actionType),
+        )
+      : [];
   const details: string[] = [];
   for (const a of same.slice(0, 2)) {
     details.push(
-      `Campaign-specific: ${new Date(a.executedAt).toLocaleDateString('en-IN')} — ${words(a.actionType)} on ${a.targetId} → ${a.outcomeLabel}. ${a.context}`,
+      `Campaign-specific observation: ${new Date(a.executedAt).toLocaleDateString('en-IN')} — after ${words(a.actionType)} on ${a.targetId}, measured metrics were ${a.outcomeLabel}. ${a.context} This is a before/after observation, not causal proof.`,
     );
   }
   for (const ci of relevantAccountInsights.slice(0, 2)) {
@@ -1067,7 +1155,9 @@ function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
     (m.causalInsights ?? []).length - relevantAccountInsights.length;
   if (withheldAccountInsights > 0) {
     details.push(
-      `${withheldAccountInsights} unrelated account-wide learning(s) were withheld from this campaign trace.`,
+      lossContainmentOnly
+        ? `${withheldAccountInsights} account-wide learning(s) were withheld because this containment action is justified by verified loss, not an inferred cause.`
+        : `${withheldAccountInsights} unrelated account-wide learning(s) were withheld from this campaign trace.`,
     );
   }
   if (!same.length && !relevantAccountInsights.length)
@@ -1084,7 +1174,7 @@ function memoryStep(m: MemoryData | undefined, actionType: string): StepBody {
     headline: !actionType
       ? `${campaignActions.length} measured past action(s) on record for this campaign; account-wide lessons are not treated as campaign evidence.`
       : same.length
-        ? `"${words(actionType)}" has been tried ${same.length} time(s) on this campaign — ${improved} helped, ${worsened} backfired.`
+        ? `"${words(actionType)}" has ${same.length} measured follow-up(s) on this campaign — ${improved} improved and ${worsened} worsened observationally.`
         : `"${words(actionType)}" has not been tried on this campaign before.`,
     details,
     status: 'ok',
@@ -1132,6 +1222,9 @@ function recommendationStep(
     );
 
   const mine = (r.actions ?? []).find((a) => a.actionId === decision.actionId);
+  const avoidsAdditionalLoss =
+    (mine?.expectedImpact?.metric ?? decision.expectedImpact?.metric) ===
+    'losses_avoided';
   const details: string[] = [];
 
   if (r.candidatesConsidered !== undefined) {
@@ -1148,10 +1241,21 @@ function recommendationStep(
   }
   if (mine) {
     details.push(
-      `Expected effect: ${words(mine.expectedImpact?.metric)} ${mine.expectedImpact?.deltaPct >= 0 ? 'up' : 'down'} ${Math.abs(Math.round(mine.expectedImpact?.deltaPct ?? 0))}%.`,
+      avoidsAdditionalLoss
+        ? `${Math.abs(Math.round(mine.expectedImpact?.deltaPct ?? 0))}% budget throttle; approximately the same share of modeled future contribution loss is contained under a proportional-spend assumption. No ROAS improvement is assumed.`
+        : mine.expectedImpact?.basis === 'not_estimated'
+          ? `Validation metric: ${words(mine.expectedImpact.metric)}. No causal uplift is estimated before the controlled action is measured.`
+          : mine.expectedImpact?.basis === 'observed_gap'
+            ? `Observed peer gap: ${words(mine.expectedImpact.metric)} differs by ${Math.abs(Math.round(mine.expectedImpact.observedGapPct ?? mine.expectedImpact.deltaPct ?? 0))}%. This is measured evidence, not a promised uplift.`
+            : `Expected effect: ${words(mine.expectedImpact?.metric)} ${mine.expectedImpact?.deltaPct >= 0 ? 'up' : 'down'} ${Math.abs(Math.round(mine.expectedImpact?.deltaPct ?? 0))}%.`,
     );
+    if (avoidsAdditionalLoss) {
+      details.push(
+        'This is conditional avoided contribution loss — not revenue earned or realized profit.',
+      );
+    }
     details.push(
-      `Risk rated ${mine.risk}; priority score ${mine.score?.toFixed?.(2) ?? mine.score}.`,
+      `Risk rated ${mine.risk}; ${mine.requiresHumanApproval === false ? 'the stored approval policy did not require human review' : 'human approval is required'}.`,
     );
     if (mine.gatedBy?.length)
       details.push(`Flagged by: ${mine.gatedBy.map(words).join(', ')}.`);
@@ -1178,13 +1282,23 @@ function recommendationStep(
     title,
     question,
     headline: decision.actionType
-      ? revenueObjective
-        ? `${words(decision.actionType)} on ${decision.targetId} — worth about ${money(
+      ? revenueObjective && avoidsAdditionalLoss
+        ? `${words(decision.actionType)} on ${decision.targetId} — modeled to avoid about ${money(
             decision.expectedProfitDeltaINR7d,
-          )} of extra profit over 7 days.`
-        : `${words(decision.actionType)} on ${decision.targetId} to improve ${words(
-            mine?.expectedImpact?.metric ?? o?.primaryKPI,
-          )}${mine ? ` by about ${Math.abs(Math.round(mine.expectedImpact.deltaPct))}%` : ''}.`
+          )} of additional contribution loss over 7 days if the current spend pace and economics persist.`
+        : revenueObjective
+          ? `${words(decision.actionType)} on ${decision.targetId} — worth about ${money(
+              decision.expectedProfitDeltaINR7d,
+            )} of extra profit over 7 days.`
+          : `${words(decision.actionType)} on ${decision.targetId} to improve ${words(
+              mine?.expectedImpact?.metric ?? o?.primaryKPI,
+            )}${
+              mine?.expectedImpact?.basis === 'not_estimated'
+                ? '; uplift will be measured after the controlled action'
+                : mine
+                  ? ` by about ${Math.abs(Math.round(mine.expectedImpact.deltaPct))}%`
+                  : ''
+            }.`
       : (r.actions ?? []).length
         ? `${(r.actions ?? []).length} action(s) proposed: ${(r.actions ?? [])
             .map((a) => words(a.type))
@@ -1198,7 +1312,8 @@ function recommendationStep(
 
 function explainabilityStep(
   e: ExplainabilityData | undefined,
-  actionId: string,
+  decision: TraceDecision,
+  lossContainmentOnly: boolean,
 ): StepBody {
   const title = 'The reasoning, in its own words';
   const question = 'How does the system justify this?';
@@ -1210,7 +1325,7 @@ function explainabilityStep(
       'No written explanation was produced.',
     );
 
-  if (!actionId) {
+  if (!decision.actionId) {
     return {
       step: ENGINE_STEP.explainability,
       engine: 'explainability',
@@ -1225,7 +1340,7 @@ function explainabilityStep(
     };
   }
 
-  const mine = e.perAction?.[actionId];
+  const mine = e.perAction?.[decision.actionId];
   if (!mine) {
     return blank(
       'explainability',
@@ -1240,18 +1355,25 @@ function explainabilityStep(
     engine: 'explainability',
     title,
     question,
-    headline: mine.summary || 'A written justification was produced.',
-    details: [
-      mine.reasoning || '',
-      // The counterfactual is the most decision-useful line here: it says what
-      // is expected to happen if you decline.
-      mine.counterfactual
-        ? `If you do nothing instead: ${mine.counterfactual}`
-        : '',
-      mine.llmRendered && mine.llmRendered !== mine.reasoning
-        ? mine.llmRendered
-        : '',
-    ].filter(Boolean),
+    headline: lossContainmentOnly
+      ? `${words(decision.actionType)} is proposed only to reduce modeled loss exposure; no performance uplift and no root cause is claimed.`
+      : mine.summary || 'A written justification was produced.',
+    details: lossContainmentOnly
+      ? [
+          'The evidence supports that financial loss is occurring, but not why it is occurring; only spend exposure is being reduced.',
+          'Nothing has run yet, so this is a modeled proposal rather than a measured result.',
+        ]
+      : [
+          mine.reasoning || '',
+          // The counterfactual is the most decision-useful line here: it says
+          // what is expected to happen if you decline.
+          mine.counterfactual
+            ? `If you do nothing instead: ${mine.counterfactual}`
+            : '',
+          mine.llmRendered && mine.llmRendered !== mine.reasoning
+            ? mine.llmRendered
+            : '',
+        ].filter(Boolean),
     status: 'ok',
     decisive: true,
   };
@@ -1260,6 +1382,7 @@ function explainabilityStep(
 function executionStep(
   x: ExecutionData | undefined,
   actionId: string,
+  campaignSource?: 'agent' | 'human' | 'manual',
 ): StepBody {
   const title = 'Whether anything was actually changed';
   const question = 'Did the system touch my live campaign?';
@@ -1275,6 +1398,21 @@ function executionStep(
       ],
       status: 'ok',
       decisive: false,
+    };
+  }
+  if (campaignSource === 'manual') {
+    return {
+      step: ENGINE_STEP.execution,
+      engine: 'execution',
+      title,
+      question,
+      headline:
+        'Read-only diagnostic — this external Meta campaign cannot be changed by Meridian.',
+      details: [
+        'It was not launched through Meridian, so it is excluded from Meridian impact and the backend blocks execution.',
+      ],
+      status: 'ok',
+      decisive: true,
     };
   }
   if (!x) {
@@ -1355,8 +1493,14 @@ function learningStep(l: LearningData | undefined): StepBody {
       `Adjusted ${words(u.target)} "${words(u.key)}": ${String(u.oldValue)} → ${String(u.newValue)} because ${u.reason}.`,
     );
   }
-  if (!details.length)
-    details.push('No completed actions to measure yet in this cycle.');
+  if (!details.length) {
+    details.push(
+      'Outcomes can only be evaluated after an approved action runs and its later measurement checkpoint is reached.',
+    );
+  }
+
+  const hasPostActionEvidence =
+    (l.measurements ?? []).length > 0 || (l.calibrations ?? []).length > 0;
 
   return {
     step: ENGINE_STEP.learning,
@@ -1365,7 +1509,9 @@ function learningStep(l: LearningData | undefined): StepBody {
     question,
     headline: (l.updates ?? []).length
       ? `${l.updates.length} internal threshold(s) were adjusted based on how past predictions turned out.`
-      : 'No adjustments were needed this cycle.',
+      : hasPostActionEvidence
+        ? `${(l.measurements ?? []).length} post-action outcome checkpoint(s) were observed; no threshold calibration was recorded.`
+        : 'No post-action evidence yet, so no prediction accuracy or calibration result is available.',
     details,
     status: 'ok',
     decisive: false,

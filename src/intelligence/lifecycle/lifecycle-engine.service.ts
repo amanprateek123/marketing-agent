@@ -5,7 +5,10 @@ import { Model } from 'mongoose';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import {
@@ -74,7 +77,9 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
   protected async compute(
     deps: ComputeDeps<'lifecycle'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<LifecycleData> {
+    void cycleId;
     const snapshot = deps.snapshot!;
     const data = snapshot.data as {
       collectedAt: Date;
@@ -95,11 +100,10 @@ export class LifecycleEngine extends BaseEngine<'lifecycle', LifecycleData> {
     // classify() only applies its age-based floor when age is genuinely known.
     let ageHours = 0;
     if (this.campaignModel) {
-      const ident = this.identity.get(cycleId);
-      if (ident?.campaignId) {
+      if (identity.campaignId) {
         try {
           const c = await this.campaignModel
-            .findById(ident.campaignId)
+            .findById(identity.campaignId)
             .select('launchedAt')
             .lean()
             .exec();

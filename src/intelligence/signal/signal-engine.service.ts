@@ -5,18 +5,25 @@ import { Model } from 'mongoose';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { Campaign } from '../../campaigns/schemas/campaign.schema';
 import { BreakdownSnapshot } from '../../campaigns/schemas/breakdown-snapshot.schema';
 import {
+  OptimizationGoalSignalEvidence,
   Signal,
   SignalData,
   SignalKind,
   TrendData,
 } from '../orchestrator/decision-context';
 import { isRevenueObjective } from '../objective/kpi-profiles';
+import { compareGoalEfficiencyPeers } from '../objective/goal-efficiency';
+import { buildSnapshotGoalEfficiencyRows } from '../objective/goal-efficiency-snapshot';
+import type { SnapshotData } from '../snapshot/snapshot.types';
 import { hasEnoughElapsedTrendHistory } from '../trend/trend-readiness';
 
 /**
@@ -33,6 +40,13 @@ const REVENUE_EVIDENCE_SIGNALS = new Set<SignalKind>([
   'audience_exhaustion',
   'placement_leak',
 ]);
+
+// Frequency is an observation, not a diagnosis. Warm/custom audiences are
+// deliberately smaller than cold prospecting audiences, so they use a higher
+// monitoring threshold. Downstream still requires corroborating evidence
+// before frequency can justify a creative or placement action.
+const COLD_FREQUENCY_MONITORING_THRESHOLD = 5.5;
+const WARM_FREQUENCY_MONITORING_THRESHOLD = 8;
 
 /**
  * Signals fired from observation, not from cached rules.
@@ -99,30 +113,23 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
   protected async compute(
     deps: ComputeDeps<'signal'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<SignalData> {
+    void cycleId;
     const snap = deps.snapshot!;
     const lifecycle = deps.lifecycle!;
     const trend = deps.trend! as { data: TrendData };
     const revenue = deps.revenue!;
     const objective = deps.objective!;
-    const metrics = (
-      snap.data as {
-        metrics?: {
-          campaignLevel?: Record<string, number>;
-          adSetLevel?: Record<string, Record<string, number>>;
-          adLevel?: Record<
-            string,
-            Record<string, number> & { format?: string }
-          >;
-        };
-      }
-    ).metrics;
+    const snapshotData = snap.data as unknown as SnapshotData;
+    const metrics = snapshotData.metrics;
     const cm = metrics?.campaignLevel ?? {};
     const adSetLevel = metrics?.adSetLevel ?? {};
     const adLevel = metrics?.adLevel ?? {};
+    const adEntities = snapshotData.entities?.ads ?? {};
 
     const ignored = new Set(objective.data.policy.ignoreSignals ?? []);
-    const ident = this.identity.get(cycleId);
+    const ident = identity;
     const targetId = ident?.campaignId ?? 'unknown';
     const signals: Signal[] = [];
 
@@ -178,6 +185,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
         strength: number;
         metricEvidence: Record<string, number>;
         reasoning: string;
+        goalEvidence?: OptimizationGoalSignalEvidence;
       },
     ) => {
       if (ignored.has(kind)) return;
@@ -196,6 +204,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
         trigger: opts.trigger,
         strength: opts.strength,
         reasoning: opts.reasoning,
+        goalEvidence: opts.goalEvidence,
         firstSeenAt: new Date(),
       });
     };
@@ -256,13 +265,16 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     }
 
     // ── frequency_ceiling — absolute over-frequency ──────────────────
-    if (freq > 5.5) {
+    if (freq > COLD_FREQUENCY_MONITORING_THRESHOLD) {
       push('frequency_ceiling', {
         severity: 'critical',
-        strength: Math.min(1, (freq - 5.5) / 3),
-        trigger: 'freq>5.5',
-        metricEvidence: { frequency: freq },
-        reasoning: `Frequency ${freq.toFixed(1)} means every person reached saw ads ${freq.toFixed(1)} times on average. Above 5.5, incremental impressions rarely convert and CPMs waste.`,
+        strength: Math.min(1, (freq - COLD_FREQUENCY_MONITORING_THRESHOLD) / 3),
+        trigger: 'freq>generalCampaignMonitoringThreshold(5.5)',
+        metricEvidence: {
+          frequency: freq,
+          monitoringThreshold: COLD_FREQUENCY_MONITORING_THRESHOLD,
+        },
+        reasoning: `Campaign frequency is ${freq.toFixed(1)}, above the system's ${COLD_FREQUENCY_MONITORING_THRESHOLD.toFixed(1)} general early-warning threshold. Campaign rollups can mix warm and cold ad groups, so this only flags saturation risk; target-specific thresholds and corroborating trend or breakdown evidence are required before any action.`,
       });
     }
 
@@ -300,13 +312,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     }
 
     // ── unprofitable_run — below breakeven with meaningful spend ─────
-    if (
-      !skipPerfStage &&
-      breakevenROAS > 0 &&
-      spend > 500 &&
-      !isProfitable &&
-      roas > 0
-    ) {
+    if (breakevenROAS > 0 && spend > 500 && !isProfitable && roas > 0) {
       const gap = breakevenROAS - roas;
       const relativeGap = gap / breakevenROAS;
       const contribMarginProxy = revenueData.derivation?.marginPct ?? 0.4;
@@ -455,6 +461,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     // effective_status) and skip anything not ACTIVE.
     const marginPct = revenueData.derivation?.marginPct ?? 0.4;
     const adSetStatuses = new Map<string, string>();
+    const adSetAudienceTypes = new Map<string, string>();
     let metaCampaignId: string | undefined;
     if (this.campaignModel && ident?.campaignId) {
       try {
@@ -463,13 +470,29 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
           .select('metaAdSets metaCampaignId')
           .lean()
           .exec()) as {
-          metaAdSets?: Array<{ id?: string; status?: string }>;
+          metaAdSets?: Array<{
+            id?: string;
+            status?: string;
+            audienceType?: string;
+            targetingDetail?: { customAudiences?: unknown[] };
+            rawTargeting?: { custom_audiences?: unknown[] };
+          }>;
           metaCampaignId?: string;
         } | null;
         metaCampaignId = c?.metaCampaignId;
         for (const as of c?.metaAdSets ?? []) {
-          if (as.id && as.status)
+          if (!as.id) continue;
+          if (as.status)
             adSetStatuses.set(as.id, String(as.status).toUpperCase());
+          const hasCustomAudience =
+            (as.targetingDetail?.customAudiences?.length ?? 0) > 0 ||
+            (as.rawTargeting?.custom_audiences?.length ?? 0) > 0;
+          adSetAudienceTypes.set(
+            as.id,
+            hasCustomAudience
+              ? 'custom'
+              : String(as.audienceType ?? 'other').toLowerCase(),
+          );
         }
       } catch {
         // non-fatal — we just won't be able to filter by status
@@ -481,201 +504,229 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
       const s = adSetStatuses.get(id);
       return !s || s === 'ACTIVE';
     };
-    if (!skipPerfStage && breakevenROAS > 0) {
-      for (const [adSetId, m] of Object.entries(adSetLevel)) {
-        if (!isAdsetActive(adSetId)) continue;
-        const asSpend = num(m.spend);
-        const asRoas = num(m.roas);
-        const asPurchases = num(m.purchases);
-        const asFreq = num(m.frequency);
-        const asClicks = num(m.clicks);
-        const asCpc = num(m.cpc);
-        const asCtr = num(m.ctr);
-        const asImpressions = num(m.impressions);
+    // Common delivery/creative observations must also run for awareness,
+    // reach and traffic campaigns, where breakeven ROAS is intentionally
+    // unavailable. Revenue-derived signals still fail closed inside push().
+    for (const [adSetId, m] of Object.entries(adSetLevel)) {
+      if (!isAdsetActive(adSetId)) continue;
+      const asSpend = num(m.spend);
+      const asRoas = num(m.roas);
+      const asPurchases = num(m.purchases);
+      const asFreq = num(m.frequency);
+      const asClicks = num(m.clicks);
+      const asCpc = num(m.cpc);
+      const asCtr = num(m.ctr);
+      const asImpressions = num(m.impressions);
 
-        // unprofitable_run — adset below breakeven with meaningful spend
-        if (asSpend > 300 && asRoas > 0 && asRoas < breakevenROAS) {
-          const gap = breakevenROAS - asRoas;
-          const relativeGap = gap / breakevenROAS;
-          const lossPerRupee = gap * marginPct;
-          push('unprofitable_run', {
-            severity: relativeGap >= 0.3 ? 'critical' : 'warn',
-            strength: Math.min(1, relativeGap),
-            targetType: 'adset',
-            target: adSetId,
-            trigger: 'adset.roas<breakevenROAS AND adset.spend>300',
-            metricEvidence: {
-              roas: asRoas,
-              breakevenROAS,
-              gap: round(gap, 3),
-              relativeGap: round(relativeGap, 3),
-              spend: asSpend,
-              purchases: asPurchases,
-            },
-            reasoning: `This ad group is at ${asRoas.toFixed(2)}× ROAS on ₹${asSpend.toFixed(0)} of spend — below the ${breakevenROAS.toFixed(2)}× breakeven. Roughly ₹${lossPerRupee.toFixed(2)} lost per ₹1 spent here.`,
-          });
-        }
+      // unprofitable_run — adset below breakeven with meaningful spend
+      if (
+        breakevenROAS > 0 &&
+        asSpend > 300 &&
+        asRoas > 0 &&
+        asRoas < breakevenROAS
+      ) {
+        const gap = breakevenROAS - asRoas;
+        const relativeGap = gap / breakevenROAS;
+        const lossPerRupee = gap * marginPct;
+        push('unprofitable_run', {
+          severity: relativeGap >= 0.3 ? 'critical' : 'warn',
+          strength: Math.min(1, relativeGap),
+          targetType: 'adset',
+          target: adSetId,
+          trigger: 'adset.roas<breakevenROAS AND adset.spend>300',
+          metricEvidence: {
+            roas: asRoas,
+            breakevenROAS,
+            gap: round(gap, 3),
+            relativeGap: round(relativeGap, 3),
+            spend: asSpend,
+            purchases: asPurchases,
+          },
+          reasoning: `This ad group is at ${asRoas.toFixed(2)}× ROAS on ₹${asSpend.toFixed(0)} of spend — below the ${breakevenROAS.toFixed(2)}× breakeven. Roughly ₹${lossPerRupee.toFixed(2)} lost per ₹1 spent here.`,
+        });
+      }
 
-        // winner_emerging — adset clearly above breakeven, making progress
-        // toward the system's scale heuristic
-        if (asRoas >= breakevenROAS * 1.3 && asPurchases >= 3) {
-          const profitPerRupee = (asRoas - breakevenROAS) * marginPct;
-          const pctToTarget =
-            targetROAS > breakevenROAS
-              ? Math.min(
-                  1,
-                  (asRoas - breakevenROAS) / (targetROAS - breakevenROAS),
-                )
-              : 1;
-          push('winner_emerging', {
-            severity: 'info',
-            strength: Math.min(1, asRoas / breakevenROAS / 2),
-            targetType: 'adset',
-            target: adSetId,
-            trigger: 'adset.roas>=breakevenROAS*1.3 AND adset.purchases>=3',
-            metricEvidence: {
-              roas: asRoas,
-              breakevenROAS,
-              targetROAS,
-              purchases: asPurchases,
-              spend: asSpend,
-            },
-            reasoning: `This ad group is at ${asRoas.toFixed(2)}× ROAS with ${asPurchases} purchases — 30%+ above breakeven ${breakevenROAS.toFixed(2)}×, ${Math.round(pctToTarget * 100)}% of the way to the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Each ₹1 here creates roughly ₹${profitPerRupee.toFixed(2)} of contribution profit. Scale candidate.`,
-          });
-        }
+      // winner_emerging — adset clearly above breakeven, making progress
+      // toward the system's scale heuristic
+      if (
+        !skipPerfStage &&
+        breakevenROAS > 0 &&
+        asRoas >= breakevenROAS * 1.3 &&
+        asPurchases >= 3
+      ) {
+        const profitPerRupee = (asRoas - breakevenROAS) * marginPct;
+        const pctToTarget =
+          targetROAS > breakevenROAS
+            ? Math.min(
+                1,
+                (asRoas - breakevenROAS) / (targetROAS - breakevenROAS),
+              )
+            : 1;
+        push('winner_emerging', {
+          severity: 'info',
+          strength: Math.min(1, asRoas / breakevenROAS / 2),
+          targetType: 'adset',
+          target: adSetId,
+          trigger: 'adset.roas>=breakevenROAS*1.3 AND adset.purchases>=3',
+          metricEvidence: {
+            roas: asRoas,
+            breakevenROAS,
+            targetROAS,
+            purchases: asPurchases,
+            spend: asSpend,
+          },
+          reasoning: `This ad group is at ${asRoas.toFixed(2)}× ROAS with ${asPurchases} purchases — 30%+ above breakeven ${breakevenROAS.toFixed(2)}×, ${Math.round(pctToTarget * 100)}% of the way to the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Each ₹1 here creates roughly ₹${profitPerRupee.toFixed(2)} of contribution profit. Scale candidate.`,
+        });
+      }
 
-        // winner_confirmed — at the system scale heuristic at adset level,
-        // with sustained volume
-        if (asRoas >= targetROAS && asPurchases >= 10) {
-          push('winner_confirmed', {
-            severity: 'info',
-            strength: 1,
-            targetType: 'adset',
-            target: adSetId,
-            trigger: 'adset.roas>=targetROAS AND adset.purchases>=10',
-            metricEvidence: {
-              roas: asRoas,
-              breakevenROAS,
-              targetROAS,
-              purchases: asPurchases,
-            },
-            reasoning: `Ad group has ${asPurchases} purchases at ${asRoas.toFixed(2)}× ROAS — at or above the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Confirmed scale candidate.`,
-          });
-        }
+      // winner_confirmed — at the system scale heuristic at adset level,
+      // with sustained volume
+      if (
+        !skipPerfStage &&
+        breakevenROAS > 0 &&
+        asRoas >= targetROAS &&
+        asPurchases >= 10
+      ) {
+        push('winner_confirmed', {
+          severity: 'info',
+          strength: 1,
+          targetType: 'adset',
+          target: adSetId,
+          trigger: 'adset.roas>=targetROAS AND adset.purchases>=10',
+          metricEvidence: {
+            roas: asRoas,
+            breakevenROAS,
+            targetROAS,
+            purchases: asPurchases,
+          },
+          reasoning: `Ad group has ${asPurchases} purchases at ${asRoas.toFixed(2)}× ROAS — at or above the system's ${targetROAS.toFixed(2)}× scale heuristic (2× breakeven, not an observed business target). Confirmed scale candidate.`,
+        });
+      }
 
-        // frequency_ceiling — adset over-frequency
-        if (asFreq > 5.5) {
-          push('frequency_ceiling', {
-            severity: 'critical',
-            strength: Math.min(1, (asFreq - 5.5) / 3),
-            targetType: 'adset',
-            target: adSetId,
-            trigger: 'adset.freq>5.5',
-            metricEvidence: { frequency: asFreq, spend: asSpend },
-            reasoning: `Ad group frequency is ${asFreq.toFixed(1)}. Every person reached saw ads that many times on average — incremental impressions rarely convert.`,
-          });
-        }
+      // frequency_ceiling — adset over-frequency
+      const audienceType = adSetAudienceTypes.get(adSetId) ?? 'other';
+      const warmAudience =
+        audienceType === 'retarget' || audienceType === 'custom';
+      const frequencyThreshold = warmAudience
+        ? WARM_FREQUENCY_MONITORING_THRESHOLD
+        : COLD_FREQUENCY_MONITORING_THRESHOLD;
+      if (asFreq > frequencyThreshold) {
+        push('frequency_ceiling', {
+          severity: 'critical',
+          strength: Math.min(1, (asFreq - frequencyThreshold) / 3),
+          targetType: 'adset',
+          target: adSetId,
+          trigger: warmAudience
+            ? 'adset.freq>warmAudienceMonitoringThreshold(8.0)'
+            : 'adset.freq>coldAudienceMonitoringThreshold(5.5)',
+          metricEvidence: {
+            frequency: asFreq,
+            spend: asSpend,
+            monitoringThreshold: frequencyThreshold,
+          },
+          reasoning: `Ad group frequency is ${asFreq.toFixed(1)}, above the system's ${frequencyThreshold.toFixed(1)} ${warmAudience ? 'warm/custom' : 'cold/unknown'}-audience monitoring threshold. This is a saturation-risk observation, not proof of fatigue or a placement problem.`,
+        });
+      }
 
-        // cvr_collapse — traffic but no conversions at adset level
-        if (asClicks > 100 && asPurchases === 0) {
-          push('cvr_collapse', {
-            severity: 'critical',
-            strength: 1,
-            targetType: 'adset',
-            target: adSetId,
-            trigger: 'adset.clicks>100 AND adset.purchases=0',
-            metricEvidence: {
-              clicks: asClicks,
-              purchases: asPurchases,
-              spend: asSpend,
-            },
-            reasoning: `Ad group had ${asClicks} clicks and 0 purchases. The audience → landing-page match is broken for this group.`,
-          });
-        }
+      // cvr_collapse — traffic but no conversions at adset level
+      if (!skipPerfStage && asClicks > 100 && asPurchases === 0) {
+        push('cvr_collapse', {
+          severity: 'critical',
+          strength: 1,
+          targetType: 'adset',
+          target: adSetId,
+          trigger: 'adset.clicks>100 AND adset.purchases=0',
+          metricEvidence: {
+            clicks: asClicks,
+            purchases: asPurchases,
+            spend: asSpend,
+          },
+          reasoning: `Ad group had ${asClicks} clicks and 0 purchases. The audience → landing-page match is broken for this group.`,
+        });
+      }
 
-        // budget_saturation — high CPC + low volume at adset level
-        if (asCpc > 25 && asPurchases < 3 && asSpend > 500) {
-          push('budget_saturation', {
-            severity: 'warn',
-            strength: 0.6,
-            targetType: 'adset',
-            target: adSetId,
-            trigger: 'adset.cpc>25 AND adset.purchases<3 AND adset.spend>500',
-            metricEvidence: {
-              cpc: asCpc,
-              purchases: asPurchases,
-              spend: asSpend,
-            },
-            reasoning: `Ad group at ₹${asCpc.toFixed(1)}/click but only ${asPurchases} of ${asClicks} clicks converted despite ₹${asSpend.toFixed(0)} spent.`,
-          });
-        }
+      // budget_saturation — high CPC + low volume at adset level
+      if (!skipPerfStage && asCpc > 25 && asPurchases < 3 && asSpend > 500) {
+        push('budget_saturation', {
+          severity: 'warn',
+          strength: 0.6,
+          targetType: 'adset',
+          target: adSetId,
+          trigger: 'adset.cpc>25 AND adset.purchases<3 AND adset.spend>500',
+          metricEvidence: {
+            cpc: asCpc,
+            purchases: asPurchases,
+            spend: asSpend,
+          },
+          reasoning: `Ad group at ₹${asCpc.toFixed(1)}/click but only ${asPurchases} of ${asClicks} clicks converted despite ₹${asSpend.toFixed(0)} spent.`,
+        });
+      }
 
-        // ctr_decay — adset CTR far below the campaign's own 7d baseline.
-        // No per-adset historical baseline exists, so the campaign-wide
-        // emaCTR7 is used as the comparison point: this adset is under-
-        // performing what this campaign's creatives typically do.
-        if (
-          !skipPerfStage &&
-          hasBaseline &&
-          emaCTR7 > 0 &&
-          asImpressions >= 500 &&
-          asCtr > 0
-        ) {
-          const asDrop = 1 - asCtr / emaCTR7;
-          if (asDrop >= 0.35) {
-            push('ctr_decay', {
-              severity: asDrop >= 0.5 ? 'critical' : 'warn',
-              strength: Math.min(1, asDrop),
-              targetType: 'adset',
-              target: adSetId,
-              trigger:
-                'adset.ctr<0.65*campaignRecentDailyBaseline AND adset.impressions>=500',
-              metricEvidence: {
-                ctr: asCtr,
-                ctrBaseline: emaCTR7,
-                dropPct: round(asDrop, 3),
-                impressions: asImpressions,
-                trendObservationCount,
-                trendElapsedDays,
-              },
-              // asCtr/emaCTR7 are already percentage-point numbers — no *100.
-              reasoning: `This ad group's CTR is ${asCtr.toFixed(2)}%, ${(asDrop * 100).toFixed(0)}% below the campaign's recent daily-observation baseline of ${emaCTR7.toFixed(2)}%, based on ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. Its creative is underperforming what this campaign recently gets.`,
-            });
-          }
-        }
-
-        // creative_fatigue — adset frequency elevated vs campaign baseline
-        // AND campaign-wide CTR trend declining. Same baseline-proxy
-        // reasoning as ctr_decay above: no per-adset EMA exists yet.
-        if (
-          !skipPerfStage &&
-          hasBaseline &&
-          emaFreq7 > 0 &&
-          asFreq / emaFreq7 >= 1.4 &&
-          slopeCTR3 < -0.005
-        ) {
-          const asRatio = asFreq / emaFreq7;
-          push('creative_fatigue', {
-            severity: asFreq > 4 ? 'critical' : 'warn',
-            strength: Math.min(
-              1,
-              (asRatio - 1) * 0.8 + Math.min(1, Math.abs(slopeCTR3) * 40),
-            ),
+      // ctr_decay — adset CTR far below the campaign's own 7d baseline.
+      // No per-adset historical baseline exists, so the campaign-wide
+      // emaCTR7 is used as the comparison point: this adset is under-
+      // performing what this campaign's creatives typically do.
+      if (
+        !skipPerfStage &&
+        hasBaseline &&
+        emaCTR7 > 0 &&
+        asImpressions >= 500 &&
+        asCtr > 0
+      ) {
+        const asDrop = 1 - asCtr / emaCTR7;
+        if (asDrop >= 0.35) {
+          push('ctr_decay', {
+            severity: asDrop >= 0.5 ? 'critical' : 'warn',
+            strength: Math.min(1, asDrop),
             targetType: 'adset',
             target: adSetId,
             trigger:
-              'adset.freq/campaignRecentDailyBase>=1.4 AND campaign.recentDailyCTRTrend<-0.005',
+              'adset.ctr<0.65*campaignRecentDailyBaseline AND adset.impressions>=500',
             metricEvidence: {
-              frequency: asFreq,
-              frequencyBaseline: emaFreq7,
-              ctrSlopePerDailyObservation: slopeCTR3,
+              ctr: asCtr,
+              ctrBaseline: emaCTR7,
+              dropPct: round(asDrop, 3),
+              impressions: asImpressions,
               trendObservationCount,
               trendElapsedDays,
             },
-            // slopeCTR3 is already in ctr's own percentage-point units — no *100.
-            reasoning: `This ad group's frequency is ${asFreq.toFixed(1)}, ${((asRatio - 1) * 100).toFixed(0)}% above the campaign's recent daily-observation baseline of ${emaFreq7.toFixed(1)}, while campaign-wide CTR fell ${Math.abs(slopeCTR3).toFixed(2)} percentage points per daily observation across ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. This group's audience is likely seeing its creative too often.`,
+            // asCtr/emaCTR7 are already percentage-point numbers — no *100.
+            reasoning: `This ad group's CTR is ${asCtr.toFixed(2)}%, ${(asDrop * 100).toFixed(0)}% below the campaign's recent daily-observation baseline of ${emaCTR7.toFixed(2)}%, based on ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. Its creative is underperforming what this campaign recently gets.`,
           });
         }
+      }
+
+      // creative_fatigue — adset frequency elevated vs campaign baseline
+      // AND campaign-wide CTR trend declining. Same baseline-proxy
+      // reasoning as ctr_decay above: no per-adset EMA exists yet.
+      if (
+        !skipPerfStage &&
+        hasBaseline &&
+        emaFreq7 > 0 &&
+        asFreq / emaFreq7 >= 1.4 &&
+        slopeCTR3 < -0.005
+      ) {
+        const asRatio = asFreq / emaFreq7;
+        push('creative_fatigue', {
+          severity: asFreq > 4 ? 'critical' : 'warn',
+          strength: Math.min(
+            1,
+            (asRatio - 1) * 0.8 + Math.min(1, Math.abs(slopeCTR3) * 40),
+          ),
+          targetType: 'adset',
+          target: adSetId,
+          trigger:
+            'adset.freq/campaignRecentDailyBase>=1.4 AND campaign.recentDailyCTRTrend<-0.005',
+          metricEvidence: {
+            frequency: asFreq,
+            frequencyBaseline: emaFreq7,
+            ctrSlopePerDailyObservation: slopeCTR3,
+            trendObservationCount,
+            trendElapsedDays,
+          },
+          // slopeCTR3 is already in ctr's own percentage-point units — no *100.
+          reasoning: `This ad group's frequency is ${asFreq.toFixed(1)}, ${((asRatio - 1) * 100).toFixed(0)}% above the campaign's recent daily-observation baseline of ${emaFreq7.toFixed(1)}, while campaign-wide CTR fell ${Math.abs(slopeCTR3).toFixed(2)} percentage points per daily observation across ${trendObservationCount} observations spanning ${trendElapsedDays.toFixed(1)} elapsed days. This group's audience is likely seeing its creative too often.`,
+        });
       }
     }
 
@@ -689,9 +740,20 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
     if (!skipPerfStage) {
       for (const [adId, m] of Object.entries(adLevel)) {
         if (m.format !== 'video') continue;
-        const adImpressions = num(m.impressions);
-        const adVideoP25 = num((m as Record<string, number>).videoP25);
-        const adCtr = num(m.ctr);
+        if (!isActiveOrStatusUnknown(adEntities[adId])) continue;
+        const adImpressions = finiteNumberOrUndefined(m.impressions);
+        const adVideoP25 = finiteNumberOrUndefined(m.videoP25);
+        const adCtr = finiteNumberOrUndefined(m.ctr);
+        // `videoP25` is optional in the snapshot. Absence means Meta did not
+        // provide hook-depth evidence; it is not an observed zero. CTR is
+        // likewise required because the rule depends on both measurements.
+        if (
+          adImpressions === undefined ||
+          adVideoP25 === undefined ||
+          adCtr === undefined
+        ) {
+          continue;
+        }
         if (adImpressions < 1000) continue; // not enough volume to trust the ratio
         const hookRate = adVideoP25 / adImpressions;
         // ctr here is Meta's own field convention: a percentage-point
@@ -706,6 +768,7 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
             trigger: 'ad.hookRate<0.15 AND ad.ctr<1.0(%) AND ad.format=video',
             metricEvidence: {
               hookRate: round(hookRate, 3),
+              videoP25: adVideoP25,
               impressions: adImpressions,
               ctr: adCtr,
             },
@@ -716,6 +779,14 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
           });
         }
       }
+    }
+
+    // Exact optimization-goal peer observations are independent of product
+    // economics and broad campaign KPIs. The shared adapter + pure comparator
+    // enforce exact parent, ACTIVE status, goal, window, source, currency and
+    // attribution identity. These signals intentionally map to no action yet.
+    for (const signal of buildOptimizationGoalSignals(snapshotData)) {
+      if (!ignored.has(signal.kind)) signals.push(signal);
     }
 
     // ── placement_leak — one placement burning spend at far worse ROAS ──
@@ -801,7 +872,159 @@ export class SignalEngine extends BaseEngine<'signal', SignalData> {
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
+function finiteNumberOrUndefined(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+function isActiveOrStatusUnknown(entity?: {
+  status?: string;
+  effectiveStatus?: string;
+}): boolean {
+  const effectiveStatus = normalizeStatus(entity?.effectiveStatus);
+  if (effectiveStatus) return effectiveStatus === 'ACTIVE';
+  const status = normalizeStatus(entity?.status);
+  return !status || status === 'ACTIVE';
+}
+function normalizeStatus(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toUpperCase();
+  return normalized || undefined;
+}
 function round(v: number, dp: number): number {
   const m = Math.pow(10, dp);
   return Math.round(v * m) / m;
+}
+
+function buildOptimizationGoalSignals(snapshot: SnapshotData): Signal[] {
+  const signals: Signal[] = [];
+  for (const level of ['adset', 'ad'] as const) {
+    const rows = buildSnapshotGoalEfficiencyRows(snapshot, level);
+    for (const target of rows) {
+      const comparison = compareGoalEfficiencyPeers({
+        target,
+        siblings: rows,
+      });
+      if (
+        comparison.status === 'insufficient' ||
+        !comparison.current ||
+        !comparison.baseline
+      ) {
+        continue;
+      }
+
+      const kind: SignalKind =
+        comparison.status === 'laggard'
+          ? 'optimization_goal_efficiency_lagging'
+          : 'optimization_goal_efficiency_leading';
+      const gapMultiple = comparison.relativeGap.observedMultiple;
+      const observedGapPct =
+        gapMultiple === null ? undefined : (gapMultiple - 1) * 100;
+      const currentEfficiency = comparison.current.efficiency.value;
+      const currency = target.provenance.currency;
+      const goalEvidence: OptimizationGoalSignalEvidence = {
+        optimizationGoal: target.optimizationGoal,
+        resultMetric: comparison.current.result.metric,
+        efficiencyMetric: comparison.current.efficiency.metric,
+        efficiencyUnit: comparison.current.efficiency.unit,
+        lowerIsBetter: comparison.current.efficiency.lowerIsBetter,
+        current: {
+          spend: comparison.current.spend,
+          result: comparison.current.result.value,
+          efficiency: currentEfficiency,
+        },
+        pooledSiblingBaseline: {
+          peerCount: comparison.baseline.peerCount,
+          peerIds: [...comparison.baseline.peerIds],
+          spend: comparison.baseline.pooledSpend,
+          result: comparison.baseline.pooledResult.value,
+          efficiency: comparison.baseline.efficiency.value,
+        },
+        observedGap: {
+          thresholdMultiple: comparison.relativeGap.thresholdMultiple,
+          multiple: gapMultiple,
+          unbounded: comparison.relativeGap.unbounded,
+          direction:
+            comparison.relativeGap.direction === 'worse' ? 'worse' : 'better',
+        },
+        window: {
+          dateStart: target.provenance.dateStart,
+          dateStop: target.provenance.dateStop,
+          metricScope: target.provenance.metricScope,
+        },
+        sourceFingerprint: target.provenance.sourceFingerprint,
+        currency,
+        claimScope: 'observational_same_window_peer_comparison',
+        causalClaim: false,
+        expectedUplift: null,
+      };
+      const metricEvidence: Record<string, number> = {
+        currentSpend: comparison.current.spend,
+        currentResult: comparison.current.result.value,
+        siblingBaselineEfficiency: comparison.baseline.efficiency.value,
+        siblingBaselineSpend: comparison.baseline.pooledSpend,
+        siblingBaselineResult: comparison.baseline.pooledResult.value,
+        peerCount: comparison.baseline.peerCount,
+        thresholdMultiple: comparison.relativeGap.thresholdMultiple,
+        unboundedGap: comparison.relativeGap.unbounded ? 1 : 0,
+        ...(currentEfficiency === null ? {} : { currentEfficiency }),
+        ...(gapMultiple === null ? {} : { observedGapMultiple: gapMultiple }),
+        ...(observedGapPct === undefined ? {} : { observedGapPct }),
+      };
+      const directionWord =
+        comparison.status === 'laggard' ? 'worse' : 'better';
+      const observedMultiple = comparison.relativeGap.unbounded
+        ? 'an unbounded amount'
+        : `${(gapMultiple ?? 0).toFixed(2)}x`;
+      const currentLabel = formatEfficiency(
+        currentEfficiency,
+        comparison.current.efficiency.metric,
+        currency,
+      );
+      const baselineLabel = formatEfficiency(
+        comparison.baseline.efficiency.value,
+        comparison.baseline.efficiency.metric,
+        currency,
+      );
+      const subject = level === 'adset' ? 'Ad set' : 'Ad';
+      const restraint =
+        comparison.status === 'laggard'
+          ? 'This establishes relative delivery inefficiency only; it does not establish whether creative, audience, placement, bid, landing page, or tracking caused it, and it predicts no uplift.'
+          : 'This is a relative efficiency leader observation, not a confirmed winner, causal explanation, scale instruction, or future-uplift prediction.';
+
+      signals.push({
+        kind,
+        severity:
+          comparison.status === 'leader'
+            ? 'info'
+            : comparison.relativeGap.unbounded || (gapMultiple ?? 0) >= 2
+              ? 'critical'
+              : 'warn',
+        targetType: level,
+        targetId: target.entityId,
+        metricEvidence,
+        goalEvidence,
+        trigger: `${target.optimizationGoal}:same_window_active_sibling_efficiency_gap>=${comparison.relativeGap.thresholdMultiple}x`,
+        strength: comparison.relativeGap.unbounded
+          ? 1
+          : Math.min(1, 0.6 + Math.max(0, (gapMultiple ?? 1.5) - 1.5) * 0.2),
+        reasoning: `Observed same-window comparison: ${subject} ${target.entityId}'s ${humanMetric(comparison.current.efficiency.metric)} is ${currentLabel}, ${observedMultiple} ${directionWord} than the pooled ${baselineLabel} baseline from ${comparison.baseline.peerCount} exact ACTIVE ${target.optimizationGoal} siblings. ${restraint}`,
+        firstSeenAt: new Date(),
+      });
+    }
+  }
+  return signals;
+}
+
+function formatEfficiency(
+  value: number | null,
+  metric: string,
+  currency: string,
+): string {
+  if (value === null) return 'unavailable because the observed result is zero';
+  if (metric === 'raw_roas') return `${value.toFixed(2)}x`;
+  const prefix = currency === 'INR' ? '₹' : `${currency} `;
+  return `${prefix}${value.toFixed(2)}`;
+}
+
+function humanMetric(metric: string): string {
+  return metric.replace(/_/g, ' ');
 }

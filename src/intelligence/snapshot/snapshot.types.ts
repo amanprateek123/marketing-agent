@@ -1,3 +1,49 @@
+import type {
+  CampaignMetricEvidenceState,
+  CampaignRevenueAttributionSource,
+  CampaignRevenueBasis,
+} from '../../campaigns/schemas/campaign.schema';
+
+export interface GoalResultInputs {
+  /** Exact Meta action_type counts; no generic purchase/lead relabeling. */
+  actionCounts?: Record<string, number>;
+  /** Exact Meta action_type values before refunds or configured fallbacks. */
+  actionValuesGross?: Record<string, number>;
+}
+
+export interface MetricProvenance {
+  /** True only when Meta returned this exact entity insight row. */
+  rowObserved?: boolean;
+  /** Whether every requested page/chunk completed for the source query. */
+  fetchComplete?: boolean;
+  state?: CampaignMetricEvidenceState;
+  source?: string;
+  /** Stable identity of query/window/attribution configuration, not values. */
+  sourceFingerprint?: string;
+  /** Exact account currency (uppercase ISO code); omitted when not persisted. */
+  currency?: string;
+  metricsSyncedAt?: Date;
+  metricsLastAttemptedAt?: Date;
+  dateStart?: string;
+  dateStop?: string;
+  attributionSpec?: unknown;
+  promotedObject?: unknown;
+  revenueBasis?: CampaignRevenueBasis;
+  revenueAttributionSource?: CampaignRevenueAttributionSource;
+  revenueAttributionActionTypes?: string[];
+  /** Campaign-configured conversion alias total; identity stays in actionCounts. */
+  canonicalConversions?: number;
+  /** Canonical persisted refund-net revenue, regardless of its basis. */
+  canonicalRevenueNet?: number;
+  /** Exact selected Meta action value before refund/config transformations. */
+  rawMetaActionValueGross?: number;
+  /** Observed Meta value after only the configured refund adjustment. */
+  rawMetaActionValueNet?: number;
+  /** Explicit model; never interchangeable with rawMetaActionValueGross. */
+  configuredRevenueEstimateNet?: number;
+  goalResultInputs?: GoalResultInputs;
+}
+
 /**
  * Canonical metric shape for the intelligence pipeline. Every downstream
  * engine reads these fields — never Meta directly.
@@ -18,6 +64,13 @@ export interface MetricSet {
   roas: number;
   aov: number;
   frequency: number;
+  /** Optional deeper-funnel/delivery facts when the sync source exposes them. */
+  landingPageViews?: number;
+  inlineLinkClicks?: number;
+  outboundClicks?: number;
+  video3s?: number;
+  thruplay?: number;
+  provenance?: MetricProvenance;
 }
 
 export interface AdMetricSet extends MetricSet {
@@ -31,6 +84,49 @@ export interface AdMetricSet extends MetricSet {
   videoP50?: number;
   videoP75?: number;
   videoP100?: number;
+  /** A genuinely windowed comparison row; lifetime metrics remain above. */
+  last7d?: Partial<MetricSet>;
+}
+
+export interface SnapshotCampaignEntity {
+  id: string;
+  name: string;
+  productName?: string;
+  objective?: string;
+  /** Exact persisted Meta budget topology. Budget shifts are safe only for ABO. */
+  budgetModel?: 'abo' | 'cbo' | 'asc';
+  status?: string;
+  effectiveStatus?: string;
+}
+
+export interface SnapshotAdSetEntity {
+  id: string;
+  name: string;
+  status?: string;
+  effectiveStatus?: string;
+  audienceType?: string;
+  optimizationGoal?: string;
+}
+
+export interface SnapshotAdEntity {
+  id: string;
+  /** Exact parent id when supplied by the source; never inferred from names. */
+  adSetId?: string;
+  name: string;
+  status?: string;
+  effectiveStatus?: string;
+  creative?: {
+    id?: string;
+    name?: string;
+    body?: string;
+    title?: string;
+    cta?: string;
+    linkUrl?: string;
+    videoId?: string;
+    imageHash?: string;
+    thumbnailUrl?: string;
+    isDynamic?: boolean;
+  };
 }
 
 /**
@@ -46,6 +142,16 @@ export interface SnapshotData {
     campaignLevel: MetricSet;
     adSetLevel: Record<string, MetricSet>;
     adLevel: Record<string, AdMetricSet>;
+  };
+  /**
+   * Immutable entity labels and hierarchy captured beside the metrics.
+   * Historical slices may omit this; consumers must then show unresolved
+   * labels instead of guessing joins from names or URLs.
+   */
+  entities?: {
+    campaign: SnapshotCampaignEntity;
+    adSets: Record<string, SnapshotAdSetEntity>;
+    ads: Record<string, SnapshotAdEntity>;
   };
   meta: {
     learningStage?:
@@ -81,11 +187,14 @@ export interface SnapshotData {
 export interface RawMetaCampaign {
   id?: string;
   name?: string;
+  productName?: string;
   objective?: string;
+  budgetModel?: 'abo' | 'cbo' | 'asc';
   status?: string;
   effective_status?: string;
   account_id?: string;
   learning_stage?: string;
+  metricProvenance?: MetricProvenance;
   insights?: {
     spend?: number | string;
     impressions?: number | string;
@@ -103,16 +212,44 @@ export interface RawMetaCampaign {
 export interface RawMetaAdSet {
   id?: string;
   name?: string;
+  status?: string;
+  effectiveStatus?: string;
   audienceType?: string;
+  optimizationGoal?: string;
+  landingPageViews?: number;
+  inlineLinkClicks?: number;
+  thruplay?: number;
+  metricProvenance?: MetricProvenance;
   insights?: RawMetaCampaign['insights'];
 }
 
 export interface RawMetaAd {
   id?: string;
   name?: string;
+  adSetId?: string;
+  status?: string;
+  effectiveStatus?: string;
   hookStyle?: string;
   format?: 'image' | 'video' | 'carousel';
   copyVariantIndex?: number;
+  creativeId?: string;
+  creativeName?: string;
+  creativeBody?: string;
+  creativeTitle?: string;
+  creativeCta?: string;
+  creativeLinkUrl?: string;
+  creativeVideoId?: string;
+  creativeImageHash?: string;
+  thumbnailUrl?: string;
+  isDynamicCreative?: boolean;
+  landingPageViews?: number;
+  inlineLinkClicks?: number;
+  outboundClicks?: number;
+  video3s?: number;
+  thruplay?: number;
+  last7d?: RawMetaCampaign['insights'];
+  last7dMetricProvenance?: MetricProvenance;
+  metricProvenance?: MetricProvenance;
   quality_ranking?: string;
   engagement_ranking?: string;
   conversion_ranking?: string;

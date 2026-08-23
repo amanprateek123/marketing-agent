@@ -8,16 +8,14 @@ import { ComputeDeps } from '../../../../src/intelligence/shared/engine.interfac
 import { SliceRepository } from '../../../../src/intelligence/shared/slice-repository.service';
 
 class PortfolioHarness extends PortfolioEngine {
+  private testIdentity = { tenantId: 'tenant-1', campaignId: 'campaign-1' };
+
   run(deps: ComputeDeps<'portfolio'>) {
-    return this.compute(deps, 'cycle-1');
+    return this.compute(deps, 'cycle-1', this.testIdentity);
   }
 
   setIdentity(tenantId: string, campaignId: string): void {
-    (
-      this as unknown as {
-        identity: Map<string, { tenantId: string; campaignId: string }>;
-      }
-    ).identity.set('cycle-1', { tenantId, campaignId });
+    this.testIdentity = { tenantId, campaignId };
   }
 }
 

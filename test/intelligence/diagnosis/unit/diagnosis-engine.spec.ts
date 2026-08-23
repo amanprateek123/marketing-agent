@@ -47,6 +47,47 @@ const signal = (
   firstSeenAt: new Date('2026-08-23T00:00:00.000Z'),
 });
 
+const goalSignal = (
+  kind:
+    | 'optimization_goal_efficiency_lagging'
+    | 'optimization_goal_efficiency_leading',
+  targetType: Signal['targetType'],
+  targetId: string,
+): Signal => ({
+  ...signal(kind, 0.8, targetType, targetId),
+  goalEvidence: {
+    optimizationGoal: 'LANDING_PAGE_VIEWS',
+    resultMetric: 'landing_page_views',
+    efficiencyMetric: 'cost_per_landing_page_view',
+    efficiencyUnit: 'currency',
+    lowerIsBetter: true,
+    current: { spend: 450, result: 30, efficiency: 15 },
+    pooledSiblingBaseline: {
+      peerCount: 2,
+      peerIds: ['peer-1', 'peer-2'],
+      spend: 500,
+      result: 100,
+      efficiency: 5,
+    },
+    observedGap: {
+      thresholdMultiple: 1.5,
+      multiple: 3,
+      unbounded: false,
+      direction: kind.endsWith('lagging') ? 'worse' : 'better',
+    },
+    window: {
+      dateStart: '2026-08-01',
+      dateStop: '2026-08-22',
+      metricScope: 'lifetime',
+    },
+    sourceFingerprint: 'same-query',
+    currency: 'INR',
+    claimScope: 'observational_same_window_peer_comparison',
+    causalClaim: false,
+    expectedUplift: null,
+  },
+});
+
 function deps(signals: Signal[]): ComputeDeps<'diagnosis'> {
   return {
     signal: context({ signals }),
@@ -94,6 +135,24 @@ describe('DiagnosisEngine corroboration gates', () => {
         suggestedFocus: 'creative',
       }),
     ]);
+  });
+
+  it('keeps a singleton hook-burn hypothesis scoped to the exact video ad', async () => {
+    const result = await engine.run(
+      deps([signal('hook_burn', 0.8, 'ad', 'ad-video-1')]),
+    );
+
+    expect(result.rootCauses).toEqual([
+      expect.objectContaining({
+        hypothesis: 'Weak video-opening engagement on this ad',
+        targetType: 'ad',
+        targetId: 'ad-video-1',
+        evidenceSignals: ['hook_burn'],
+        confidence: 0.8,
+        suggestedFocus: 'creative',
+      }),
+    ]);
+    expect(result.narrative).toContain('target=ad:ad-video-1');
   });
 
   it('infers audience exhaustion only when saturation corroborates frequency', async () => {
@@ -150,5 +209,83 @@ describe('DiagnosisEngine corroboration gates', () => {
         }),
       ]),
     );
+  });
+
+  it('keeps an ad-set goal-efficiency lag explicitly cause-unresolved', async () => {
+    const result = await engine.run(
+      deps([
+        goalSignal('optimization_goal_efficiency_lagging', 'adset', 'adset-a'),
+        signal('ctr_decay', 0.8, 'adset', 'adset-a'),
+      ]),
+    );
+    const diagnosis = result.rootCauses.find((candidate) =>
+      candidate.evidenceSignals.includes(
+        'optimization_goal_efficiency_lagging',
+      ),
+    );
+
+    expect(diagnosis).toMatchObject({
+      targetType: 'adset',
+      targetId: 'adset-a',
+      suggestedFocus: 'delivery_efficiency',
+      evidenceSignals: ['optimization_goal_efficiency_lagging'],
+      goalEvidence: {
+        optimizationGoal: 'LANDING_PAGE_VIEWS',
+        causalClaim: false,
+        expectedUplift: null,
+      },
+    });
+    expect(diagnosis?.hypothesis).toContain('Cause remains unresolved');
+    expect(diagnosis?.hypothesis).toContain('does not establish creative');
+    expect(diagnosis?.hypothesis).toContain('no uplift is predicted');
+  });
+
+  it('adds a bounded creative hypothesis only for the exact ad with corroborating creative evidence', async () => {
+    const result = await engine.run(
+      deps([
+        goalSignal('optimization_goal_efficiency_lagging', 'ad', 'ad-a'),
+        signal('hook_burn', 0.7, 'ad', 'ad-a'),
+        signal('hook_burn', 0.9, 'ad', 'ad-b'),
+      ]),
+    );
+    const diagnosis = result.rootCauses.find((candidate) =>
+      candidate.evidenceSignals.includes(
+        'optimization_goal_efficiency_lagging',
+      ),
+    );
+
+    expect(diagnosis).toMatchObject({
+      targetType: 'ad',
+      targetId: 'ad-a',
+      suggestedFocus: 'creative',
+      evidenceSignals: ['optimization_goal_efficiency_lagging', 'hook_burn'],
+    });
+    expect(diagnosis?.hypothesis).toContain(
+      'creative contribution is plausible, not proven',
+    );
+    expect(
+      result.rootCauses.filter(
+        (candidate) =>
+          candidate.targetId === 'ad-a' &&
+          candidate.evidenceSignals.includes('hook_burn'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('describes a leader as observational, not confirmed or causal', async () => {
+    const result = await engine.run(
+      deps([
+        goalSignal('optimization_goal_efficiency_leading', 'adset', 'adset-a'),
+      ]),
+    );
+
+    expect(result.rootCauses).toEqual([
+      expect.objectContaining({
+        suggestedFocus: 'delivery_efficiency',
+        hypothesis: expect.stringContaining(
+          'no causal driver, scale outcome, or future uplift is established',
+        ),
+      }),
+    ]);
   });
 });

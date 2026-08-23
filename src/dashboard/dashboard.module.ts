@@ -20,6 +20,10 @@ import {
   CampaignIntelligenceCycleSchema,
 } from '../intelligence/orchestrator/cycle.schema';
 import {
+  EngineOutputDoc,
+  EngineOutputSchema,
+} from '../intelligence/orchestrator/engine-output.schema';
+import {
   ExecutedAction,
   ExecutedActionSchema,
 } from '../learning/schemas/executed-action.schema';
@@ -52,6 +56,7 @@ import { DashboardService } from './dashboard.service';
         name: CampaignIntelligenceCycle.name,
         schema: CampaignIntelligenceCycleSchema,
       },
+      { name: EngineOutputDoc.name, schema: EngineOutputSchema },
       { name: ExecutedAction.name, schema: ExecutedActionSchema },
     ]),
   ],

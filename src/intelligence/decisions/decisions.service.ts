@@ -23,6 +23,7 @@ import {
   Campaign,
   isManagedCampaignSource,
 } from '../../campaigns/schemas/campaign.schema';
+import { stableStringify } from '../explainability/intelligence-review.validator';
 
 const REVIEW_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours
 
@@ -372,6 +373,22 @@ export class DecisionsService {
       );
     }
 
+    const intelligenceReviewError =
+      this.validateIntelligenceReviewForExecution(doc);
+    if (intelligenceReviewError) {
+      await this.finishExecutionClaim(
+        tenantId,
+        decisionId,
+        claimToken,
+        'blocked',
+        intelligenceReviewError,
+      );
+      this.log.warn(
+        `Execution blocked for decision ${decisionId}: ${intelligenceReviewError}`,
+      );
+      return { executed: false, error: intelligenceReviewError };
+    }
+
     let campaign: Campaign | null;
     try {
       campaign = doc.campaignId
@@ -551,6 +568,84 @@ export class DecisionsService {
       executed: false,
       error: 'Decision could not be claimed for execution',
     };
+  }
+
+  /**
+   * Goal-aware decisions are created by the current deterministic cascade and
+   * must carry a positive, validated Step-14 critic result before any Meta
+   * mutation. Truly legacy decisions predate this contract and retain their
+   * existing execution behavior.
+   */
+  private validateIntelligenceReviewForExecution(
+    doc: IntelligenceDecisionDocument,
+  ): string | undefined {
+    if (doc.decisionContractVersion !== 'goal_aware_v1') return undefined;
+
+    if (!doc.intelligenceReviewVersion) {
+      return 'Intelligence review is pending; goal-aware decisions cannot execute before Step 14 completes';
+    }
+    if (doc.intelligenceReviewVersion !== 'intelligence_review_v1') {
+      return `Intelligence review version ${doc.intelligenceReviewVersion} is unsupported; intelligence_review_v1 is required`;
+    }
+
+    const review = doc.intelligenceReview;
+    if (!isRecord(review)) {
+      return 'Intelligence review is pending or incomplete; execution requires a validated OpenAI review';
+    }
+    if (review.source !== 'openai') {
+      return `Intelligence review source is ${typeof review.source === 'string' ? review.source : 'unavailable'}; fallback reviews cannot authorize execution`;
+    }
+    if (!isRecord(review.validation) || review.validation.valid !== true) {
+      return 'Intelligence review failed deterministic validation; execution is blocked';
+    }
+    if (review.verdict !== 'support') {
+      return `Intelligence review verdict is ${typeof review.verdict === 'string' ? review.verdict : 'unavailable'}; only support can authorize execution`;
+    }
+
+    const reviewedAction = isRecord(review.recommendation)
+      ? review.recommendation.action
+      : undefined;
+    if (!isRecord(reviewedAction)) {
+      return 'Intelligence review is incomplete; its reviewed action is unavailable';
+    }
+    const storedAction = {
+      actionId: doc.actionId,
+      type: doc.actionType,
+      targetType: doc.targetType,
+      targetId: doc.targetId,
+      parameters: doc.parameters ?? {},
+      expectedImpact: doc.expectedImpact,
+      expectedProfitDeltaINR7d: doc.expectedProfitDeltaINR7d,
+      risk: doc.risk,
+      score: doc.score,
+      gatedBy: [...(doc.gatedBy ?? [])].sort(),
+      requiresHumanApproval: doc.requiresHumanApproval,
+    };
+    const reviewedStoredFields = {
+      actionId: reviewedAction.actionId,
+      type: reviewedAction.type,
+      targetType: reviewedAction.targetType,
+      targetId: reviewedAction.targetId,
+      parameters: reviewedAction.parameters,
+      expectedImpact: reviewedAction.expectedImpact,
+      expectedProfitDeltaINR7d: reviewedAction.expectedProfitDeltaINR7d,
+      risk: reviewedAction.risk,
+      score: reviewedAction.score,
+      gatedBy: Array.isArray(reviewedAction.gatedBy)
+        ? [...reviewedAction.gatedBy].sort()
+        : reviewedAction.gatedBy,
+      requiresHumanApproval: reviewedAction.requiresHumanApproval,
+    };
+    try {
+      if (
+        stableStringify(storedAction) !== stableStringify(reviewedStoredFields)
+      ) {
+        return 'Intelligence review does not match the stored decision; execution is blocked';
+      }
+    } catch {
+      return 'Intelligence review action binding is invalid; execution is blocked';
+    }
+    return undefined;
   }
 
   /**
@@ -921,7 +1016,10 @@ export class DecisionsService {
         ? {
             actionId: top.actionId,
             actionType: top.actionType,
+            targetType: top.targetType,
             targetId: top.targetId,
+            campaignSource: top.campaignSource,
+            expectedImpact: top.expectedImpact,
             expectedProfitDeltaINR7d: top.expectedProfitDeltaINR7d,
             confidence: top.confidence,
             gatedBy: top.gatedBy,
@@ -935,6 +1033,7 @@ export class DecisionsService {
       campaignName,
       decisionsInCycle: decisions.length,
       topDecisionId: top ? String((top as { _id: unknown })._id) : null,
+      ...intelligenceReviewTraceFields(top),
       stepsWithData: steps.filter((s) => s.status === 'ok').length,
       totalSteps: steps.length,
       steps: stripLogs(steps, includeLogs),
@@ -956,7 +1055,10 @@ export class DecisionsService {
       decision: {
         actionId: decision.actionId,
         actionType: decision.actionType,
+        targetType: decision.targetType,
         targetId: decision.targetId,
+        campaignSource: decision.campaignSource,
+        expectedImpact: decision.expectedImpact,
         expectedProfitDeltaINR7d: decision.expectedProfitDeltaINR7d,
         confidence: decision.confidence,
         gatedBy: decision.gatedBy,
@@ -970,6 +1072,7 @@ export class DecisionsService {
       campaignName: decision.campaignName ?? '',
       actionType: decision.actionType,
       status: decision.status,
+      ...intelligenceReviewTraceFields(decision),
       // How much of the cascade actually left a record — the honest header for
       // a trace whose middle is empty.
       stepsWithData: steps.filter((s) => s.status === 'ok').length,
@@ -977,6 +1080,47 @@ export class DecisionsService {
       steps: stripLogs(steps, includeLogs),
     };
   }
+}
+
+/**
+ * The Step-14 review is optional for historical decisions. Keep the trace
+ * response backward compatible by omitting absent fields instead of returning
+ * misleading null placeholders. Cycle traces expose the review for the same
+ * top-scoring decision used to render their decision-specific step text.
+ */
+function intelligenceReviewTraceFields(
+  decision?: Pick<
+    IntelligenceDecision,
+    | 'intelligenceReviewVersion'
+    | 'intelligenceReview'
+    | 'intelligenceEvidence'
+    | 'intelligenceReviewedAt'
+  > | null,
+): {
+  intelligenceReviewVersion?: string;
+  intelligenceReview?: Record<string, unknown>;
+  intelligenceEvidence?: Record<string, unknown>;
+  intelligenceReviewedAt?: Date;
+} {
+  if (!decision) return {};
+  return {
+    ...(decision.intelligenceReviewVersion === undefined
+      ? {}
+      : { intelligenceReviewVersion: decision.intelligenceReviewVersion }),
+    ...(decision.intelligenceReview === undefined
+      ? {}
+      : { intelligenceReview: decision.intelligenceReview }),
+    ...(decision.intelligenceEvidence === undefined
+      ? {}
+      : { intelligenceEvidence: decision.intelligenceEvidence }),
+    ...(decision.intelligenceReviewedAt === undefined
+      ? {}
+      : { intelligenceReviewedAt: decision.intelligenceReviewedAt }),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**

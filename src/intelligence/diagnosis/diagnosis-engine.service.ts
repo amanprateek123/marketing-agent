@@ -14,8 +14,12 @@ const PATTERNS: Array<{
   focus: DiagnosisData['rootCauses'][number]['suggestedFocus'];
 }> = [
   {
-    match: new Set(['creative_fatigue', 'hook_burn']),
-    hypothesis: 'Hook saturation on current audience',
+    // hook_burn is already a compound, volume-gated observation on one
+    // active video ad (P25 depth + CTR). Keep the conclusion explicitly at
+    // hypothesis level, but do not require an impossible ad-level pairing
+    // with creative_fatigue, which is emitted at campaign/ad-set scope.
+    match: new Set(['hook_burn']),
+    hypothesis: 'Weak video-opening engagement on this ad',
     focus: 'creative',
   },
   {
@@ -128,7 +132,24 @@ export class DiagnosisEngine extends BaseEngine<'diagnosis', DiagnosisData> {
     // either target and must never be combined into one actionable root cause.
     for (const targetSignals of signalsByTarget.values()) {
       const target = targetSignals[0];
+      const laggingGoalSignal = targetSignals.find(
+        (signal) => signal.kind === 'optimization_goal_efficiency_lagging',
+      );
+      const leadingGoalSignal = targetSignals.find(
+        (signal) => signal.kind === 'optimization_goal_efficiency_leading',
+      );
       for (const p of PATTERNS) {
+        // When a hook observation corroborates an exact ad-level goal lag,
+        // the bounded combined hypothesis below supersedes the generic hook
+        // diagnosis. This prevents two near-duplicate creative diagnoses.
+        if (
+          laggingGoalSignal &&
+          target.targetType === 'ad' &&
+          p.match.size === 1 &&
+          p.match.has('hook_burn')
+        ) {
+          continue;
+        }
         const matched = [...p.match].map((kind) =>
           targetSignals.find((signal) => signal.kind === kind),
         );
@@ -148,6 +169,46 @@ export class DiagnosisEngine extends BaseEngine<'diagnosis', DiagnosisData> {
           suggestedFocus: p.focus,
         });
       }
+
+      const goalSignal = laggingGoalSignal ?? leadingGoalSignal;
+      if (!goalSignal?.goalEvidence) continue;
+      const creativeCorroboration =
+        goalSignal.kind === 'optimization_goal_efficiency_lagging' &&
+        target.targetType === 'ad'
+          ? targetSignals.filter(
+              (signal) =>
+                signal.kind === 'hook_burn' || signal.kind === 'ctr_decay',
+            )
+          : [];
+      const evidence = [goalSignal, ...creativeCorroboration];
+      const confidence = Math.min(
+        0.8,
+        evidence.reduce((sum, signal) => sum + signal.strength, 0) /
+          evidence.length,
+      );
+      const goal = goalSignal.goalEvidence.optimizationGoal;
+      const isLagging =
+        goalSignal.kind === 'optimization_goal_efficiency_lagging';
+      const hasCreativeCorroboration = creativeCorroboration.length > 0;
+      const hypothesis = hasCreativeCorroboration
+        ? `Relative ${goal} delivery inefficiency is observed, and this exact ad also has weak hook or target CTR evidence; creative contribution is plausible, not proven, and no uplift is predicted.`
+        : isLagging
+          ? `Relative ${goal} delivery inefficiency is observed against exact ACTIVE same-window siblings. Cause remains unresolved: the evidence does not establish creative, audience, placement, bid, landing-page, or tracking causality, and no uplift is predicted.`
+          : `Relative ${goal} delivery-efficiency leadership is observed against exact ACTIVE same-window siblings; no causal driver, scale outcome, or future uplift is established.`;
+      rootCauses.push({
+        hypothesis,
+        targetType: target.targetType,
+        targetId: target.targetId,
+        evidenceSignals: evidence.map((signal) => signal.kind),
+        supportingTrends: [
+          'Observed same-window pooled sibling comparison; not causal evidence.',
+        ],
+        goalEvidence: goalSignal.goalEvidence,
+        confidence: Number(confidence.toFixed(3)),
+        suggestedFocus: hasCreativeCorroboration
+          ? 'creative'
+          : 'delivery_efficiency',
+      });
     }
 
     rootCauses.sort((a, b) => b.confidence - a.confidence);
@@ -173,18 +234,35 @@ export class DiagnosisEngine extends BaseEngine<'diagnosis', DiagnosisData> {
     return 'fragmentation';
   }
 
+  /**
+   * Operators read this string directly on the recommendations page, so it
+   * stays in plain language. The machine-readable code remains available as
+   * `leakDiagnosis` for anything that needs to branch on it.
+   */
+  private plainLeak(leak: DiagnosisData['leakDiagnosis']): string {
+    const phrases: Record<string, string> = {
+      none: 'nothing structurally wrong stood out',
+      chronic_unprofitable: 'it is simply returning less than it costs to run',
+      creative_leak: 'the ads themselves look like the weak point',
+      auction_leak: 'where the ads are being shown looks like the weak point',
+      data_gap: 'delivery data is missing',
+      fragmentation: 'the spend is spread too thin to read clearly',
+    };
+    return phrases[leak] ?? leak.replace(/_/g, ' ');
+  }
+
   private narrate(
     rootCauses: DiagnosisData['rootCauses'],
     leak: DiagnosisData['leakDiagnosis'],
   ): string {
     if (rootCauses.length === 0)
-      return `No supported root cause emerged from the available evidence (leak=${leak}).`;
+      return `No supported root cause emerged from the available evidence — ${this.plainLeak(leak)}.`;
     const top = rootCauses[0];
     const target =
       top.targetType && top.targetId
         ? `, target=${top.targetType}:${top.targetId}`
         : '';
-    return `Top hypothesis: ${top.hypothesis} (confidence ${(top.confidence * 100).toFixed(0)}%, focus=${top.suggestedFocus}${target}). Leak diagnosis: ${leak}.`;
+    return `Top hypothesis: ${top.hypothesis} (confidence ${(top.confidence * 100).toFixed(0)}%, focus=${top.suggestedFocus}${target}). In plain terms: ${this.plainLeak(leak)}.`;
   }
 
   protected computeConfidence(

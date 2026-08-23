@@ -423,6 +423,23 @@ export function evaluateCopilotReadiness(input: {
   if (!destination) addMissing(missingFields, 'landingUrl');
   else if (!validUrl(destination))
     blockers.push('Landing URL must be a valid http(s) URL.');
+  else if (plan.productMode === 'new') {
+    // A brand-new product pointing at another product's page is usually a
+    // mistake: the ads would send this product's traffic to a page selling
+    // something else. Surface it rather than accepting it silently — the
+    // operator may still want it deliberately, so this warns, never blocks.
+    const borrowedFrom = (company.products ?? []).find(
+      (p) =>
+        (p.landingUrl ?? '').trim().toLowerCase() ===
+          destination.trim().toLowerCase() &&
+        normalizeName(p.name ?? '') !== normalizeName(plan.productName ?? ''),
+    );
+    if (borrowedFrom) {
+      warnings.push(
+        `This landing page already belongs to "${borrowedFrom.name}". Visitors clicking an ad for "${plan.productName}" would land on a page selling something else — confirm this is intended, or give this product its own page.`,
+      );
+    }
+  }
 
   if (!plan.objective) addMissing(missingFields, 'objective');
   else if (!OBJECTIVES.has(plan.objective))

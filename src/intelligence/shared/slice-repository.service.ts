@@ -9,8 +9,8 @@ import { EngineOutputDoc } from '../orchestrator/engine-output.schema';
 import { EngineContext } from './engine-context';
 
 export interface SliceIdentity {
-  tenantId: string;
-  campaignId: string;
+  readonly tenantId: string;
+  readonly campaignId: string;
 }
 
 export function isValidSliceIdentity(

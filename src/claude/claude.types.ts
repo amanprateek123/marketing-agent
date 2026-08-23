@@ -12,6 +12,8 @@ export enum AgentType {
   CAMPAIGN_CREATOR = 'campaign_creator',
   CAMPAIGN_COPILOT = 'campaign_copilot',
   CAMPAIGN_AUDITOR = 'campaign_auditor',
+  /** OpenAI-backed critic for the deterministic 16-step intelligence result. */
+  INTELLIGENCE_REVIEWER = 'intelligence_reviewer',
   LEARNING_AGENT = 'learning_agent',
   PROMPT_GENERATOR = 'prompt_generator',
   CREATIVE_LEARNING_AGENT = 'creative_learning_agent',
@@ -59,6 +61,7 @@ export const NO_TOOL_AGENTS: AgentType[] = [
   AgentType.CAMPAIGN_CREATOR,
   AgentType.CAMPAIGN_COPILOT,
   AgentType.CAMPAIGN_AUDITOR,
+  AgentType.INTELLIGENCE_REVIEWER,
   AgentType.LEARNING_AGENT,
   AgentType.CREATIVE_LEARNING_AGENT,
   AgentType.CAMPAIGN_LEARNING_AGENT,

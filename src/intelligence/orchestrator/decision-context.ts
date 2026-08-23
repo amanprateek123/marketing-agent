@@ -1,4 +1,6 @@
 import { EngineContext } from '../shared/engine-context';
+import type { IntelligenceReviewEvidenceBundle } from '../explainability/intelligence-review-evidence.builder';
+import type { IntelligenceReviewResult } from '../explainability/intelligence-review.types';
 
 // ── Slice payload types ──────────────────────────────────────────────────
 // SnapshotData lives in snapshot.types.ts (imports fully typed there);
@@ -161,7 +163,50 @@ export type SignalKind =
   | 'winner_emerging'
   | 'winner_confirmed'
   | 'audience_exhaustion'
-  | 'learning_limited_locked';
+  | 'learning_limited_locked'
+  | 'optimization_goal_efficiency_lagging'
+  | 'optimization_goal_efficiency_leading';
+
+/**
+ * Like-for-like Meta optimization-goal evidence. It is deliberately separate
+ * from the legacy numeric metricEvidence bag so exact goal/window/provenance
+ * identity cannot be flattened away or mistaken for a causal uplift claim.
+ */
+export interface OptimizationGoalSignalEvidence {
+  optimizationGoal: string;
+  resultMetric: string;
+  efficiencyMetric: string;
+  efficiencyUnit: string;
+  lowerIsBetter: boolean;
+  current: {
+    spend: number;
+    result: number;
+    efficiency: number | null;
+  };
+  pooledSiblingBaseline: {
+    peerCount: number;
+    peerIds: string[];
+    spend: number;
+    result: number;
+    efficiency: number;
+  };
+  observedGap: {
+    thresholdMultiple: number;
+    multiple: number | null;
+    unbounded: boolean;
+    direction: 'better' | 'worse';
+  };
+  window: {
+    dateStart: string;
+    dateStop: string;
+    metricScope: string;
+  };
+  sourceFingerprint: string;
+  currency: string;
+  claimScope: 'observational_same_window_peer_comparison';
+  causalClaim: false;
+  expectedUplift: null;
+}
 
 export interface Signal {
   kind: SignalKind;
@@ -176,6 +221,8 @@ export interface Signal {
   strength: number;
   /** Human-readable reasoning — surfaced to the operator in the review UI. */
   reasoning: string;
+  /** Present only for exact, same-window optimization-goal comparisons. */
+  goalEvidence?: OptimizationGoalSignalEvidence;
   firstSeenAt: Date;
 }
 
@@ -195,12 +242,15 @@ export interface DiagnosisData {
     targetId?: string;
     evidenceSignals: SignalKind[];
     supportingTrends: string[];
+    /** Carries the exact observation without upgrading it into causality. */
+    goalEvidence?: OptimizationGoalSignalEvidence;
     confidence: number;
     suggestedFocus:
       | 'creative'
       | 'audience'
       | 'budget'
       | 'placement'
+      | 'delivery_efficiency'
       | 'objective_mismatch';
   }>;
   leakDiagnosis:
@@ -354,6 +404,11 @@ export interface RecommendedAction {
     metric: string;
     deltaPct: number;
     confidence: number;
+    /** Distinguishes a forecast from a measured peer gap or an unquantified test. */
+    basis?: 'modeled' | 'observed_gap' | 'not_estimated';
+    currentValue?: number;
+    siblingBaselineValue?: number;
+    observedGapPct?: number;
   };
   /** Expected ₹ contribution profit delta over the next 7 days if applied. */
   expectedProfitDeltaINR7d: number;
@@ -389,6 +444,10 @@ export interface ExplainabilityData {
       evidenceChain: Array<{ step: string; source: string }>;
       counterfactual?: string;
       llmRendered?: string;
+      /** Persisted OpenAI critic output; fallback is explicit and fail-closed. */
+      review?: IntelligenceReviewResult;
+      /** Exact allow-listed facts and hierarchy used to produce `review`. */
+      evidence?: IntelligenceReviewEvidenceBundle;
     }
   >;
 }

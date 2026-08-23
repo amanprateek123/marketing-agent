@@ -3,7 +3,10 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { BusinessData } from '../orchestrator/decision-context';
@@ -71,7 +74,10 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
   protected async compute(
     deps: ComputeDeps<'business'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<BusinessData> {
+    void deps;
+    void cycleId;
     // deps carries only engine-slice outputs, never identity fields — the
     // previous `deps as unknown as {tenantId}` cast always resolved to
     // undefined, so tenantId was always '' here. That meant `company` never
@@ -79,8 +85,7 @@ export class BusinessEngine extends BaseEngine<'business', BusinessData> {
     // real getWeeklySpend() call was never even attempted — silently
     // re-breaking the weekly-cap enforcement this engine exists to provide,
     // via a different path than the original hardcoded-0 bug.
-    const ident = this.identity.get(cycleId);
-    const tenantId = ident?.tenantId ?? '';
+    const tenantId = identity.tenantId;
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)

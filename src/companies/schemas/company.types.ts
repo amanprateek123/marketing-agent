@@ -171,6 +171,11 @@ export interface MetaAdsConfig {
   accountId: string;      // Primary Meta Ads account ID (e.g. act_123456)
   accountIds?: string[];  // All Meta Ads account IDs — importer pulls from all of them
   /**
+   * Meta-reported currency by normalized ad account ID (`act_123` → `INR`).
+   * Metric provenance uses this value and never infers currency from products.
+   */
+  accountCurrencies?: Record<string, string>;
+  /**
    * Meta Business Manager ID (the "business portfolio" a token's ad accounts
    * live under). When set, ad-account discovery (GET /:tenantId/meta-accounts)
    * scopes to this business's owned + client ad accounts instead of every

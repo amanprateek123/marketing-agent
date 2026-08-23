@@ -1,4 +1,8 @@
-import { DecisionContext, EngineSliceKey } from '../orchestrator/decision-context';
+import {
+  DecisionContext,
+  EngineSliceKey,
+} from '../orchestrator/decision-context';
+import type { SliceIdentity } from './slice-repository.service';
 
 /**
  * The contract every intelligence engine implements. Engines rarely
@@ -13,7 +17,7 @@ export interface Engine<K extends EngineSliceKey = EngineSliceKey> {
   readonly dependsOn: readonly EngineSliceKey[];
   readonly triggerOn: readonly string[];
 
-  execute(cycleId: string): Promise<void>;
+  execute(cycleId: string, identityHint?: SliceIdentity): Promise<void>;
   canRun?(cycleId: string): Promise<boolean>;
 }
 

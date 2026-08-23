@@ -33,6 +33,11 @@ export type CampaignRevenueAttributionSource =
   | 'account_fallback'
   | 'unresolved'
   | 'unknown';
+export type CampaignMetricEvidenceState =
+  | 'observed'
+  | 'preserved'
+  | 'missing'
+  | 'unknown';
 
 /**
  * 'agent' and 'human' campaigns were both launched BY this system (weekly
@@ -94,6 +99,42 @@ export class Campaign {
   // Last time this campaign was synced from Meta
   @Prop()
   syncedAt?: Date;
+
+  /**
+   * Row-level evidence for the campaign insight totals. `syncedAt` also moves
+   * when structure/status is refreshed, so it is not sufficient proof that a
+   * metrics row was returned by Meta in that attempt.
+   */
+  @Prop()
+  metricsRowObserved?: boolean;
+
+  @Prop()
+  metricsFetchComplete?: boolean;
+
+  @Prop({ default: 'unknown' })
+  metricsState?: CampaignMetricEvidenceState;
+
+  @Prop({ default: '' })
+  metricsSource?: string;
+
+  @Prop({ default: '' })
+  metricsSourceFingerprint?: string;
+
+  /** Exact Meta account currency when known; blank is intentionally unknown. */
+  @Prop({ default: '' })
+  metricsCurrency?: string;
+
+  @Prop()
+  metricsSyncedAt?: Date;
+
+  @Prop()
+  metricsLastAttemptedAt?: Date;
+
+  @Prop({ type: String, default: null })
+  metricsDateStart?: string | null;
+
+  @Prop({ type: String, default: null })
+  metricsDateStop?: string | null;
 
   @Prop({ default: '' })
   topic: string;
@@ -230,6 +271,25 @@ export class Campaign {
   @Prop({ type: [String], default: [] })
   revenueAttributionActionTypes: string[];
 
+  /** Exact selected Meta action value before the configured refund adjustment. */
+  @Prop({ type: Number })
+  rawMetaActionValueGross?: number | null;
+
+  /** The same observed Meta value after the configured refund adjustment. */
+  @Prop({ type: Number })
+  rawMetaActionValueNet?: number | null;
+
+  /** Modeled return used only when Meta supplied no selected action value. */
+  @Prop({ type: Number })
+  configuredRevenueEstimateNet?: number | null;
+
+  /** Exact action_type/value rows retained for goal-specific result resolution. */
+  @Prop({ type: Object, default: null })
+  goalResultInputs?: {
+    actionCounts?: Record<string, number>;
+    actionValuesGross?: Record<string, number>;
+  } | null;
+
   @Prop({ default: 0 })
   ctr: number;
 
@@ -340,9 +400,28 @@ export class Campaign {
     dailyBudget: number;
     lifetimeBudget: number;
     optimizationGoal: string;
+    /** Whether this exact ad-set insight row was returned in the last attempt. */
+    metricsRowObserved?: boolean;
+    metricsFetchComplete?: boolean;
+    metricsState?: CampaignMetricEvidenceState;
+    metricsSource?: string;
+    metricsSourceFingerprint?: string;
+    metricsCurrency?: string;
+    metricsSyncedAt?: Date;
+    metricsLastAttemptedAt?: Date;
     // Money
     spend: number;
     revenue: number;
+    revenueBasis?: CampaignRevenueBasis;
+    revenueAttributionSource?: CampaignRevenueAttributionSource;
+    revenueAttributionActionTypes?: string[];
+    rawMetaActionValueGross?: number | null;
+    rawMetaActionValueNet?: number | null;
+    configuredRevenueEstimateNet?: number | null;
+    goalResultInputs?: {
+      actionCounts?: Record<string, number>;
+      actionValuesGross?: Record<string, number>;
+    };
     roas: number;
     cpc: number;
     cpm: number;
@@ -353,6 +432,7 @@ export class Campaign {
     reach: number;
     frequency: number;
     clicks: number;
+    inlineLinkClicks?: number;
     ctr: number;
     // Funnel
     conversions: number;
@@ -365,6 +445,7 @@ export class Campaign {
     videoP50: number;
     videoP75: number;
     videoP100: number;
+    thruplay?: number;
     videoP25Pct: number;
     videoP50Pct: number;
     videoP75Pct: number;
@@ -396,8 +477,8 @@ export class Campaign {
     // locales, Advantage flags) — see structureTargeting() in campaign-sync.service.ts
     targetingDetail?: Record<string, unknown>;
     rawTargeting?: Record<string, unknown>;
-    dateStart: string;
-    dateStop: string;
+    dateStart?: string;
+    dateStop?: string;
     ads: {
       id: string;
       name: string;
@@ -418,6 +499,27 @@ export class Campaign {
       // Money (lifetime window)
       spend: number;
       revenue: number;
+      revenueBasis?: CampaignRevenueBasis;
+      revenueAttributionSource?: CampaignRevenueAttributionSource;
+      revenueAttributionActionTypes?: string[];
+      rawMetaActionValueGross?: number | null;
+      rawMetaActionValueNet?: number | null;
+      configuredRevenueEstimateNet?: number | null;
+      /** Inherited from the exact parent ad set used for this ad's metrics. */
+      attributionSpec?: unknown;
+      promotedObject?: unknown;
+      goalResultInputs?: {
+        actionCounts?: Record<string, number>;
+        actionValuesGross?: Record<string, number>;
+      };
+      metricsRowObserved?: boolean;
+      metricsFetchComplete?: boolean;
+      metricsState?: CampaignMetricEvidenceState;
+      metricsSource?: string;
+      metricsSourceFingerprint?: string;
+      metricsCurrency?: string;
+      metricsSyncedAt?: Date;
+      metricsLastAttemptedAt?: Date;
       roas: number;
       cpc: number;
       cpm: number;
@@ -455,8 +557,8 @@ export class Campaign {
       videoP50Pct: number;
       videoP75Pct: number;
       videoP100Pct: number;
-      dateStart: string;
-      dateStop: string;
+      dateStart?: string;
+      dateStop?: string;
       // Recency window (7d) — fatigue/decay reads this, not lifetime
       last7d?: {
         spend: number;
@@ -465,7 +567,20 @@ export class Campaign {
         ctr: number;
         conversions: number;
         revenue: number;
+        rawMetaActionValueGross?: number;
         cpa: number;
+        dateStart?: string;
+        dateStop?: string;
+        metricsRowObserved?: boolean;
+        metricsFetchComplete?: boolean;
+        metricsSource?: string;
+        metricsSourceFingerprint?: string;
+        metricsCurrency?: string;
+        metricsSyncedAt?: Date;
+        goalResultInputs?: {
+          actionCounts?: Record<string, number>;
+          actionValuesGross?: Record<string, number>;
+        };
       };
     }[];
   }[];

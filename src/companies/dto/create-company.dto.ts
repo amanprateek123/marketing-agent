@@ -86,6 +86,7 @@ class MetaDto {
   @IsOptional() @IsString() accessToken?: string;
   @IsOptional() @IsString() accountId?: string;
   @IsOptional() @IsArray() @IsString({ each: true }) accountIds?: string[];
+  @IsOptional() @IsObject() accountCurrencies?: Record<string, string>;
   @IsOptional() @IsString() businessId?: string;
   @IsOptional() @IsString() pixelId?: string;
   @IsOptional() @IsString() pageId?: string;

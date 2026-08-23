@@ -13,8 +13,12 @@ import {
 } from '../orchestrator/decision-context';
 
 class TestableRecommendationEngine extends RecommendationEngine {
-  run(deps: ComputeDeps<'recommendation'>, cycleId = 'cycle-1') {
-    return this.compute(deps, cycleId);
+  run(
+    deps: ComputeDeps<'recommendation'>,
+    cycleId = 'cycle-1',
+    identity = { tenantId: 'tenant-1', campaignId: 'campaign-1' },
+  ) {
+    return this.compute(deps, cycleId, identity);
   }
 }
 
@@ -89,6 +93,72 @@ const signal = (
   firstSeenAt: new Date('2026-08-23T00:00:00.000Z'),
 });
 
+const goalSignal = (input: {
+  kind:
+    | 'optimization_goal_efficiency_lagging'
+    | 'optimization_goal_efficiency_leading';
+  targetType?: 'adset' | 'ad';
+  targetId: string;
+  currentEfficiency: number | null;
+  baselineEfficiency: number;
+  peerIds?: string[];
+  optimizationGoal?: string;
+  efficiencyMetric?: string;
+  lowerIsBetter?: boolean;
+}): Signal => ({
+  ...signal(
+    input.kind,
+    0.9,
+    `Observed exact same-window ${input.optimizationGoal ?? 'IMPRESSIONS'} peer gap; no causal uplift claimed.`,
+    input.targetType ?? 'adset',
+    input.targetId,
+  ),
+  goalEvidence: {
+    optimizationGoal: input.optimizationGoal ?? 'IMPRESSIONS',
+    resultMetric: 'impressions',
+    efficiencyMetric: input.efficiencyMetric ?? 'cpm',
+    efficiencyUnit: 'currency',
+    lowerIsBetter: input.lowerIsBetter ?? true,
+    current: {
+      spend: 1000,
+      result: 100000,
+      efficiency: input.currentEfficiency,
+    },
+    pooledSiblingBaseline: {
+      peerCount: 2,
+      peerIds: input.peerIds ?? ['adset-2', 'adset-3'],
+      spend: 2000,
+      result: 400000,
+      efficiency: input.baselineEfficiency,
+    },
+    observedGap: {
+      thresholdMultiple: 1.5,
+      multiple:
+        input.currentEfficiency === null
+          ? null
+          : Math.max(
+              input.currentEfficiency / input.baselineEfficiency,
+              input.baselineEfficiency / input.currentEfficiency,
+            ),
+      unbounded: input.currentEfficiency === null,
+      direction:
+        input.kind === 'optimization_goal_efficiency_lagging'
+          ? 'worse'
+          : 'better',
+    },
+    window: {
+      dateStart: '2026-08-01',
+      dateStop: '2026-08-22',
+      metricScope: 'lifetime',
+    },
+    sourceFingerprint: 'meta-query-v1',
+    currency: 'INR',
+    claimScope: 'observational_same_window_peer_comparison',
+    causalClaim: false,
+    expectedUplift: null,
+  },
+});
+
 const diagnosis = (
   evidenceSignals: Signal['kind'][],
   confidence = 1,
@@ -119,9 +189,19 @@ function deps(input?: {
   economicsAvailable?: boolean;
   revenueEvidenceAvailable?: boolean;
   roas?: number;
+  spend?: number;
+  purchases?: number;
   adSetLevel?: Record<string, Record<string, number>>;
+  adLevel?: Record<string, Record<string, number>>;
+  confidence?: {
+    overall: number;
+    snapshot: number;
+    statisticalPower: number;
+    okToRecommend: boolean;
+  };
   /** null deliberately omits freshness metadata; undefined uses fresh default. */
   freshnessSec?: number | null;
+  budgetModel?: 'abo' | 'cbo' | 'asc';
 }): ComputeDeps<'recommendation'> {
   const goal = input?.goal ?? 'sales';
   const roas = input?.roas ?? 3;
@@ -135,10 +215,10 @@ function deps(input?: {
         : { freshnessSec: input?.freshnessSec ?? 60 }),
       metrics: {
         campaignLevel: {
-          spend: 1000,
-          revenue: roas * 1000,
+          spend: input?.spend ?? 1000,
+          revenue: roas * (input?.spend ?? 1000),
           roas,
-          purchases: 30,
+          purchases: input?.purchases ?? 30,
           impressions: 10000,
           reach: 6000,
           clicks: 200,
@@ -149,6 +229,14 @@ function deps(input?: {
           frequency: 1.67,
         },
         adSetLevel: input?.adSetLevel ?? {},
+        adLevel: input?.adLevel ?? {},
+      },
+      entities: {
+        campaign: {
+          id: 'campaign-1',
+          name: 'Campaign',
+          budgetModel: input?.budgetModel,
+        },
       },
     }),
     objective: context(objective(goal)),
@@ -218,15 +306,19 @@ function deps(input?: {
       method: 'linear' as const,
     }),
     confidence: context({
-      overall: 0.9,
-      perEngine: {},
+      overall: input?.confidence?.overall ?? 0.9,
+      perEngine: { snapshot: input?.confidence?.snapshot ?? 0.9 },
       quality: {
         dataFreshnessSec: 60,
         snapshotCoverage: 1,
         historyDepthDays: 7,
-        statisticalPower: 1,
+        statisticalPower: input?.confidence?.statisticalPower ?? 1,
       },
-      gates: { okToRecommend: true, okToExecute: false, reasonsBlocked: [] },
+      gates: {
+        okToRecommend: input?.confidence?.okToRecommend ?? true,
+        okToExecute: false,
+        reasonsBlocked: [],
+      },
     }),
     memory: context({
       pastActions: [],
@@ -350,15 +442,6 @@ describe('RecommendationEngine goal and reliability gates', () => {
       { find, insertMany } as never,
       null,
     );
-    (
-      persistenceEngine as unknown as {
-        identity: Map<string, { tenantId: string; campaignId: string }>;
-      }
-    ).identity.set('cycle-1', {
-      tenantId: 'tenant-1',
-      campaignId: 'campaign-1',
-    });
-
     await persistenceEngine.run(
       deps({ signals: [signal('winner_confirmed')] }),
     );
@@ -434,7 +517,10 @@ describe('RecommendationEngine goal and reliability gates', () => {
     expect(result.actions.length).toBeGreaterThan(0);
     for (const action of result.actions) {
       expect(action.expectedImpact.metric).toBe('cpm');
-      expect(action.expectedImpact.deltaPct).toBeLessThan(0);
+      expect(action.expectedImpact).toMatchObject({
+        deltaPct: 0,
+        basis: 'not_estimated',
+      });
       expect(action.expectedProfitDeltaINR7d).toBe(0);
       expect(action.score).toBeGreaterThan(0);
       expect(action.reasoning).not.toMatch(/ROAS|revenue|profit|breakeven/i);
@@ -442,6 +528,335 @@ describe('RecommendationEngine goal and reliability gates', () => {
         action.evidenceChain.map((item) => item.step).join(' '),
       ).not.toMatch(/ROAS|revenue|profit|breakeven/i);
     }
+  });
+
+  it('scales an exact same-window goal leader without inventing uplift or profit', async () => {
+    const leading = goalSignal({
+      kind: 'optimization_goal_efficiency_leading',
+      targetId: 'adset-1',
+      currentEfficiency: 5,
+      baselineEfficiency: 10,
+    });
+    const result = await engine.run(
+      deps({
+        goal: 'awareness',
+        signals: [leading],
+        diagnosis: diagnosis(
+          ['optimization_goal_efficiency_leading'],
+          0.75,
+          'delivery_efficiency',
+        ),
+        lifecycle: lifecycle(['scale_adset'], { canScale: true }, 'stable'),
+        budgetModel: 'abo',
+        adSetLevel: {
+          'adset-1': { spend: 1000, impressions: 200000, cpm: 5 },
+        },
+      }),
+    );
+
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({
+      type: 'scale_adset',
+      targetId: 'adset-1',
+      parameters: {
+        scalePercent: 10,
+        optimizationGoal: 'IMPRESSIONS',
+        validationMetric: 'cpm',
+        claimScope: 'observational_same_window_peer_comparison',
+      },
+      expectedImpact: {
+        metric: 'cpm',
+        deltaPct: 0,
+        basis: 'observed_gap',
+        currentValue: 5,
+        siblingBaselineValue: 10,
+        observedGapPct: 100,
+      },
+      expectedProfitDeltaINR7d: 0,
+      requiresHumanApproval: true,
+    });
+    expect(result.actions[0].reasoning).toMatch(/no causal uplift/i);
+    expect(result.actions[0].reasoning).not.toMatch(
+      /profit gain|will improve/i,
+    );
+  });
+
+  it('withholds exact-goal scaling when ABO budget topology is not verified', async () => {
+    const result = await engine.run(
+      deps({
+        goal: 'awareness',
+        signals: [
+          goalSignal({
+            kind: 'optimization_goal_efficiency_leading',
+            targetId: 'adset-1',
+            currentEfficiency: 5,
+            baselineEfficiency: 10,
+          }),
+        ],
+        diagnosis: diagnosis(
+          ['optimization_goal_efficiency_leading'],
+          0.75,
+          'delivery_efficiency',
+        ),
+        lifecycle: lifecycle(['scale_adset'], { canScale: true }, 'stable'),
+        budgetModel: 'cbo',
+        adSetLevel: {
+          'adset-1': { spend: 1000, impressions: 200000, cpm: 5 },
+        },
+      }),
+    );
+
+    expect(result.actions).toEqual([]);
+    expect(
+      result.gateReasonCounts?.[
+        'action:goal_scale_requires_verified_abo_budget'
+      ],
+    ).toBe(1);
+  });
+
+  it('offers a severe exact-goal ad laggard for human pause review', async () => {
+    const lagging = goalSignal({
+      kind: 'optimization_goal_efficiency_lagging',
+      targetType: 'ad',
+      targetId: 'ad-1',
+      currentEfficiency: 20,
+      baselineEfficiency: 10,
+    });
+    const result = await engine.run(
+      deps({
+        goal: 'awareness',
+        signals: [lagging],
+        diagnosis: diagnosis(
+          ['optimization_goal_efficiency_lagging'],
+          0.75,
+          'delivery_efficiency',
+          'ad',
+          'ad-1',
+        ),
+        lifecycle: lifecycle(['pause_ad'], { canPause: true }, 'stable'),
+        adLevel: {
+          'ad-1': { spend: 1000, impressions: 50000, cpm: 20 },
+        },
+      }),
+    );
+
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({
+      type: 'pause_ad',
+      targetType: 'ad',
+      targetId: 'ad-1',
+      expectedImpact: {
+        metric: 'cpm',
+        basis: 'observed_gap',
+        deltaPct: 0,
+      },
+      expectedProfitDeltaINR7d: 0,
+      requiresHumanApproval: true,
+    });
+    expect(result.actions[0].reasoning).toMatch(/observed evidence/i);
+  });
+
+  it('requires same-ad creative corroboration before replacing a goal laggard creative', async () => {
+    const lagging = goalSignal({
+      kind: 'optimization_goal_efficiency_lagging',
+      targetType: 'ad',
+      targetId: 'ad-1',
+      currentEfficiency: 20,
+      baselineEfficiency: 10,
+    });
+    const hook = signal(
+      'hook_burn',
+      0.8,
+      'Observed low hook depth on this exact video ad.',
+      'ad',
+      'ad-1',
+    );
+    const result = await engine.run(
+      deps({
+        goal: 'awareness',
+        signals: [lagging, hook],
+        diagnosis: diagnosis(
+          ['optimization_goal_efficiency_lagging', 'hook_burn'],
+          0.75,
+          'creative',
+          'ad',
+          'ad-1',
+        ),
+        lifecycle: lifecycle(
+          ['replace_creative'],
+          { canPause: false, canReplaceCreative: true },
+          'stable',
+        ),
+        adLevel: {
+          'ad-1': { spend: 1000, impressions: 50000, cpm: 20 },
+        },
+      }),
+    );
+
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({
+      type: 'replace_creative',
+      targetId: 'ad-1',
+      expectedImpact: { metric: 'cpm', basis: 'observed_gap' },
+    });
+    expect(
+      result.actions[0].evidenceChain.map((item) => item.step).join(' '),
+    ).toMatch(/hook/i);
+  });
+
+  it('builds only a bounded same-goal ABO reallocation from a verified leader and laggard', async () => {
+    const lagging = goalSignal({
+      kind: 'optimization_goal_efficiency_lagging',
+      targetId: 'adset-lag',
+      currentEfficiency: 20,
+      baselineEfficiency: 10,
+      peerIds: ['adset-lead', 'adset-peer'],
+    });
+    const leading = goalSignal({
+      kind: 'optimization_goal_efficiency_leading',
+      targetId: 'adset-lead',
+      currentEfficiency: 5,
+      baselineEfficiency: 10,
+      peerIds: ['adset-lag', 'adset-peer'],
+    });
+    const result = await engine.run(
+      deps({
+        goal: 'awareness',
+        signals: [lagging, leading],
+        diagnosis: diagnosis(
+          ['optimization_goal_efficiency_lagging'],
+          0.75,
+          'delivery_efficiency',
+          'adset',
+          'adset-lag',
+        ),
+        lifecycle: lifecycle(['shift_budget_between_adsets'], {}, 'stable'),
+        budgetModel: 'abo',
+        adSetLevel: {
+          'adset-lag': { spend: 1000, impressions: 50000, cpm: 20 },
+          'adset-lead': { spend: 1000, impressions: 200000, cpm: 5 },
+          'adset-peer': { spend: 1000, impressions: 100000, cpm: 10 },
+        },
+      }),
+    );
+
+    const shift = result.actions.find(
+      (action) => action.type === 'shift_budget_between_adsets',
+    );
+    expect(shift).toMatchObject({
+      targetId: 'adset-lag',
+      parameters: {
+        fromAdSetId: 'adset-lag',
+        toAdSetId: 'adset-lead',
+        shiftPercent: 10,
+        optimizationGoal: 'IMPRESSIONS',
+        validationMetric: 'cpm',
+      },
+      expectedImpact: {
+        metric: 'cpm',
+        deltaPct: 0,
+        basis: 'observed_gap',
+        currentValue: 20,
+        siblingBaselineValue: 5,
+        observedGapPct: 300,
+      },
+      expectedProfitDeltaINR7d: 0,
+      requiresHumanApproval: true,
+    });
+    expect(shift?.reasoning).toMatch(/does not claim|promise future uplift/i);
+  });
+
+  it('uses the exact ad row for ad-target loss and creative math', async () => {
+    const result = await engine.run(
+      deps({
+        goal: 'sales',
+        roas: 3,
+        spend: 10_000,
+        signals: [
+          signal(
+            'hook_burn',
+            0.9,
+            'Observed low P25 depth and CTR on this active video ad.',
+            'ad',
+            'ad-video-1',
+          ),
+        ],
+        diagnosis: diagnosis(
+          ['hook_burn'],
+          0.9,
+          'creative',
+          'ad',
+          'ad-video-1',
+        ),
+        lifecycle: lifecycle(
+          ['replace_creative', 'pause_ad'],
+          { canPause: true, canReplaceCreative: true },
+          'stable',
+        ),
+        adLevel: {
+          'ad-video-1': {
+            spend: 100,
+            revenue: 20,
+            roas: 0.2,
+            purchases: 1,
+            impressions: 2_000,
+            clicks: 10,
+            ctr: 0.5,
+          },
+        },
+      }),
+    );
+
+    const pause = result.actions.find((action) => action.type === 'pause_ad');
+    expect(pause).toMatchObject({
+      targetType: 'ad',
+      targetId: 'ad-video-1',
+      expectedProfitDeltaINR7d: 28,
+      requiresHumanApproval: true,
+    });
+    expect(pause?.reasoning).toContain('Ad ad-video-1');
+    expect(pause?.reasoning).toContain('0.20× ROAS');
+    expect(pause?.evidenceChain).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'snapshot',
+          step: expect.stringContaining('₹10/day'),
+        }),
+      ]),
+    );
+
+    const replace = result.actions.find(
+      (action) => action.type === 'replace_creative',
+    );
+    expect(replace?.targetId).toBe('ad-video-1');
+    expect(replace?.expectedProfitDeltaINR7d).toBe(6);
+  });
+
+  it('fails closed when an ad-target signal has no exact ad metric row', async () => {
+    const result = await engine.run(
+      deps({
+        signals: [
+          signal('hook_burn', 0.9, 'Observed hook issue.', 'ad', 'missing-ad'),
+        ],
+        diagnosis: diagnosis(
+          ['hook_burn'],
+          0.9,
+          'creative',
+          'ad',
+          'missing-ad',
+        ),
+        lifecycle: lifecycle(
+          ['replace_creative', 'pause_ad'],
+          { canPause: true, canReplaceCreative: true },
+          'stable',
+        ),
+      }),
+    );
+
+    expect(result.actions).toEqual([]);
+    expect(
+      result.gateReasonCounts?.['evidence:target_metrics_unavailable'],
+    ).toBe(2);
   });
 
   it('does not turn frequency or audience evidence into an unsupported placement change', async () => {
@@ -593,6 +1008,108 @@ describe('RecommendationEngine goal and reliability gates', () => {
       type: 'reduce_total_budget',
       targetType: 'campaign',
       parameters: { reductionPercent: 20 },
+      expectedImpact: {
+        metric: 'losses_avoided',
+        deltaPct: 20,
+      },
+      expectedProfitDeltaINR7d: 35,
+    });
+    expect(result.actions[0].reasoning).toContain(
+      'does not assume ROAS will improve',
+    );
+  });
+
+  it('offers only a bounded human-review loss throttle for evidence-mature learning', async () => {
+    const learningLifecycle: LifecycleData = {
+      ...lifecycle(['add_creative'], { canReduceBudget: false }, 'learning'),
+      ageHours: 240,
+      blockedActions: [],
+    };
+    const result = await engine.run(
+      deps({
+        roas: 0.5,
+        spend: 10_000,
+        purchases: 14,
+        signals: [
+          signal(
+            'unprofitable_run',
+            0.6,
+            'Verified return remains materially below breakeven.',
+            'campaign',
+            'campaign-1',
+          ),
+        ],
+        diagnosis: {
+          rootCauses: [],
+          leakDiagnosis: 'chronic_unprofitable',
+          narrative: 'No supported causal root cause yet.',
+        },
+        lifecycle: learningLifecycle,
+        confidence: {
+          overall: 0.6,
+          snapshot: 0.9,
+          statisticalPower: 0.56,
+          okToRecommend: false,
+        },
+      }),
+    );
+
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0]).toMatchObject({
+      type: 'reduce_total_budget',
+      targetType: 'campaign',
+      parameters: { reductionPercent: 20 },
+      requiresHumanApproval: true,
+      expectedImpact: { metric: 'losses_avoided', deltaPct: 20 },
+    });
+    expect(result.actions[0].reasoning).toMatch(
+      /loss containment for human review/i,
+    );
+    expect(result.actions[0].reasoning).toMatch(
+      /not an optimization-uplift claim/i,
+    );
+  });
+
+  it('keeps young learning campaigns behind the containment safety gates', async () => {
+    const youngLearning: LifecycleData = {
+      ...lifecycle(['add_creative'], { canReduceBudget: false }, 'learning'),
+      ageHours: 72,
+      blockedActions: [],
+    };
+    const result = await engine.run(
+      deps({
+        roas: 0.5,
+        spend: 10_000,
+        purchases: 14,
+        signals: [
+          signal(
+            'unprofitable_run',
+            0.8,
+            'Verified loss, but the campaign is young.',
+            'campaign',
+            'campaign-1',
+          ),
+        ],
+        diagnosis: {
+          rootCauses: [],
+          leakDiagnosis: 'chronic_unprofitable',
+          narrative: 'No supported causal root cause yet.',
+        },
+        lifecycle: youngLearning,
+        confidence: {
+          overall: 0.6,
+          snapshot: 0.9,
+          statisticalPower: 0.56,
+          okToRecommend: false,
+        },
+      }),
+    );
+
+    expect(result.actions).toEqual([]);
+    expect(result.gateReasonCounts).toMatchObject({
+      'lifecycle:learning:not_allowed': 1,
+      'confidence:not_okToRecommend': 1,
+      'diagnosis:no_matching_root_cause': 1,
     });
   });
 

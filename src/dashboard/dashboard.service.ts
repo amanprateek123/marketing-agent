@@ -21,9 +21,15 @@ import { Company } from '../companies/schemas/company.schema';
 import { CreativePackage } from '../creative/schemas/creative-package.schema';
 import { IntelligenceDecision } from '../intelligence/decisions/intelligence-decision.schema';
 import { CampaignIntelligenceCycle } from '../intelligence/orchestrator/cycle.schema';
+import { ENGINE_SLICE_KEYS } from '../intelligence/orchestrator/decision-context';
+import { EngineOutputDoc } from '../intelligence/orchestrator/engine-output.schema';
 import { ExecutedAction } from '../learning/schemas/executed-action.schema';
 import { PipelineRun } from '../pipeline/schemas/pipeline-run.schema';
 import { parseCampaignName } from './campaign-name.parser';
+import {
+  brainReliabilityCycleIds,
+  buildBrainReliability,
+} from './brain-reliability';
 import { ObjectiveVerdict, evaluateObjective } from './objective-evaluation';
 import { isTrustedProductScopedTimeseriesRevenue } from '../campaigns/meta-ads/timeseries-revenue-provenance.util';
 import {
@@ -58,6 +64,10 @@ import {
 const ZERO_CONV_ALERT_MIN_SPEND = 2000;
 /** Metrics older than this are stale enough that verdicts built on them lie. */
 const STALE_METRICS_HOURS = 36;
+/** Align operating evidence with the documented 30-day slice-compaction boundary. */
+const BRAIN_RELIABILITY_WINDOW_DAYS = 30;
+/** Withhold rate-like claims until at least three conclusive outcomes exist. */
+const BRAIN_RELIABILITY_MIN_CONCLUSIVE_OUTCOMES = 3;
 
 const STATUS_LABELS: Record<string, string> = {
   active: 'Running',
@@ -103,6 +113,8 @@ export class DashboardService {
     private readonly decisionModel: Model<IntelligenceDecision>,
     @InjectModel(CampaignIntelligenceCycle.name)
     private readonly cycleModel: Model<CampaignIntelligenceCycle>,
+    @InjectModel(EngineOutputDoc.name)
+    private readonly engineOutputModel: Model<EngineOutputDoc>,
     @InjectModel(ExecutedAction.name)
     private readonly executedActionModel: Model<ExecutedAction>,
   ) {}
@@ -430,7 +442,7 @@ export class DashboardService {
         exactCampaignIds.length
           ? this.cycleModel
               .find(exactCampaignFilter)
-              .select('campaignId startedAt completedAt status')
+              .select('cycleId campaignId startedAt completedAt status')
               .lean()
               .exec()
           : Promise.resolve([]),
@@ -478,12 +490,44 @@ export class DashboardService {
         .filter((campaign) => String(campaign.metaCampaignId ?? '').trim())
         .map((campaign) => [String(campaign.metaCampaignId), campaign]),
     );
-    const dailyPerformance = await this.loadToolImpactDailyPerformance(
+    const reliabilityCycleIds = brainReliabilityCycleIds({
+      cycles: cycles as any[],
+      exactCampaignIds,
+      now,
+      windowDays: BRAIN_RELIABILITY_WINDOW_DAYS,
+    });
+    const [dailyPerformance, engineOutputs] = await Promise.all([
+      this.loadToolImpactDailyPerformance(
+        tenantId,
+        rows,
+        authoritativeProductByMetaId,
+        persistedCampaignByMetaId,
+      ),
+      reliabilityCycleIds.length
+        ? this.engineOutputModel
+            .find({
+              tenantId,
+              campaignId: { $in: exactCampaignIds },
+              cycleId: { $in: reliabilityCycleIds },
+              engine: { $in: [...ENGINE_SLICE_KEYS] },
+            })
+            .select('tenantId campaignId cycleId engine slice')
+            .lean()
+            .exec()
+        : Promise.resolve([]),
+    ]);
+    const brainReliability = buildBrainReliability({
       tenantId,
-      rows,
-      authoritativeProductByMetaId,
-      persistedCampaignByMetaId,
-    );
+      exactCampaignIds,
+      campaignRows: rows,
+      cycles: cycles as any[],
+      engineOutputs: engineOutputs as any[],
+      decisions: decisions as any[],
+      executedActions: executedActions as any[],
+      now,
+      windowDays: BRAIN_RELIABILITY_WINDOW_DAYS,
+      minimumConclusiveOutcomes: BRAIN_RELIABILITY_MIN_CONCLUSIVE_OUTCOMES,
+    });
     const portfolio = this.rollUp(rows, econ);
     const rawOutcome = buildRawRoasOutcome(rows);
     const matureIdSet = new Set(
@@ -567,6 +611,22 @@ export class DashboardService {
                 metric: d.expectedImpact.metric,
                 deltaPct: round(Number(d.expectedImpact.deltaPct), 2),
                 confidence: round(Number(d.expectedImpact.confidence), 4),
+                basis: d.expectedImpact.basis,
+                currentValue: Number.isFinite(
+                  Number(d.expectedImpact.currentValue),
+                )
+                  ? round(Number(d.expectedImpact.currentValue), 4)
+                  : undefined,
+                siblingBaselineValue: Number.isFinite(
+                  Number(d.expectedImpact.siblingBaselineValue),
+                )
+                  ? round(Number(d.expectedImpact.siblingBaselineValue), 4)
+                  : undefined,
+                observedGapPct: Number.isFinite(
+                  Number(d.expectedImpact.observedGapPct),
+                )
+                  ? round(Number(d.expectedImpact.observedGapPct), 2)
+                  : undefined,
               }
             : undefined,
         confidence: Number.isFinite(Number(d.confidence))
@@ -758,6 +818,7 @@ export class DashboardService {
         notes: econ.notes,
       },
       dailyPerformance,
+      brainReliability,
       automation: {
         pipelineRuns: {
           total: pipelineRuns.length,

@@ -3,7 +3,10 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { MemoryData } from '../orchestrator/decision-context';
@@ -70,14 +73,16 @@ export class MemoryEngine extends BaseEngine<'memory', MemoryData> {
   protected async compute(
     deps: ComputeDeps<'memory'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<MemoryData> {
+    void deps;
+    void cycleId;
     // deps carries only engine-slice outputs, never identity fields — the
     // previous `deps as unknown as {tenantId}` cast always resolved to
     // undefined, so tenantId was always '' and `company` (hence every real
     // causalInsight/companyLearnings field below) never loaded.
-    const ident = this.identity.get(cycleId);
-    const tenantId = ident?.tenantId ?? '';
-    const campaignId = ident?.campaignId ?? '';
+    const tenantId = identity.tenantId;
+    const campaignId = identity.campaignId;
     const company =
       this.companies && tenantId
         ? await this.companies.findByTenantId(tenantId).catch(() => null)

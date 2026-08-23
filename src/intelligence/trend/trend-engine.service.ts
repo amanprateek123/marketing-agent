@@ -5,7 +5,10 @@ import { Model } from 'mongoose';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { TrendData, TrendReading } from '../orchestrator/decision-context';
@@ -120,7 +123,9 @@ export class TrendEngine extends BaseEngine<'trend', TrendData> {
   protected async compute(
     deps: ComputeDeps<'trend'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<TrendData> {
+    void cycleId;
     const snap = deps.snapshot!;
     // deps carries only engine-slice outputs, never identity fields — the
     // previous `deps as unknown as {tenantId, campaignId}` cast always
@@ -131,12 +136,11 @@ export class TrendEngine extends BaseEngine<'trend', TrendData> {
     // signal (ctr_decay, creative_fatigue, audience_saturation) and the
     // forecast engine's linear/ema_projection methods permanently
     // unreachable, no matter how much real history existed in Mongo.
-    const ident = this.identity.get(cycleId);
     // Load enough raw ticks to cover up to 30 days at the documented 15-min
     // capture cadence. They are collapsed to one daily observation below.
     const identityFilter = {
-      tenantId: ident?.tenantId ?? '',
-      campaignId: ident?.campaignId ?? '',
+      tenantId: identity.tenantId,
+      campaignId: identity.campaignId,
     };
     const currentSnapshotId = String(
       (snap.data as { snapshotId?: unknown }).snapshotId ?? '',

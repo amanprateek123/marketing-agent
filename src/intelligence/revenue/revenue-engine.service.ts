@@ -5,7 +5,10 @@ import { Model } from 'mongoose';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { RevenueData } from '../orchestrator/decision-context';
@@ -96,7 +99,9 @@ export class RevenueEngine extends BaseEngine<
   protected async compute(
     deps: ComputeDeps<'revenue'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<RevenueData & { derivation: RevenueDerivation }> {
+    void cycleId;
     const snap = deps.snapshot!;
     const objective = deps.objective!;
     const data = snap.data as {
@@ -129,10 +134,9 @@ export class RevenueEngine extends BaseEngine<
     // Product identity and stored-return provenance are both decision inputs.
     // Neither may be inferred from array position: differently-margined
     // products can coexist within the same tenant.
-    const ident = this.identity.get(cycleId);
     const resolution = await this.resolveProductForCampaign(
-      ident?.tenantId,
-      ident?.campaignId,
+      identity.tenantId,
+      identity.campaignId,
     );
     const product = resolution.product;
     const revenueQuality = classifyRevenueEvidence(

@@ -14,6 +14,7 @@ import { buildProductResolver } from '../../campaigns/meta-ads/product-resolver.
 import { getRefundFactor } from '../../common/conversion-value.util';
 import { MetaSnapshotFetcher } from '../snapshot/meta-snapshot-fetcher.interface';
 import {
+  MetricProvenance,
   RawMetaAd,
   RawMetaAdSet,
   RawMetaBundle,
@@ -38,20 +39,12 @@ import {
  *      action_values). campaign-sync's persisted data has real per-adset/ad
  *      revenue from Meta's actual pixel values.
  *
- * Refund haircut: SnapshotBuilder.computeRevenue() unconditionally applies
- * its own haircut from `products[0].refundRatePercent` (see
- * snapshot-builder.service.ts) — that contract is unchanged. But
- * campaign-sync's persisted revenue is already NET (Phase 0 fix, haircut by
- * THIS campaign's actual resolved product via buildProductResolver, which
- * can differ from the cascade's coarser `products[0]` for multi-product
- * tenants). Feeding already-net revenue into a builder that haircuts again
- * would double-discount it. So this reverses this campaign's own haircut
- * (divides back to gross) before handing off, preserving the exact
- * gross-in/builder-haircuts contract the old adapter also used — for
- * single-product tenants (the common case) this round-trips exactly;
- * for multi-product tenants it's no less precise than before (the old
- * adapter's synthesized revenue used the same `products[0]`-style
- * resolution via pickProduct()).
+ * Revenue provenance: campaign-sync stores canonical refund-net revenue but
+ * that value may be either a Meta action value or a configured estimate. The
+ * adapter now transports the canonical net separately from the exact raw Meta
+ * gross value, so SnapshotBuilder preserves the number without relabeling an
+ * estimate as action_values. Legacy documents without provenance retain the
+ * old gross-transport compatibility path until they are refreshed by sync.
  */
 @Injectable()
 export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
@@ -83,10 +76,9 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       throw new Error(`tenant not found: ${input.tenantId}`);
     }
 
-    // Reverse THIS campaign's refund haircut (see class doc) so
-    // SnapshotBuilder's own haircut — driven by the cascade's coarser
-    // products[0] — lands on the right gross figure instead of discounting
-    // already-net revenue a second time.
+    // Product resolution remains necessary for the legacy compatibility path
+    // that reverses a persisted net Meta value when row-level provenance has
+    // not yet been backfilled.
     const productByCampaign = await buildProductResolver(
       this.campaignModel,
       this.briefModel,
@@ -97,15 +89,21 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
     const refundFactor = getRefundFactor(
       productByCampaign(input.metaCampaignId),
     );
-    const toGross = (netRevenue: number) => netRevenue / refundFactor;
-
     const c = campaign as any;
     const now = new Date();
     // campaign.syncedAt is when campaign-sync last actually wrote this doc —
     // a real freshness signal (SnapshotValidator's freshness score was
     // previously always ~1.0 because the old adapter synthesized "now" as
     // the window end regardless of how stale the underlying fetch was).
-    const syncedAtCandidate = c.syncedAt ? new Date(c.syncedAt) : undefined;
+    const persistedMetricsSyncedAt =
+      c.metricsSyncedAt ??
+      // Legacy documents predate row-level provenance. Once the boolean is
+      // present, never substitute a structure/status sync timestamp for a
+      // missing metrics timestamp.
+      (c.metricsRowObserved === undefined ? c.syncedAt : undefined);
+    const syncedAtCandidate = persistedMetricsSyncedAt
+      ? new Date(persistedMetricsSyncedAt)
+      : undefined;
     const sourceMetricsSyncedAt =
       syncedAtCandidate && Number.isFinite(syncedAtCandidate.getTime())
         ? syncedAtCandidate
@@ -118,6 +116,10 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       ? new Date(c.launchedAt)
       : new Date(metaWindowEnd.getTime() - 90 * 86400 * 1000);
 
+    const campaignMetricProvenance = this.toMetricProvenance(
+      c,
+      sourceMetricsSyncedAt,
+    );
     const campaignInsights = this.toRawInsights({
       spend: c.spend ?? 0,
       impressions: c.impressions ?? 0,
@@ -128,7 +130,8 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
       cpm: c.cpm ?? 0,
       frequency: c.frequency ?? 0,
       conversions: c.conversions ?? 0,
-      revenue: toGross(c.revenue ?? 0),
+      actionValueGross: this.transportActionValueGross(c, refundFactor),
+      goalResultInputs: campaignMetricProvenance?.goalResultInputs,
     });
 
     // Campaign-level learning stage: the WORST stage across ad sets, because
@@ -153,11 +156,19 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
     const rawCampaign: RawMetaCampaign = {
       id: input.metaCampaignId,
       name: c.name ?? '',
+      productName: this.textOrUndefined(c.productName),
       objective: c.objective || undefined,
-      status: (c.effectiveStatus || c.status || '').toString().toUpperCase(),
-      effective_status: c.effectiveStatus || '',
+      budgetModel:
+        c.budgetModel === 'abo' ||
+        c.budgetModel === 'cbo' ||
+        c.budgetModel === 'asc'
+          ? c.budgetModel
+          : undefined,
+      status: this.upperTextOrUndefined(c.effectiveStatus || c.status),
+      effective_status: this.textOrUndefined(c.effectiveStatus),
       account_id: c.metaAccountId ?? '',
       learning_stage: learningStage,
+      metricProvenance: campaignMetricProvenance,
       insights: campaignInsights,
     };
 
@@ -165,10 +176,21 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
     const rawAds: Record<string, RawMetaAd> = {};
     for (const as of (c.metaAdSets ?? []) as any[]) {
       if (!as.id) continue;
+      const adSetMetricProvenance = this.toMetricProvenance(
+        as,
+        sourceMetricsSyncedAt,
+      );
       rawAdSets[as.id] = {
         id: as.id,
         name: as.name ?? '',
-        audienceType: as.audienceType,
+        status: this.textOrUndefined(as.status),
+        effectiveStatus: this.textOrUndefined(as.effectiveStatus),
+        audienceType: this.textOrUndefined(as.audienceType),
+        optimizationGoal: this.textOrUndefined(as.optimizationGoal),
+        landingPageViews: this.numberOrUndefined(as.landingPageView),
+        inlineLinkClicks: this.numberOrUndefined(as.inlineLinkClicks),
+        thruplay: this.numberOrUndefined(as.thruplay),
+        metricProvenance: adSetMetricProvenance,
         insights: this.toRawInsights({
           spend: as.spend ?? 0,
           impressions: as.impressions ?? 0,
@@ -179,17 +201,66 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
           cpm: as.cpm ?? 0,
           frequency: as.frequency ?? 0,
           conversions: as.conversions ?? 0,
-          revenue: toGross(as.revenue ?? 0),
+          actionValueGross: this.transportActionValueGross(as, refundFactor),
+          goalResultInputs: adSetMetricProvenance?.goalResultInputs,
+          addToCart: this.numberOrUndefined(as.addToCart),
+          initiateCheckout: this.numberOrUndefined(as.initiateCheckout),
+          landingPageViews: this.numberOrUndefined(as.landingPageView),
         }),
       };
 
       for (const ad of (as.ads ?? []) as any[]) {
         if (!ad.id) continue;
+        const adMetricProvenance = this.toMetricProvenance(
+          ad,
+          sourceMetricsSyncedAt,
+        );
+        const last7dMetricProvenance = ad.last7d
+          ? this.toMetricProvenance(ad.last7d, sourceMetricsSyncedAt)
+          : undefined;
         rawAds[ad.id] = {
           id: ad.id,
           name: ad.name ?? '',
+          adSetId: as.id,
+          status: this.textOrUndefined(ad.status),
+          effectiveStatus: this.textOrUndefined(ad.effectiveStatus),
           hookStyle: ad.hookStyle,
           format: ad.format,
+          copyVariantIndex: this.numberOrUndefined(ad.copyVariantIndex),
+          creativeId: this.textOrUndefined(ad.creativeId),
+          creativeName: this.textOrUndefined(ad.creativeName),
+          creativeBody: this.textOrUndefined(ad.creativeBody),
+          creativeTitle: this.textOrUndefined(ad.creativeTitle),
+          creativeCta: this.textOrUndefined(ad.creativeCta),
+          creativeLinkUrl: this.textOrUndefined(ad.creativeLinkUrl),
+          creativeVideoId: this.textOrUndefined(ad.creativeVideoId),
+          creativeImageHash: this.textOrUndefined(ad.creativeImageHash),
+          thumbnailUrl: this.textOrUndefined(ad.thumbnailUrl),
+          isDynamicCreative:
+            typeof ad.isDynamicCreative === 'boolean'
+              ? ad.isDynamicCreative
+              : undefined,
+          landingPageViews: this.numberOrUndefined(ad.landingPageView),
+          inlineLinkClicks: this.numberOrUndefined(ad.inlineLinkClicks),
+          outboundClicks: this.numberOrUndefined(ad.outboundClicks),
+          video3s: this.numberOrUndefined(ad.video3s),
+          thruplay: this.numberOrUndefined(ad.thruplay),
+          metricProvenance: adMetricProvenance,
+          last7d: ad.last7d
+            ? this.toRawInsights({
+                spend: this.numberOrUndefined(ad.last7d.spend),
+                impressions: this.numberOrUndefined(ad.last7d.impressions),
+                clicks: this.numberOrUndefined(ad.last7d.clicks),
+                ctr: this.numberOrUndefined(ad.last7d.ctr),
+                conversions: this.numberOrUndefined(ad.last7d.conversions),
+                actionValueGross: this.transportActionValueGross(
+                  ad.last7d,
+                  refundFactor,
+                ),
+                goalResultInputs: last7dMetricProvenance?.goalResultInputs,
+              })
+            : undefined,
+          last7dMetricProvenance,
           quality_ranking: ad.qualityRanking,
           engagement_ranking: ad.engagementRanking,
           conversion_ranking: ad.conversionRanking,
@@ -204,12 +275,19 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
               cpm: ad.cpm ?? 0,
               frequency: ad.frequency ?? 0,
               conversions: ad.conversions ?? 0,
-              revenue: toGross(ad.revenue ?? 0),
+              actionValueGross: this.transportActionValueGross(
+                ad,
+                refundFactor,
+              ),
+              goalResultInputs: adMetricProvenance?.goalResultInputs,
+              addToCart: this.numberOrUndefined(ad.addToCart),
+              initiateCheckout: this.numberOrUndefined(ad.initiateCheckout),
+              landingPageViews: this.numberOrUndefined(ad.landingPageView),
             }),
-            video_p25_watched_actions: [{ value: ad.videoP25 ?? 0 }],
-            video_p50_watched_actions: [{ value: ad.videoP50 ?? 0 }],
-            video_p75_watched_actions: [{ value: ad.videoP75 ?? 0 }],
-            video_p100_watched_actions: [{ value: ad.videoP100 ?? 0 }],
+            video_p25_watched_actions: this.actionArray(ad.videoP25),
+            video_p50_watched_actions: this.actionArray(ad.videoP50),
+            video_p75_watched_actions: this.actionArray(ad.videoP75),
+            video_p100_watched_actions: this.actionArray(ad.videoP100),
           },
         };
       }
@@ -304,28 +382,272 @@ export class MetaSnapshotFetcherAdapter implements MetaSnapshotFetcher {
   // }
 
   private toRawInsights(m: {
-    spend: number;
-    impressions: number;
-    reach: number;
-    clicks: number;
-    ctr: number;
-    cpc: number;
-    cpm: number;
-    frequency: number;
-    conversions: number;
-    revenue: number;
+    spend?: number;
+    impressions?: number;
+    reach?: number;
+    clicks?: number;
+    ctr?: number;
+    cpc?: number;
+    cpm?: number;
+    frequency?: number;
+    conversions?: number;
+    actionValueGross?: number;
+    goalResultInputs?: MetricProvenance['goalResultInputs'];
+    addToCart?: number;
+    initiateCheckout?: number;
+    landingPageViews?: number;
   }): NonNullable<RawMetaCampaign['insights']> {
-    return {
-      spend: String(m.spend),
-      impressions: String(m.impressions),
-      reach: String(m.reach),
-      clicks: String(m.clicks),
-      ctr: String(m.ctr),
-      cpc: String(m.cpc),
-      cpm: String(m.cpm),
-      frequency: String(m.frequency),
-      actions: [{ action_type: 'purchase', value: m.conversions }],
-      action_values: [{ action_type: 'purchase', value: m.revenue }],
+    const insights: NonNullable<RawMetaCampaign['insights']> = {};
+    this.assignRawString(insights, 'spend', m.spend);
+    this.assignRawString(insights, 'impressions', m.impressions);
+    this.assignRawString(insights, 'reach', m.reach);
+    this.assignRawString(insights, 'clicks', m.clicks);
+    this.assignRawString(insights, 'ctr', m.ctr);
+    this.assignRawString(insights, 'cpc', m.cpc);
+    this.assignRawString(insights, 'cpm', m.cpm);
+    this.assignRawString(insights, 'frequency', m.frequency);
+
+    const actions: NonNullable<RawMetaCampaign['insights']>['actions'] = [];
+    const exactCounts = m.goalResultInputs?.actionCounts;
+    if (exactCounts !== undefined) {
+      for (const [actionType, value] of Object.entries(exactCounts)) {
+        if (Number.isFinite(value)) {
+          actions.push({ action_type: actionType, value });
+        }
+      }
+    } else {
+      // Backward-compatible transport for legacy Campaign documents that do
+      // not retain exact aliases. New rows use goalResultInputs and therefore
+      // never relabel a lead/install/custom event as a purchase.
+      if (m.conversions !== undefined) {
+        actions.push({ action_type: 'purchase', value: m.conversions });
+      }
+      if (m.addToCart !== undefined) {
+        actions.push({ action_type: 'add_to_cart', value: m.addToCart });
+      }
+      if (m.initiateCheckout !== undefined) {
+        actions.push({
+          action_type: 'initiate_checkout',
+          value: m.initiateCheckout,
+        });
+      }
+      if (m.landingPageViews !== undefined) {
+        actions.push({
+          action_type: 'landing_page_view',
+          value: m.landingPageViews,
+        });
+      }
+    }
+    if (actions.length > 0) insights.actions = actions;
+    const exactActionValues = m.goalResultInputs?.actionValuesGross;
+    if (exactActionValues !== undefined) {
+      const actionValues = Object.entries(exactActionValues)
+        .filter(([, value]) => Number.isFinite(value))
+        .map(([actionType, value]) => ({
+          action_type: actionType,
+          value,
+        }));
+      if (actionValues.length > 0) insights.action_values = actionValues;
+    } else if (m.actionValueGross !== undefined) {
+      insights.action_values = [
+        { action_type: 'purchase', value: m.actionValueGross },
+      ];
+    }
+    return insights;
+  }
+
+  private assignRawString(
+    insights: NonNullable<RawMetaCampaign['insights']>,
+    key:
+      | 'spend'
+      | 'impressions'
+      | 'reach'
+      | 'clicks'
+      | 'ctr'
+      | 'cpc'
+      | 'cpm'
+      | 'frequency',
+    value: number | undefined,
+  ): void {
+    if (value !== undefined) insights[key] = String(value);
+  }
+
+  private actionArray(
+    value: unknown,
+  ): Array<{ value: number | string }> | undefined {
+    const parsed = this.numberOrUndefined(value);
+    return parsed === undefined ? undefined : [{ value: parsed }];
+  }
+
+  private transportActionValueGross(
+    source: Record<string, unknown>,
+    refundFactor: number,
+  ): number | undefined {
+    const exact = this.numberOrUndefined(source.rawMetaActionValueGross);
+    if (exact !== undefined) return exact;
+    const basis = this.textOrUndefined(source.revenueBasis);
+    if (basis && basis !== 'meta_action_value') return undefined;
+    const persistedNet = this.numberOrUndefined(source.revenue);
+    return persistedNet === undefined ? undefined : persistedNet / refundFactor;
+  }
+
+  private toMetricProvenance(
+    source: Record<string, unknown>,
+    fallbackSyncedAt: Date | null,
+  ): MetricProvenance | undefined {
+    const metricsSyncedAt = this.dateOrUndefined(source.metricsSyncedAt);
+    const metricsLastAttemptedAt = this.dateOrUndefined(
+      source.metricsLastAttemptedAt,
+    );
+    const goalResultInputs = this.goalResultInputsOrUndefined(
+      source.goalResultInputs,
+    );
+    const state = this.metricStateOrUndefined(source.metricsState);
+    const revenueBasis = this.revenueBasisOrUndefined(source.revenueBasis);
+    const revenueAttributionSource = this.revenueSourceOrUndefined(
+      source.revenueAttributionSource,
+    );
+    const provenance: MetricProvenance = {
+      rowObserved:
+        typeof source.metricsRowObserved === 'boolean'
+          ? source.metricsRowObserved
+          : undefined,
+      fetchComplete:
+        typeof source.metricsFetchComplete === 'boolean'
+          ? source.metricsFetchComplete
+          : undefined,
+      state,
+      source: this.textOrUndefined(source.metricsSource),
+      sourceFingerprint: this.textOrUndefined(source.metricsSourceFingerprint),
+      currency: this.currencyOrUndefined(source.metricsCurrency),
+      metricsSyncedAt: metricsSyncedAt ?? fallbackSyncedAt ?? undefined,
+      metricsLastAttemptedAt,
+      dateStart: this.textOrUndefined(
+        source.metricsDateStart ?? source.dateStart,
+      ),
+      dateStop: this.textOrUndefined(source.metricsDateStop ?? source.dateStop),
+      attributionSpec: source.attributionSpec,
+      promotedObject: source.promotedObject,
+      revenueBasis,
+      revenueAttributionSource,
+      revenueAttributionActionTypes: this.stringArrayOrUndefined(
+        source.revenueAttributionActionTypes,
+      ),
+      canonicalConversions: this.numberOrUndefined(source.conversions),
+      canonicalRevenueNet: this.numberOrUndefined(source.revenue),
+      rawMetaActionValueGross: this.numberOrUndefined(
+        source.rawMetaActionValueGross,
+      ),
+      rawMetaActionValueNet: this.numberOrUndefined(
+        source.rawMetaActionValueNet,
+      ),
+      configuredRevenueEstimateNet: this.numberOrUndefined(
+        source.configuredRevenueEstimateNet,
+      ),
+      goalResultInputs,
     };
+    return Object.values(provenance).some((value) => value !== undefined)
+      ? provenance
+      : undefined;
+  }
+
+  private metricStateOrUndefined(value: unknown): MetricProvenance['state'] {
+    return value === 'observed' ||
+      value === 'preserved' ||
+      value === 'missing' ||
+      value === 'unknown'
+      ? value
+      : undefined;
+  }
+
+  private revenueBasisOrUndefined(
+    value: unknown,
+  ): MetricProvenance['revenueBasis'] {
+    return value === 'meta_action_value' ||
+      value === 'configured_conversion_value' ||
+      value === 'no_attributed_revenue' ||
+      value === 'unknown'
+      ? value
+      : undefined;
+  }
+
+  private revenueSourceOrUndefined(
+    value: unknown,
+  ): MetricProvenance['revenueAttributionSource'] {
+    return value === 'custom_conversion' ||
+      value === 'custom_event' ||
+      value === 'standard_event' ||
+      value === 'app_event' ||
+      value === 'account_fallback' ||
+      value === 'unresolved' ||
+      value === 'unknown'
+      ? value
+      : undefined;
+  }
+
+  private stringArrayOrUndefined(value: unknown): string[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    return value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  private goalResultInputsOrUndefined(
+    value: unknown,
+  ): MetricProvenance['goalResultInputs'] {
+    if (!value || typeof value !== 'object') return undefined;
+    const row = value as Record<string, unknown>;
+    const actionCounts = this.numberRecordOrUndefined(row.actionCounts);
+    const actionValuesGross = this.numberRecordOrUndefined(
+      row.actionValuesGross,
+    );
+    return actionCounts !== undefined || actionValuesGross !== undefined
+      ? { actionCounts, actionValuesGross }
+      : undefined;
+  }
+
+  private numberRecordOrUndefined(
+    value: unknown,
+  ): Record<string, number> | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return undefined;
+    }
+    const entries = Object.entries(value as Record<string, unknown>)
+      .map(([key, raw]): [string, number | undefined] => [
+        key.trim(),
+        this.numberOrUndefined(raw),
+      ])
+      .filter((entry): entry is [string, number] =>
+        Boolean(entry[0] && entry[1] !== undefined),
+      );
+    return Object.fromEntries(entries);
+  }
+
+  private dateOrUndefined(value: unknown): Date | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    const date = value instanceof Date ? value : new Date(String(value));
+    return Number.isFinite(date.getTime()) ? date : undefined;
+  }
+
+  private currencyOrUndefined(value: unknown): string | undefined {
+    const normalized = this.textOrUndefined(value)?.toUpperCase();
+    return normalized && /^[A-Z]{3}$/.test(normalized) ? normalized : undefined;
+  }
+
+  private numberOrUndefined(value: unknown): number | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private textOrUndefined(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  private upperTextOrUndefined(value: unknown): string | undefined {
+    return this.textOrUndefined(value)?.toUpperCase();
   }
 }

@@ -522,6 +522,18 @@ export class CampaignCopilotService {
     const patch = input.patch ?? {};
     const notes: string[] = [];
     const latest = input.latestUserMessage;
+    // Numbers are only accepted when the operator actually typed them, which
+    // stops the model inventing a price. Digit-group separators have to be
+    // normalized first, though: "₹1,299" is extracted as 1299, and a raw
+    // substring test against "1,299" fails — silently dropping a value the
+    // operator clearly supplied. Handles Indian grouping ("1,29,999") too.
+    const latestDigitsNormalized = latest.replace(/(\d)[, \s](?=\d)/g, '$1');
+    const mentionsNumber = (value: unknown): boolean => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return false;
+      const asText = String(n);
+      return latest.includes(asText) || latestDigitsNormalized.includes(asText);
+    };
     // The initial greeting may explain available choices but cannot make any
     // choice on the operator's behalf.
     if (!latest.trim()) return { plan, notes };
@@ -601,9 +613,19 @@ export class CampaignCopilotService {
           plan.newProduct = this.emptyNewProduct();
         }
       } else if (!configured) {
-        notes.push(
-          `I ignored product "${requestedProduct}" because it is not configured and you did not explicitly ask to create it as a new product.`,
-        );
+        // Only say something was ignored when it actually was. Once the plan
+        // already carries this product as a new one, later turns still mention
+        // it — emitting the note there tells the operator their input was
+        // rejected when it was accepted, which is worse than saying nothing.
+        const alreadyAcceptedAsNew =
+          plan.productMode === 'new' &&
+          normalizeName(plan.productName ?? '') ===
+            normalizeName(requestedProduct);
+        if (!alreadyAcceptedAsNew) {
+          notes.push(
+            `I ignored product "${requestedProduct}" because it is not configured and you did not explicitly ask to create it as a new product.`,
+          );
+        }
       }
     }
 
@@ -640,7 +662,7 @@ export class CampaignCopilotService {
       if (
         Number.isFinite(Number(next.price)) &&
         Number(next.price) > 0 &&
-        latest.includes(String(next.price))
+        mentionsNumber(next.price)
       )
         current.price = Number(next.price);
       if (
@@ -662,7 +684,7 @@ export class CampaignCopilotService {
       if (
         Number.isFinite(Number(next.conversionValue)) &&
         Number(next.conversionValue) > 0 &&
-        latest.includes(String(next.conversionValue))
+        mentionsNumber(next.conversionValue)
       )
         current.conversionValue = Number(next.conversionValue);
       for (const field of [
@@ -776,7 +798,16 @@ export class CampaignCopilotService {
       Number.isFinite(Number(patch.dailyBudget)) &&
       Number(patch.dailyBudget) > 0 &&
       (/\d/.test(latest) || /\b(hundred|thousand|lakh)\b/i.test(latest)) &&
-      /\b(budget|daily|per day|spend|₹|rs\.?|rupees?)\b/i.test(latest)
+      // The currency symbols must sit OUTSIDE the \b group: ₹ and $ are
+      // non-word characters, so "\b₹" never matches after a space and that
+      // alternative was silently dead. "₹500/day" — the most natural way to
+      // write it — was therefore rejected unless the operator also happened
+      // to type the word "budget".
+      (/\b(?:budget|daily|per\s*day|a\s*day|spend|rs\.?|rupees?|inr)\b/i.test(
+        latest,
+      ) ||
+        /[₹$]/.test(latest) ||
+        /\/\s*day\b/i.test(latest))
     ) {
       requestedBudget = Number(patch.dailyBudget);
     }
@@ -798,9 +829,15 @@ export class CampaignCopilotService {
 
     if (accountChanged) {
       notes.push(
-        'The account changed, so I cleared the audience and will verify choices from the new account before accepting one.',
+        'The account changed, so any saved audience from the previous account was cleared. A broad or Advantage+ choice still applies; a specific saved audience will be verified against the new account first.',
       );
-    } else if (
+    }
+    // A changed account only invalidates account-SCOPED audiences (a saved
+    // lookalike belongs to one account). It must not discard a generic type
+    // like Advantage+ that the operator states in the very same message —
+    // that read as the assistant ignoring a clear instruction.
+    if (
+      !accountChanged &&
       patch.useRecommendedAudience &&
       acceptsRecommendation('audience')
     ) {
@@ -825,7 +862,11 @@ export class CampaignCopilotService {
           plan.metaAudienceId = null;
         }
       }
-      const requestedAudience = (input.accountAudiences ?? []).find(
+      // Saved audiences stay blocked for one turn after an account switch:
+      // their IDs belong to the previous account and cannot be trusted yet.
+      const requestedAudience = (
+        accountChanged ? [] : (input.accountAudiences ?? [])
+      ).find(
         (audience) =>
           (typeof patch.metaAudienceId === 'string' &&
             audience.id === patch.metaAudienceId &&

@@ -19,7 +19,9 @@ describe('SnapshotBuilder', () => {
       campaign: {
         id: 'meta-cmp-1',
         name: 'Test',
+        productName: 'Kundli Reading',
         objective: 'OUTCOME_SALES',
+        status: 'ACTIVE',
         effective_status: 'ACTIVE',
         learning_stage: 'ACTIVE',
         account_id: 'act_123',
@@ -177,6 +179,12 @@ describe('SnapshotBuilder', () => {
       adSets: {
         as1: {
           id: 'as1',
+          name: 'India cold',
+          status: 'active',
+          effectiveStatus: 'ACTIVE',
+          audienceType: 'lookalike',
+          optimizationGoal: 'OFFSITE_CONVERSIONS',
+          landingPageViews: 165,
           insights: {
             spend: '500',
             impressions: '10000',
@@ -191,6 +199,17 @@ describe('SnapshotBuilder', () => {
     expect(data.metrics.adSetLevel.as1.spend).toBe(500);
     expect(data.metrics.adSetLevel.as1.revenue).toBeCloseTo(1140); // haircut 5%
     expect(data.metrics.adSetLevel.as1.roas).toBeCloseTo(2.28, 2);
+    expect(data.metrics.adSetLevel.as1.cvr).toBeCloseTo(0.04, 4);
+    expect(data.metrics.adSetLevel.as1.aov).toBeCloseTo(142.5, 2);
+    expect(data.metrics.adSetLevel.as1.landingPageViews).toBe(165);
+    expect(data.entities?.adSets.as1).toEqual({
+      id: 'as1',
+      name: 'India cold',
+      status: 'active',
+      effectiveStatus: 'ACTIVE',
+      audienceType: 'lookalike',
+      optimizationGoal: 'OFFSITE_CONVERSIONS',
+    });
   });
 
   it('normalizes ad payloads including video quartiles', () => {
@@ -198,9 +217,36 @@ describe('SnapshotBuilder', () => {
       ads: {
         ad1: {
           id: 'ad1',
+          adSetId: 'as1',
+          name: 'Pain hook video',
+          status: 'active',
+          effectiveStatus: 'ACTIVE',
           hookStyle: 'pain_point',
           format: 'video',
           copyVariantIndex: 2,
+          creativeId: 'creative-1',
+          creativeName: 'Pain hook',
+          creativeBody: 'Know why the same problems repeat',
+          creativeTitle: 'Read your Kundli',
+          creativeCta: 'LEARN_MORE',
+          creativeLinkUrl: 'https://example.test/kundli',
+          creativeVideoId: 'video-1',
+          creativeImageHash: 'hash-1',
+          thumbnailUrl: 'https://example.test/thumb.jpg',
+          isDynamicCreative: false,
+          landingPageViews: 64,
+          inlineLinkClicks: 71,
+          outboundClicks: 59,
+          video3s: 1750,
+          thruplay: 610,
+          last7d: {
+            spend: '60',
+            impressions: '1800',
+            clicks: '36',
+            ctr: '2',
+            actions: [{ action_type: 'purchase', value: '2' }],
+            action_values: [{ action_type: 'purchase', value: '240' }],
+          },
           quality_ranking: 'ABOVE_AVERAGE',
           engagement_ranking: 'AVERAGE',
           conversion_ranking: 'BELOW_AVERAGE',
@@ -228,6 +274,170 @@ describe('SnapshotBuilder', () => {
     expect(ad.conversionRanking).toBe('BELOW_AVERAGE');
     expect(ad.videoP25).toBe(3200);
     expect(ad.videoP100).toBe(420);
+    expect(ad.cvr).toBeCloseTo(0.0375, 4);
+    expect(ad.aov).toBeCloseTo(142.5, 2);
+    expect(ad.landingPageViews).toBe(64);
+    expect(ad.inlineLinkClicks).toBe(71);
+    expect(ad.outboundClicks).toBe(59);
+    expect(ad.video3s).toBe(1750);
+    expect(ad.thruplay).toBe(610);
+    expect(ad.last7d).toEqual({
+      spend: 60,
+      impressions: 1800,
+      clicks: 36,
+      ctr: 2,
+      purchases: 2,
+      revenue: 228,
+      cvr: expect.closeTo(2 / 36, 4),
+      aov: 114,
+      roas: 3.8,
+    });
+    expect(data.entities?.ads.ad1).toEqual({
+      id: 'ad1',
+      adSetId: 'as1',
+      name: 'Pain hook video',
+      status: 'active',
+      effectiveStatus: 'ACTIVE',
+      creative: {
+        id: 'creative-1',
+        name: 'Pain hook',
+        body: 'Know why the same problems repeat',
+        title: 'Read your Kundli',
+        cta: 'LEARN_MORE',
+        linkUrl: 'https://example.test/kundli',
+        videoId: 'video-1',
+        imageHash: 'hash-1',
+        thumbnailUrl: 'https://example.test/thumb.jpg',
+        isDynamic: false,
+      },
+    });
+  });
+
+  it('keeps missing optional hierarchy and creative metrics unresolved', () => {
+    const data = builder.build({
+      bundle: bundle({
+        ads: {
+          ad1: {
+            id: 'ad1',
+            name: 'No enrichment',
+            last7d: {},
+            insights: { spend: '10', impressions: '100' },
+          },
+        },
+      }),
+      products: [product],
+      now,
+    });
+
+    expect(data.entities?.campaign).toEqual({
+      id: 'meta-cmp-1',
+      name: 'Test',
+      productName: 'Kundli Reading',
+      objective: 'OUTCOME_SALES',
+      status: 'ACTIVE',
+      effectiveStatus: 'ACTIVE',
+    });
+    expect(data.entities?.ads.ad1.adSetId).toBeUndefined();
+    expect(data.entities?.ads.ad1.creative).toBeUndefined();
+    expect(data.metrics.adLevel.ad1.landingPageViews).toBeUndefined();
+    expect(data.metrics.adLevel.ad1.inlineLinkClicks).toBeUndefined();
+    expect(data.metrics.adLevel.ad1.video3s).toBeUndefined();
+    expect(data.metrics.adLevel.ad1.last7d).toBeUndefined();
+  });
+
+  it('does not estimate missing 7-day return from configured product value', () => {
+    const data = builder.build({
+      bundle: bundle({
+        ads: {
+          ad1: {
+            id: 'ad1',
+            last7d: {
+              spend: '50',
+              clicks: '20',
+              actions: [{ action_type: 'purchase', value: '2' }],
+            },
+          },
+        },
+      }),
+      products: [product],
+      now,
+    });
+
+    expect(data.metrics.adLevel.ad1.last7d).toMatchObject({
+      spend: 50,
+      clicks: 20,
+      purchases: 2,
+      cvr: 0.1,
+    });
+    expect(data.metrics.adLevel.ad1.last7d?.revenue).toBeUndefined();
+    expect(data.metrics.adLevel.ad1.last7d?.aov).toBeUndefined();
+    expect(data.metrics.adLevel.ad1.last7d?.roas).toBeUndefined();
+  });
+
+  it('carries ad-set goal metrics and keeps an omitted Meta row explicitly unresolved', () => {
+    const metricsSyncedAt = new Date('2026-07-01T11:50:00Z');
+    const data = builder.build({
+      bundle: bundle({
+        adSets: {
+          as1: {
+            id: 'as1',
+            name: 'LPV set',
+            optimizationGoal: 'LANDING_PAGE_VIEWS',
+            inlineLinkClicks: 42,
+            thruplay: 18,
+            metricProvenance: {
+              rowObserved: false,
+              fetchComplete: false,
+              state: 'preserved',
+              source: 'meta_insights',
+              sourceFingerprint: 'sha256:source',
+              currency: 'INR',
+              metricsSyncedAt,
+              dateStart: '2026-06-01',
+              dateStop: '2026-06-30',
+              attributionSpec: [
+                { event_type: 'CLICK_THROUGH', window_days: 7 },
+              ],
+              revenueBasis: 'configured_conversion_value',
+              configuredRevenueEstimateNet: 500,
+              canonicalRevenueNet: 500,
+              canonicalConversions: 2,
+              goalResultInputs: {
+                actionCounts: { landing_page_view: 12 },
+                actionValuesGross: {},
+              },
+            },
+            insights: {
+              spend: '100',
+              impressions: '1000',
+              clicks: '50',
+            },
+          },
+        },
+      }),
+      products: [product],
+      now,
+    });
+
+    expect(data.metrics.adSetLevel.as1).toMatchObject({
+      inlineLinkClicks: 42,
+      thruplay: 18,
+      purchases: 2,
+      revenue: 500,
+      provenance: {
+        rowObserved: false,
+        fetchComplete: false,
+        state: 'preserved',
+        sourceFingerprint: 'sha256:source',
+        dateStart: '2026-06-01',
+        dateStop: '2026-06-30',
+        configuredRevenueEstimateNet: 500,
+      },
+    });
+    expect(
+      data.metrics.adSetLevel.as1.provenance?.rawMetaActionValueGross,
+    ).toBeUndefined();
+    expect(data.missingFields).toContain('ad_set_metrics_row:as1');
   });
 
   it('detects missing spend when impressions and spend both zero', () => {

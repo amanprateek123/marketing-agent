@@ -476,4 +476,335 @@ describe('decision trace objective wording', () => {
     );
     expect(memory?.decisive).toBe(false);
   });
+
+  it('renders a learning-stage loss-containment decision without claiming causal uplift', () => {
+    const action = {
+      actionId: 'contain-1',
+      type: 'reduce_total_budget',
+      targetType: 'campaign',
+      targetId: 'campaign-1',
+      parameters: { reductionPercent: 20 },
+      expectedImpact: {
+        metric: 'losses_avoided',
+        deltaPct: 20,
+        confidence: 0.55,
+      },
+      expectedProfitDeltaINR7d: 3_585,
+      reasoning:
+        'This is loss containment for human review, not an optimization-uplift claim.',
+      evidenceChain: [
+        {
+          step: 'Containment guard: bounded 20% human-review throttle.',
+          source: 'safety_policy',
+        },
+      ],
+      risk: 'low',
+      implementationCost: 1,
+      score: 0.5,
+      gatedBy: ['causal_diagnosis_unresolved'],
+      requiresHumanApproval: true,
+    };
+
+    const steps = buildDecisionTrace({
+      slices: {
+        objective: slice({
+          objective: 'sales',
+          source: 'campaign_field',
+          primaryKPI: 'roas',
+          supportingKPIs: ['purchases'],
+          policy: {},
+        }),
+        lifecycle: slice({
+          stage: 'learning',
+          ageHours: 240,
+          progressionScore: 0.5,
+          nextExpectedStage: 'growing',
+          allowedActions: ['add_creative'],
+          blockedActions: [],
+          monitoringCadenceMinutes: 180,
+          gates: {
+            canPause: false,
+            canScale: false,
+            canReduceBudget: false,
+            canReplaceCreative: false,
+            canAddAudience: true,
+          },
+        }),
+        signal: slice({
+          signals: [
+            {
+              kind: 'unprofitable_run',
+              severity: 'critical',
+              targetType: 'campaign',
+              targetId: 'campaign-1',
+              metricEvidence: { roas: 0.51 },
+              trigger: 'below_breakeven',
+              strength: 0.9,
+              reasoning: 'Campaign ROAS is below verified breakeven.',
+              firstSeenAt: new Date('2026-08-23T00:00:00.000Z'),
+            },
+            {
+              kind: 'unprofitable_run',
+              severity: 'warn',
+              targetType: 'adset',
+              targetId: 'adset-1',
+              metricEvidence: { roas: 0.7 },
+              trigger: 'below_breakeven',
+              strength: 0.8,
+              reasoning: 'A sibling ad set is also below breakeven.',
+              firstSeenAt: new Date('2026-08-23T00:00:00.000Z'),
+            },
+          ],
+        }),
+        diagnosis: slice({
+          rootCauses: [],
+          leakDiagnosis: 'none',
+          narrative: 'The cause is unresolved.',
+        }),
+        confidence: slice({
+          overall: 0.55,
+          perEngine: {},
+          quality: {
+            dataFreshnessSec: 60,
+            sourceDataFresh: true,
+            snapshotCoverage: 1,
+            historyDepthDays: 10,
+            statisticalPower: 0.7,
+          },
+          gates: {
+            okToRecommend: false,
+            okToExecute: false,
+            reasonsBlocked: ['causal_diagnosis_unresolved'],
+          },
+        }),
+        memory: slice({
+          pastActions: [],
+          causalInsights: [
+            {
+              finding: 'A historic budget increase was followed by lower ROAS.',
+              confidence: 0.8,
+              isolatedVariable: 'budget',
+            },
+          ],
+          similarPastCycles: [],
+          companyLearnings: {
+            winningHooks: [],
+            losingHooks: [],
+            winningExemplars: [],
+            audienceHookSaturation: {},
+          },
+        }),
+        recommendation: slice({ actions: [action], candidatesConsidered: 1 }),
+        explainability: slice({
+          perAction: {
+            'contain-1': {
+              summary: 'Expected 20% losses_avoided.',
+              reasoning: action.reasoning,
+              evidenceChain: action.evidenceChain,
+            },
+          },
+        }),
+        execution: slice({
+          applied: [],
+          failed: [],
+          deferred: [{ actionId: 'contain-1', reason: 'shadow mode' }],
+        }),
+        learning: slice({ measurements: [], calibrations: [], updates: [] }),
+      } as any,
+      decision: {
+        actionId: 'contain-1',
+        actionType: 'reduce_total_budget',
+        targetType: 'campaign',
+        targetId: 'campaign-1',
+        campaignSource: 'manual',
+        expectedImpact: action.expectedImpact,
+        expectedProfitDeltaINR7d: 3_585,
+        evidenceSnapshot: { signalKind: 'unprofitable_run' },
+      },
+    });
+
+    const lifecycle = steps.find((step) => step.step === 3);
+    expect(lifecycle?.headline).toContain('strict loss-containment exception');
+    expect(lifecycle?.headline).not.toContain('is allowed');
+    expect(lifecycle?.details.join(' ')).toContain(
+      'budget reductions are not ordinarily permitted',
+    );
+
+    const signal = steps.find((step) => step.step === 6);
+    const triggered = signal?.details.filter((line) =>
+      line.includes('triggered this suggestion'),
+    );
+    expect(triggered).toHaveLength(1);
+    expect(triggered?.[0]).toContain('campaign campaign-1');
+    expect(triggered?.[0]).not.toContain('adset-1');
+
+    expect(steps.find((step) => step.step === 7)?.headline).toContain(
+      'No supported root cause emerged for this exact target',
+    );
+
+    const confidence = steps.find((step) => step.step === 11);
+    expect(confidence?.headline).toContain('causal optimization is held');
+    expect(confidence?.details.join(' ')).toContain(
+      'Strict verified-loss containment',
+    );
+    expect(confidence?.details.join(' ')).not.toContain(
+      'Allowed to suggest: no',
+    );
+    expect(confidence?.details.join(' ')).toContain('enough roas observations');
+
+    const memory = steps.find((step) => step.step === 12);
+    expect(memory?.details.join(' ')).toContain(
+      'justified by verified loss, not an inferred cause',
+    );
+    expect(memory?.details.join(' ')).not.toContain('historic budget increase');
+
+    const recommendation = steps.find((step) => step.step === 13);
+    expect(recommendation?.headline).toContain(
+      'modeled to avoid about ₹3,585 of additional contribution loss',
+    );
+    expect(recommendation?.headline).toContain(
+      'if the current spend pace and economics persist',
+    );
+    expect(recommendation?.headline).not.toContain('extra profit');
+    expect(recommendation?.details.join(' ')).toContain(
+      'not revenue earned or realized profit',
+    );
+
+    const explanation = steps.find((step) => step.step === 14);
+    expect(explanation?.headline).toContain('no performance uplift');
+    expect(explanation?.headline).toContain('no root cause is claimed');
+    expect(explanation?.details.join(' ')).toContain(
+      'modeled proposal rather than a measured result',
+    );
+    expect(explanation?.details.join(' ')).not.toContain('score');
+
+    expect(steps.find((step) => step.step === 15)?.headline).toContain(
+      'Read-only diagnostic',
+    );
+    expect(steps.find((step) => step.step === 16)?.headline).toContain(
+      'No post-action evidence yet',
+    );
+  });
+
+  it('does not invent a containment exception for a legacy reduction without safety-policy evidence', () => {
+    const steps = buildDecisionTrace({
+      slices: {
+        lifecycle: slice({
+          stage: 'learning',
+          ageHours: 240,
+          nextExpectedStage: 'growing',
+          allowedActions: [],
+          blockedActions: [],
+          monitoringCadenceMinutes: 180,
+          gates: {
+            canPause: false,
+            canScale: false,
+            canReduceBudget: false,
+          },
+        }),
+        recommendation: slice({
+          actions: [
+            {
+              actionId: 'legacy-1',
+              type: 'reduce_total_budget',
+              targetType: 'campaign',
+              targetId: 'campaign-1',
+              expectedImpact: {
+                metric: 'losses_avoided',
+                deltaPct: 20,
+                confidence: 0.5,
+              },
+              evidenceChain: [],
+            },
+          ],
+        }),
+      } as any,
+      decision: {
+        actionId: 'legacy-1',
+        actionType: 'reduce_total_budget',
+        targetType: 'campaign',
+        targetId: 'campaign-1',
+        expectedProfitDeltaINR7d: 700,
+      },
+    });
+
+    const lifecycle = steps.find((step) => step.step === 3);
+    expect(lifecycle?.headline).toContain('not ordinarily permitted');
+    expect(lifecycle?.headline).not.toContain('containment exception');
+  });
+
+  it('does not attribute a same-kind signal from a sibling target to the decision', () => {
+    const steps = buildDecisionTrace({
+      slices: {
+        signal: slice({
+          signals: [
+            {
+              kind: 'unprofitable_run',
+              severity: 'critical',
+              targetType: 'adset',
+              targetId: 'adset-2',
+              metricEvidence: { roas: 0.5 },
+              trigger: 'below_breakeven',
+              strength: 0.9,
+              reasoning: 'Only the sibling target fired.',
+              firstSeenAt: new Date('2026-08-23T00:00:00.000Z'),
+            },
+          ],
+        }),
+      } as any,
+      decision: {
+        actionId: 'a1',
+        actionType: 'pause_adset',
+        targetType: 'adset',
+        targetId: 'adset-1',
+        expectedProfitDeltaINR7d: 0,
+        evidenceSnapshot: { signalKind: 'unprofitable_run' },
+      },
+    });
+
+    const signal = steps.find((step) => step.step === 6);
+    expect(signal?.decisive).toBe(false);
+    expect(signal?.details.join(' ')).not.toContain(
+      'triggered this suggestion',
+    );
+  });
+
+  it('describes measured action memory as observational rather than causal', () => {
+    const steps = buildDecisionTrace({
+      slices: {
+        memory: slice({
+          pastActions: [
+            {
+              actionType: 'reduce_total_budget',
+              targetId: 'campaign-1',
+              executedAt: new Date('2026-08-20T00:00:00.000Z'),
+              outcomeLabel: 'improved',
+              context: 'ROAS was higher at the 72h checkpoint.',
+            },
+          ],
+          causalInsights: [],
+          similarPastCycles: [],
+          companyLearnings: {
+            winningHooks: [],
+            losingHooks: [],
+            winningExemplars: [],
+            audienceHookSaturation: {},
+          },
+        }),
+      } as any,
+      decision: {
+        actionId: 'a1',
+        actionType: 'reduce_total_budget',
+        targetType: 'campaign',
+        targetId: 'campaign-1',
+        expectedProfitDeltaINR7d: 0,
+      },
+    });
+
+    const memory = steps.find((step) => step.step === 12);
+    expect(memory?.headline).toContain('observationally');
+    expect(memory?.details.join(' ')).toContain('not causal proof');
+    expect(memory?.headline).not.toContain('helped');
+    expect(memory?.headline).not.toContain('backfired');
+  });
 });

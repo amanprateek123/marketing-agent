@@ -1,4 +1,5 @@
 import { DashboardService } from './dashboard.service';
+import { ENGINE_SLICE_KEYS } from '../intelligence/orchestrator/decision-context';
 
 function queryReturning<T>(value: T) {
   const query: any = {};
@@ -185,6 +186,7 @@ describe('DashboardService.getToolImpact', () => {
     };
     const decisionModel = { find: jest.fn(() => queryReturning([])) };
     const cycleModel = { find: jest.fn(() => queryReturning([])) };
+    const engineOutputModel = { find: jest.fn(() => queryReturning([])) };
     const executedActionModel = {
       find: jest.fn(() => queryReturning([])),
     };
@@ -273,6 +275,7 @@ describe('DashboardService.getToolImpact', () => {
       {} as any,
       decisionModel as any,
       cycleModel as any,
+      engineOutputModel as any,
       executedActionModel as any,
     );
 
@@ -606,5 +609,402 @@ describe('DashboardService.getToolImpact', () => {
         'meta-unknown-objective',
       ]),
     );
+  });
+
+  it('reports scoped brain reliability without turning missing evidence into a pass', async () => {
+    const productEconomics = {
+      productName: 'Product A',
+      marginPct: 0.5,
+      refundPct: 0,
+      netMarginPct: 0.5,
+      breakevenROAS: 2,
+      targetROAS: 2.4,
+      method: 'product-config' as const,
+      notes: [],
+    };
+    const economics = {
+      forTenant: jest.fn().mockResolvedValue({
+        ...productEconomics,
+        byProduct: { 'Product A': productEconomics },
+        hasMixedMargins: false,
+      }),
+      forProduct: jest.fn().mockReturnValue(productEconomics),
+    };
+    const campaigns = [
+      {
+        _id: 'agent-launched',
+        tenantId: 'tenant-1',
+        source: 'agent',
+        productName: 'Product A',
+        name: 'Agent sales campaign',
+        metaCampaignId: 'meta-agent',
+        launchedAt: new Date('2026-08-01T12:00:00.000Z'),
+        createdAt: new Date('2026-08-01T10:00:00.000Z'),
+        dataAsOf: new Date('2026-08-21T10:00:00.000Z'),
+        status: 'active',
+        objective: 'OUTCOME_SALES',
+        budget: 100,
+        spend: 100,
+        revenue: 120,
+        revenueBasis: 'meta_action_value',
+        revenueAttributionSource: 'custom_conversion',
+        conversions: 2,
+      },
+    ];
+    const cycles = [
+      {
+        cycleId: 'cycle-full',
+        campaignId: 'agent-launched',
+        startedAt: new Date('2026-08-21T09:00:00.000Z'),
+        status: 'completed',
+      },
+      {
+        cycleId: 'cycle-partial',
+        campaignId: 'agent-launched',
+        startedAt: new Date('2026-08-21T06:00:00.000Z'),
+        status: 'completed',
+      },
+      {
+        cycleId: 'cycle-failed',
+        campaignId: 'agent-launched',
+        startedAt: new Date('2026-08-20T06:00:00.000Z'),
+        status: 'failed',
+      },
+      {
+        cycleId: 'cycle-pending',
+        campaignId: 'agent-launched',
+        startedAt: new Date('2026-08-21T11:00:00.000Z'),
+        status: 'pending',
+      },
+      // Deliberately over-returned by the mock; neither may enter a scorecard
+      // denominator or the engine-output lookup.
+      {
+        cycleId: 'cycle-manual',
+        campaignId: 'manual-campaign',
+        startedAt: new Date('2026-08-21T10:00:00.000Z'),
+        status: 'completed',
+      },
+      {
+        cycleId: 'cycle-old',
+        campaignId: 'agent-launched',
+        startedAt: new Date('2026-07-01T10:00:00.000Z'),
+        status: 'completed',
+      },
+    ];
+
+    const engineOutput = (
+      cycleId: string,
+      engine: string,
+      data: Record<string, unknown> = {},
+      campaignId = 'agent-launched',
+      tenantId = 'tenant-1',
+    ) => ({
+      tenantId,
+      campaignId,
+      cycleId,
+      engine,
+      slice: {
+        version:
+          engine === 'confidence' ? 'confidence@1.2.0' : `${engine}@1.0.0`,
+        data,
+      },
+    });
+    const fullOutputs = ENGINE_SLICE_KEYS.map((engine) =>
+      engineOutput(
+        'cycle-full',
+        engine,
+        engine === 'confidence'
+          ? {
+              overall: 0.8,
+              gates: {
+                okToRecommend: true,
+                okToExecute: true,
+                reasonsBlocked: [],
+              },
+            }
+          : {},
+      ),
+    );
+    const partialOutputs = ENGINE_SLICE_KEYS.slice(0, 15).map((engine) =>
+      engineOutput(
+        'cycle-partial',
+        engine,
+        engine === 'confidence'
+          ? {
+              overall: 0.42,
+              gates: {
+                okToRecommend: false,
+                okToExecute: false,
+                reasonsBlocked: [
+                  'recommend:power<0.5 (0.20)',
+                  'recommend:power<0.5 (0.20)',
+                  'execute:lifecycle=learning',
+                ],
+              },
+            }
+          : {},
+      ),
+    );
+    const engineOutputs = [
+      ...fullOutputs,
+      ...partialOutputs,
+      engineOutput('cycle-pending', 'snapshot'),
+      {
+        ...engineOutput('cycle-pending', 'confidence', {
+          overall: 0.9,
+          gates: {
+            okToRecommend: true,
+            okToExecute: true,
+            reasonsBlocked: ['power<0.5 (0.00)'],
+          },
+        }),
+        slice: {
+          version: 'confidence@1.0.0',
+          data: {
+            overall: 0.9,
+            gates: {
+              okToRecommend: true,
+              okToExecute: true,
+              reasonsBlocked: ['power<0.5 (0.00)'],
+            },
+          },
+        },
+      },
+      // Duplicate and unknown engines must not inflate 16 known steps.
+      engineOutput('cycle-full', 'snapshot'),
+      engineOutput('cycle-full', 'future_engine'),
+      // Over-returned rows fail the in-memory tenant/cohort/cycle boundary.
+      engineOutput('cycle-manual', 'snapshot', {}, 'manual-campaign'),
+      engineOutput(
+        'cycle-full',
+        'learning',
+        {},
+        'agent-launched',
+        'other-tenant',
+      ),
+    ];
+
+    const decisions = [
+      {
+        campaignId: 'agent-launched',
+        cycleId: 'cycle-full',
+        status: 'shadow_review',
+        decisionContractVersion: 'goal_aware_v1',
+        objective: 'sales',
+        primaryKPI: 'roas',
+        expectedImpact: { metric: 'roas', deltaPct: 12, confidence: 0.7 },
+      },
+      {
+        campaignId: 'agent-launched',
+        cycleId: 'cycle-full',
+        status: 'approved',
+        executionStatus: 'failed',
+        decisionContractVersion: 'goal_aware_v1',
+        objective: 'sales',
+        primaryKPI: 'roas',
+        expectedImpact: { metric: 'roas', deltaPct: 10, confidence: null },
+      },
+      {
+        campaignId: 'agent-launched',
+        cycleId: 'cycle-partial',
+        status: 'rejected',
+      },
+      {
+        campaignId: 'manual-campaign',
+        cycleId: 'cycle-manual',
+        status: 'shadow_review',
+        decisionContractVersion: 'goal_aware_v1',
+        objective: 'sales',
+        primaryKPI: 'roas',
+        expectedImpact: { metric: 'roas', deltaPct: 90, confidence: 1 },
+      },
+      {
+        campaignId: 'agent-launched',
+        cycleId: 'cycle-old',
+        status: 'shadow_review',
+        decisionContractVersion: 'goal_aware_v1',
+        objective: 'sales',
+        primaryKPI: 'roas',
+        expectedImpact: { metric: 'roas', deltaPct: 90, confidence: 1 },
+      },
+    ];
+    const actions = [
+      {
+        campaignId: 'agent-launched',
+        executedAt: new Date('2026-08-15T10:00:00.000Z'),
+        evaluateAt24h: new Date('2026-08-16T10:00:00.000Z'),
+        evaluateAt72h: new Date('2026-08-18T10:00:00.000Z'),
+        metricsAtT24h: { spend: 200 },
+        metricsAtT72h: { spend: 500 },
+        status: 'final',
+        outcomeLabel: 'improved',
+      },
+      {
+        campaignId: 'agent-launched',
+        executedAt: new Date('2026-08-20T10:00:00.000Z'),
+        evaluateAt24h: new Date('2026-08-21T10:00:00.000Z'),
+        evaluateAt72h: new Date('2026-08-23T10:00:00.000Z'),
+        metricsAtT24h: null,
+        status: 'pending',
+      },
+      {
+        campaignId: 'agent-launched',
+        executedAt: new Date('2026-08-21T11:00:00.000Z'),
+        evaluateAt24h: new Date('2026-08-22T11:00:00.000Z'),
+        evaluateAt72h: new Date('2026-08-24T11:00:00.000Z'),
+        status: 'pending',
+      },
+      {
+        campaignId: 'manual-campaign',
+        executedAt: new Date('2026-08-15T10:00:00.000Z'),
+        evaluateAt24h: new Date('2026-08-16T10:00:00.000Z'),
+        evaluateAt72h: new Date('2026-08-18T10:00:00.000Z'),
+        metricsAtT24h: { spend: 999 },
+        metricsAtT72h: { spend: 999 },
+        status: 'final',
+        outcomeLabel: 'improved',
+      },
+      {
+        campaignId: 'agent-launched',
+        executedAt: new Date('2026-07-01T10:00:00.000Z'),
+        evaluateAt24h: new Date('2026-07-02T10:00:00.000Z'),
+        evaluateAt72h: new Date('2026-07-04T10:00:00.000Z'),
+        metricsAtT24h: { spend: 999 },
+        metricsAtT72h: { spend: 999 },
+        status: 'final',
+        outcomeLabel: 'improved',
+      },
+    ];
+
+    const companyModel = {
+      findOne: jest.fn(() =>
+        queryReturning({ products: [{ name: 'Product A' }] }),
+      ),
+    };
+    const campaignModel = { find: jest.fn(() => queryReturning(campaigns)) };
+    const timeseriesModel = { find: jest.fn(() => queryReturning([])) };
+    const runModel = { find: jest.fn(() => queryReturning([])) };
+    const decisionModel = { find: jest.fn(() => queryReturning(decisions)) };
+    const cycleModel = { find: jest.fn(() => queryReturning(cycles)) };
+    const engineOutputModel = {
+      find: jest.fn(() => queryReturning(engineOutputs)),
+    };
+    const executedActionModel = {
+      find: jest.fn(() => queryReturning(actions)),
+    };
+    const service = new DashboardService(
+      economics as any,
+      campaignModel as any,
+      companyModel as any,
+      timeseriesModel as any,
+      runModel as any,
+      {} as any,
+      decisionModel as any,
+      cycleModel as any,
+      engineOutputModel as any,
+      executedActionModel as any,
+    );
+
+    const result = await service.getToolImpact('tenant-1');
+
+    expect(engineOutputModel.find).toHaveBeenCalledWith({
+      tenantId: 'tenant-1',
+      campaignId: { $in: ['agent-launched'] },
+      cycleId: {
+        $in: ['cycle-full', 'cycle-partial', 'cycle-failed', 'cycle-pending'],
+      },
+      engine: { $in: [...ENGINE_SLICE_KEYS] },
+    });
+    expect(result.brainReliability).toMatchObject({
+      label: 'Operating evidence — not causal uplift or prediction accuracy',
+      window: {
+        days: 30,
+        from: '2026-07-22T12:00:00.000Z',
+        to: '2026-08-21T12:00:00.000Z',
+        cohort: 'exact_verified_tool_launches',
+      },
+      cycleCompleteness: {
+        requiredSteps: 16,
+        cyclesRun: 4,
+        statusCompleted: 2,
+        failed: 1,
+        pending: 1,
+        fullTraceCycles: 1,
+        partialTraceCycles: 2,
+        unavailableTraceCycles: 1,
+        fullTraceRatePct: 25,
+      },
+      gateReadiness: {
+        evaluatedCycles: 2,
+        unavailableCycles: 2,
+        recommendPassed: 1,
+        recommendHeld: 1,
+        recommendPassRatePct: 50,
+        executionEvidencePassed: 1,
+        executionEvidenceHeld: 1,
+        topRecommendBlockers: [{ code: 'recommend:power<0.5', count: 1 }],
+      },
+      predictions: {
+        decisions: 3,
+        goalAwareDecisions: 2,
+        completePredictions: 1,
+        legacyOrIncomplete: 2,
+        contractCoveragePct: 33.3,
+        byStatus: {
+          shadow_review: 1,
+          approved: 1,
+          rejected: 1,
+          expired: 0,
+        },
+        unrecognizedStatus: 0,
+        executionSucceeded: 0,
+        executionFailedOrBlocked: 1,
+      },
+      outcomes: {
+        scope: 'campaign_cohort_actions_unlinked_to_predictions',
+        recorded: 3,
+        due24h: 2,
+        measured24h: 1,
+        overdue24h: 1,
+        notYetDue24h: 1,
+        due72h: 1,
+        finalized72h: 1,
+        overdue72h: 0,
+        notYetDue72h: 2,
+        conclusive72h: 1,
+        byLabel: {
+          improved: 1,
+          worsened: 0,
+          neutral: 0,
+          inconclusive: 0,
+        },
+        minimumConclusiveSample: 3,
+        improvedRatePct: null,
+        reportable: false,
+        predictionAccuracyPct: null,
+      },
+    });
+    expect(result.brainReliability).not.toHaveProperty('score');
+    expect(result.brainReliability.recentCycles[0]).toMatchObject({
+      cycleId: 'cycle-pending',
+      campaignId: 'agent-launched',
+      campaignName: 'Agent sales campaign',
+      stepsRecorded: 2,
+      requiredSteps: 16,
+      recommendGate: 'unavailable',
+      executionEvidenceGate: 'unavailable',
+      decisionsWritten: 0,
+    });
+    expect(
+      result.brainReliability.recentCycles.find(
+        (cycle) => cycle.cycleId === 'cycle-full',
+      ),
+    ).toMatchObject({
+      stepsRecorded: 16,
+      confidenceOverall: 0.8,
+      recommendGate: 'passed',
+      executionEvidenceGate: 'passed',
+      decisionsWritten: 2,
+    });
   });
 });

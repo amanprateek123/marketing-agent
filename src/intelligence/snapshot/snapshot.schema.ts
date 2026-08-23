@@ -1,7 +1,8 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Schema as MongooseSchema } from 'mongoose';
 
-export type IntelligenceSnapshotDocument = HydratedDocument<IntelligenceSnapshot>;
+export type IntelligenceSnapshotDocument =
+  HydratedDocument<IntelligenceSnapshot>;
 
 /**
  * intelligence_snapshots — the immutable truth layer for campaign
@@ -54,6 +55,10 @@ export class IntelligenceSnapshot {
   @Prop({ type: MongooseSchema.Types.Mixed, required: true })
   metrics!: Record<string, unknown>;
 
+  /** Exact campaign → ad set → ad → creative identity captured with metrics. */
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  entities?: Record<string, unknown>;
+
   @Prop({ type: MongooseSchema.Types.Mixed })
   meta?: Record<string, unknown>;
 
@@ -64,11 +69,16 @@ export class IntelligenceSnapshot {
   freshnessSec?: number;
 }
 
-export const IntelligenceSnapshotSchema = SchemaFactory.createForClass(IntelligenceSnapshot);
+export const IntelligenceSnapshotSchema =
+  SchemaFactory.createForClass(IntelligenceSnapshot);
 
 // Every downstream engine that reads snapshot history queries by
 // (tenantId, campaignId, collectedAt desc).
-IntelligenceSnapshotSchema.index({ tenantId: 1, campaignId: 1, collectedAt: -1 });
+IntelligenceSnapshotSchema.index({
+  tenantId: 1,
+  campaignId: 1,
+  collectedAt: -1,
+});
 
 // snapshotId is a unique pointer per snapshot doc.
 IntelligenceSnapshotSchema.index({ snapshotId: 1 }, { unique: true });

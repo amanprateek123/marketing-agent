@@ -65,6 +65,43 @@ function campaign(overrides: AnyRecord = {}) {
   } as any;
 }
 
+function goalAwareDecision(): AnyRecord {
+  const doc = decision({
+    decisionContractVersion: 'goal_aware_v1',
+    objective: 'sales',
+    primaryKPI: 'roas',
+    expectedImpact: { metric: 'roas', deltaPct: 0, confidence: 0.7 },
+    expectedProfitDeltaINR7d: 100,
+    risk: 'medium',
+    score: 100,
+    gatedBy: [],
+    requiresHumanApproval: true,
+    intelligenceReviewVersion: 'intelligence_review_v1',
+  });
+  doc.intelligenceReview = {
+    source: 'openai',
+    verdict: 'support',
+    validation: { valid: true, issues: [] },
+    recommendation: {
+      action: {
+        actionId: doc.actionId,
+        type: doc.actionType,
+        targetType: doc.targetType,
+        targetId: doc.targetId,
+        parameters: doc.parameters,
+        expectedImpact: doc.expectedImpact,
+        expectedProfitDeltaINR7d: doc.expectedProfitDeltaINR7d,
+        risk: doc.risk,
+        implementationCost: 3,
+        score: doc.score,
+        gatedBy: doc.gatedBy,
+        requiresHumanApproval: doc.requiresHumanApproval,
+      },
+    },
+  };
+  return doc;
+}
+
 function hasValue(actual: unknown, expected: unknown): boolean {
   if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
     const condition = expected as AnyRecord;
@@ -251,6 +288,101 @@ describe('DecisionsService execution boundary', () => {
     expect(state.campaignAuditor.executeExternalAction).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'pending',
+      (doc: AnyRecord) => {
+        delete doc.intelligenceReviewVersion;
+        delete doc.intelligenceReview;
+      },
+      'Intelligence review is pending',
+    ],
+    [
+      'fallback',
+      (doc: AnyRecord) => {
+        doc.intelligenceReview.source = 'fallback';
+        doc.intelligenceReview.verdict = 'hold';
+        doc.intelligenceReview.validation.valid = false;
+      },
+      'fallback reviews cannot authorize execution',
+    ],
+    [
+      'hold',
+      (doc: AnyRecord) => {
+        doc.intelligenceReview.verdict = 'hold';
+      },
+      'verdict is hold',
+    ],
+    [
+      'reject',
+      (doc: AnyRecord) => {
+        doc.intelligenceReview.verdict = 'reject';
+      },
+      'verdict is reject',
+    ],
+    [
+      'invalid',
+      (doc: AnyRecord) => {
+        doc.intelligenceReview.validation.valid = false;
+      },
+      'failed deterministic validation',
+    ],
+  ])(
+    'blocks a goal-aware decision with a %s intelligence review',
+    async (_label, mutate, message) => {
+      const doc = goalAwareDecision();
+      mutate(doc);
+      const state = setup({ doc });
+
+      const result = await state.service.executeApprovedDecision(
+        'tenant-1',
+        'decision-1',
+      );
+
+      expect(result).toEqual({
+        executed: false,
+        error: expect.stringContaining(message),
+      });
+      expect(state.doc.executionStatus).toBe('blocked');
+      expect(state.campaignModel.findOne).not.toHaveBeenCalled();
+      expect(
+        state.campaignAuditor.executeExternalAction,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it('executes a goal-aware decision only after a supported validated OpenAI review', async () => {
+    const state = setup({ doc: goalAwareDecision() });
+
+    const result = await state.service.executeApprovedDecision(
+      'tenant-1',
+      'decision-1',
+    );
+
+    expect(result).toEqual({ executed: true });
+    expect(state.campaignAuditor.executeExternalAction).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it('blocks execution if the decision changed after OpenAI reviewed it', async () => {
+    const doc = goalAwareDecision();
+    doc.parameters = { dailyBudgetINR: 9_999 };
+    const state = setup({ doc });
+
+    const result = await state.service.executeApprovedDecision(
+      'tenant-1',
+      'decision-1',
+    );
+
+    expect(result).toEqual({
+      executed: false,
+      error:
+        'Intelligence review does not match the stored decision; execution is blocked',
+    });
+    expect(state.campaignAuditor.executeExternalAction).not.toHaveBeenCalled();
+  });
+
   it('records execution only after the external executor resolves', async () => {
     const state = setup();
 
@@ -434,5 +566,98 @@ describe('DecisionsService cycle trace identity', () => {
     );
     expect(state.slices.loadFull).not.toHaveBeenCalled();
     expect(state.model.find).not.toHaveBeenCalled();
+  });
+});
+
+describe('DecisionsService intelligence review trace exposure', () => {
+  const intelligenceReview = {
+    verdict: 'hold',
+    headline: 'More evidence is needed',
+    source: 'openai',
+  };
+  const intelligenceEvidence = {
+    packet: { schemaVersion: 'intelligence_review_v1', facts: [] },
+    hierarchy: { nodes: [] },
+  };
+  const intelligenceReviewedAt = new Date('2026-08-23T06:30:00.000Z');
+
+  it('exposes the denormalized review on a decision trace', async () => {
+    const state = setup({
+      doc: decision({
+        intelligenceReviewVersion: 'intelligence_review_v1',
+        intelligenceReview,
+        intelligenceEvidence,
+        intelligenceReviewedAt,
+      }),
+    });
+    state.slices.loadFull.mockResolvedValue({
+      execution: {
+        data: { applied: [], deferred: [], failed: [] },
+        confidence: 0.8,
+        evidence: [],
+        version: 'test@1',
+        computedAt: new Date(),
+        ms: 1,
+        deterministic: true,
+      },
+    });
+
+    const result = await state.service.trace('tenant-1', 'decision-1');
+
+    expect(result).toMatchObject({
+      intelligenceReviewVersion: 'intelligence_review_v1',
+      intelligenceReview,
+      intelligenceEvidence,
+      intelligenceReviewedAt,
+    });
+  });
+
+  it('exposes the top decision review on a cycle trace', async () => {
+    const state = setup({
+      doc: decision({
+        intelligenceReviewVersion: 'intelligence_review_v1',
+        intelligenceReview,
+        intelligenceEvidence,
+        intelligenceReviewedAt,
+      }),
+    });
+    state.model.find.mockReturnValue(query([state.doc]));
+    state.slices.identityForCycle.mockResolvedValue({
+      tenantId: 'tenant-1',
+      campaignId: 'campaign-1',
+    });
+    state.slices.loadFull.mockResolvedValue({
+      execution: {
+        data: { applied: [], deferred: [], failed: [] },
+        confidence: 0.8,
+        evidence: [],
+        version: 'test@1',
+        computedAt: new Date(),
+        ms: 1,
+        deterministic: true,
+      },
+    });
+
+    const result = await state.service.cycleTrace('tenant-1', 'cycle-1');
+
+    expect(result).toMatchObject({
+      topDecisionId: 'decision-1',
+      intelligenceReviewVersion: 'intelligence_review_v1',
+      intelligenceReview,
+      intelligenceEvidence,
+      intelligenceReviewedAt,
+    });
+  });
+
+  it('omits review fields for historical decisions without Step-14 review data', async () => {
+    const state = setup();
+    state.slices.loadFull.mockResolvedValue({});
+
+    const result = await state.service.trace('tenant-1', 'decision-1');
+
+    expect(result).not.toHaveProperty('intelligenceReviewVersion');
+    expect(result).not.toHaveProperty('intelligenceReview');
+    expect(result).not.toHaveProperty('intelligenceEvidence');
+    expect(result).not.toHaveProperty('intelligenceReviewedAt');
   });
 });

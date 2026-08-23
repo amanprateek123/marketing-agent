@@ -20,11 +20,50 @@ import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CompaniesService } from './companies.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
-import { MetaAdsService } from '../campaigns/meta-ads/meta-ads.service';
+import { MetaAdsService, MetaAdAccountSummary } from '../campaigns/meta-ads/meta-ads.service';
 import { CampaignSyncService } from '../campaigns/meta-ads/campaign-sync.service';
 import { SchedulerService } from '../scheduler/scheduler.service';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { UpdateCompanyDto } from './dto/update-company.dto';
+
+function normalizeMetaAccountId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith('act_') ? trimmed : `act_${trimmed}`;
+}
+
+function normalizeMetaCurrency(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(normalized) ? normalized : null;
+}
+
+/** Keep unselected account evidence while refreshing selected accounts. */
+export function mergeMetaAccountCurrencies(
+  existing: Record<string, string> | undefined,
+  discovered: MetaAdAccountSummary[],
+  selectedAccountIds: string[],
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const [rawId, rawCurrency] of Object.entries(existing ?? {})) {
+    const accountId = normalizeMetaAccountId(rawId);
+    const currency = normalizeMetaCurrency(rawCurrency);
+    if (accountId && currency) merged[accountId] = currency;
+  }
+
+  const selected = new Set(
+    selectedAccountIds
+      .map(normalizeMetaAccountId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  for (const account of discovered) {
+    const accountId = normalizeMetaAccountId(account.id);
+    const currency = normalizeMetaCurrency(account.currency);
+    if (accountId && selected.has(accountId) && currency) merged[accountId] = currency;
+  }
+  return merged;
+}
 
 @Controller('companies')
 export class CompaniesController {
@@ -243,9 +282,11 @@ export class CompaniesController {
     // the normalize() comment above. Strip whatever format arrives so this
     // endpoint can't write mixed-format entries into company.meta.accountIds.
     const stripPrefix = (id: string) => (id.startsWith('act_') ? id.slice(4) : id);
+    // One account-level discovery response supplies the selected IDs and their
+    // authoritative currencies; no per-campaign/ad-set/ad request is added.
+    const accounts = await this.metaAdsService.listAdAccounts(company.meta.accessToken, company.meta.businessId);
     let accountIds = body.accountIds?.map(stripPrefix);
     if (!accountIds?.length) {
-      const accounts = await this.metaAdsService.listAdAccounts(company.meta.accessToken, company.meta.businessId);
       accountIds = accounts.filter((a) => a.status === 'active').map((a) => stripPrefix(a.id));
     }
     if (!accountIds.length) {
@@ -257,6 +298,11 @@ export class CompaniesController {
         ...company.meta,
         accountId: company.meta.accountId ?? accountIds[0],
         accountIds,
+        accountCurrencies: mergeMetaAccountCurrencies(
+          company.meta.accountCurrencies,
+          accounts,
+          accountIds,
+        ),
       },
     } as any);
 

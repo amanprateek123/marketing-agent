@@ -28,7 +28,10 @@ function stableActionId(
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import {
@@ -41,6 +44,7 @@ import {
   DiagnosisData,
   LifecycleData,
   ObjectiveData,
+  OptimizationGoalSignalEvidence,
   RecommendationData,
   RecommendedAction,
   Signal,
@@ -75,6 +79,7 @@ const HUMAN_APPROVAL: CampaignActionType[] = [
   'pause_adset',
   'scale_adset',
   'replace_creative',
+  'shift_budget_between_adsets',
   'reduce_total_budget',
 ];
 
@@ -97,6 +102,17 @@ const REVENUE_ONLY_SIGNALS = new Set<SignalKind>([
 /** Minimum evidence needed before an observation can become a suggestion. */
 const MIN_SIGNAL_CONFIDENCE = 0.5;
 const MIN_DIAGNOSIS_CONFIDENCE = 0.5;
+
+// A cause is not required to observe and contain a verified financial loss.
+// This narrow exception never claims to fix ROAS: it only offers a bounded,
+// human-reviewed throttle when a campaign has remained in Meta learning long
+// enough, has meaningful conversion volume, and every source/economics gate is
+// independently healthy. Young or weakly observed learning campaigns remain
+// fully protected.
+const LOSS_CONTAINMENT_MIN_AGE_HOURS = 7 * 24;
+const LOSS_CONTAINMENT_MIN_SPEND_INR = 5_000;
+const LOSS_CONTAINMENT_MIN_PURCHASES = 10;
+const LOSS_CONTAINMENT_MAX_ROAS_TO_BREAKEVEN_RATIO = 0.7;
 
 /**
  * Lifecycle exposes both an action allow-list and coarse capability gates.
@@ -163,6 +179,12 @@ const SIGNAL_TO_ACTIONS: Partial<Record<SignalKind, CampaignActionType[]>> = {
   winner_emerging: ['scale_adset'],
   winner_confirmed: ['scale_adset'],
   learning_limited_locked: ['shift_budget_between_adsets'],
+  // Exact goal outliers do not imply a cause. A lagging ad can be held for
+  // review; creative replacement becomes eligible only when Diagnosis also
+  // has same-ad creative evidence. Ad-set reallocation is built separately
+  // because it requires a verified same-goal recipient.
+  optimization_goal_efficiency_lagging: ['pause_ad', 'replace_creative'],
+  optimization_goal_efficiency_leading: ['scale_adset'],
 };
 
 /**
@@ -172,13 +194,13 @@ const SIGNAL_TO_ACTIONS: Partial<Record<SignalKind, CampaignActionType[]>> = {
  * on raw ₹ estimate alone.
  */
 const ACTION_FOCUS: Record<CampaignActionType, DiagnosisFocus[]> = {
-  pause_ad: ['creative', 'objective_mismatch'],
+  pause_ad: ['creative', 'objective_mismatch', 'delivery_efficiency'],
   pause_adset: ['budget', 'objective_mismatch'],
-  scale_adset: ['budget'],
+  scale_adset: ['budget', 'delivery_efficiency'],
   replace_creative: ['creative'],
   add_creative: ['creative'],
   add_adset: ['audience'],
-  shift_budget_between_adsets: ['budget', 'audience'],
+  shift_budget_between_adsets: ['budget', 'audience', 'delivery_efficiency'],
   reduce_total_budget: ['budget'],
   // Narrowing inventory is justified by placement evidence only. It is not
   // an audience-expansion lever and can worsen an already-high frequency.
@@ -285,6 +307,7 @@ export class RecommendationEngine extends BaseEngine<
   protected async compute(
     deps: ComputeDeps<'recommendation'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<RecommendationData> {
     const signals = (deps.signal!.data.signals ?? []) as Signal[];
     const objective = deps.objective!.data;
@@ -314,6 +337,10 @@ export class RecommendationEngine extends BaseEngine<
       metrics?: {
         campaignLevel?: Record<string, number>;
         adSetLevel?: Record<string, Record<string, number>>;
+        adLevel?: Record<string, Record<string, number>>;
+      };
+      entities?: {
+        campaign?: { budgetModel?: 'abo' | 'cbo' | 'asc' };
       };
     };
     const trend = deps.trend!.data as TrendData;
@@ -335,6 +362,8 @@ export class RecommendationEngine extends BaseEngine<
 
     const cm = snapshot.metrics?.campaignLevel ?? {};
     const adSetLevel = snapshot.metrics?.adSetLevel ?? {};
+    const adLevel = snapshot.metrics?.adLevel ?? {};
+    const campaignBudgetModel = snapshot.entities?.campaign?.budgetModel;
     const observedROAS = num(cm.roas);
     const observedSpend = num(cm.spend);
     const observedPurchases = num(cm.purchases);
@@ -389,16 +418,21 @@ export class RecommendationEngine extends BaseEngine<
     // Resolve the campaign name once so reasoning references a real name
     // instead of "campaign unknown". Non-blocking — falls back to id.
     let campaignName = 'this campaign';
-    const ident = this.identity.get(cycleId);
-    if (this.campaignModel && ident?.campaignId) {
+    let campaignSource: 'agent' | 'human' | 'manual' | undefined;
+    const ident = identity;
+    if (this.campaignModel) {
       try {
         const c = await this.campaignModel
           .findById(ident.campaignId)
-          .select('name')
+          .select('name source')
           .lean()
           .exec();
-        const doc = c as { name?: string } | null;
+        const doc = c as {
+          name?: string;
+          source?: 'agent' | 'human' | 'manual';
+        } | null;
         if (doc?.name) campaignName = doc.name;
+        campaignSource = doc?.source;
       } catch {
         // ignore
       }
@@ -513,18 +547,57 @@ export class RecommendationEngine extends BaseEngine<
         );
         if (supporting.length === 0) continue;
 
+        const lossContainmentOnly =
+          type === 'reduce_total_budget' &&
+          targetType === 'campaign' &&
+          lifecycle.stage === 'learning' &&
+          (lifecycle.ageHours ?? 0) >= LOSS_CONTAINMENT_MIN_AGE_HOURS &&
+          revenueObjective &&
+          sourceMetricsFresh &&
+          economicsAvailable &&
+          revenueEvidenceAvailable &&
+          financialDataAvailable &&
+          observedSpend >= LOSS_CONTAINMENT_MIN_SPEND_INR &&
+          observedPurchases >= LOSS_CONTAINMENT_MIN_PURCHASES &&
+          observedROAS > 0 &&
+          breakevenROAS > 0 &&
+          observedROAS / breakevenROAS <=
+            LOSS_CONTAINMENT_MAX_ROAS_TO_BREAKEVEN_RATIO &&
+          confidence.overall >= 0.5 &&
+          (confidence.perEngine?.snapshot ?? 0) >= 0.6 &&
+          (confidence.quality?.statisticalPower ?? 0) >= 0.5 &&
+          !forecastRecovering &&
+          supporting.some(
+            (signal) =>
+              signal.kind === 'unprofitable_run' &&
+              signal.strength >= MIN_SIGNAL_CONFIDENCE,
+          );
+
         const gatedBy: string[] = [];
+        const scopedMetricRow =
+          targetType === 'campaign'
+            ? cm
+            : targetType === 'adset'
+              ? (adSetLevel[targetId] ?? cm)
+              : adLevel[targetId];
+        if (targetType === 'ad' && !scopedMetricRow) {
+          gatedBy.push('evidence:target_metrics_unavailable');
+        }
         if (gateStarBlock) gatedBy.push('lifecycle:all-blocked');
         if (blockedSet.has(type)) gatedBy.push(`lifecycle:${lifecycle.stage}`);
-        if (!allowedSet.has(type))
+        if (!allowedSet.has(type) && !lossContainmentOnly)
           gatedBy.push(`lifecycle:${lifecycle.stage}:not_allowed`);
         const lifecycleGate = ACTION_LIFECYCLE_GATE[type];
-        if (lifecycleGate && !lifecycle.gates[lifecycleGate]) {
+        if (
+          lifecycleGate &&
+          !lifecycle.gates[lifecycleGate] &&
+          !lossContainmentOnly
+        ) {
           gatedBy.push(
             `lifecycle:${lifecycle.stage}:${snakeCase(lifecycleGate)}=false`,
           );
         }
-        if (!confidence.gates.okToRecommend)
+        if (!confidence.gates.okToRecommend && !lossContainmentOnly)
           gatedBy.push('confidence:not_okToRecommend');
         if (!sourceMetricsFresh)
           gatedBy.push('source_metrics:stale_or_unknown');
@@ -539,6 +612,16 @@ export class RecommendationEngine extends BaseEngine<
           gatedBy.push('financial_data:unavailable');
         if (capExhausted && (type === 'scale_adset' || type === 'add_adset'))
           gatedBy.push('business:weekly_cap_exhausted');
+        const exactGoalSignal = supporting.find(
+          (signal) => signal.goalEvidence,
+        );
+        if (
+          exactGoalSignal &&
+          type === 'scale_adset' &&
+          campaignBudgetModel !== 'abo'
+        ) {
+          gatedBy.push('action:goal_scale_requires_verified_abo_budget');
+        }
         if (type === 'shift_budget_between_adsets')
           gatedBy.push('action:requires_cross_adset_pair');
         if (recentlyWorsenedSameTarget.has(`${targetId}::${type}`))
@@ -569,20 +652,24 @@ export class RecommendationEngine extends BaseEngine<
           gatedBy.push('action:add_adset_launch_contract_incomplete');
         }
 
-        // For adset-level targets, use the adset's own metrics in the
-        // reasoning + profit math — not the campaign's aggregate, which
-        // can be profitable overall while individual adsets bleed.
-        let scopedROAS = observedROAS;
-        let scopedSpend = observedSpend;
-        let scopedPurchases = observedPurchases;
-        let scopedDailySpend = dailySpendVelocity;
-        if (targetType === 'adset' && adSetLevel[targetId]) {
-          const m = adSetLevel[targetId];
+        // Ad-level reasoning and profit math must use the exact ad row. A
+        // profitable campaign/ad set must never mask a bleeding child ad;
+        // when the ad row is absent the candidate is gated above instead of
+        // borrowing a higher-level aggregate.
+        let scopedROAS = targetType === 'ad' ? 0 : observedROAS;
+        let scopedSpend = targetType === 'ad' ? 0 : observedSpend;
+        let scopedPurchases = targetType === 'ad' ? 0 : observedPurchases;
+        let scopedDailySpend = targetType === 'ad' ? 0 : dailySpendVelocity;
+        const hasExactNonCampaignRow =
+          (targetType === 'adset' && Boolean(adSetLevel[targetId])) ||
+          (targetType === 'ad' && Boolean(adLevel[targetId]));
+        if (hasExactNonCampaignRow && scopedMetricRow) {
+          const m = scopedMetricRow;
           scopedROAS = num(m.roas);
           scopedSpend = num(m.spend);
           scopedPurchases = num(m.purchases);
           // m.spend is also a lifetime total (same Meta date_preset='maximum'
-          // fetch as the campaign level) — no per-adset age is available, so
+          // fetch as the campaign level) — no per-target age is available, so
           // the campaign's own age is the best available proxy, still far
           // more accurate than dividing a potentially months-old lifetime
           // total by a flat 7.
@@ -614,18 +701,18 @@ export class RecommendationEngine extends BaseEngine<
             `signal:weak(${strongestSignalConfidence.toFixed(2)}<${MIN_SIGNAL_CONFIDENCE.toFixed(2)})`,
           );
         }
-        if (!matchingRootCause) {
+        if (!matchingRootCause && !lossContainmentOnly) {
           gatedBy.push('diagnosis:no_matching_root_cause');
-        } else if (matchingRootCause.confidence < MIN_DIAGNOSIS_CONFIDENCE) {
+        } else if (
+          matchingRootCause &&
+          matchingRootCause.confidence < MIN_DIAGNOSIS_CONFIDENCE
+        ) {
           gatedBy.push(
             `diagnosis:weak(${matchingRootCause.confidence.toFixed(2)}<${MIN_DIAGNOSIS_CONFIDENCE.toFixed(2)})`,
           );
         }
 
-        const scopedMetrics =
-          targetType === 'adset' && adSetLevel[targetId]
-            ? adSetLevel[targetId]
-            : cm;
+        const scopedMetrics = scopedMetricRow ?? {};
 
         const action = this.buildAction({
           cycleId,
@@ -641,7 +728,9 @@ export class RecommendationEngine extends BaseEngine<
           marginPct,
           breakevenROAS,
           targetROAS,
-          diagnosisNarrative: diagnosis.narrative,
+          diagnosisNarrative: matchingRootCause
+            ? `Exact-target hypothesis: ${matchingRootCause.hypothesis} (${Math.round(matchingRootCause.confidence * 100)}% confidence).`
+            : diagnosis.narrative,
           matchingRootCause,
           forecastRecovering,
           forecastROAS7d,
@@ -655,6 +744,7 @@ export class RecommendationEngine extends BaseEngine<
             objective,
             scopedMetrics,
           ),
+          lossContainmentOnly,
         });
         if (!Number.isFinite(action.score) || action.score <= 0) {
           action.gatedBy.push('quality:zero_score');
@@ -672,25 +762,64 @@ export class RecommendationEngine extends BaseEngine<
     }
 
     // ── shift_budget_between_adsets — cross-adset synthesis ──────────
-    // Needs cross-adset context that no single signal has. Look for a clear
-    // winner+loser pair inside the same campaign and propose a shift.
-    const shiftAction = this.buildShiftBudgetAction({
+    // Prefer the exact same-window optimization-goal contract. It supplies a
+    // verified donor and recipient without inventing a causal uplift. The
+    // older revenue-only shortcut remains as a fallback for sales campaigns.
+    const exactGoalShiftAction = this.buildGoalShiftBudgetAction({
       cycleId,
-      adSetLevel,
-      breakevenROAS,
-      marginPct,
-      ageDays,
+      signals: goalCompatibleSignals,
       campaignName,
-      objective,
-      economicsAvailable,
-      revenueEvidenceAvailable,
-      financialDataAvailable,
+      campaignBudgetModel,
+      lifecycle,
       blockedSet,
       allowedSet,
-      lifecycle,
       gateStarBlock,
       okToRecommend: confidence.gates.okToRecommend && sourceMetricsFresh,
+      sourceMetricsFresh,
+      diagnosis,
     });
+    if (exactGoalShiftAction) {
+      if (
+        !Number.isFinite(exactGoalShiftAction.score) ||
+        exactGoalShiftAction.score <= 0
+      ) {
+        exactGoalShiftAction.gatedBy.push('quality:zero_score');
+      }
+      candidates.push(exactGoalShiftAction);
+      const sourceSignal = goalCompatibleSignals.find(
+        (signal) =>
+          signal.kind === 'optimization_goal_efficiency_lagging' &&
+          signal.targetType === 'adset' &&
+          signal.targetId === exactGoalShiftAction.targetId,
+      );
+      if (sourceSignal) {
+        evidenceByActionId.set(exactGoalShiftAction.actionId, {
+          signalKind: sourceSignal.kind,
+          signalReasoning: sourceSignal.reasoning,
+          metrics: { ...sourceSignal.metricEvidence },
+        });
+      }
+    }
+
+    const shiftAction = exactGoalShiftAction
+      ? null
+      : this.buildShiftBudgetAction({
+          cycleId,
+          adSetLevel,
+          breakevenROAS,
+          marginPct,
+          ageDays,
+          campaignName,
+          objective,
+          economicsAvailable,
+          revenueEvidenceAvailable,
+          financialDataAvailable,
+          blockedSet,
+          allowedSet,
+          lifecycle,
+          gateStarBlock,
+          okToRecommend: confidence.gates.okToRecommend && sourceMetricsFresh,
+        });
     if (shiftAction) {
       if (!sourceMetricsFresh) {
         shiftAction.gatedBy.push('source_metrics:stale_or_unknown');
@@ -749,12 +878,17 @@ export class RecommendationEngine extends BaseEngine<
         try {
           const c = await this.campaignModel
             .findById(ident.campaignId)
-            .select('name metaCampaignId')
+            .select('name metaCampaignId source')
             .lean()
             .exec();
-          const doc = c as { name?: string; metaCampaignId?: string } | null;
+          const doc = c as {
+            name?: string;
+            metaCampaignId?: string;
+            source?: 'agent' | 'human' | 'manual';
+          } | null;
           metaCampaignId = doc?.metaCampaignId;
           if (doc?.name) campaignNameForDoc = doc.name;
+          campaignSource = doc?.source ?? campaignSource;
         } catch {
           // non-fatal — decision is still valid without meta id / name
         }
@@ -781,6 +915,10 @@ export class RecommendationEngine extends BaseEngine<
               // suppress the first fresh goal-aware proposal for 48 hours;
               // the read path keeps the newest equivalent row visible.
               decisionContractVersion: 'goal_aware_v1',
+              // Likewise, create one fresh review-ready proposal when the
+              // open row predates the bounded Step-14 OpenAI critic. Once a
+              // decision has that contract, normal 48h dedup resumes.
+              intelligenceReviewVersion: 'intelligence_review_v1',
               reviewWindowExpiresAt: { $gt: now },
               targetId: { $in: filtered.map((a) => a.targetId) },
               actionType: { $in: filtered.map((a) => a.type) },
@@ -813,6 +951,7 @@ export class RecommendationEngine extends BaseEngine<
           campaignId: ident?.campaignId ?? '',
           metaCampaignId,
           campaignName: campaignNameForDoc,
+          campaignSource,
           cycleId,
           snapshotId: snapshot.snapshotId,
           actionId: a.actionId,
@@ -889,6 +1028,7 @@ export class RecommendationEngine extends BaseEngine<
     campaignName: string;
     objective: ObjectiveData;
     objectiveMetricValue: number;
+    lossContainmentOnly: boolean;
   }): RecommendedAction {
     const {
       cycleId,
@@ -914,6 +1054,7 @@ export class RecommendationEngine extends BaseEngine<
       campaignName,
       objective,
       objectiveMetricValue,
+      lossContainmentOnly,
     } = input;
 
     const risk = RISK[type];
@@ -928,6 +1069,9 @@ export class RecommendationEngine extends BaseEngine<
       {},
       ...signals.map((sig) => sig.metricEvidence),
     );
+    const goalEvidence = signals.find(
+      (signal) => signal.goalEvidence,
+    )?.goalEvidence;
 
     // ── Expected profit delta over next 7 days (contribution profit) ──
     // Each action type has a distinct profit-mechanics model.
@@ -951,7 +1095,30 @@ export class RecommendationEngine extends BaseEngine<
     // the real observed number rather than overstating it.
     const revenueROASProxy = Math.max(observedROAS, breakevenROAS);
 
-    if (revenueObjective) {
+    if (goalEvidence) {
+      // The comparator supplies a measured peer gap, not an intervention
+      // forecast. Preserve the exact goal metric and keep economic impact at
+      // zero until an executed action has its own 24h/72h outcome evidence.
+      impactMetric = goalEvidence.efficiencyMetric;
+      deltaPct = 0;
+      projectedProfitDelta7dINR = 0;
+      const gapMultiple = goalEvidence.observedGap.multiple;
+      const gapLabel = goalEvidence.observedGap.unbounded
+        ? 'an unbounded gap'
+        : `${(gapMultiple ?? 0).toFixed(2)}x`;
+      goalScoreBasis = Math.max(
+        100,
+        Math.round(100 * finiteSortValue(gapMultiple ?? Number.NaN)),
+      );
+      parameters = {
+        optimizationGoal: goalEvidence.optimizationGoal,
+        validationMetric: goalEvidence.efficiencyMetric,
+        evidenceWindow: { ...goalEvidence.window },
+        claimScope: goalEvidence.claimScope,
+        ...(type === 'scale_adset' ? { scalePercent: 10 } : {}),
+      };
+      mechanicsExplanation = `${goalMechanic(type)} The exact ${words(goalEvidence.efficiencyMetric)} is ${formatExactGoalEfficiency(goalEvidence.current.efficiency, goalEvidence)} versus a pooled ${formatExactGoalEfficiency(goalEvidence.pooledSiblingBaseline.efficiency, goalEvidence)} baseline from ${goalEvidence.pooledSiblingBaseline.peerCount} active same-goal siblings (${gapLabel} ${goalEvidence.observedGap.direction}). This is observed evidence; no causal uplift or economic gain is estimated.`;
+    } else if (revenueObjective) {
       switch (type) {
         case 'pause_adset':
         case 'pause_ad':
@@ -959,18 +1126,23 @@ export class RecommendationEngine extends BaseEngine<
           // If currently unprofitable, pausing avoids further losses.
           if (observedROAS > 0 && observedROAS < breakevenROAS) {
             const lossPerRupee = (breakevenROAS - observedROAS) * marginPct;
-            projectedProfitDelta7dINR = dailySpendVelocity * 7 * lossPerRupee;
-            const verb =
-              type === 'reduce_total_budget' ? 'Cutting' : 'Stopping';
-            mechanicsExplanation = `${verb} spend here saves an estimated ₹${projectedProfitDelta7dINR.toFixed(0)} of losses over the next 7 days at the current ₹${dailySpendVelocity.toFixed(0)}/day pace.`;
+            const reductionFraction = type === 'reduce_total_budget' ? 0.2 : 1;
+            projectedProfitDelta7dINR =
+              dailySpendVelocity * 7 * lossPerRupee * reductionFraction;
+            mechanicsExplanation =
+              type === 'reduce_total_budget'
+                ? `A 20% budget reduction limits modeled additional loss by roughly ₹${projectedProfitDelta7dINR.toFixed(0)} over the next 7 days if the current ₹${dailySpendVelocity.toFixed(0)}/day pace and economics persist. It does not assume ROAS will improve.`
+                : `Stopping spend here saves an estimated ₹${projectedProfitDelta7dINR.toFixed(0)} of losses over the next 7 days at the current ₹${dailySpendVelocity.toFixed(0)}/day pace.`;
           } else {
             projectedProfitDelta7dINR = 0;
             mechanicsExplanation = `This campaign appears profitable today — pausing would forgo profit, not save it.`;
           }
           impactMetric = 'losses_avoided';
-          deltaPct = 100;
           if (type === 'reduce_total_budget') {
             parameters = { reductionPercent: 20 };
+            deltaPct = 20;
+          } else {
+            deltaPct = 100;
           }
           break;
         }
@@ -1074,19 +1246,17 @@ export class RecommendationEngine extends BaseEngine<
       }
     } else {
       const goalMetric = scoredMetricFor(objective.objective);
-      const goalDeltaMagnitude = goalDeltaForAction(type, metricEvidence);
-      deltaPct = goalMetric.lowerIsBetter
-        ? -goalDeltaMagnitude
-        : goalDeltaMagnitude;
+      // Without a same-goal, same-window peer baseline or a prior measured
+      // outcome for this exact lever, a percentage uplift would be invented.
+      // Keep the action testable but explicitly unquantified.
+      deltaPct = 0;
       impactMetric = goalMetric.metric;
-      goalScoreBasis = Math.abs(goalDeltaMagnitude) * 100;
-
-      const direction = goalMetric.lowerIsBetter ? 'reduce' : 'increase';
+      goalScoreBasis = 100;
       const currentValue = formatGoalMetric(
         goalMetric.metric,
         objectiveMetricValue,
       );
-      mechanicsExplanation = `${goalMechanic(type)} This is expected to ${direction} ${goalMetric.label.toLowerCase()} by roughly ${goalDeltaMagnitude}% from its current ${currentValue}, directly optimizing the ${objective.objective.replace(/_/g, ' ')} goal.`;
+      mechanicsExplanation = `${goalMechanic(type)} The current ${goalMetric.label.toLowerCase()} is ${currentValue}. No causal uplift is estimated; the exact goal metric must be measured after the controlled action.`;
 
       if (
         (type === 'replace_creative' || type === 'add_creative') &&
@@ -1117,21 +1287,28 @@ export class RecommendationEngine extends BaseEngine<
     let diagnosisLine = '';
     if (matchingRootCause) {
       diagnosisMult = 1 + matchingRootCause.confidence * 0.5;
-      diagnosisLine = revenueObjective
-        ? `Diagnosis agrees: "${matchingRootCause.hypothesis}" (${Math.round(matchingRootCause.confidence * 100)}% confidence) points at the same ${matchingRootCause.suggestedFocus} root cause.`
-        : `Diagnosis agrees at ${Math.round(matchingRootCause.confidence * 100)}% confidence and points at the same ${matchingRootCause.suggestedFocus} cause.`;
+      diagnosisLine = goalEvidence
+        ? `Diagnosis preserves the boundary: ${matchingRootCause.hypothesis} (${Math.round(matchingRootCause.confidence * 100)}% evidence confidence).`
+        : revenueObjective
+          ? `Diagnosis agrees: "${matchingRootCause.hypothesis}" (${Math.round(matchingRootCause.confidence * 100)}% confidence) points at the same ${matchingRootCause.suggestedFocus} root cause.`
+          : `Diagnosis agrees at ${Math.round(matchingRootCause.confidence * 100)}% confidence and points at the same ${matchingRootCause.suggestedFocus} cause.`;
     }
 
     let forecastMult = 1;
     let forecastLine = '';
-    if (revenueObjective && isCutAction && forecastRecovering) {
+    if (
+      revenueObjective &&
+      !goalEvidence &&
+      isCutAction &&
+      forecastRecovering
+    ) {
       forecastMult = 0.6;
       forecastLine = `Caveat: the 7-day forecast shows ROAS trending toward ${forecastROAS7d.toFixed(2)}× — already recovering, so this may be premature.`;
     }
 
     let portfolioMult = 1;
     let portfolioLine = '';
-    if (portfolioTier === 'D' || portfolioTier === 'C') {
+    if (!goalEvidence && (portfolioTier === 'D' || portfolioTier === 'C')) {
       if (isGrowthAction) {
         portfolioMult = 0.7;
         portfolioLine = `Portfolio context: this campaign ranks tier ${portfolioTier} account-wide — scaling a weak performer is lower priority than its isolated estimate suggests.`;
@@ -1141,7 +1318,7 @@ export class RecommendationEngine extends BaseEngine<
           ? `Portfolio context: this campaign ranks tier ${portfolioTier} account-wide, reinforcing the case to cut losses here.`
           : `Portfolio context: this campaign ranks tier ${portfolioTier} account-wide, reinforcing the case to reduce inefficient delivery here.`;
       }
-    } else if (portfolioTier === 'A' && isGrowthAction) {
+    } else if (!goalEvidence && portfolioTier === 'A' && isGrowthAction) {
       portfolioMult = 1.15;
       portfolioLine = `Portfolio context: this campaign ranks tier A account-wide — a strong candidate for incremental budget.`;
     }
@@ -1157,9 +1334,11 @@ export class RecommendationEngine extends BaseEngine<
     // many signals corroborate it and by diagnosis/forecast/portfolio/
     // memory context. This is the ranking signal — genuinely multi-
     // parameter, not the single-metric ROAS-only ordering it used to be.
-    const scoreBasis = revenueObjective
-      ? Math.abs(projectedProfitDelta7dINR)
-      : goalScoreBasis;
+    const scoreBasis = goalEvidence
+      ? goalScoreBasis
+      : revenueObjective
+        ? Math.abs(projectedProfitDelta7dINR)
+        : goalScoreBasis;
     const score = Math.round(
       (scoreBasis / RISK_MULT[risk]) *
         combinedStrength *
@@ -1175,9 +1354,15 @@ export class RecommendationEngine extends BaseEngine<
     // level so adset-level actions don't read as if the whole campaign is
     // failing.
     const subject =
-      targetType === 'adset' ? `The ad group in ${campaignName}` : campaignName;
+      targetType === 'adset'
+        ? `The ad group in ${campaignName}`
+        : targetType === 'ad'
+          ? `Ad ${targetId} in ${campaignName}`
+          : campaignName;
     let conditionLine: string;
-    if (!revenueObjective) {
+    if (goalEvidence) {
+      conditionLine = `${subject} is an observed ${goalEvidence.optimizationGoal} ${goalEvidence.observedGap.direction === 'worse' ? 'laggard' : 'leader'} on ${words(goalEvidence.efficiencyMetric)} against exact active siblings in the same reporting window.`;
+    } else if (!revenueObjective) {
       const goalMetric = scoredMetricFor(objective.objective);
       conditionLine = `${subject} is assigned the ${objective.objective.replace(/_/g, ' ')} objective. Its current ${goalMetric.label.toLowerCase()} is ${formatGoalMetric(goalMetric.metric, objectiveMetricValue)}.`;
     } else {
@@ -1199,32 +1384,47 @@ export class RecommendationEngine extends BaseEngine<
     // entry per corroborating signal (previously always exactly one).
     const evidenceChain: RecommendedAction['evidenceChain'] = [
       ...signals.map((sig) => ({ step: sig.reasoning, source: 'signal' })),
-      ...(revenueObjective
+      ...(goalEvidence
         ? [
             {
-              step: `Money: ${observedROAS.toFixed(2)}× ROAS observed, needs ${breakevenROAS.toFixed(2)}× to break even (contribution margin ${(marginPct * 100).toFixed(0)}%).`,
-              source: 'revenue',
+              step: `Exact Meta goal: ${goalEvidence.optimizationGoal}; measured KPI: ${words(goalEvidence.efficiencyMetric)}; current ${formatExactGoalEfficiency(goalEvidence.current.efficiency, goalEvidence)}; pooled sibling baseline ${formatExactGoalEfficiency(goalEvidence.pooledSiblingBaseline.efficiency, goalEvidence)}.`,
+              source: 'snapshot',
             },
             {
-              step: `Spend pace: ~₹${dailySpendVelocity.toFixed(0)}/day across ${observedPurchases} purchases so far.`,
-              source: 'snapshot',
+              step: 'Claim boundary: same-window peer observation only; causality and future uplift are not established.',
+              source: 'safety_policy',
             },
           ]
-        : [
-            {
-              step: `Goal: ${objective.objective.replace(/_/g, ' ')}; primary KPI: ${objective.primaryKPI}.`,
-              source: 'objective',
-            },
-            {
-              step: `${scoredMetricFor(objective.objective).label}: ${formatGoalMetric(scoredMetricFor(objective.objective).metric, objectiveMetricValue)} on ₹${observedSpend.toFixed(0)} spend.`,
-              source: 'snapshot',
-            },
-          ]),
+        : revenueObjective
+          ? [
+              {
+                step: `Money: ${observedROAS.toFixed(2)}× ROAS observed, needs ${breakevenROAS.toFixed(2)}× to break even (contribution margin ${(marginPct * 100).toFixed(0)}%).`,
+                source: 'revenue',
+              },
+              {
+                step: `Spend pace: ~₹${dailySpendVelocity.toFixed(0)}/day across ${observedPurchases} purchases so far.`,
+                source: 'snapshot',
+              },
+            ]
+          : [
+              {
+                step: `Goal: ${objective.objective.replace(/_/g, ' ')}; primary KPI: ${objective.primaryKPI}.`,
+                source: 'objective',
+              },
+              {
+                step: `${scoredMetricFor(objective.objective).label}: ${formatGoalMetric(scoredMetricFor(objective.objective).metric, objectiveMetricValue)} on ₹${observedSpend.toFixed(0)} spend.`,
+                source: 'snapshot',
+              },
+            ]),
       {
-        step: revenueObjective
-          ? `Root cause: ${diagnosisNarrative}`
-          : `Goal-compatible root-cause confidence: ${Math.round((matchingRootCause?.confidence ?? 0) * 100)}%; focus: ${matchingRootCause?.suggestedFocus ?? 'unresolved'}.`,
-        source: 'diagnosis',
+        step: lossContainmentOnly
+          ? `Containment guard: the root cause is unresolved, so this is a bounded 20% human-review throttle—not a claim that ROAS will improve. Evidence threshold: ≥${LOSS_CONTAINMENT_MIN_AGE_HOURS / 24} days, ≥₹${LOSS_CONTAINMENT_MIN_SPEND_INR.toLocaleString('en-IN')} spend, and ≥${LOSS_CONTAINMENT_MIN_PURCHASES} purchases.`
+          : goalEvidence
+            ? `Diagnosis boundary: ${diagnosisNarrative}`
+            : revenueObjective
+              ? `Root cause: ${diagnosisNarrative}`
+              : `Goal-compatible root-cause confidence: ${Math.round((matchingRootCause?.confidence ?? 0) * 100)}%; focus: ${matchingRootCause?.suggestedFocus ?? 'unresolved'}.`,
+        source: lossContainmentOnly ? 'safety_policy' : 'diagnosis',
       },
       ...(forecastLine ? [{ step: forecastLine, source: 'forecast' }] : []),
       ...(portfolioLine ? [{ step: portfolioLine, source: 'portfolio' }] : []),
@@ -1261,6 +1461,9 @@ export class RecommendationEngine extends BaseEngine<
       conditionLine,
       corroborationLine,
       mechanicsExplanation,
+      lossContainmentOnly
+        ? `The causal diagnosis is unresolved; this is loss containment for human review, not an optimization-uplift claim.`
+        : '',
       diagnosisLine,
       forecastLine,
       portfolioLine,
@@ -1279,6 +1482,31 @@ export class RecommendationEngine extends BaseEngine<
         metric: impactMetric,
         deltaPct,
         confidence: combinedStrength,
+        basis: goalEvidence
+          ? 'observed_gap'
+          : revenueObjective
+            ? 'modeled'
+            : 'not_estimated',
+        ...(goalEvidence?.current.efficiency !== null &&
+        goalEvidence?.current.efficiency !== undefined
+          ? { currentValue: goalEvidence.current.efficiency }
+          : !revenueObjective && Number.isFinite(objectiveMetricValue)
+            ? { currentValue: objectiveMetricValue }
+            : {}),
+        ...(goalEvidence
+          ? {
+              siblingBaselineValue:
+                goalEvidence.pooledSiblingBaseline.efficiency,
+              ...(goalEvidence.observedGap.multiple === null
+                ? {}
+                : {
+                    observedGapPct:
+                      Math.round(
+                        (goalEvidence.observedGap.multiple - 1) * 1000,
+                      ) / 10,
+                  }),
+            }
+          : {}),
       },
       expectedProfitDeltaINR7d: Math.round(projectedProfitDelta7dINR),
       reasoning,
@@ -1288,6 +1516,179 @@ export class RecommendationEngine extends BaseEngine<
       score,
       gatedBy,
       requiresHumanApproval: HUMAN_APPROVAL.includes(type),
+    };
+  }
+
+  /**
+   * Build a bounded ABO reallocation from two independently-qualified exact
+   * goal signals. This is an observed same-window peer gap, never a forecast
+   * that the gap will persist after money moves.
+   */
+  private buildGoalShiftBudgetAction(input: {
+    cycleId: string;
+    signals: Signal[];
+    campaignName: string;
+    campaignBudgetModel?: 'abo' | 'cbo' | 'asc';
+    lifecycle: LifecycleData;
+    blockedSet: Set<string>;
+    allowedSet: Set<string>;
+    gateStarBlock: boolean;
+    okToRecommend: boolean;
+    sourceMetricsFresh: boolean;
+    diagnosis: DiagnosisData;
+  }): RecommendedAction | null {
+    const laggards = input.signals.filter(
+      (signal) =>
+        signal.kind === 'optimization_goal_efficiency_lagging' &&
+        signal.targetType === 'adset' &&
+        signal.goalEvidence,
+    );
+    const leaders = input.signals.filter(
+      (signal) =>
+        signal.kind === 'optimization_goal_efficiency_leading' &&
+        signal.targetType === 'adset' &&
+        signal.goalEvidence,
+    );
+    if (laggards.length === 0 || leaders.length === 0) return null;
+
+    const pairs = laggards.flatMap((laggard) =>
+      leaders
+        .filter(
+          (leader) =>
+            leader.targetId !== laggard.targetId &&
+            exactGoalEvidenceMatches(
+              laggard.goalEvidence!,
+              leader.goalEvidence!,
+            ) &&
+            laggard.goalEvidence!.pooledSiblingBaseline.peerIds.includes(
+              leader.targetId,
+            ),
+        )
+        .map((leader) => ({ laggard, leader })),
+    );
+    if (pairs.length === 0) return null;
+
+    pairs.sort((left, right) => {
+      const leftGap = goalPairMultiple(
+        left.laggard.goalEvidence!,
+        left.leader.goalEvidence!,
+      );
+      const rightGap = goalPairMultiple(
+        right.laggard.goalEvidence!,
+        right.leader.goalEvidence!,
+      );
+      return finiteSortValue(rightGap) - finiteSortValue(leftGap);
+    });
+    const { laggard, leader } = pairs[0];
+    const evidence = laggard.goalEvidence!;
+    const leaderEvidence = leader.goalEvidence!;
+    const pairMultiple = goalPairMultiple(evidence, leaderEvidence);
+    const shiftPercent = 10;
+    const gatedBy: string[] = [];
+
+    if (input.campaignBudgetModel !== 'abo') {
+      gatedBy.push('action:goal_shift_requires_verified_abo_budget');
+    }
+    if (input.gateStarBlock) gatedBy.push('lifecycle:all-blocked');
+    if (input.blockedSet.has('shift_budget_between_adsets')) {
+      gatedBy.push('lifecycle:blocked');
+    }
+    if (!input.allowedSet.has('shift_budget_between_adsets')) {
+      gatedBy.push(`lifecycle:${input.lifecycle.stage}:not_allowed`);
+    }
+    if (!input.okToRecommend) gatedBy.push('confidence:not_okToRecommend');
+    if (!input.sourceMetricsFresh) {
+      gatedBy.push('source_metrics:stale_or_unknown');
+    }
+    const diagnosis = input.diagnosis.rootCauses.find(
+      (cause) =>
+        cause.targetType === 'adset' &&
+        cause.targetId === laggard.targetId &&
+        cause.suggestedFocus === 'delivery_efficiency' &&
+        cause.evidenceSignals.includes('optimization_goal_efficiency_lagging'),
+    );
+    if (!diagnosis) {
+      gatedBy.push('diagnosis:no_matching_root_cause');
+    } else if (diagnosis.confidence < MIN_DIAGNOSIS_CONFIDENCE) {
+      gatedBy.push(
+        `diagnosis:weak(${diagnosis.confidence.toFixed(2)}<${MIN_DIAGNOSIS_CONFIDENCE.toFixed(2)})`,
+      );
+    }
+
+    const currentValue = evidence.current.efficiency;
+    const leaderValue = leaderEvidence.current.efficiency;
+    if (leaderValue === null) return null;
+    const observedGapPct = Number.isFinite(pairMultiple)
+      ? Math.round((pairMultiple - 1) * 1000) / 10
+      : undefined;
+    const metricLabel = words(evidence.efficiencyMetric);
+    const gapText = Number.isFinite(pairMultiple)
+      ? `${pairMultiple.toFixed(2)}x`
+      : 'an unbounded amount';
+    const reasoning = [
+      `Reallocate 10% of the donor ad set's allocation inside ${input.campaignName}.`,
+      `Ad set ${laggard.targetId} is ${gapText} less efficient on ${metricLabel} than exact same-window ${evidence.optimizationGoal} leader ${leader.targetId}.`,
+      `This is an observational ABO reallocation for human review; it does not claim the recipient caused the difference or promise future uplift.`,
+    ].join(' ');
+    const evidenceChain: RecommendedAction['evidenceChain'] = [
+      {
+        step: laggard.reasoning,
+        source: 'signal',
+      },
+      {
+        step: leader.reasoning,
+        source: 'signal',
+      },
+      {
+        step: `Like-for-like gate: ${evidence.optimizationGoal}, ${evidence.window.dateStart} to ${evidence.window.dateStop}, ${evidence.currency}, ${evidence.pooledSiblingBaseline.peerCount} eligible peers, identical source and attribution identity.`,
+        source: 'snapshot',
+      },
+      {
+        step: 'Safety policy: ABO only, 10% donor shift, shadow review, human approval, and no causal-uplift estimate.',
+        source: 'safety_policy',
+      },
+    ];
+
+    return {
+      actionId: stableActionId(
+        input.cycleId,
+        'shift_budget_between_adsets',
+        'adset',
+        laggard.targetId,
+      ),
+      type: 'shift_budget_between_adsets',
+      targetType: 'adset',
+      targetId: laggard.targetId,
+      parameters: {
+        fromAdSetId: laggard.targetId,
+        toAdSetId: leader.targetId,
+        shiftPercent,
+        optimizationGoal: evidence.optimizationGoal,
+        validationMetric: evidence.efficiencyMetric,
+        evidenceWindow: { ...evidence.window },
+        claimScope: evidence.claimScope,
+      },
+      expectedImpact: {
+        metric: evidence.efficiencyMetric,
+        deltaPct: 0,
+        confidence: Math.min(laggard.strength, leader.strength),
+        basis: 'observed_gap',
+        ...(currentValue === null ? {} : { currentValue }),
+        siblingBaselineValue: leaderValue,
+        ...(observedGapPct === undefined ? {} : { observedGapPct }),
+      },
+      expectedProfitDeltaINR7d: 0,
+      reasoning,
+      evidenceChain,
+      risk: 'low',
+      implementationCost: 1,
+      score: Math.round(
+        100 *
+          Math.min(laggard.strength, leader.strength) *
+          Math.min(3, finiteSortValue(pairMultiple)),
+      ),
+      gatedBy,
+      requiresHumanApproval: true,
     };
   }
 
@@ -1477,6 +1878,54 @@ export class RecommendationEngine extends BaseEngine<
   }
 }
 
+function exactGoalEvidenceMatches(
+  left: OptimizationGoalSignalEvidence,
+  right: OptimizationGoalSignalEvidence,
+): boolean {
+  return (
+    left.optimizationGoal === right.optimizationGoal &&
+    left.resultMetric === right.resultMetric &&
+    left.efficiencyMetric === right.efficiencyMetric &&
+    left.efficiencyUnit === right.efficiencyUnit &&
+    left.lowerIsBetter === right.lowerIsBetter &&
+    left.window.dateStart === right.window.dateStart &&
+    left.window.dateStop === right.window.dateStop &&
+    left.window.metricScope === right.window.metricScope &&
+    left.sourceFingerprint === right.sourceFingerprint &&
+    left.currency === right.currency &&
+    left.claimScope === 'observational_same_window_peer_comparison' &&
+    right.claimScope === 'observational_same_window_peer_comparison' &&
+    left.causalClaim === false &&
+    right.causalClaim === false &&
+    left.expectedUplift === null &&
+    right.expectedUplift === null
+  );
+}
+
+function goalPairMultiple(
+  laggard: OptimizationGoalSignalEvidence,
+  leader: OptimizationGoalSignalEvidence,
+): number {
+  const laggardValue = laggard.current.efficiency;
+  const leaderValue = leader.current.efficiency;
+  if (leaderValue === null || leaderValue < 0) return Number.NaN;
+  if (laggardValue === null) {
+    return laggard.lowerIsBetter ? Number.NaN : Number.POSITIVE_INFINITY;
+  }
+  if (laggardValue < 0) return Number.NaN;
+  if (laggard.lowerIsBetter) {
+    if (leaderValue === 0) return Number.POSITIVE_INFINITY;
+    return laggardValue / leaderValue;
+  }
+  if (laggardValue === 0) return Number.POSITIVE_INFINITY;
+  return leaderValue / laggardValue;
+}
+
+function finiteSortValue(value: number): number {
+  if (value === Number.POSITIVE_INFINITY) return 10;
+  return Number.isFinite(value) ? value : 0;
+}
+
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
@@ -1503,33 +1952,6 @@ function metricValueForObjective(
   // in an older replayed slice. Prefer recomputation when operands exist so
   // rate units stay consistent with Objective Engine grading.
   return computed || num(metrics[goalMetric]);
-}
-
-function goalDeltaForAction(
-  type: CampaignActionType,
-  metricEvidence: Record<string, number>,
-): number {
-  switch (type) {
-    case 'replace_creative':
-    case 'add_creative': {
-      const observedDrop = num(metricEvidence.dropPct) || 0.2;
-      return Math.max(5, Math.min(25, Math.round(observedDrop * 50)));
-    }
-    case 'add_adset':
-      return 15;
-    case 'scale_adset':
-      return 10;
-    case 'shift_budget_between_adsets':
-      return 10;
-    case 'narrow_placement':
-      return 8;
-    case 'dayparting':
-      return 6;
-    case 'pause_ad':
-    case 'pause_adset':
-    case 'reduce_total_budget':
-      return 10;
-  }
 }
 
 function goalMechanic(type: CampaignActionType): string {
@@ -1562,6 +1984,20 @@ function formatGoalMetric(metric: string, value: number): string {
   if (metric === 'ctr' || metric === 'cvr') return `${value.toFixed(2)}%`;
   if (metric === 'cpc' || metric === 'cpm') return `₹${value.toFixed(2)}`;
   return value.toFixed(2);
+}
+
+function formatExactGoalEfficiency(
+  value: number | null,
+  evidence: OptimizationGoalSignalEvidence,
+): string {
+  if (value === null) return 'undefined because the observed result is zero';
+  if (evidence.efficiencyMetric === 'raw_roas') return `${value.toFixed(2)}x`;
+  const prefix = evidence.currency === 'INR' ? '₹' : `${evidence.currency} `;
+  return `${prefix}${value.toFixed(2)}`;
+}
+
+function words(value: string): string {
+  return value.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function snakeCase(value: string): string {

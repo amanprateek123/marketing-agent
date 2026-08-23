@@ -5,7 +5,10 @@ import { Model } from 'mongoose';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import {
   META_SNAPSHOT_FETCHER,
@@ -41,19 +44,6 @@ export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
   readonly step = 1;
   readonly version = '1.0.0';
   readonly dependsOn = [] as const;
-
-  // Cache the (tenantId, campaignId) per cycle so the base class can
-  // find identity without a Mongo round-trip. Populated by
-  // captureForCycle, drained in its finally block.
-  private readonly identity = new Map<
-    string,
-    {
-      tenantId: string;
-      campaignId: string;
-      metaCampaignId: string;
-      products: ProductForRevenue[];
-    }
-  >();
 
   constructor(
     sliceRepo: SliceRepository,
@@ -100,6 +90,7 @@ export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
       metaWindowStart: bundle.metaWindowStart,
       metaWindowEnd: bundle.metaWindowEnd,
       metrics: data.metrics,
+      entities: data.entities,
       meta: data.meta,
       missingFields: data.missingFields,
       freshnessSec: data.freshnessSec,
@@ -123,17 +114,14 @@ export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
     metaCampaignId: string;
     products: ProductForRevenue[];
   }): Promise<void> {
-    this.identity.set(input.cycleId, {
-      tenantId: input.tenantId,
-      campaignId: input.campaignId,
-      metaCampaignId: input.metaCampaignId,
-      products: input.products,
-    });
-    try {
-      await this.execute(input.cycleId);
-    } finally {
-      this.identity.delete(input.cycleId);
-    }
+    // Snapshot has no persisted dependency from which BaseEngine can recover
+    // identity. Pass this invocation's complete immutable input directly so
+    // duplicate same-cycle listeners cannot overwrite or delete shared state.
+    const invocation = {
+      ...input,
+      products: [...input.products],
+    };
+    await this.execute(input.cycleId, invocation);
   }
 
   /**
@@ -156,17 +144,25 @@ export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
   protected async compute(
     _deps: unknown,
     cycleId: string,
+    resolvedIdentity: SliceIdentity,
   ): Promise<SnapshotData> {
-    // Identity for this exact invocation was stored by captureForCycle.
-    // Do not use a singleton "current cycle": Nest event handlers can
-    // overlap even when a Bull worker normally processes serially.
-    const identity = this.identity.get(cycleId);
-    if (!identity) {
-      throw new Error('SnapshotEngine.compute called without cycle identity');
+    const identity = resolvedIdentity as SliceIdentity & {
+      metaCampaignId?: unknown;
+      products?: unknown;
+    };
+    if (
+      typeof identity.metaCampaignId !== 'string' ||
+      identity.metaCampaignId.trim().length === 0 ||
+      !Array.isArray(identity.products)
+    ) {
+      throw new Error('SnapshotEngine.compute called without complete input');
     }
     const anyCycle = {
       cycleId,
-      ...identity,
+      tenantId: identity.tenantId,
+      campaignId: identity.campaignId,
+      metaCampaignId: identity.metaCampaignId,
+      products: identity.products as ProductForRevenue[],
     };
     const bundle = await this.fetcher.fetch({
       tenantId: anyCycle.tenantId,
@@ -184,6 +180,7 @@ export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
       metaWindowStart: bundle.metaWindowStart,
       metaWindowEnd: bundle.metaWindowEnd,
       metrics: data.metrics,
+      entities: data.entities,
       meta: data.meta,
       missingFields: data.missingFields,
       freshnessSec: data.freshnessSec,
@@ -207,14 +204,6 @@ export class SnapshotEngine extends BaseEngine<'snapshot', SnapshotData> {
         note: `freshness=${data.freshnessSec}s`,
       },
     ];
-  }
-
-  protected async identityFromDeps(
-    cycleId: string,
-  ): Promise<{ tenantId: string; campaignId: string }> {
-    const ident = this.identity.get(cycleId);
-    if (!ident) return { tenantId: '', campaignId: '' };
-    return { tenantId: ident.tenantId, campaignId: ident.campaignId };
   }
 
   /**

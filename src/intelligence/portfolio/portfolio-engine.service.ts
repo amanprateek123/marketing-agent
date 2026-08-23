@@ -5,7 +5,10 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { BaseEngine } from '../shared/base-engine';
 import { EngineEventBus } from '../shared/engine-event-bus.service';
 import { EngineRegistry } from '../shared/engine-registry';
-import { SliceRepository } from '../shared/slice-repository.service';
+import {
+  SliceIdentity,
+  SliceRepository,
+} from '../shared/slice-repository.service';
 import { Evidence } from '../shared/engine-context';
 import { ComputeDeps } from '../shared/engine.interface';
 import { ObjectiveKey, PortfolioData } from '../orchestrator/decision-context';
@@ -133,7 +136,9 @@ export class PortfolioEngine extends BaseEngine<'portfolio', PortfolioData> {
   protected async compute(
     deps: ComputeDeps<'portfolio'>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<PortfolioData> {
+    void cycleId;
     const snap = deps.snapshot!;
     const cm =
       (snap.data as { metrics?: { campaignLevel?: Record<string, number> } })
@@ -147,23 +152,21 @@ export class PortfolioEngine extends BaseEngine<'portfolio', PortfolioData> {
     // previous `deps as unknown as {campaignId}` cast always resolved to
     // undefined, so every ranking entry was silently keyed campaignId=''
     // and any downstream lookup by real campaignId could never match.
-    const ident = this.identity.get(cycleId);
-    const campaignId = ident?.campaignId ?? '';
+    const campaignId = identity.campaignId;
 
     // Pull all active rows once, then canonicalize/filter in memory. Stored
     // objective values can be either modern OUTCOME_* enums or legacy Meta
     // names, so a literal Mongo equality would silently miss valid peers.
-    const siblings =
-      this.campaignModel && ident?.tenantId
-        ? await this.campaignModel
-            .find({ tenantId: ident.tenantId, status: 'active' })
-            .select(
-              '_id objective spend roas revenue impressions clicks conversions ctr cpc cpm',
-            )
-            .lean()
-            .exec()
-            .catch(() => [])
-        : [];
+    const siblings = this.campaignModel
+      ? await this.campaignModel
+          .find({ tenantId: identity.tenantId, status: 'active' })
+          .select(
+            '_id objective spend roas revenue impressions clicks conversions ctr cpc cpm',
+          )
+          .lean()
+          .exec()
+          .catch(() => [])
+      : [];
     const siblingRows = siblings as unknown as PortfolioCampaignRow[];
 
     const sameObjective = siblingRows.filter(

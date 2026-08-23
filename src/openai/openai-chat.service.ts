@@ -24,6 +24,27 @@ export interface OpenAIChatResult {
   costUSD: number;
 }
 
+export interface OpenAIStructuredParams<T> {
+  tenantId: string;
+  agentType: AgentType;
+  systemPrompt: string;
+  userMessage: string;
+  /** Short snake_case name recorded by OpenAI for the JSON-schema format. */
+  schemaName: string;
+  /** Strict JSON Schema for the complete response object. */
+  schema: Record<string, unknown>;
+  model?: string;
+  runId?: string;
+  /** Compile-time marker only; parsing and domain validation happen at runtime. */
+  _output?: T;
+}
+
+export interface OpenAIStructuredResult<T> extends OpenAIChatResult {
+  data: T;
+  model: string;
+  responseId?: string;
+}
+
 /**
  * Plain one-shot text-completion equivalent of ClaudeService.runAgent(), used
  * by the creative copy/prompt-writing pipeline. Unlike the Claude Agent SDK's
@@ -46,16 +67,25 @@ export class OpenAIChatService {
 
   async runChat(params: OpenAIChatParams): Promise<OpenAIChatResult> {
     const apiKey = this.configService.get<string>('openai.apiKey');
-    const model = params.model ?? this.configService.get<string>('openai.chatModel') ?? 'gpt-5.1';
+    const model =
+      params.model ??
+      this.configService.get<string>('openai.chatModel') ??
+      'gpt-5.1';
 
     if (!apiKey) {
       throw new Error('OPENAI_API_KEY not configured');
     }
 
-    this.logger.log(`[${params.agentType}] Calling OpenAI chat: tenantId=${params.tenantId} model=${model}`);
+    this.logger.log(
+      `[${params.agentType}] Calling OpenAI chat: tenantId=${params.tenantId} model=${model}`,
+    );
 
     let lastError: unknown;
-    for (let attempt = 1; attempt <= OpenAIChatService.MAX_ATTEMPTS; attempt++) {
+    for (
+      let attempt = 1;
+      attempt <= OpenAIChatService.MAX_ATTEMPTS;
+      attempt++
+    ) {
       try {
         const response = await axios.post(
           'https://api.openai.com/v1/chat/completions',
@@ -65,7 +95,9 @@ export class OpenAIChatService {
               { role: 'system', content: params.systemPrompt },
               { role: 'user', content: params.userMessage },
             ],
-            ...(params.expectJson ? { response_format: { type: 'json_object' } } : {}),
+            ...(params.expectJson
+              ? { response_format: { type: 'json_object' } }
+              : {}),
           },
           {
             headers: {
@@ -81,7 +113,9 @@ export class OpenAIChatService {
         const outputTokens = response.data?.usage?.completion_tokens ?? 0;
         const costUSD = this.estimateCost(model, inputTokens, outputTokens);
 
-        this.logger.log(`[${params.agentType}] OpenAI chat completed: tenantId=${params.tenantId} contentLength=${content.length}`);
+        this.logger.log(
+          `[${params.agentType}] OpenAI chat completed: tenantId=${params.tenantId} contentLength=${content.length}`,
+        );
 
         await this.logUsage({
           tenantId: params.tenantId,
@@ -98,18 +132,159 @@ export class OpenAIChatService {
         lastError = err;
         const status = (err as any)?.response?.status;
         const code = (err as any)?.code;
-        const retriable = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || (typeof status === 'number' && status >= 500);
+        const retriable =
+          code === 'ECONNABORTED' ||
+          code === 'ETIMEDOUT' ||
+          (typeof status === 'number' && status >= 500);
         if (!retriable || attempt === OpenAIChatService.MAX_ATTEMPTS) throw err;
 
         const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15_000);
-        this.logger.warn(`[${params.agentType}] OpenAI chat attempt ${attempt} failed (code=${code} status=${status}); retrying in ${backoffMs}ms`);
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        this.logger.warn(
+          `[${params.agentType}] OpenAI chat attempt ${attempt} failed (code=${code} status=${status}); retrying in ${backoffMs}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
       }
     }
     throw lastError;
   }
 
-  private estimateCost(model: string, inputTokens: number, outputTokens: number): number {
+  /**
+   * One-shot, strict structured output through the Responses API.
+   *
+   * This transport only guarantees syntactically schema-shaped JSON. Callers
+   * must still validate every evidence reference and immutable decision field
+   * against their own allow-listed input before trusting the result.
+   */
+  async runStructured<T>(
+    params: OpenAIStructuredParams<T>,
+  ): Promise<OpenAIStructuredResult<T>> {
+    const apiKey = this.configService.get<string>('openai.apiKey');
+    const model =
+      params.model ??
+      this.configService.get<string>('openai.chatModel') ??
+      'gpt-5.1';
+
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY not configured');
+    }
+
+    this.logger.log(
+      `[${params.agentType}] Calling OpenAI Responses API: tenantId=${params.tenantId} model=${model} schema=${params.schemaName}`,
+    );
+
+    let lastError: unknown;
+    for (
+      let attempt = 1;
+      attempt <= OpenAIChatService.MAX_ATTEMPTS;
+      attempt++
+    ) {
+      try {
+        const response = await axios.post(
+          'https://api.openai.com/v1/responses',
+          {
+            model,
+            store: false,
+            instructions: params.systemPrompt,
+            input: [
+              {
+                role: 'user',
+                content: [{ type: 'input_text', text: params.userMessage }],
+              },
+            ],
+            text: {
+              format: {
+                type: 'json_schema',
+                name: params.schemaName,
+                strict: true,
+                schema: params.schema,
+              },
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: OpenAIChatService.TIMEOUT_MS,
+          },
+        );
+
+        const content = extractResponsesText(response.data);
+        if (!content) {
+          throw new Error('OpenAI Responses API returned no output_text');
+        }
+
+        let data: T;
+        try {
+          data = JSON.parse(content) as T;
+        } catch (err) {
+          throw new Error(
+            `OpenAI structured output was not valid JSON: ${(err as Error).message}`,
+          );
+        }
+
+        const inputTokens = response.data?.usage?.input_tokens ?? 0;
+        const outputTokens = response.data?.usage?.output_tokens ?? 0;
+        const costUSD = this.estimateCost(model, inputTokens, outputTokens);
+
+        try {
+          await this.logUsage({
+            tenantId: params.tenantId,
+            runId: params.runId,
+            agent: params.agentType,
+            model,
+            inputTokens,
+            outputTokens,
+            costUSD,
+          });
+        } catch (err) {
+          // Usage telemetry must not turn a successfully validated analyst
+          // response into a failed intelligence cycle.
+          this.logger.warn(
+            `[${params.agentType}] Usage logging failed: ${(err as Error).message}`,
+          );
+        }
+
+        return {
+          data,
+          content,
+          model,
+          responseId:
+            typeof response.data?.id === 'string'
+              ? response.data.id
+              : undefined,
+          inputTokens,
+          outputTokens,
+          costUSD,
+        };
+      } catch (err) {
+        lastError = err;
+        const status = (err as any)?.response?.status;
+        const code = (err as any)?.code;
+        const retriable =
+          code === 'ECONNABORTED' ||
+          code === 'ETIMEDOUT' ||
+          status === 408 ||
+          status === 409 ||
+          status === 429 ||
+          (typeof status === 'number' && status >= 500);
+        if (!retriable || attempt === OpenAIChatService.MAX_ATTEMPTS) throw err;
+
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 15_000);
+        this.logger.warn(
+          `[${params.agentType}] OpenAI Responses attempt ${attempt} failed (code=${code} status=${status}); retrying in ${backoffMs}ms`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
+    throw lastError;
+  }
+
+  private estimateCost(
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+  ): number {
     // Pricing per million tokens — placeholder estimates, verify against
     // OpenAI's current pricing page; these drift over time.
     const pricing: Record<string, { input: number; output: number }> = {
@@ -117,7 +292,10 @@ export class OpenAIChatService {
       'gpt-5.1-mini': { input: 0.5, output: 2.0 },
     };
     const p = pricing[model] ?? pricing['gpt-5.1'];
-    return (inputTokens / 1_000_000) * p.input + (outputTokens / 1_000_000) * p.output;
+    return (
+      (inputTokens / 1_000_000) * p.input +
+      (outputTokens / 1_000_000) * p.output
+    );
   }
 
   private async logUsage(data: {
@@ -142,4 +320,23 @@ export class OpenAIChatService {
       timestamp: new Date(),
     });
   }
+}
+
+/** REST responses expose content in `output`; some clients also add the
+ * convenience `output_text` field. Accept both without weakening validation. */
+function extractResponsesText(body: unknown): string {
+  const response = body as {
+    output_text?: unknown;
+    output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
+  };
+  if (typeof response?.output_text === 'string') return response.output_text;
+
+  for (const item of response?.output ?? []) {
+    for (const content of item.content ?? []) {
+      if (content.type === 'output_text' && typeof content.text === 'string') {
+        return content.text;
+      }
+    }
+  }
+  return '';
 }

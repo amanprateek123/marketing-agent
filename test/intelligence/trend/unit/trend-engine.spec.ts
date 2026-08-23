@@ -12,7 +12,10 @@ import { SliceRepository } from '../../../../src/intelligence/shared/slice-repos
 
 class TrendHarness extends TrendEngine {
   run(deps: ComputeDeps<'trend'>): Promise<TrendData> {
-    return this.compute(deps, 'cycle-1');
+    return this.compute(deps, 'cycle-1', {
+      tenantId: '91astrology',
+      campaignId: 'campaign-1',
+    });
   }
 }
 
@@ -71,14 +74,6 @@ describe('TrendEngine history depth', () => {
       {} as EngineRegistry,
       snapshotModel,
     );
-    (
-      engine as unknown as {
-        identity: Map<string, { tenantId: string; campaignId: string }>;
-      }
-    ).identity.set('cycle-1', {
-      tenantId: '91astrology',
-      campaignId: 'campaign-1',
-    });
     return { engine, snapshotModel, recentQuery, oldestQuery };
   }
 

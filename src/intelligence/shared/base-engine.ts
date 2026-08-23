@@ -67,7 +67,7 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
    * Entry point. Called by orchestrator (for cycle-driven engines) or
    * directly by the @OnEvent handler in the subclass.
    */
-  async execute(cycleId: string): Promise<void> {
+  async execute(cycleId: string, identityHint?: SliceIdentity): Promise<void> {
     // Load dependencies
     const loaded = await this.sliceRepo.loadManyWithIdentity(
       cycleId,
@@ -88,15 +88,18 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
       }
     }
 
-    // Persisted dependency identity is authoritative. Event handlers keep a
-    // short-lived identity map for the first engine and as a fast-path hint,
-    // but duplicate same-cycle events can overlap and delete that map while a
-    // second invocation is still running. Never persist the empty fallback.
-    const identity = await this.resolveCycleIdentity(
-      cycleId,
-      deps,
-      loaded.identity,
-    );
+    // Persisted dependency identity is authoritative. Event handlers may keep
+    // a short-lived identity map as a fast-path hint, but duplicate same-cycle
+    // events can overlap and delete that map while a second invocation is
+    // still running. Never compute or persist from the empty fallback.
+    const identity = Object.freeze({
+      ...(await this.resolveCycleIdentity(
+        cycleId,
+        deps,
+        loaded.identity,
+        identityHint,
+      )),
+    });
 
     // Check optional skip predicate
     if (this.canRun && !(await this.canRun(cycleId))) {
@@ -118,7 +121,11 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
       // campaign cycles on the same engine instance; subclasses must never
       // infer "the current cycle" from shared mutable state or the first
       // entry in an identity map.
-      const data = await this.compute(deps as ComputeDeps<K>, cycleId);
+      const data = await this.compute(
+        deps as ComputeDeps<K>,
+        cycleId,
+        identity,
+      );
       const slice: EngineContext<TData> = {
         data,
         confidence: clampConfidence(
@@ -169,8 +176,10 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
     cycleId: string,
     deps: Partial<DecisionContext>,
     dependencyIdentity: SliceIdentity | null,
+    identityHint?: SliceIdentity,
   ): Promise<SliceIdentity> {
-    const eventIdentity = await this.identityFromDeps(cycleId, deps);
+    const eventIdentity =
+      identityHint ?? (await this.identityFromDeps(cycleId, deps));
 
     if (isValidSliceIdentity(dependencyIdentity)) {
       if (
@@ -208,6 +217,7 @@ export abstract class BaseEngine<K extends EngineSliceKey, TData>
   protected abstract compute(
     deps: ComputeDeps<K>,
     cycleId: string,
+    identity: SliceIdentity,
   ): Promise<TData>;
 
   /** Confidence formula per each guide's §10. Default is 1.0 if all deps present. */

@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Schema as MongooseSchema } from 'mongoose';
+import type { CampaignSource } from '../../campaigns/schemas/campaign.schema';
 
 export type IntelligenceDecisionDocument =
   HydratedDocument<IntelligenceDecision>;
@@ -23,6 +24,10 @@ export interface IntelligenceDecisionExpectedImpact {
   metric: string;
   deltaPct: number;
   confidence: number;
+  basis?: 'modeled' | 'observed_gap' | 'not_estimated';
+  currentValue?: number;
+  siblingBaselineValue?: number;
+  observedGapPct?: number;
 }
 
 /**
@@ -49,6 +54,9 @@ export class IntelligenceDecision {
   @Prop({ required: true, index: true }) campaignId!: string;
   @Prop() metaCampaignId?: string;
   @Prop() campaignName?: string;
+  /** Manual/Meta-imported campaigns are diagnostic-only and never executable. */
+  @Prop({ enum: ['agent', 'human', 'manual'] })
+  campaignSource?: CampaignSource;
   @Prop({ required: true, index: true }) cycleId!: string;
 
   /** Snapshot pointer this decision was based on. */
@@ -95,6 +103,17 @@ export class IntelligenceDecision {
   @Prop({ default: 0 }) confidence?: number;
   @Prop({ type: [String], default: [] }) gatedBy!: string[];
   @Prop({ required: true, default: true }) requiresHumanApproval!: boolean;
+
+  /**
+   * Step-14 evidence review copied onto the decision for a single coherent UI
+   * read. The canonical copy remains in the explainability engine slice.
+   */
+  @Prop() intelligenceReviewVersion?: string;
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  intelligenceReview?: Record<string, unknown>;
+  @Prop({ type: MongooseSchema.Types.Mixed })
+  intelligenceEvidence?: Record<string, unknown>;
+  @Prop() intelligenceReviewedAt?: Date;
 
   /** Original snapshot of what fired this decision — for review. */
   @Prop({ type: MongooseSchema.Types.Mixed }) evidenceSnapshot?: {

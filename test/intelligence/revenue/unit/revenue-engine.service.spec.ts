@@ -25,7 +25,6 @@ interface CampaignFixture {
 }
 
 interface Harness {
-  identity: Map<string, { tenantId: string; campaignId: string }>;
   compute(
     deps: ComputeDeps<'revenue'>,
     cycleId: string,
@@ -92,12 +91,25 @@ function makeHarness(input?: {
     companyModel,
     campaignModel,
   );
-  const harness = engine as unknown as Harness;
-  harness.identity.set('cycle-1', {
-    tenantId: 'astro',
-    campaignId: 'campaign-1',
-  });
-  return harness;
+  const raw = engine as unknown as {
+    compute(
+      deps: ComputeDeps<'revenue'>,
+      cycleId: string,
+      identity: { tenantId: string; campaignId: string },
+    ): Promise<RevenueOutput>;
+    computeConfidence(
+      deps: ComputeDeps<'revenue'>,
+      output: RevenueOutput,
+    ): number;
+  };
+  return {
+    compute: (deps, cycleId) =>
+      raw.compute(deps, cycleId, {
+        tenantId: 'astro',
+        campaignId: 'campaign-1',
+      }),
+    computeConfidence: (deps, output) => raw.computeConfidence(deps, output),
+  };
 }
 
 function makeDeps(overrides?: {

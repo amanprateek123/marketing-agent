@@ -660,6 +660,101 @@ export interface ToolImpactOverview {
 
   dailyPerformance: ToolImpactDailyPerformance;
 
+  /**
+   * Operational evidence for the intelligence cascade on this exact
+   * tool-owned cohort. These independently-denominated measures deliberately
+   * do not collapse into an invented "AI reliability" score.
+   */
+  brainReliability: {
+    label: 'Operating evidence — not causal uplift or prediction accuracy';
+    window: {
+      days: number;
+      from: string;
+      to: string;
+      cohort: 'exact_verified_tool_launches';
+    };
+    cycleCompleteness: {
+      requiredSteps: 16;
+      cyclesRun: number;
+      statusCompleted: number;
+      failed: number;
+      pending: number;
+      /** Cycles with all sixteen distinct, known engine slices persisted. */
+      fullTraceCycles: number;
+      /** Cycles with at least one but fewer than sixteen known slices. */
+      partialTraceCycles: number;
+      /** Cycles with no known persisted engine slice in this evidence window. */
+      unavailableTraceCycles: number;
+      fullTraceRatePct: number | null;
+    };
+    gateReadiness: {
+      /** Cycles with the current confidence contract and both boolean gates. */
+      evaluatedCycles: number;
+      /** Missing or malformed confidence slices; never treated as a pass. */
+      unavailableCycles: number;
+      recommendPassed: number;
+      recommendHeld: number;
+      recommendPassRatePct: number | null;
+      /** Evidence threshold only; the product still requires human approval. */
+      executionEvidencePassed: number;
+      executionEvidenceHeld: number;
+      topRecommendBlockers: Array<{ code: string; count: number }>;
+    };
+    predictions: {
+      decisions: number;
+      goalAwareDecisions: number;
+      /** Goal-aware rows with a complete, finite expected-impact contract. */
+      completePredictions: number;
+      legacyOrIncomplete: number;
+      contractCoveragePct: number | null;
+      byStatus: Record<
+        'shadow_review' | 'approved' | 'rejected' | 'expired',
+        number
+      >;
+      unrecognizedStatus: number;
+      executionSucceeded: number;
+      executionFailedOrBlocked: number;
+    };
+    outcomes: {
+      scope: 'campaign_cohort_actions_unlinked_to_predictions';
+      recorded: number;
+      due24h: number;
+      measured24h: number;
+      overdue24h: number;
+      notYetDue24h: number;
+      due72h: number;
+      finalized72h: number;
+      overdue72h: number;
+      notYetDue72h: number;
+      conclusive72h: number;
+      byLabel: Record<
+        'improved' | 'worsened' | 'neutral' | 'inconclusive',
+        number
+      >;
+      minimumConclusiveSample: number;
+      improvedRatePct: number | null;
+      reportable: boolean;
+      /** Withheld until an executed action is linked to its prediction. */
+      predictionAccuracyPct: null;
+      limitation: string;
+    };
+    recentCycles: Array<{
+      cycleId: string;
+      campaignId: string;
+      campaignName: string;
+      startedAt: string;
+      status: 'pending' | 'completed' | 'failed';
+      stepsRecorded: number;
+      requiredSteps: 16;
+      confidenceOverall: number | null;
+      recommendGate: 'passed' | 'held' | 'unavailable';
+      /** Evidence threshold only; never permission for automatic execution. */
+      executionEvidenceGate: 'passed' | 'held' | 'unavailable';
+      decisionsWritten: number;
+      reasonsBlocked: string[];
+    }>;
+  };
+
   automation: {
     pipelineRuns: {
       /** Every persisted tenant run record, including records without a campaign. */
@@ -735,6 +830,10 @@ export interface ToolImpactOverview {
         metric: string;
         deltaPct: number;
         confidence: number;
+        basis?: 'modeled' | 'observed_gap' | 'not_estimated';
+        currentValue?: number;
+        siblingBaselineValue?: number;
+        observedGapPct?: number;
       };
       confidence?: number;
       isModelEstimate: true;

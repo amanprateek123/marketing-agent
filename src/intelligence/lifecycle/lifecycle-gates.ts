@@ -1,8 +1,9 @@
-import { LifecycleData, LifecycleStage } from '../orchestrator/decision-context';
+import {
+  LifecycleData,
+  LifecycleStage,
+} from '../orchestrator/decision-context';
 
-const g = (
-  x: Partial<LifecycleData['gates']>,
-): LifecycleData['gates'] => ({
+const g = (x: Partial<LifecycleData['gates']>): LifecycleData['gates'] => ({
   canPause: false,
   canScale: false,
   canReduceBudget: false,
@@ -13,7 +14,10 @@ const g = (
 
 export const LIFECYCLE_GATES: Record<
   LifecycleStage,
-  Pick<LifecycleData, 'allowedActions' | 'blockedActions' | 'monitoringCadenceMinutes' | 'gates'>
+  Pick<
+    LifecycleData,
+    'allowedActions' | 'blockedActions' | 'monitoringCadenceMinutes' | 'gates'
+  >
 > = {
   draft: {
     allowedActions: [],
@@ -40,7 +44,10 @@ export const LIFECYCLE_GATES: Record<
   learning: {
     allowedActions: ['add_creative', 'narrow_placement'],
     blockedActions: [
-      { action: 'pause_ad', reason: 'Meta learning stage; pause resets learning' },
+      {
+        action: 'pause_ad',
+        reason: 'Meta learning stage; pause resets learning',
+      },
       { action: 'pause_adset', reason: 'Meta learning stage' },
       { action: 'scale_adset', reason: 'Wait for learning to complete' },
       { action: 'shift_budget_between_adsets', reason: 'Learning phase' },
@@ -49,19 +56,36 @@ export const LIFECYCLE_GATES: Record<
     gates: g({ canReplaceCreative: true }),
   },
   growing: {
-    allowedActions: ['scale_adset', 'add_creative', 'shift_budget_between_adsets'],
+    allowedActions: [
+      'scale_adset',
+      'add_creative',
+      'shift_budget_between_adsets',
+    ],
     blockedActions: [],
     monitoringCadenceMinutes: 60,
-    gates: g({ canScale: true, canReplaceCreative: true, canAddAudience: true }),
+    gates: g({
+      canScale: true,
+      canReplaceCreative: true,
+      canAddAudience: true,
+    }),
   },
   scaling: {
-    allowedActions: ['scale_adset', 'shift_budget_between_adsets'],
+    allowedActions: [
+      'scale_adset',
+      'shift_budget_between_adsets',
+      'reduce_total_budget',
+    ],
     blockedActions: [],
     monitoringCadenceMinutes: 60,
     gates: g({ canScale: true, canReduceBudget: true }),
   },
   stable: {
-    allowedActions: ['add_creative', 'narrow_placement', 'shift_budget_between_adsets'],
+    allowedActions: [
+      'add_creative',
+      'narrow_placement',
+      'shift_budget_between_adsets',
+      'reduce_total_budget',
+    ],
     blockedActions: [],
     monitoringCadenceMinutes: 120,
     gates: g({
@@ -71,10 +95,13 @@ export const LIFECYCLE_GATES: Record<
     }),
   },
   fatigue: {
-    allowedActions: ['replace_creative', 'add_creative', 'narrow_placement'],
-    blockedActions: [
-      { action: 'scale_adset', reason: 'Fatigue detected' },
+    allowedActions: [
+      'replace_creative',
+      'add_creative',
+      'narrow_placement',
+      'reduce_total_budget',
     ],
+    blockedActions: [{ action: 'scale_adset', reason: 'Fatigue detected' }],
     monitoringCadenceMinutes: 60,
     gates: g({ canReplaceCreative: true, canReduceBudget: true }),
   },
@@ -92,7 +119,9 @@ export const LIFECYCLE_GATES: Record<
   },
   unknown: {
     allowedActions: [],
-    blockedActions: [{ action: '*', reason: 'Lifecycle unknown; insufficient data' }],
+    blockedActions: [
+      { action: '*', reason: 'Lifecycle unknown; insufficient data' },
+    ],
     monitoringCadenceMinutes: 60,
     gates: g({}),
   },

@@ -1,6 +1,9 @@
 import {
+  buildMetricsSourceFingerprint,
   CampaignSyncService,
+  collectGoalResultInputs,
   reconcileCampaignTopLineMetrics,
+  resolveConfiguredAccountCurrency,
 } from './campaign-sync.service';
 
 type TopLineMetrics = Parameters<typeof reconcileCampaignTopLineMetrics>[0];
@@ -99,8 +102,184 @@ function enrichedCampaign(
   };
 }
 
+describe('campaign-sync goal evidence helpers', () => {
+  it('resolves normalized and legacy-bare account currency keys without guessing', () => {
+    expect(
+      resolveConfiguredAccountCurrency(
+        { act_123: 'inr', '456': 'usd' },
+        'act_123',
+      ),
+    ).toBe('INR');
+    expect(
+      resolveConfiguredAccountCurrency(
+        { act_123: 'inr', '456': 'usd' },
+        'act_456',
+      ),
+    ).toBe('USD');
+    expect(
+      resolveConfiguredAccountCurrency({ act_123: 'invalid' }, 'act_123'),
+    ).toBeUndefined();
+  });
+
+  it('retains exact action aliases and gross values without relabeling them', () => {
+    expect(
+      collectGoalResultInputs(
+        [
+          { action_type: 'lead', value: '2' },
+          { action_type: 'lead', value: '1' },
+          { action_type: 'mobile_app_install', value: '7' },
+        ],
+        [{ action_type: 'offsite_conversion.custom.sale', value: '1499.5' }],
+      ),
+    ).toEqual({
+      actionCounts: { lead: 3, mobile_app_install: 7 },
+      actionValuesGross: {
+        'offsite_conversion.custom.sale': 1499.5,
+      },
+    });
+  });
+
+  it('fingerprints query provenance deterministically and changes on window or attribution drift', () => {
+    const base = {
+      source: 'meta_insights',
+      apiVersion: 'v21.0',
+      accountId: 'act_123',
+      level: 'adset' as const,
+      datePreset: 'maximum',
+      useUnifiedAttributionSetting: true,
+      dateStart: '2026-07-01',
+      dateStop: '2026-08-20',
+      attributionSpec: [{ event_type: 'CLICK_THROUGH', window_days: 7 }],
+      revenueAttributionActionTypes: ['purchase', 'omni_purchase'],
+    };
+    const reordered = {
+      ...base,
+      revenueAttributionActionTypes: ['omni_purchase', 'purchase'],
+    };
+    expect(buildMetricsSourceFingerprint(base)).toBe(
+      buildMetricsSourceFingerprint(reordered),
+    );
+    expect(buildMetricsSourceFingerprint(base)).not.toBe(
+      buildMetricsSourceFingerprint({ ...base, dateStop: '2026-08-21' }),
+    );
+  });
+
+  it('builds ad-set and ad rows with exact goal inputs, windows, and distinct revenue bases', () => {
+    const { service } = setup();
+    const rows = (service as any).buildMetaAdSets(
+      {
+        adSets: [
+          {
+            id: 'as-1',
+            name: 'Sales set',
+            status: 'ACTIVE',
+            optimization_goal: 'OFFSITE_CONVERSIONS',
+            attribution_spec: [{ event_type: 'CLICK_THROUGH', window_days: 7 }],
+            promoted_object: { custom_conversion_id: 'cc-1' },
+          },
+        ],
+        adSetInsights: [
+          {
+            adset_id: 'as-1',
+            adset_name: 'Sales set',
+            spend: '500',
+            impressions: '10000',
+            clicks: '200',
+            inline_link_clicks: '160',
+            actions: [{ action_type: 'purchase', value: '4' }],
+            action_values: [{ action_type: 'purchase', value: '1200' }],
+            video_thruplay_watched_actions: [{ value: '90' }],
+            date_start: '2026-07-01',
+            date_stop: '2026-08-20',
+          },
+        ],
+        adInsights: [
+          {
+            adset_id: 'as-1',
+            ad_id: 'ad-1',
+            ad_name: 'Lead proof',
+            spend: '100',
+            impressions: '2000',
+            clicks: '40',
+            inline_link_clicks: '31',
+            actions: [{ action_type: 'purchase', value: '2' }],
+            video_thruplay_watched_actions: [{ value: '20' }],
+            date_start: '2026-07-02',
+            date_stop: '2026-08-19',
+          },
+        ],
+        ads: [{ name: 'Lead proof', status: 'ACTIVE', creative: {} }],
+      },
+      new Set(['purchase']),
+      {
+        revenueAttributionSource: 'standard_event',
+        refundFactor: 0.9,
+        effectiveConversionValue: 250,
+        metricsSyncedAt: new Date('2026-08-20T10:00:00Z'),
+        accountId: 'act_123',
+        currency: 'INR',
+      },
+    );
+
+    expect(rows[0]).toMatchObject({
+      optimizationGoal: 'OFFSITE_CONVERSIONS',
+      inlineLinkClicks: 160,
+      thruplay: 90,
+      dateStart: '2026-07-01',
+      dateStop: '2026-08-20',
+      metricsRowObserved: true,
+      metricsSource: 'meta_enriched_import',
+      metricsCurrency: 'INR',
+      revenueBasis: 'meta_action_value',
+      rawMetaActionValueGross: 1200,
+      rawMetaActionValueNet: 1080,
+      configuredRevenueEstimateNet: null,
+      attributionSpec: [{ event_type: 'CLICK_THROUGH', window_days: 7 }],
+      promotedObject: { custom_conversion_id: 'cc-1' },
+      goalResultInputs: {
+        actionCounts: { purchase: 4 },
+        actionValuesGross: { purchase: 1200 },
+      },
+    });
+    expect(rows[0].ads[0]).toMatchObject({
+      inlineLinkClicks: 31,
+      thruplay: 20,
+      dateStart: '2026-07-02',
+      dateStop: '2026-08-19',
+      revenueBasis: 'configured_conversion_value',
+      rawMetaActionValueGross: null,
+      configuredRevenueEstimateNet: 500,
+      metricsRowObserved: true,
+      metricsCurrency: 'INR',
+    });
+  });
+});
+
 describe('CampaignSyncService.syncFromEnrichedData revenue', () => {
   const conversionTypes = new Set(['purchase']);
+
+  it('uses the enriched campaign account currency as observed provenance', async () => {
+    const { campaignModel, service } = setup();
+    const campaign = {
+      ...enrichedCampaign('currency-campaign', 'Reading'),
+      account_id: '123',
+      account_currency: 'inr',
+    };
+
+    await service.syncFromEnrichedData(
+      'tenant-1',
+      [campaign],
+      conversionTypes,
+      [{ name: 'Reading', active: true, conversionEvent: 'Purchase' }],
+    );
+
+    expect(campaignModel.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metaCampaignId: 'currency-campaign',
+        metricsCurrency: 'INR',
+      }),
+    );
+  });
 
   it('applies each detected product refund factor to fresh Meta action value', async () => {
     const { campaignModel, service } = setup();
@@ -627,7 +806,7 @@ describe('CampaignSyncService recurring per-product attribution', () => {
         },
         complete: true,
       });
-      jest
+      const chunkedFetch = jest
         .spyOn(service as any, 'fetchAllPagesChunked')
         .mockImplementation(async (...args: any[]) =>
           String(args[4]).startsWith('Campaign insights')
@@ -673,6 +852,208 @@ describe('CampaignSyncService recurring per-product attribution', () => {
         revenueAttributionSource: expectedSource,
       });
       expect(finalSet.roas).toBe(expectedRevenue / 1000);
+      const adSetInsightsCall = chunkedFetch.mock.calls.find((args: any[]) =>
+        String(args[4]).startsWith('AdSet insights'),
+      );
+      const adSetInsightsParams = (adSetInsightsCall?.[1] ?? {}) as any;
+      expect(adSetInsightsParams.fields).toContain('inline_link_clicks');
+      expect(adSetInsightsParams.fields).toContain(
+        'video_thruplay_watched_actions',
+      );
+      expect(adSetInsightsParams.use_unified_attribution_setting).toBe('true');
     },
   );
+
+  it('preserves prior ad-set/ad values but marks omitted insight rows non-observed', async () => {
+    const oldMetricsSyncedAt = new Date('2026-08-20T08:00:00Z');
+    const existing = {
+      _id: 'internal-id',
+      tenantId: 'tenant-1',
+      metaCampaignId: 'active-campaign',
+      metaAccountId: 'act_123',
+      productName: 'Resolved Product',
+      status: 'active',
+      spend: 900,
+      revenue: 1000,
+      revenueBasis: 'meta_action_value',
+      metricsCurrency: 'USD',
+      metricsSyncedAt: oldMetricsSyncedAt,
+      metaAdSets: [
+        {
+          id: 'as-1',
+          spend: 321,
+          revenue: 444,
+          metricsCurrency: 'USD',
+          dateStart: '2026-07-01',
+          dateStop: '2026-08-20',
+          metricsSyncedAt: oldMetricsSyncedAt,
+          metricsSourceFingerprint: 'sha256:previous-adset',
+          ads: [
+            {
+              id: 'ad-1',
+              spend: 123,
+              revenue: 222,
+              metricsCurrency: 'USD',
+              dateStart: '2026-07-02',
+              dateStop: '2026-08-19',
+              metricsSyncedAt: oldMetricsSyncedAt,
+              metricsSourceFingerprint: 'sha256:previous-ad',
+              last7d: {
+                spend: 40,
+                metricsCurrency: 'USD',
+                metricsSyncedAt: oldMetricsSyncedAt,
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const campaignModel = {
+      find: jest.fn(() => queryReturning([existing])),
+      findOne: jest.fn(() => queryReturning(null)),
+      updateOne: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
+      updateMany: jest.fn(),
+    };
+    const service = new CampaignSyncService(
+      campaignModel as any,
+      { find: jest.fn(() => queryReturning([])) } as any,
+    );
+    jest.spyOn(service as any, 'fetchAllPages').mockResolvedValue({
+      data: {
+        data: [
+          {
+            id: 'active-campaign',
+            name: 'Active campaign',
+            status: 'ACTIVE',
+            effective_status: 'ACTIVE',
+            objective: 'OUTCOME_SALES',
+          },
+        ],
+      },
+      complete: true,
+    });
+    jest
+      .spyOn(service as any, 'fetchAllPagesChunked')
+      .mockImplementation(async (...args: any[]) => {
+        const label = String(args[4]);
+        if (label.startsWith('Campaign insights')) {
+          return {
+            data: {
+              data: [
+                {
+                  campaign_id: 'active-campaign',
+                  spend: '950',
+                  impressions: '10000',
+                  clicks: '200',
+                  actions: [{ action_type: 'purchase', value: '5' }],
+                  action_values: [{ action_type: 'purchase', value: '1100' }],
+                  date_start: '2026-07-01',
+                  date_stop: '2026-08-21',
+                },
+              ],
+            },
+            complete: true,
+          };
+        }
+        if (label.startsWith('AdSets')) {
+          return {
+            data: {
+              data: [
+                {
+                  id: 'as-1',
+                  campaign_id: 'active-campaign',
+                  name: 'Sales set',
+                  status: 'ACTIVE',
+                  effective_status: 'ACTIVE',
+                  optimization_goal: 'OFFSITE_CONVERSIONS',
+                  attribution_spec: [
+                    { event_type: 'CLICK_THROUGH', window_days: 7 },
+                  ],
+                },
+              ],
+            },
+            complete: true,
+          };
+        }
+        if (label.startsWith('Ads ')) {
+          return {
+            data: {
+              data: [
+                {
+                  id: 'ad-1',
+                  adset_id: 'as-1',
+                  name: 'Proof ad',
+                  status: 'ACTIVE',
+                  effective_status: 'ACTIVE',
+                  creative: {},
+                },
+              ],
+            },
+            complete: true,
+          };
+        }
+        return { data: { data: [] }, complete: false };
+      });
+    const timeout = jest.spyOn(global, 'setTimeout').mockImplementation(((
+      callback: () => void,
+    ) => {
+      callback();
+      return 0 as any;
+    }) as any);
+
+    try {
+      await service.syncActiveCampaigns({
+        tenantId: 'tenant-1',
+        meta: {
+          accessToken: 'token',
+          accountId: '123',
+          accountCurrencies: { act_123: 'inr' },
+        },
+        products: [
+          {
+            name: 'Resolved Product',
+            active: true,
+            conversionEvent: 'Purchase',
+            conversionValue: 100,
+            refundRatePercent: 0,
+          },
+        ],
+      } as any);
+    } finally {
+      timeout.mockRestore();
+    }
+
+    const finalSet = campaignModel.updateOne.mock.calls.at(-1)?.[1].$set;
+    expect(finalSet.metricsCurrency).toBe('INR');
+    const adSet = finalSet.metaAdSets[0];
+    expect(adSet).toMatchObject({
+      spend: 321,
+      revenue: 444,
+      dateStart: '2026-07-01',
+      dateStop: '2026-08-20',
+      metricsRowObserved: false,
+      metricsFetchComplete: false,
+      metricsState: 'preserved',
+      metricsSyncedAt: oldMetricsSyncedAt,
+      metricsSourceFingerprint: 'sha256:previous-adset',
+      metricsCurrency: 'INR',
+    });
+    expect(adSet.ads[0]).toMatchObject({
+      spend: 123,
+      revenue: 222,
+      dateStart: '2026-07-02',
+      dateStop: '2026-08-19',
+      metricsRowObserved: false,
+      metricsFetchComplete: false,
+      metricsState: 'preserved',
+      metricsSyncedAt: oldMetricsSyncedAt,
+      metricsSourceFingerprint: 'sha256:previous-ad',
+      metricsCurrency: 'INR',
+      last7d: {
+        spend: 40,
+        metricsCurrency: 'INR',
+        metricsSyncedAt: oldMetricsSyncedAt,
+      },
+    });
+  });
 });
