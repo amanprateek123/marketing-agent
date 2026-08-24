@@ -52,6 +52,39 @@ export interface InsightsAdSetSnapshot {
   ads: InsightsAdSnapshot[];
 }
 
+/** One segment inside a breakdown — an age bucket, an hour, a placement. */
+export interface InsightsBreakdownRow {
+  /** Human-readable segment label, e.g. "25-34 female" or "monday". */
+  segment: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  ctr: number | null;
+  conversions: number;
+  /** Null when Meta returned no trusted revenue for this segment. */
+  revenue: number | null;
+  cpa: number | null;
+  roas: number | null;
+}
+
+/**
+ * Performance split along one dimension. Deep-sync already stores these per
+ * campaign; without them the analyst can only see totals and has to answer
+ * "which age group buys?" or "what time converts?" with nothing at all.
+ */
+export interface InsightsBreakdown {
+  /** age_gender | placement | region | country | hourly | dow | creative copy. */
+  dimension: string;
+  /** Insights window these rows cover, e.g. "last_30d". */
+  window: string;
+  /** When Meta was last read for this dimension, so stale splits are visible. */
+  fetchedAt: string | null;
+  /** Segments carried, highest spend first. */
+  rows: InsightsBreakdownRow[];
+  /** Set when lower-spend segments were dropped to keep the payload small. */
+  omittedSegments: number;
+}
+
 export interface InsightsCampaignSnapshot {
   campaignId: string;
   metaCampaignId: string | null;
@@ -76,6 +109,12 @@ export interface InsightsCampaignSnapshot {
   dataAsOf: string | null;
   launchedAt: string | null;
   adSets: InsightsAdSetSnapshot[];
+  /**
+   * Performance splits for this campaign. Empty when deep-sync has not yet
+   * recorded any — which the analyst must report as "not collected" rather
+   * than answering the question from campaign totals.
+   */
+  breakdowns: InsightsBreakdown[];
 }
 
 /** What the UI shows in the right-hand panel to prove the right target was read. */

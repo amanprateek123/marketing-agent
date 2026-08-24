@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
+import {
+  BreakdownSnapshot,
+  BreakdownSnapshotDocument,
+} from '../campaigns/schemas/breakdown-snapshot.schema';
 import { TenantEconomicsService } from '../common/economics/tenant-economics.service';
 import { OpenAIChatService } from '../openai/openai-chat.service';
 import { AgentType } from '../claude/claude.types';
@@ -9,6 +13,8 @@ import {
   InsightsAdSetSnapshot,
   InsightsAdSnapshot,
   InsightsAskResult,
+  InsightsBreakdown,
+  InsightsBreakdownRow,
   InsightsCampaignSnapshot,
   InsightsResolutionMethod,
   InsightsResolvedContext,
@@ -17,12 +23,35 @@ import {
 /** Ad sets/ads carried per campaign. Enough to reason with, small enough to send. */
 const MAX_ADSETS = 12;
 const MAX_ADS_PER_ADSET = 8;
+/**
+ * Segments carried per breakdown. Region alone returns 36 Indian states and
+ * placement 33 combinations; the long tail is almost all near-zero spend, so
+ * the top slice by spend answers the question at a fraction of the payload.
+ */
+const MAX_BREAKDOWN_ROWS = 12;
+/** Campaign-level splits deep-sync records, in the order an operator asks for them. */
+const CAMPAIGN_BREAKDOWNS = [
+  'age_gender',
+  'placement',
+  'region',
+  'hourly',
+  'dow',
+  'country',
+] as const;
 /** Metrics older than this are called out rather than quietly presented as current. */
 const STALE_AFTER_HOURS = 36;
 
 const SYSTEM_PROMPT = `You are Meridian's campaign analyst. You answer questions about advertising campaigns that have already run.
 
-You are given ONE campaign as JSON: its totals, its ad sets, and its ads. Answer only from that JSON.
+You are given ONE campaign as JSON: its totals, its ad sets, its ads, and its breakdowns. Answer only from that JSON.
+
+About breakdowns:
+- "breakdowns" splits this campaign's performance along one dimension at a time: age_gender (age and gender), placement (where the ad showed), region and country (where the buyer was), hourly (hour of day), dow (day of week).
+- Use them for questions about who converts, where, and when. Name the winning and losing segment explicitly, with its spend and its result.
+- Each breakdown carries only its highest-spending segments. When omittedSegments is above zero, say that smaller segments exist and were not read.
+- Segments are not independent: the same spend appears in every dimension. Never add figures across two breakdowns.
+- Each breakdown covers its own "window" — say which period the split refers to when it differs from the campaign totals.
+- If "breakdowns" is empty or lacks the dimension asked about, say that split has not been collected for this campaign. Never approximate it from campaign or ad set totals.
 
 Hard rules:
 - Never invent a number. Every figure you state must appear in the JSON.
@@ -50,6 +79,8 @@ export class CampaignInsightsService {
   constructor(
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
+    @InjectModel(BreakdownSnapshot.name)
+    private readonly breakdownModel: Model<BreakdownSnapshotDocument>,
     private readonly economics: TenantEconomicsService,
     private readonly openAIChatService: OpenAIChatService,
   ) {}
@@ -320,6 +351,11 @@ export class CampaignInsightsService {
       // Economics are optional context; never block an answer on them.
     }
 
+    const breakdowns = await this.loadBreakdowns(
+      tenantId,
+      c.metaCampaignId ?? null,
+    );
+
     const adSets: InsightsAdSetSnapshot[] = (c.metaAdSets ?? [])
       .slice(0, MAX_ADSETS)
       .map((a: Record<string, any>) => ({
@@ -382,7 +418,78 @@ export class CampaignInsightsService {
       dataAsOf: c.dataAsOf ?? c.syncedAt?.toISOString?.() ?? null,
       launchedAt: c.launchedAt?.toISOString?.() ?? null,
       adSets,
+      breakdowns,
     };
+  }
+
+  /**
+   * Campaign-level performance splits. Rows are already aggregated by
+   * deep-sync, so this is a lookup and a sort — no metric is recomputed here,
+   * which keeps these numbers identical to the ones the audit loop reasons on.
+   */
+  private async loadBreakdowns(
+    tenantId: string,
+    metaCampaignId: string | null,
+  ): Promise<InsightsBreakdown[]> {
+    if (!metaCampaignId) return [];
+    let docs: Array<Record<string, any>>;
+    try {
+      docs = await this.breakdownModel
+        .find({
+          tenantId,
+          level: 'campaign',
+          entityId: metaCampaignId,
+          breakdownType: { $in: [...CAMPAIGN_BREAKDOWNS] },
+        })
+        .lean()
+        .exec();
+    } catch (err) {
+      // A missing split must never cost the operator the whole answer.
+      this.logger.warn(
+        `Breakdown load failed for tenantId=${tenantId} campaign=${metaCampaignId}: ${(err as Error).message}`,
+      );
+      return [];
+    }
+
+    const order = new Map(CAMPAIGN_BREAKDOWNS.map((t, i) => [t as string, i]));
+    return docs
+      .sort(
+        (a, b) =>
+          (order.get(a.breakdownType) ?? 99) - (order.get(b.breakdownType) ?? 99),
+      )
+      .map((doc) => {
+        // Zero-spend segments are Meta reporting a cell it never delivered to.
+        // They add rows without adding information, and they dilute the top-N.
+        const spent = (doc.rows ?? []).filter(
+          (r: Record<string, any>) => (num(r.spend) ?? 0) > 0,
+        );
+        const ranked = [...spent].sort(
+          (a, b) => (num(b.spend) ?? 0) - (num(a.spend) ?? 0),
+        );
+        const kept = ranked.slice(0, MAX_BREAKDOWN_ROWS);
+        return {
+          dimension: doc.breakdownType,
+          window: doc.window ?? 'unknown',
+          fetchedAt: doc.fetchedAt?.toISOString?.() ?? null,
+          omittedSegments: ranked.length - kept.length,
+          rows: kept.map(
+            (r: Record<string, any>): InsightsBreakdownRow => ({
+              segment: segmentLabel(r.keys ?? {}),
+              spend: round2(num(r.spend) ?? 0) ?? 0,
+              impressions: num(r.impressions) ?? 0,
+              clicks: num(r.clicks) ?? 0,
+              ctr: round2(num(r.ctr)),
+              conversions: num(r.conversions) ?? 0,
+              // revenue is deliberately nullable upstream: null means Meta
+              // returned no trusted return for the cell, which is not ₹0.
+              revenue: round2(num(r.revenue)),
+              cpa: round2(num(r.cpa)),
+              roas: round2(num(r.roas)),
+            }),
+          ),
+        };
+      })
+      .filter((b) => b.rows.length > 0);
   }
 
   private buildCaveats(s: InsightsCampaignSnapshot): string[] {
@@ -422,4 +529,38 @@ export class CampaignInsightsService {
 
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** Keeps long decimals out of the payload without changing what a figure means. */
+function round2(value: number | null): number | null {
+  return value === null ? null : Math.round(value * 100) / 100;
+}
+
+/**
+ * Collapse a breakdown row's key object into one label the analyst can quote
+ * back verbatim. Meta names the same idea differently per dimension, so the
+ * known keys are joined in a fixed order and anything unrecognised still
+ * appears rather than being silently dropped.
+ */
+function segmentLabel(keys: Record<string, unknown>): string {
+  const ordered = [
+    'age',
+    'gender',
+    'region',
+    'country',
+    'publisherPlatform',
+    'platformPosition',
+    'devicePlatform',
+    'hour',
+    'dow',
+    'assetText',
+  ];
+  const parts = ordered
+    .map((k) => keys[k])
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+  if (parts.length) return parts.join(' · ');
+  const fallback = Object.values(keys).filter(
+    (v): v is string => typeof v === 'string' && v.trim().length > 0,
+  );
+  return fallback.length ? fallback.join(' · ') : 'unknown';
 }

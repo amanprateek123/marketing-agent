@@ -8,6 +8,10 @@ import { CommonModule } from '../common/common.module';
 import { CreativeModule } from '../creative/creative.module';
 import { Campaign, CampaignSchema } from '../campaigns/schemas/campaign.schema';
 import {
+  BreakdownSnapshot,
+  BreakdownSnapshotSchema,
+} from '../campaigns/schemas/breakdown-snapshot.schema';
+import {
   CreativeBrief,
   CreativeBriefSchema,
 } from '../pipeline/schemas/creative-brief.schema';
@@ -35,6 +39,7 @@ import {
       { name: CreativeBrief.name, schema: CreativeBriefSchema },
       { name: PipelineRun.name, schema: PipelineRunSchema },
       { name: Campaign.name, schema: CampaignSchema },
+      { name: BreakdownSnapshot.name, schema: BreakdownSnapshotSchema },
     ]),
     BullModule.registerQueue({ name: CAMPAIGN_COPILOT_BUILD }),
     ClaudeModule,
