@@ -591,9 +591,20 @@ export function evaluateCopilotReadiness(input: {
       plan.newProduct?.conversionEvent;
     const conversionValue =
       product?.conversionValue ?? plan.newProduct?.conversionValue;
-    if (!conversionEvent?.trim())
+    // A configured custom conversion IS the optimization target: the ad set is
+    // built with promoted_object.custom_conversion_id and the event name is
+    // never sent to Meta (see meta-ads.service — "takes priority over
+    // conversionEvent"). Meta's own designation for that setup is the literal
+    // string "CustomEvent", so name-matching it against purchase keywords
+    // blocked a correctly-configured product on a field the build ignores.
+    const customConversionId =
+      product?.customConversionId ?? plan.newProduct?.customConversionId;
+    if (customConversionId?.trim()) {
+      // Purchase-compatibility is defined on the custom conversion itself,
+      // inside Meta. Nothing here can or should second-guess it.
+    } else if (!conversionEvent?.trim()) {
       addMissing(missingFields, 'product.conversionEvent');
-    else if (
+    } else if (
       !/purchase|order.*complete|payment.*complete|sale/i.test(conversionEvent)
     ) {
       blockers.push(
