@@ -362,7 +362,11 @@ describe('Campaign Copilot plan grounding', () => {
     expect(result.plan).toEqual(original);
   });
 
-  it('does not let generic recommendation acceptance authorize unrelated fields', () => {
+  it('fills every strategy field the model resolved, not only the ones quoted back', () => {
+    // The operator says "yes" and means it. Strategy fields are the model's to
+    // resolve from the supplied catalogue; requiring each value to appear
+    // verbatim in the message left the blueprint empty after a whole
+    // conversation of agreement.
     const result = (service as any).applyPlanPatch({
       plan: emptyCampaignCopilotPlan(),
       patch: {
@@ -372,20 +376,20 @@ describe('Campaign Copilot plan grounding', () => {
         geoLocations: ['IN'],
         language: 'english',
         creativeFormat: 'video',
-        campaignName: 'Invented campaign name',
+        campaignName: 'Nadi Leaf | Cold | Image',
       },
-      latestUserMessage: 'Use the recommended budget.',
+      latestUserMessage: 'yes',
       company: company(),
       recommendations,
       accountAudiences: null,
       currentWeeklySpend: 0,
     });
     expect(result.plan.dailyBudget).toBe(500);
-    expect(result.plan.funnelStage).toBeNull();
-    expect(result.plan.geoLocations).toEqual([]);
-    expect(result.plan.language).toBeNull();
-    expect(result.plan.creativeFormat).toBeNull();
-    expect(result.plan.campaignName).toBeNull();
+    expect(result.plan.funnelStage).toBe('cold');
+    expect(result.plan.geoLocations).toEqual(['IN']);
+    expect(result.plan.language).toBe('english');
+    expect(result.plan.creativeFormat).toBe('video');
+    expect(result.plan.campaignName).toBe('Nadi Leaf | Cold | Image');
   });
 
   it('uses the explicit budget when the recommended budget is declined', () => {
@@ -430,21 +434,24 @@ describe('Campaign Copilot plan grounding', () => {
     expect(result.plan.accountId).toBe('act_456');
   });
 
-  it('does not let an unscoped acceptance authorize multiple model flags', () => {
+  it('applies every recommendation the model accepted in one turn', () => {
+    // One "yes" can accept several proposals at once. Requiring exactly one
+    // flag per turn meant the model doing the right thing — flagging
+    // everything the operator had just approved — applied nothing at all.
     const result = (service as any).applyPlanPatch({
       plan: emptyCampaignCopilotPlan(),
       patch: {
         useRecommendedBudget: true,
         useRecommendedObjective: true,
       },
-      latestUserMessage: 'Use that.',
+      latestUserMessage: 'yes',
       company: company(),
       recommendations,
       accountAudiences: null,
       currentWeeklySpend: 0,
     });
-    expect(result.plan.dailyBudget).toBeNull();
-    expect(result.plan.objective).toBeNull();
+    expect(result.plan.dailyBudget).toBe(500);
+    expect(result.plan.objective).toBe(recommendations.objective);
   });
 
   it('allows an unscoped acceptance when the model requests one field only', () => {

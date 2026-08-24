@@ -18,6 +18,7 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { MetaAudience } from '../companies/schemas/company.types';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import {
+  MetaAdAccountSummary,
   MetaCustomAudience,
   MetaPageSummary,
   MetaAdsService,
@@ -41,7 +42,6 @@ import {
   COPILOT_OPTIMIZATION_GOAL,
   configuredAccountIds,
   evaluateCopilotReadiness,
-  explicitlyAcceptsRecommendation,
   findConfiguredProduct,
   isAudienceType,
   isCreativeFormat,
@@ -65,6 +65,16 @@ interface RuntimeContext {
   accountAudiencesVerified: boolean;
   pages: MetaPageSummary[] | null;
   pagesVerified: boolean;
+  /**
+   * Configured ad accounts resolved to their live Meta names. Without this the
+   * turn prompt carries bare numeric ids, and an operator saying "use the
+   * Mayank account" leaves the model to guess which id that is — it invents a
+   * mapping, the id gate rejects it, and the account silently never binds.
+   * Null when the live lookup failed: an unverified name must never be
+   * accepted as grounding for an account choice.
+   */
+  accounts: MetaAdAccountSummary[] | null;
+  accountsVerified: boolean;
 }
 
 @Injectable()
@@ -392,6 +402,7 @@ export class CampaignCopilotService {
           currentWeeklySpend: before.currentWeeklySpend,
           accountAudiences: before.accountAudiences,
           pages: before.pages,
+          accounts: before.accounts,
           session: locked,
           recommendations,
           readiness,
@@ -418,6 +429,7 @@ export class CampaignCopilotService {
         company: before.company,
         recommendations,
         accountAudiences: before.accountAudiences,
+        accounts: before.accounts,
         currentWeeklySpend: before.currentWeeklySpend,
       });
       // Most turns keep the same account. Reuse the already-verified runtime
@@ -516,46 +528,16 @@ export class CampaignCopilotService {
     company: CompanyDocument;
     recommendations: CampaignCopilotRecommendations;
     accountAudiences: MetaAudience[] | null;
+    accounts?: MetaAdAccountSummary[] | null;
     currentWeeklySpend: number;
   }): { plan: CampaignCopilotPlan; notes: string[] } {
     const plan = structuredClone(input.plan);
     const patch = input.patch ?? {};
     const notes: string[] = [];
     const latest = input.latestUserMessage;
-    // Numbers are only accepted when the operator actually typed them, which
-    // stops the model inventing a price. Digit-group separators have to be
-    // normalized first, though: "₹1,299" is extracted as 1299, and a raw
-    // substring test against "1,299" fails — silently dropping a value the
-    // operator clearly supplied. Handles Indian grouping ("1,29,999") too.
-    const latestDigitsNormalized = latest.replace(/(\d)[, \s](?=\d)/g, '$1');
-    const mentionsNumber = (value: unknown): boolean => {
-      const n = Number(value);
-      if (!Number.isFinite(n)) return false;
-      const asText = String(n);
-      return latest.includes(asText) || latestDigitsNormalized.includes(asText);
-    };
-    // The initial greeting may explain available choices but cannot make any
-    // choice on the operator's behalf.
+    // The opening greeting carries no operator intent, so it may explain the
+    // available choices but must not make any of them.
     if (!latest.trim()) return { plan, notes };
-    const recommendedSubjects = (
-      [
-        ['budget', patch.useRecommendedBudget],
-        ['objective', patch.useRecommendedObjective],
-        ['account', patch.useRecommendedAccount],
-        ['audience', patch.useRecommendedAudience],
-        ['format', patch.useRecommendedCreativeFormat],
-      ] as const
-    )
-      .filter(([, requested]) => requested)
-      .map(([subject]) => subject);
-    const acceptsRecommendation = (
-      subject: (typeof recommendedSubjects)[number],
-    ) =>
-      explicitlyAcceptsRecommendation(
-        latest,
-        subject,
-        recommendedSubjects.length === 1 && recommendedSubjects[0] === subject,
-      );
 
     const requestedProduct =
       typeof patch.productName === 'string' ? patch.productName.trim() : '';
@@ -563,26 +545,11 @@ export class CampaignCopilotService {
       const configured = findConfiguredProduct(input.company, requestedProduct);
       const productWasChanged =
         normalizeName(plan.productName) !== normalizeName(requestedProduct);
-      const productWasNamed = normalizeName(latest).includes(
-        normalizeName(requestedProduct),
-      );
-      const activeProducts = (input.company.products ?? []).filter(
-        (product) => product.active !== false,
-      );
-      const soleProductAccepted =
-        explicitlyAcceptsRecommendation(
-          latest,
-          'product',
-          recommendedSubjects.length === 0,
-        ) &&
-        activeProducts.length === 1 &&
-        normalizeName(activeProducts[0].name) ===
-          normalizeName(requestedProduct);
-      if (
-        configured &&
-        patch.productMode !== 'new' &&
-        (productWasNamed || soleProductAccepted)
-      ) {
+      // The model resolves which product the operator meant — "nadi leaf" is
+      // its job to match to "Nadi Leaf Reading", and it does that well. What
+      // is checked here is only that the resolved product genuinely exists in
+      // this tenant's catalogue; an invented one still cannot enter the plan.
+      if (configured && patch.productMode !== 'new') {
         plan.productMode = 'existing';
         plan.productName = configured.name;
         // Existing canonical URL is authoritative. A new URL is accepted only
@@ -596,10 +563,10 @@ export class CampaignCopilotService {
         }
       } else if (
         patch.productMode === 'new' &&
-        productWasNamed &&
-        /\b(new|create|add|not (available|listed|there)|doesn'?t exist)\b/i.test(
-          latest,
-        )
+        // A brand-new product has no catalogue entry to check the name
+        // against, so the operator's own words are the only ground truth
+        // there is. Everything else on the plan is the model's to resolve.
+        normalizeName(latest).includes(normalizeName(requestedProduct))
       ) {
         const switchingToNewProduct =
           productWasChanged || plan.productMode !== 'new';
@@ -633,16 +600,21 @@ export class CampaignCopilotService {
       input.company,
       plan.productName,
     );
+    const sameUrl = (
+      a: string | null | undefined,
+      b: string | null | undefined,
+    ) =>
+      (a ?? '').trim().replace(/\/+$/, '').toLowerCase() ===
+      (b ?? '').trim().replace(/\/+$/, '').toLowerCase();
     if (isHttpUrl(patch.landingUrl)) {
-      if (!latest.includes(patch.landingUrl)) {
-        notes.push(
-          'I ignored a landing URL that was not present in your message.',
-        );
-      } else if (selectedProduct?.landingUrl) {
-        plan.landingUrl = selectedProduct.landingUrl;
-        if (selectedProduct.landingUrl !== patch.landingUrl) {
+      if (selectedProduct?.landingUrl?.trim()) {
+        // The configured product's own URL stays authoritative — the model may
+        // surface it, never replace it. Only a genuine divergence is worth
+        // reporting; echoing the same URL back is a no-op.
+        plan.landingUrl = selectedProduct.landingUrl.trim();
+        if (!sameUrl(selectedProduct.landingUrl, patch.landingUrl)) {
           notes.push(
-            `The existing product URL remains authoritative (${selectedProduct.landingUrl}); this flow will not silently overwrite it.`,
+            `The existing product URL remains authoritative (${selectedProduct.landingUrl.trim()}); this flow will not silently overwrite it.`,
           );
         }
       } else {
@@ -653,40 +625,42 @@ export class CampaignCopilotService {
     if (patch.newProduct && (plan.productMode === 'new' || selectedProduct)) {
       const current = plan.newProduct ?? this.emptyNewProduct();
       const next = patch.newProduct;
-      if (
-        typeof next.description === 'string' &&
-        next.description.trim() &&
-        normalizeName(latest).includes(normalizeName(next.description))
-      )
+      // Descriptive setup fields come straight from the model — it reads them
+      // out of the supplied catalogue, and the operator sees every one of them
+      // in the blueprint before anything is built.
+      if (typeof next.description === 'string' && next.description.trim())
         current.description = next.description.trim().slice(0, 2_000);
-      if (
-        Number.isFinite(Number(next.price)) &&
-        Number(next.price) > 0 &&
-        mentionsNumber(next.price)
-      )
+      if (Number.isFinite(Number(next.price)) && Number(next.price) > 0)
         current.price = Number(next.price);
-      if (
-        typeof next.currency === 'string' &&
-        next.currency.trim() &&
-        (latest.toLowerCase().includes(next.currency.toLowerCase()) ||
-          /₹|rupees?|\binr\b/i.test(latest))
-      )
+      if (typeof next.currency === 'string' && next.currency.trim())
         current.currency = next.currency.trim().toUpperCase().slice(0, 3);
       if (
         typeof next.conversionEvent === 'string' &&
-        next.conversionEvent.trim() &&
-        (latest.toLowerCase().includes(next.conversionEvent.toLowerCase()) ||
-          /\b(purchase|lead|registration|subscribe|conversion event)\b/i.test(
-            latest,
-          ))
+        next.conversionEvent.trim()
       )
         current.conversionEvent = next.conversionEvent.trim().slice(0, 100);
       if (
         Number.isFinite(Number(next.conversionValue)) &&
-        Number(next.conversionValue) > 0 &&
-        mentionsNumber(next.conversionValue)
+        Number(next.conversionValue) > 0
       )
         current.conversionValue = Number(next.conversionValue);
+      // Meta identifiers are the exception to model-driven filling. A wrong
+      // pixel id looks exactly like a right one and produces a live campaign
+      // that tracks nothing, and unlike every other field there is no
+      // catalogue to check it against. So an id must come from somewhere real:
+      // already on file for this tenant, or transcribed by the operator.
+      const knownIdentifiers = new Set(
+        [
+          input.company.meta?.pixelId,
+          input.company.meta?.pageId,
+          selectedProduct?.pixelId,
+          selectedProduct?.customConversionId,
+          selectedProduct?.pageId,
+          selectedProduct?.metaAppId,
+        ]
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim()),
+      );
       for (const field of [
         'pixelId',
         'customConversionId',
@@ -695,13 +669,18 @@ export class CampaignCopilotService {
         'metaAppStoreUrl',
       ] as const) {
         const value = next[field];
-        if (typeof value === 'string' && value.trim()) {
-          if (field === 'metaAppStoreUrl') {
-            if (isHttpUrl(value) && latest.includes(value))
-              current[field] = value;
-          } else if (latest.includes(value)) {
-            current[field] = value.trim();
-          }
+        if (typeof value !== 'string' || !value.trim()) continue;
+        if (field === 'metaAppStoreUrl') {
+          if (isHttpUrl(value)) current[field] = value.trim();
+        } else if (
+          knownIdentifiers.has(value.trim()) ||
+          latest.includes(value.trim())
+        ) {
+          current[field] = value.trim();
+        } else {
+          notes.push(
+            `I ignored a ${field} that is not on file for this tenant — paste it from Meta, or add it in settings first.`,
+          );
         }
       }
       // For an existing product this object is a fill-missing-only patch. The
@@ -723,19 +702,7 @@ export class CampaignCopilotService {
     }
 
     if (isObjective(patch.objective)) {
-      const aliases: Record<string, RegExp> = {
-        sales_purchase: /\b(sales?|purchase|conversion)\b/i,
-        leads: /\b(leads?|registration)\b/i,
-        traffic: /\btraffic|landing page views?|clicks?\b/i,
-        engagement: /\bengagement|post engagement\b/i,
-        awareness: /\bawareness|ad recall\b/i,
-        reach: /\breach\b/i,
-        app_promotion: /\bapp promotion|app installs?|app engagement\b/i,
-      };
-      if (
-        aliases[patch.objective].test(latest) ||
-        (patch.useRecommendedObjective && acceptsRecommendation('objective'))
-      ) {
+      {
         if (plan.objective !== patch.objective) {
           plan.appPlatform = null;
           const supplementalEvent = plan.newProduct?.conversionEvent ?? '';
@@ -753,34 +720,27 @@ export class CampaignCopilotService {
         }
         plan.objective = patch.objective;
       }
-    } else if (
-      patch.useRecommendedObjective &&
-      acceptsRecommendation('objective')
-    ) {
+    } else if (patch.useRecommendedObjective) {
       plan.objective = input.recommendations.objective;
     }
 
     const accounts = configuredAccountIds(input.company);
     let accountChanged = false;
-    const acceptedRecommendedAccount =
-      patch.useRecommendedAccount && acceptsRecommendation('account');
-    const proposedAccount = acceptedRecommendedAccount
-      ? input.recommendations.accountId
-      : normalizeAccountId(patch.accountId);
+    // Same precedence as the budget: a named account wins over the flag.
+    const proposedAccount =
+      normalizeAccountId(patch.accountId) ??
+      (patch.useRecommendedAccount ? input.recommendations.accountId : null);
     if (proposedAccount) {
-      const directlyNamed =
-        latest.includes(proposedAccount) ||
-        latest.includes(proposedAccount.replace(/^act_/, ''));
-      if (
-        accounts.includes(proposedAccount) &&
-        (directlyNamed || acceptedRecommendedAccount)
-      ) {
+      // The model resolves "the Mayank account" to an id using the verified
+      // id↔name list in its context. Only tenant-configured ids are accepted,
+      // so a guessed mapping still cannot reach the plan.
+      if (accounts.includes(proposedAccount)) {
         if (plan.accountId !== proposedAccount) {
           accountChanged = true;
           this.clearAudience(plan);
         }
         plan.accountId = proposedAccount;
-      } else if (!accounts.includes(proposedAccount)) {
+      } else {
         notes.push(
           'I ignored an account ID that is not configured for this tenant.',
         );
@@ -792,25 +752,20 @@ export class CampaignCopilotService {
       currentWeeklySpend: input.currentWeeklySpend,
     });
     let requestedBudget: number | null = null;
-    if (patch.useRecommendedBudget && acceptsRecommendation('budget')) {
-      requestedBudget = input.recommendations.budget?.dailyBudget ?? null;
-    } else if (
+    // An explicit figure outranks the recommendation flag. The model sets both
+    // when it is declining its own suggestion ("not the recommended budget,
+    // ₹1000 instead"), and reading the flag first silently reinstated the
+    // number the operator had just turned down.
+    if (
       Number.isFinite(Number(patch.dailyBudget)) &&
-      Number(patch.dailyBudget) > 0 &&
-      (/\d/.test(latest) || /\b(hundred|thousand|lakh)\b/i.test(latest)) &&
-      // The currency symbols must sit OUTSIDE the \b group: ₹ and $ are
-      // non-word characters, so "\b₹" never matches after a space and that
-      // alternative was silently dead. "₹500/day" — the most natural way to
-      // write it — was therefore rejected unless the operator also happened
-      // to type the word "budget".
-      (/\b(?:budget|daily|per\s*day|a\s*day|spend|rs\.?|rupees?|inr)\b/i.test(
-        latest,
-      ) ||
-        /[₹$]/.test(latest) ||
-        /\/\s*day\b/i.test(latest))
+      Number(patch.dailyBudget) > 0
     ) {
       requestedBudget = Number(patch.dailyBudget);
+    } else if (patch.useRecommendedBudget) {
+      requestedBudget = input.recommendations.budget?.dailyBudget ?? null;
     }
+    // Whatever figure arrives, the cap still decides. clampDailyBudget is the
+    // one control the model genuinely cannot talk its way past.
     if (requestedBudget !== null) {
       plan.requestedDailyBudget = Math.round(requestedBudget);
       plan.dailyBudget = clampDailyBudget(requestedBudget, maxAllowed);
@@ -821,11 +776,7 @@ export class CampaignCopilotService {
       }
     }
 
-    if (
-      isFunnelStage(patch.funnelStage) &&
-      new RegExp(`\\b${patch.funnelStage}\\b`, 'i').test(latest)
-    )
-      plan.funnelStage = patch.funnelStage;
+    if (isFunnelStage(patch.funnelStage)) plan.funnelStage = patch.funnelStage;
 
     if (accountChanged) {
       notes.push(
@@ -836,11 +787,7 @@ export class CampaignCopilotService {
     // lookalike belongs to one account). It must not discard a generic type
     // like Advantage+ that the operator states in the very same message —
     // that read as the assistant ignoring a clear instruction.
-    if (
-      !accountChanged &&
-      patch.useRecommendedAudience &&
-      acceptsRecommendation('audience')
-    ) {
+    if (!accountChanged && patch.useRecommendedAudience) {
       const recommendation = input.recommendations.audience;
       if (recommendation) {
         plan.funnelStage = recommendation.funnelStage;
@@ -850,31 +797,24 @@ export class CampaignCopilotService {
         plan.targetSegment = recommendation.targetSegment;
       }
     } else {
-      if (
-        isAudienceType(patch.audienceType) &&
-        (latest.toLowerCase().includes(patch.audienceType.replace('_', ' ')) ||
-          (patch.audienceType === 'advantage_plus' &&
-            /advantage\+?|broad/i.test(latest)))
-      ) {
+      if (isAudienceType(patch.audienceType)) {
         plan.audienceType = patch.audienceType;
         if (patch.audienceType === 'advantage_plus') {
           plan.audienceName = null;
           plan.metaAudienceId = null;
         }
       }
-      // Saved audiences stay blocked for one turn after an account switch:
-      // their IDs belong to the previous account and cannot be trusted yet.
+      // A saved audience must still exist in the live list for THIS account —
+      // that is a real-existence check against verified Meta data, not a guess
+      // about wording. IDs from a just-switched account stay blocked one turn.
       const requestedAudience = (
         accountChanged ? [] : (input.accountAudiences ?? [])
       ).find(
         (audience) =>
           (typeof patch.metaAudienceId === 'string' &&
-            audience.id === patch.metaAudienceId &&
-            latest.includes(audience.id)) ||
+            audience.id === patch.metaAudienceId) ||
           (typeof patch.audienceName === 'string' &&
-            normalizeName(audience.name) ===
-              normalizeName(patch.audienceName) &&
-            normalizeName(latest).includes(normalizeName(audience.name))),
+            normalizeName(audience.name) === normalizeName(patch.audienceName)),
       );
       if (requestedAudience) {
         plan.audienceName = requestedAudience.name;
@@ -897,53 +837,29 @@ export class CampaignCopilotService {
         (candidate) =>
           normalizeName(candidate.name) === normalizeName(patch.targetSegment),
       );
-      if (
-        segment &&
-        normalizeName(latest).includes(normalizeName(segment.name))
-      )
-        plan.targetSegment = segment.name;
+      // The segment must be one this product actually defines.
+      if (segment) plan.targetSegment = segment.name;
     }
 
     const geos = sanitizeGeoLocations(patch.geoLocations);
-    const geoGrounded = geos?.every((geo) => {
-      const names: Record<string, RegExp> = {
-        IN: /\b(?:india|India|INDIA|IN)\b/,
-        US: /\b(united states|usa|us)\b/i,
-        GB: /\b(united kingdom|uk|gb)\b/i,
-        CA: /\b(canada|ca)\b/i,
-        AU: /\b(australia|au)\b/i,
-      };
-      return (names[geo] ?? new RegExp(`\\b${geo}\\b`, 'i')).test(latest);
-    });
-    if (geos?.length && geoGrounded) plan.geoLocations = geos;
+    if (geos?.length) plan.geoLocations = geos;
     const language = sanitizeLanguage(patch.language);
-    if (language && latest.toLowerCase().includes(language))
-      plan.language = language;
-    if (
-      isCreativeFormat(patch.creativeFormat) &&
-      latest.toLowerCase().includes(patch.creativeFormat)
-    ) {
+    if (language) plan.language = language;
+    if (isCreativeFormat(patch.creativeFormat)) {
       plan.creativeFormat = patch.creativeFormat;
-    } else if (
-      patch.useRecommendedCreativeFormat &&
-      acceptsRecommendation('format')
-    ) {
+    } else if (patch.useRecommendedCreativeFormat) {
       plan.creativeFormat = input.recommendations.creativeFormat;
     }
-    if (
-      (patch.appPlatform === 'iOS' || patch.appPlatform === 'Android') &&
-      latest.toLowerCase().includes(patch.appPlatform.toLowerCase())
-    ) {
+    if (patch.appPlatform === 'iOS' || patch.appPlatform === 'Android') {
       plan.appPlatform = patch.appPlatform;
     }
 
+    // Campaign name, angle and key message are the model's to write — that is
+    // the copy it was asked for. Requiring the operator to have typed them
+    // verbatim meant they could never be filled from a proposal at all.
     for (const field of ['campaignName', 'angle', 'keyMessage'] as const) {
       const value = patch[field];
-      if (
-        typeof value === 'string' &&
-        value.trim() &&
-        normalizeName(latest).includes(normalizeName(value))
-      ) {
+      if (typeof value === 'string' && value.trim()) {
         plan[field] = value
           .trim()
           .slice(0, field === 'keyMessage' ? 1_000 : 200);
@@ -1004,6 +920,9 @@ export class CampaignCopilotService {
     const currentWeeklySpend =
       await this.campaignsService.getWeeklySpend(tenantId);
     const normalizedAccount = normalizeAccountId(accountId);
+    // Account names are needed most on the turn where no account is chosen
+    // yet, so this lookup deliberately runs before the no-selection return.
+    const accounts = await this.loadConfiguredAccounts(tenantId, company);
     if (
       !normalizedAccount ||
       !configuredAccountIds(company).includes(normalizedAccount) ||
@@ -1016,6 +935,8 @@ export class CampaignCopilotService {
         accountAudiencesVerified: false,
         pages: null,
         pagesVerified: false,
+        accounts,
+        accountsVerified: accounts !== null,
       };
     }
     const [audienceResult, pageResult] = await Promise.allSettled([
@@ -1049,7 +970,36 @@ export class CampaignCopilotService {
       accountAudiencesVerified: audienceResult.status === 'fulfilled',
       pages: pageResult.status === 'fulfilled' ? pageResult.value : null,
       pagesVerified: pageResult.status === 'fulfilled',
+      accounts,
+      accountsVerified: accounts !== null,
     };
+  }
+
+  /**
+   * Live names for the tenant's configured ad accounts. Returns null — never a
+   * partial or guessed list — when Meta cannot be reached, so a failed lookup
+   * degrades to id-only matching rather than to unverified name matching.
+   */
+  private async loadConfiguredAccounts(
+    tenantId: string,
+    company: CompanyDocument,
+  ): Promise<MetaAdAccountSummary[] | null> {
+    const configured = configuredAccountIds(company);
+    if (!configured.length || !company.meta?.accessToken) return null;
+    try {
+      const all = await this.metaAdsService.listAdAccounts(
+        company.meta.accessToken,
+        company.meta.businessId,
+      );
+      return all.filter((account) =>
+        configured.includes(normalizeAccountId(account.id) ?? ''),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Could not verify ad account names: tenant=${tenantId} error=${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
   }
 
   private readonly toMetaAudience = (
@@ -1070,6 +1020,9 @@ Rules:
 - Existing products/accounts/audiences must use their exact configured values. If a product is absent, ask whether the user wants to configure it as NEW; collect every missing setup field.
 - Do not silently apply a recommendation. Set a useRecommended* flag only after the user clearly says to use/accept/choose it.
 - A plan is only being prepared for pending approval. Never claim that it is live, launched, spending, or guaranteed profitable.
+- Meridian itself builds the campaign into pending approval once every readiness field is set — the operator then approves it and Meridian launches it on Meta. Never tell the operator to build the campaign by hand in Ads Manager, and never say you are unable to set one up.
+- The supplied plan state is the only record of what has actually been applied. Describe fields from that state alone. If you proposed a value on the previous turn and the state does not show it, it was NOT applied — say so plainly and ask for the wording that would set it, rather than restating it as though it stuck.
+- An ad account may be referenced by the verified name in metaConfiguration.accounts. Never guess which id a name belongs to; if that list is null, ask for the account ID.
 - Full intelligence diagnosis needs post-launch metrics; do not pretend the 16-engine cascade has evaluated a new campaign.
 - Return exactly one JSON object, no markdown, matching this shape:
 {
@@ -1109,6 +1062,7 @@ Omit unchanged planPatch fields. Never use null to erase a field.`;
     currentWeeklySpend: number;
     accountAudiences: MetaAudience[] | null;
     pages?: MetaPageSummary[] | null;
+    accounts?: MetaAdAccountSummary[] | null;
     session: CampaignCopilotSessionDocument;
     recommendations: CampaignCopilotRecommendations;
     readiness: CampaignCopilotSessionDocument['readiness'];
@@ -1143,6 +1097,14 @@ Omit unchanged planPatch fields. Never use null to erase a field.`;
       },
       metaConfiguration: {
         accountIds: configuredAccountIds(company),
+        // Verified id↔name pairs. When null the names could not be confirmed
+        // with Meta this turn, and an account may only be chosen by its id.
+        accounts:
+          input.accounts?.map((account) => ({
+            id: normalizeAccountId(account.id),
+            name: account.name,
+            status: account.status,
+          })) ?? null,
         pageId: company.meta?.pageId ?? null,
         pixelId: company.meta?.pixelId ?? null,
         connected: !!company.meta?.accessToken,
