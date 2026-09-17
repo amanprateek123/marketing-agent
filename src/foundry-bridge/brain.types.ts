@@ -351,6 +351,30 @@ export interface BrainGateDecisionBody {
   selectedIds?: string[];
 }
 
+/**
+ * One turn of a thread with the Brain.
+ *
+ * A turn is an EXCHANGE, not a message: the user turn and the brain turn answering it carry the
+ * same `turnIndex`. That is the brain's own shape — `conversation_turns` is unique on
+ * (session, turn, role) — and flattening it into a message list would lose which answer belongs to
+ * which question the moment two are asked in quick succession.
+ */
+export interface BrainConversationTurn {
+  turnIndex: number;
+  role: 'user' | 'brain';
+  content: string;
+  contentClipped: boolean;
+  evidenceRefs: string[];
+  runId: string | null;
+}
+
+export interface BrainConversation {
+  sessionId: string;
+  turns: BrainConversationTurn[];
+  omittedOlder: number;
+  lastTurn: number;
+}
+
 export type BrainTabKey =
   | 'pulse'
   | 'decisions'

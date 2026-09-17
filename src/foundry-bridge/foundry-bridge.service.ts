@@ -19,6 +19,8 @@ import {
 } from './mappers';
 import type {
   BrainAgent,
+  BrainConversation,
+  BrainConversationTurn,
   BrainAgentKey,
   BrainAllocation,
   BrainAttentionItem,
@@ -959,20 +961,67 @@ export class FoundryBridgeService {
   async readConversation(
     sessionId: string,
     limit = 20,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<BrainConversation> {
     this.assertBrain();
+    let raw: Record<string, unknown>;
     try {
-      return await this.brain.call<Record<string, unknown>>(
+      raw = await this.brain.call<Record<string, unknown>>(
         'conversation_read',
         {
           session_id: sessionId,
           limit: Math.min(Math.max(limit, 1), 50),
+          // Bigger than the Brain's own read, and that difference is deliberate. The small default
+          // exists because a result over ~2KB reaches a Foundry code step as an artifact envelope
+          // it cannot materialize. Nothing here is a code step — this is an HTTP response to a
+          // browser — so the operator gets the turn as it was written rather than clipped at 400
+          // characters for a constraint that does not apply on this side.
           content_chars: 4000,
         },
       );
     } catch (err) {
       this.rethrow(err);
     }
+    const turns = Array.isArray(raw.turns) ? raw.turns : [];
+    return {
+      sessionId:
+        typeof raw.session_id === 'string' ? raw.session_id : sessionId,
+      turns: turns
+        .map((entry) =>
+          entry && typeof entry === 'object'
+            ? (entry as Record<string, unknown>)
+            : {},
+        )
+        .map((turn): BrainConversationTurn | null => {
+          const role =
+            turn.role === 'brain'
+              ? 'brain'
+              : turn.role === 'user'
+                ? 'user'
+                : null;
+          const content =
+            typeof turn.content === 'string' ? turn.content : null;
+          if (!role || content === null) return null;
+          return {
+            turnIndex:
+              typeof turn.turn_index === 'number' ? turn.turn_index : 0,
+            role,
+            content,
+            contentClipped: turn.content_clipped === true,
+            evidenceRefs: Array.isArray(turn.evidence_refs)
+              ? turn.evidence_refs.filter(
+                  (ref): ref is string => typeof ref === 'string',
+                )
+              : [],
+            runId: typeof turn.run_id === 'string' ? turn.run_id : null,
+          };
+        })
+        .filter((t): t is BrainConversationTurn => t !== null),
+      // Not a cosmetic count. A truncated history that looks complete is how an agent — or a
+      // person reading over its shoulder — confidently contradicts what was agreed four turns ago.
+      omittedOlder:
+        typeof raw.omitted_older === 'number' ? raw.omitted_older : 0,
+      lastTurn: typeof raw.last_turn === 'number' ? raw.last_turn : 0,
+    };
   }
 
   /**
@@ -984,6 +1033,13 @@ export class FoundryBridgeService {
    * `commit_decisions`, carrying the run id that produced it — this bridge never writes a brain
    * turn, because a turn attributed to the Brain that the Brain did not produce is exactly the
    * untraceable claim this system refuses.
+   *
+   * THE TURN INDEX IS CHOSEN HERE RATHER THAN LEFT TO THE BRAIN, and that is what makes a failed
+   * send recoverable. Writing first means a run that never starts — an unreachable Foundry, a token
+   * that does not grant the Brain — leaves a question recorded with nothing coming to answer it.
+   * `conversation_append` is idempotent on (session, turn, role), so pinning the index makes
+   * re-sending the same message land on the same row instead of filling the thread with duplicates
+   * of a question that was only ever asked once.
    */
   async sendConversationMessage(
     sessionId: string,
@@ -993,22 +1049,49 @@ export class FoundryBridgeService {
     this.assertBrain();
     const text = (message ?? '').trim();
     if (!text) throw new BadRequestException('A message is required.');
+
+    // Read before write, for the index. A failed read is not a reason to refuse the message — the
+    // append assigns its own index in that case, which is the brain's normal behaviour.
+    const existing = await this.brain.tryCall<Record<string, unknown>>(
+      'conversation_read',
+      { session_id: sessionId, limit: 1 },
+    );
+    const lastTurn =
+      existing && typeof existing.last_turn === 'number'
+        ? existing.last_turn
+        : null;
+    const turnIndex = lastTurn === null ? null : lastTurn + 1;
+
     try {
       await this.brain.call('conversation_append', {
         session_id: sessionId,
         role: 'user',
         content: text,
         surface: 'dashboard',
+        ...(turnIndex === null ? {} : { turn_index: turnIndex }),
       });
     } catch (err) {
       this.rethrow(err);
     }
-    const { runId } = await this.startRun('brain', {
-      message: text,
-      session_id: sessionId,
-      ...(mode ? { mode } : {}),
-    });
-    return { runId, sessionId };
+
+    try {
+      const { runId } = await this.startRun('brain', {
+        message: text,
+        session_id: sessionId,
+        ...(mode ? { mode } : {}),
+      });
+      return { runId, sessionId };
+    } catch (err) {
+      // Say what actually happened. "Failed to send" would be wrong — the message IS recorded, and
+      // an operator told otherwise would either retype it or assume the Brain ignored them.
+      const reason =
+        err instanceof Error ? err.message : 'the run could not be started';
+      throw new BadGatewayException(
+        `Your message was recorded${turnIndex === null ? '' : ` as turn ${turnIndex}`}, but no run ` +
+          `started to answer it: ${reason} Sending it again is safe — it lands on the same turn ` +
+          'rather than asking twice.',
+      );
+    }
   }
 }
 

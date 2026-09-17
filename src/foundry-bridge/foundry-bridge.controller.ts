@@ -5,6 +5,7 @@ import { GateDecisionDto } from './dto/gate-decision.dto';
 import { StartAgentRunDto } from './dto/start-agent-run.dto';
 import type {
   BrainAgent,
+  BrainConversation,
   BrainDecision,
   BrainEventPage,
   BrainGate,
@@ -161,7 +162,7 @@ export class FoundryBridgeController {
     @Param('tenantId') _tenantId: string,
     @Param('sessionId') sessionId: string,
     @Query('limit') limit?: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<BrainConversation> {
     const parsed = Number(limit);
     return this.bridge.readConversation(
       sessionId,
