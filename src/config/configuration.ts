@@ -91,6 +91,33 @@ export default () => ({
     // starts a run or polls it, so none of them waits on generation.
     timeoutMs: parseInt(process.env.PIPELINE_API_TIMEOUT_MS ?? '30000', 10),
   },
+  foundry: {
+    // Foundry's RUN api, as MCP over HTTP — not REST. This token may only RUN the agents it was
+    // granted; it cannot edit or deploy anything, which is why it is safe to hold in this service.
+    // Unset = every /brain/* route that needs a run 503s and the rest of the app is unaffected.
+    url: process.env.FOUNDRY_RUN_MCP_URL ?? '',
+    token: process.env.FOUNDRY_RUN_TOKEN ?? '',
+    // Generous because an MCP call here starts or reads a run rather than waiting on one — a
+    // Brain review takes minutes, and nothing in this bridge holds a request open for it.
+    timeoutMs: parseInt(process.env.FOUNDRY_RUN_TIMEOUT_MS ?? '60000', 10),
+  },
+  brain: {
+    // The 91astro brain's MCP server — the same URL and token the creative pipeline already uses,
+    // so there is one credential for one server rather than two that can drift apart.
+    url: process.env.BRAIN_MCP_URL ?? '',
+    token: process.env.BRAIN_MCP_BEARER_TOKEN ?? '',
+    timeoutMs: parseInt(process.env.BRAIN_MCP_TIMEOUT_MS ?? '30000', 10),
+    /**
+     * The Slack id a console gate decision is recorded under.
+     *
+     * The brain enforces `APPROVAL_SLACK_IDS` inside `approval_record` — a check in SQL that
+     * nothing written in a Slack message can argue its way past. The dashboard has a real login,
+     * but the brain cannot see it, so a decision made here still has to arrive carrying an identity
+     * that allowlist knows. Held server-side; unset, gate decisions 503 with a message naming this
+     * variable rather than failing upstream and leaving a gate that will not close.
+     */
+    approvalActorSlackId: process.env.BRAIN_APPROVAL_ACTOR_SLACK_ID ?? '',
+  },
   ops: {
     // System-failure alert channel (pipeline deaths, creative failures, stale-data
     // audit skips, Slack delivery failures). Separate from tenant webhooks — this

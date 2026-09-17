@@ -16,6 +16,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { AuthModule } from './auth/auth.module';
 import { PipelineBridgeModule } from './pipeline-bridge/pipeline-bridge.module';
+import { FoundryBridgeModule } from './foundry-bridge/foundry-bridge.module';
 import { CampaignCopilotModule } from './campaign-copilot/campaign-copilot.module';
 
 @Module({
@@ -44,6 +45,7 @@ import { CampaignCopilotModule } from './campaign-copilot/campaign-copilot.modul
     IntelligenceModule,
     DashboardModule,
     PipelineBridgeModule,
+    FoundryBridgeModule,
     CampaignCopilotModule,
   ],
 })
