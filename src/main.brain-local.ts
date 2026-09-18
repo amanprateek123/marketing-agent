@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { Module } from '@nestjs/common';
 import configuration from './config/configuration';
+import { AuthModule } from './auth/auth.module';
 import { FoundryBridgeModule } from './foundry-bridge/foundry-bridge.module';
 
 /**
@@ -14,11 +15,14 @@ import { FoundryBridgeModule } from './foundry-bridge/foundry-bridge.module';
  * over MCP. This boots that one module so the console can be driven against the LIVE brain on a
  * laptop with no database installed.
  *
- * IT HAS NO AUTH GUARD. The real app puts `JwtAuthGuard` on every route via APP_GUARD in
- * AuthModule; AuthModule is not imported here, because it needs Mongo for the user lookup. That is
- * the whole reason for the environment check below: this file must never be the thing that boots
- * in front of a real ad account. It is not in `package.json`'s scripts, it binds loopback only, and
- * it refuses to start unless APP_ENV is explicitly `development`.
+ * IT DOES CARRY REAL AUTH. AuthModule needs no database — this app has no user table, just
+ * AUTH_EMAIL/AUTH_PASSWORD checked against the environment — so importing it costs nothing and
+ * keeps local behaviour faithful: `JwtAuthGuard` goes on every route via APP_GUARD exactly as in
+ * production, and the login flow is the same one the deployed dashboard uses. Local is worth less
+ * as a rehearsal if the thing it skips is the guard.
+ *
+ * It still refuses to start unless APP_ENV is exactly `development`, and binds loopback only: it
+ * serves a partial API (one module of sixteen), so it must never be mistaken for the real one.
  *
  *   APP_ENV=development npx ts-node -r tsconfig-paths/register src/main.brain-local.ts
  *
@@ -29,6 +33,7 @@ import { FoundryBridgeModule } from './foundry-bridge/foundry-bridge.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration] }),
+    AuthModule,
     FoundryBridgeModule,
   ],
 })
@@ -56,9 +61,13 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   const port = Number(process.env.APP_PORT ?? 8082);
-  // Loopback only. This process has no authentication; it should not be reachable from the LAN.
+  // Loopback only. It serves a partial API against live production data; it should not be
+  // reachable from the LAN even though the guard is on.
   await app.listen(port, '127.0.0.1');
-  console.log(`\nBrain console API (LOCAL, no auth) → http://127.0.0.1:${port}/api/v1/brain/:tenantId/state\n`);
+  console.log(
+    `\nBrain console API (LOCAL) → http://127.0.0.1:${port}/api/v1\n` +
+      `  sign in as ${process.env.AUTH_EMAIL ?? '(AUTH_EMAIL unset)'}\n`,
+  );
 }
 
 void bootstrap();
