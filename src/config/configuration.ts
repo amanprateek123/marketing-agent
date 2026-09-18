@@ -101,6 +101,24 @@ export default () => ({
     // Brain review takes minutes, and nothing in this bridge holds a request open for it.
     timeoutMs: parseInt(process.env.FOUNDRY_RUN_TIMEOUT_MS ?? '60000', 10),
   },
+  foundryBuilder: {
+    /**
+     * Foundry's BUILDER api — a different, much more powerful token than `foundry.token`.
+     *
+     * It is here for exactly two verbs: read an agent's schedules, and pause or resume one. That
+     * is what lets an operator fix a paused trigger from the dashboard instead of opening Studio —
+     * which is how a paused Producer schedule went unnoticed from 2026-09-12.
+     *
+     * The same credential can rewrite prompts, edit graphs and deploy versions, so the bridge
+     * constructs its client with a hard tool allowlist (see `foundry-bridge.service.ts`). The
+     * restriction is on the transport, not on the controller remembering to behave.
+     *
+     * Unset = the trigger routes 503 and nothing else changes.
+     */
+    url: process.env.FOUNDRY_BUILDER_MCP_URL ?? '',
+    token: process.env.FOUNDRY_BUILDER_TOKEN ?? '',
+    timeoutMs: parseInt(process.env.FOUNDRY_BUILDER_TIMEOUT_MS ?? '30000', 10),
+  },
   brain: {
     // The 91astro brain's MCP server — the same URL and token the creative pipeline already uses,
     // so there is one credential for one server rather than two that can drift apart.

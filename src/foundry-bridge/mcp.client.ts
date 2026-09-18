@@ -61,12 +61,37 @@ export class McpClient {
     private readonly token: string,
     timeoutMs = 60000,
     private readonly label = 'mcp',
+    /**
+     * When set, the ONLY tool names this client may call. Anything else throws before a request
+     * is built.
+     *
+     * This exists for one credential in particular. Reading and pausing a schedule needs Foundry's
+     * BUILDER token, which is the same credential that can rewrite an agent's prompts, edit its
+     * graph and deploy a new version. The dashboard needs two verbs out of that surface; handing it
+     * the whole token and trusting the controller to only call two of them makes every future
+     * route a place where that trust can quietly lapse.
+     *
+     * So the restriction lives on the transport, not on the caller's good intentions: a client
+     * constructed with an allowlist cannot express the other calls at all.
+     */
+    private readonly allowedTools?: ReadonlySet<string>,
   ) {
     this.http = axios.create({ timeout: timeoutMs });
   }
 
   isConfigured(): boolean {
     return Boolean(this.url);
+  }
+
+  private assertAllowed(tool: string): void {
+    if (this.allowedTools && !this.allowedTools.has(tool)) {
+      throw new McpToolError(
+        `${this.label} may not call '${tool}'`,
+        tool,
+        `This client is restricted to: ${[...this.allowedTools].join(', ')}. The restriction is ` +
+          'deliberate — the token behind it can do far more than this surface should expose.',
+      );
+    }
   }
 
   /**
@@ -83,6 +108,7 @@ export class McpClient {
     if (!this.isConfigured()) {
       throw new McpTransportError(`${this.label} is not configured`, tool);
     }
+    this.assertAllowed(tool);
     const id = this.nextId++;
     let raw: string;
     try {

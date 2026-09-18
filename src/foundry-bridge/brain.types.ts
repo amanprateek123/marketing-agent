@@ -59,6 +59,25 @@ export interface BrainAgentDefinition {
   inputs: BrainAgentInput[];
 }
 
+/**
+ * One schedule or webhook that can start an agent.
+ *
+ * `enabled` is the only field this console may change. Everything else — the cron, the name, the
+ * kind — is read-only here and lives in Studio, because changing WHEN something runs is a
+ * different act from turning a known schedule back on after someone paused it.
+ */
+export interface BrainTrigger {
+  id: string | null;
+  name: string;
+  /** 'schedule' | 'webhook' | 'app_event' — what starts the agent. */
+  source: string;
+  /** The 5-field cron for a schedule, null for anything else. */
+  cron: string | null;
+  enabled: boolean;
+  /** Foundry's own word: active, paused, needs_connection… */
+  status: string;
+}
+
 export interface BrainAgent extends BrainAgentDefinition {
   nextRunAt: string | null;
   lastRun: BrainRunSummary | null;

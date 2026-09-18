@@ -1,7 +1,16 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { FoundryBridgeService } from './foundry-bridge.service';
 import { SendMessageDto } from './dto/conversation.dto';
 import { GateDecisionDto } from './dto/gate-decision.dto';
+import { SetTriggerEnabledDto } from './dto/trigger.dto';
 import { StartAgentRunDto } from './dto/start-agent-run.dto';
 import type {
   BrainAgent,
@@ -13,6 +22,7 @@ import type {
   BrainRunDetail,
   BrainRunSummary,
   BrainState,
+  BrainTrigger,
 } from './brain.types';
 
 /**
@@ -121,6 +131,37 @@ export class FoundryBridgeController {
     @Body() dto: StartAgentRunDto,
   ): Promise<{ runId: string }> {
     return this.bridge.startRun(agentKey, { ...dto });
+  }
+
+  /**
+   * GET /api/v1/brain/:tenantId/agents/:agentKey/triggers
+   *
+   * What starts this agent, and whether it is on. A paused schedule is invisible until something
+   * does not happen — which is how four stage agents read as broken for six days when they had
+   * been correctly replaced by a sweeper.
+   */
+  @Get(':tenantId/agents/:agentKey/triggers')
+  async triggers(
+    @Param('tenantId') _tenantId: string,
+    @Param('agentKey') agentKey: string,
+  ): Promise<BrainTrigger[]> {
+    return this.bridge.getAgentTriggers(agentKey);
+  }
+
+  /**
+   * PATCH /api/v1/brain/:tenantId/agents/:agentKey/triggers/:triggerId
+   *
+   * Pause or resume. Nothing else — the transport itself is restricted to `list_triggers` and
+   * `update_trigger`, because the token behind them can rewrite the agent.
+   */
+  @Patch(':tenantId/agents/:agentKey/triggers/:triggerId')
+  async setTrigger(
+    @Param('tenantId') _tenantId: string,
+    @Param('agentKey') agentKey: string,
+    @Param('triggerId') triggerId: string,
+    @Body() dto: SetTriggerEnabledDto,
+  ): Promise<BrainTrigger | null> {
+    return this.bridge.setTriggerEnabled(agentKey, triggerId, dto.enabled);
   }
 
   /** POST /api/v1/brain/:tenantId/runs/:runId/cancel — stop an in-flight run. */

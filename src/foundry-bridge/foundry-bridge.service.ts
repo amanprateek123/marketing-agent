@@ -37,6 +37,7 @@ import type {
   BrainStageKey,
   BrainStageState,
   BrainState,
+  BrainTrigger,
 } from './brain.types';
 
 /**
@@ -61,6 +62,7 @@ export class FoundryBridgeService {
   private readonly logger = new Logger(FoundryBridgeService.name);
   private readonly foundry: McpClient;
   private readonly brain: McpClient;
+  private readonly builder: McpClient;
   /**
    * The Slack id the brain's approval allowlist recognises, held server-side.
    *
@@ -87,6 +89,18 @@ export class FoundryBridgeService {
       (this.config.get<string>('brain.token') ?? '').trim(),
       this.config.get<number>('brain.timeoutMs') ?? 30000,
       'brain',
+    );
+    // TWO VERBS OUT OF A TOKEN THAT CAN DO EVERYTHING.
+    //
+    // The builder token can rewrite prompts, edit graphs and deploy versions. The console needs to
+    // read schedules and toggle one. The allowlist is passed to the transport so the other calls
+    // cannot be made from this process at all — not "are not made", cannot be.
+    this.builder = new McpClient(
+      (this.config.get<string>('foundryBuilder.url') ?? '').trim(),
+      (this.config.get<string>('foundryBuilder.token') ?? '').trim(),
+      this.config.get<number>('foundryBuilder.timeoutMs') ?? 30000,
+      'foundry-builder',
+      new Set(['list_triggers', 'update_trigger']),
     );
     this.approvalActorSlackId = (
       this.config.get<string>('brain.approvalActorSlackId') ?? ''
@@ -1129,6 +1143,102 @@ export class FoundryBridgeService {
           `started to answer it: ${reason} Sending it again is safe — it lands on the same turn ` +
           'rather than asking twice.',
       );
+    }
+  }
+
+  // ── triggers ─────────────────────────────────────────────────────────────
+
+  private assertBuilder(): void {
+    if (!this.builder.isConfigured()) {
+      throw new ServiceUnavailableException(
+        'Schedule control is not configured (set FOUNDRY_BUILDER_MCP_URL and ' +
+          'FOUNDRY_BUILDER_TOKEN). Runs and reads are unaffected.',
+      );
+    }
+  }
+
+  /**
+   * Every trigger on one agent.
+   *
+   * This exists because a paused schedule is invisible until something does not happen. The four
+   * pipeline stage agents ran on 10-minute polls until 2026-09-12, when those were correctly
+   * replaced by a deterministic sweeper — but nothing on any screen said so, and the pause read as
+   * breakage for six days.
+   */
+  async getAgentTriggers(agentKey: string): Promise<BrainTrigger[]> {
+    const definition = AGENTS_BY_KEY.get(agentKey as BrainAgentKey);
+    if (!definition) throw new NotFoundException(`No agent '${agentKey}'.`);
+    this.assertBuilder();
+    try {
+      const listed = await this.builder.call<{ triggers?: unknown[] }>(
+        'list_triggers',
+        {
+          agent_id: definition.foundryAgentId,
+        },
+      );
+      return (listed.triggers ?? [])
+        .map((raw) =>
+          raw && typeof raw === 'object'
+            ? (raw as Record<string, unknown>)
+            : {},
+        )
+        .map(
+          (row): BrainTrigger => ({
+            id: typeof row.id === 'string' ? row.id : null,
+            name: typeof row.name === 'string' ? row.name : 'Untitled trigger',
+            source: typeof row.source === 'string' ? row.source : 'unknown',
+            cron: typeof row.cron === 'string' ? row.cron : null,
+            enabled: row.enabled === true,
+            status: typeof row.status === 'string' ? row.status : 'unknown',
+          }),
+        );
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /**
+   * Pause or resume one trigger. The ONLY mutation this console may make to a schedule.
+   *
+   * Deliberately not a reschedule. Turning a known schedule back on is recovering from a visible
+   * mistake; changing when something runs is a decision about how the company operates, and that
+   * belongs where it can be reviewed.
+   */
+  async setTriggerEnabled(
+    agentKey: string,
+    trigger: string,
+    enabled: boolean,
+  ): Promise<BrainTrigger | null> {
+    const definition = AGENTS_BY_KEY.get(agentKey as BrainAgentKey);
+    if (!definition) throw new NotFoundException(`No agent '${agentKey}'.`);
+    if (!trigger.trim())
+      throw new BadRequestException('A trigger id is required.');
+    this.assertBuilder();
+    try {
+      const result = await this.builder.call<Record<string, unknown>>(
+        'update_trigger',
+        {
+          agent_id: definition.foundryAgentId,
+          trigger,
+          enabled,
+        },
+      );
+      const row =
+        result.trigger && typeof result.trigger === 'object'
+          ? (result.trigger as Record<string, unknown>)
+          : null;
+      if (!row) return null;
+      return {
+        id: typeof row.id === 'string' ? row.id : null,
+        name: typeof row.name === 'string' ? row.name : 'Untitled trigger',
+        source: typeof row.source === 'string' ? row.source : 'schedule',
+        cron: typeof row.cron === 'string' ? row.cron : null,
+        // Foundry echoes status but not always `enabled`; the request is the truth here.
+        enabled,
+        status: typeof row.status === 'string' ? row.status : 'unknown',
+      };
+    } catch (err) {
+      this.rethrow(err);
     }
   }
 }
