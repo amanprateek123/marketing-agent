@@ -12,6 +12,12 @@ commit is live predates it. A pull of `main` picks up both.
 
 ---
 
+## 0. Which branch
+
+**`data-enrich`** — that is what production runs, for both repos. `main` is now identical to it
+(the same commits, pushed to both), so a pull of either gets the same code. If the box already has
+`data-enrich` checked out, a plain `git pull` is all it needs.
+
 ## 1. Backend env — `marketing-agent/.env`
 
 ```bash
@@ -52,8 +58,8 @@ carries only `NEXT_PUBLIC_API_URL`, so there is nothing to change here — just 
 ## 3. Deploy
 
 ```bash
-cd /path/to/marketing-agent && git pull            # main
-cd ../Marketing-Agent-Dashboard && git pull        # main
+cd /path/to/marketing-agent && git pull            # data-enrich
+cd ../Marketing-Agent-Dashboard && git pull        # data-enrich
 cd ../marketing-agent && docker compose up -d --build
 ```
 
@@ -68,7 +74,7 @@ curl -s https://marketing.91astrology.com/api/v1/brain/91astrology/state | head 
 | You get | It means |
 |---|---|
 | `{"generatedAt":…,"connected":true,…}` | Working. Done. |
-| `404 Cannot GET` | The backend did not pick up the new module — the build did not include `main`. |
+| `404 Cannot GET` | The backend did not pick up the new module — the build did not include `data-enrich`. |
 | `{"connected":false,…}` but valid JSON | Bridge is up, Foundry is not reachable — check `FOUNDRY_RUN_TOKEN`. **The page still works**; it shows an honest "Foundry unreachable" state and the brain-sourced tabs still render. |
 | `401` | Expected without a bearer token — the route sits behind the normal dashboard login. Not a fault. |
 | `503` with a message naming an env var | That variable is missing. The message says which. |
