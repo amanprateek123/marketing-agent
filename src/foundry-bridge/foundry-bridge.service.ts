@@ -190,13 +190,18 @@ export class FoundryBridgeService {
       generatedAt: now,
       connected,
       brain: {
-        status: !connected
-          ? 'offline'
-          : hasWork === true
-            ? 'thinking'
-            : hasWork === false
-              ? 'idle'
-              : 'blocked',
+        // Driven by whether the BRAIN answered, not by whether Foundry did. Reading the brain
+        // successfully and then reporting it "offline" because the agent platform is unreachable
+        // was wrong on the first live run: `connected` already carries the Foundry fact, on its
+        // own field, and the page draws them separately.
+        status:
+          hint === null
+            ? 'offline'
+            : hasWork === true
+              ? 'thinking'
+              : hasWork === false
+                ? 'idle'
+                : 'blocked',
         headline:
           hasWork === true
             ? `Work queued${suggested ? ` — next: ${suggested}` : ''}`
