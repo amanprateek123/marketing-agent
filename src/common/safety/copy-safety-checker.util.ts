@@ -34,7 +34,16 @@ const FORBIDDEN_CLAIM_PATTERNS: { pattern: RegExp; reason: string }[] = [
 
 const SPECIAL_AD_CATEGORY_TRIGGERS: { pattern: RegExp; category: string; reason: string }[] = [
   // CREDIT
-  { pattern: /\b(credit\s*card|personal\s*loan|home\s*loan|car\s*loan|mortgage|emi|line\s*of\s*credit|payday\s*loan|microfinance)\b/i, category: 'CREDIT', reason: 'mentions credit / loan product' },
+  //
+  // `emi` used to sit bare in this alternation, which made the rule fire on
+  // any copy that so much as MENTIONS the feeling of debt. It blocked
+  // "Ek EMI khatam, doosri pehle se taiyaar kyun?" — a pain-point hook for a
+  // ₹1,799 astrology report, not a credit offer. For an Indian DTC brand
+  // writing about money stress that word is unavoidable, so match only when
+  // credit is actually being OFFERED. Same reasoning keeps the standalone
+  // product nouns (credit card, personal loan…) — those are offers by name.
+  { pattern: /\b(credit\s*card|personal\s*loan|home\s*loan|car\s*loan|mortgage|line\s*of\s*credit|payday\s*loan|microfinance)\b/i, category: 'CREDIT', reason: 'mentions credit / loan product' },
+  { pattern: /\b((apply|applying|avail|get|take)\s+(for\s+|an\s+|the\s+)?emi|emi\s+(offer|option|plan|available|facility|scheme)|no\s+cost\s+emi)\b/i, category: 'CREDIT', reason: 'offers an EMI / credit facility' },
   { pattern: /\b(low|cheap|easy|instant|fast|quick)\s+(loan|credit|emi)\b/i, category: 'CREDIT', reason: 'predatory-credit phrasing pattern' },
 
   // EMPLOYMENT
@@ -44,7 +53,18 @@ const SPECIAL_AD_CATEGORY_TRIGGERS: { pattern: RegExp; category: string; reason:
   { pattern: /\b(rent|sale|sell|buy|lease)\s+(apartment|flat|house|villa|property|condo)\b/i, category: 'HOUSING', reason: 'housing rental / sale offer' },
 
   // SOCIAL ISSUES / ELECTIONS
-  { pattern: /\b(vote|election|candidate|political|campaign\s+for|protest|movement)\b/i, category: 'ISSUES_ELECTIONS_POLITICS', reason: 'political / election content' },
+  //
+  // `movement`, `candidate` and `protest` were bare alternatives here, and all
+  // three have dominant non-political meanings that this tenant's copy uses
+  // constantly:
+  //   movement  — "har movement explain karna padta hai" (micromanaging boss),
+  //               planetary/graha movement, career movement
+  //   candidate — "job candidate", "strong candidate" in career copy
+  //   protest   — rare, but same shape
+  // A real political usage carries a qualifier, so require one. Bare `vote`,
+  // `election` and `political` stay: those have no innocent reading in an ad.
+  { pattern: /\b(vote|voting|election|electoral|political|politician|campaign\s+for\s+(office|president|mp|mla)|ballot)\b/i, category: 'ISSUES_ELECTIONS_POLITICS', reason: 'political / election content' },
+  { pattern: /\b((social|political|activist|resistance|freedom|protest)\s+movement|(political|election|opposition|party)\s+candidate|protest\s+(march|rally))\b/i, category: 'ISSUES_ELECTIONS_POLITICS', reason: 'political movement / candidate reference' },
 ];
 
 export interface CopySafetyResult {

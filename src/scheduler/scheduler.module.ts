@@ -13,6 +13,7 @@ import { AuditProcessor } from './audit.processor';
 import { LearningProcessor } from './learning.processor';
 import { MetaLearningProcessor } from './meta-learning.processor';
 import { CampaignSyncProcessor } from './campaign-sync.processor';
+import { MetaDeepSyncProcessor } from './meta-deep-sync.processor';
 import { CreativeReplacementProcessor } from './creative-replacement.processor';
 import { ShadowEvalProcessor } from './shadow-eval.processor';
 import { CreativeModule } from '../creative/creative.module';
@@ -38,7 +39,30 @@ import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/
     BullModule.registerQueue({ name: QUEUES.CAMPAIGN_AUDIT }),
     BullModule.registerQueue({ name: QUEUES.MONTHLY_LEARNING }),
     BullModule.registerQueue({ name: QUEUES.META_LEARNING_IMPORT }),
-    BullModule.registerQueue({ name: QUEUES.CAMPAIGN_SYNC }),
+    // Neither sync queue had retry configured before — a processor-level
+    // crash (not a Meta API error, those are already caught+logged inside
+    // the services) just silently under-delivered until the next tick. Now
+    // that campaign-sync is the sole source of truth other systems read
+    // from, a missed tick is worth one retry rather than a silent 10-60 min
+    // gap. Short backoff — the next scheduled tick is only minutes away.
+    BullModule.registerQueue({
+      name: QUEUES.CAMPAIGN_SYNC,
+      defaultJobOptions: {
+        attempts: 2,
+        backoff: { type: 'exponential', delay: 15_000 },
+        removeOnComplete: { count: 50 },
+        removeOnFail: { count: 50 },
+      },
+    }),
+    BullModule.registerQueue({
+      name: QUEUES.META_DEEP_SYNC,
+      defaultJobOptions: {
+        attempts: 2,
+        backoff: { type: 'exponential', delay: 30_000 },
+        removeOnComplete: { count: 50 },
+        removeOnFail: { count: 50 },
+      },
+    }),
     BullModule.registerQueue({ name: QUEUES.CREATIVE_PRODUCTION }),
     BullModule.registerQueue({ name: QUEUES.SHADOW_EVAL }),
     MongooseModule.forFeature([
@@ -53,7 +77,7 @@ import { IntelligenceBrief, IntelligenceBriefSchema } from '../pipeline/schemas/
     LearningModule,
     DeliveryModule,
   ],
-  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor, CampaignSyncProcessor, CreativeReplacementProcessor, ShadowEvalProcessor],
+  providers: [SchedulerService, PipelineProcessor, AuditProcessor, LearningProcessor, MetaLearningProcessor, CampaignSyncProcessor, MetaDeepSyncProcessor, CreativeReplacementProcessor, ShadowEvalProcessor],
   exports: [SchedulerService],
 })
 export class SchedulerModule {}

@@ -34,7 +34,7 @@ export interface AdSetTargetingPatch {
   interests?: string[];     // Meta interest IDs (passed through as targeting.flexible_spec[].interests[].id)
   geoStates?: string[];     // Meta region keys (e.g. '480' for Maharashtra)
   geoCities?: string[];     // Meta city keys
-  locales?: number[];       // Meta locale IDs (e.g. [84] for Marathi). Sent as targeting.locales.
+  locales?: number[];       // Meta locale IDs (e.g. [81] for Marathi, per META_LOCALE_IDS below). Sent as targeting.locales.
 }
 
 /**
@@ -54,23 +54,35 @@ export interface AdSetTargetingPatch {
 export const META_LOCALE_IDS: Record<string, number> = {
   // ─── VERIFIED (2026-05-19) ─────────────────────────────────────────────
   marathi:    81,   // verified via /search?type=adlocale&q=Marathi
+  // ─── VERIFIED (2026-07-16) ─────────────────────────────────────────────
+  // The entire unverified block below (hindi included) was checked live
+  // this date — EVERY single guessed ID was wrong, not just Marathi/Hindi:
+  //   hindi 53→46, english 24→6, bengali 89→45, tamil 96→48, telugu 95→49,
+  //   gujarati 116→67, punjabi 122→47, malayalam 138→50, kannada 169→75,
+  //   urdu 54→90. hindi's wrong guess (53) had already been used unverified
+  //   in a manual campaign's locale targeting before launch — resolved to
+  //   Azerbaijani, not Hindi — caught before approval. Confirms the "don't
+  //   trust a memorised ID" warning below applied to all of them, not just
+  //   the one example originally called out.
+  hindi:      46,   // verified via /search?type=adlocale&q=Hindi
+  english:    6,    // verified — resolves to "English (US)"
+  bengali:    45,   // verified via /search?type=adlocale&q=Bengali
+  tamil:      48,   // verified via /search?type=adlocale&q=Tamil
+  telugu:     49,   // verified via /search?type=adlocale&q=Telugu
+  gujarati:   67,   // verified via /search?type=adlocale&q=Gujarati
+  punjabi:    47,   // verified via /search?type=adlocale&q=Punjabi
+  malayalam:  50,   // verified via /search?type=adlocale&q=Malayalam
+  kannada:    75,   // verified via /search?type=adlocale&q=Kannada
+  urdu:       90,   // verified via /search?type=adlocale&q=Urdu
 
   // ─── UNVERIFIED — DO NOT USE without running the search query above ────
-  // These were cited from memory and may be wrong (Marathi was wrong by 3).
+  // odia and assamese returned no match on a plain-name search (2026-07-16)
+  // — may need a different query term, or may not exist as distinct Meta
+  // adlocale entries. Left unresolved rather than guessed.
   // To activate: run the curl command, confirm the key, move the line above
   // the verified divider with today's date in the comment.
-  // english:    24,
-  // hindi:      53,
-  // bengali:    89,
-  // tamil:      96,
-  // telugu:     95,
-  // gujarati:   116,
-  // punjabi:    122,
-  // malayalam:  138,
-  // kannada:    169,
-  // urdu:       54,
-  // odia:       139,
-  // assamese:   170,
+  // odia:       ?,
+  // assamese:   ?,
 };
 
 /**

@@ -93,6 +93,33 @@ export class Company {
   @Prop({ required: true })
   weeklyBudgetCap: number;
 
+  /**
+   * Monotonic compare-and-swap version for campaign budget reservations.
+   *
+   * Approval is a cross-document handoff: reserve capacity on this Company,
+   * atomically claim the Campaign as `launching`, then release the temporary
+   * reservation. Incrementing this version on every reservation mutation
+   * invalidates another app instance's stale campaign-commitment snapshot.
+   */
+  @Prop({ default: 0 })
+  campaignBudgetGuardVersion: number;
+
+  /**
+   * Very short-lived, fail-closed reservations used while an approval moves
+   * from `pending_approval` to `launching`. They intentionally have no TTL:
+   * expiring a reservation while a paused process can still resume would
+   * reopen the overspend race. Normal failures release them; an abnormal
+   * process death requires explicit reconciliation and blocks capacity rather
+   * than risking spend above the tenant cap.
+   */
+  @Prop({ type: [Object], default: [] })
+  campaignBudgetReservations: Array<{
+    token: string;
+    campaignId: string;
+    weeklyAmount: number;
+    createdAt: Date;
+  }>;
+
   @Prop({ required: true })
   maxBudgetPerCampaign: number;
 

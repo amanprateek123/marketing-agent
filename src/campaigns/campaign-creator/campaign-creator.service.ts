@@ -7,16 +7,31 @@ import { ActionLoggerService } from '../../common/action-logger/action-logger.se
 import { CampaignsService } from '../campaigns.service';
 import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
 import { CreativeBrief, CreativeBriefDocument } from '../../pipeline/schemas/creative-brief.schema';
-import { CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
+import { CreativePackage, CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
+import { ImageResizerService, ExtendRatio, RatioMap, classifyRatio } from '../../common/media/image-resizer.service';
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
+import {
+  VALID_OPTIMIZATION_GOALS,
+  resolveOptimizationGoalForLaunch,
+} from '../meta-ads/optimization-goals';
 import { SlackService } from '../../delivery/slack.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
+import {
+  assertProductLaunchable,
+  findProductByName,
+  resolveCampaignProduct,
+} from './resolve-campaign-product';
+import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
-import { getGrossConversionValue } from '../../common/conversion-value.util';
+import { getEffectiveConversionValue, getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
+import {
+  CampaignBudgetGuardService,
+  CampaignBudgetReservation,
+} from './campaign-budget-guard.service';
 
 @Injectable()
 export class CampaignCreatorService {
@@ -24,6 +39,7 @@ export class CampaignCreatorService {
 
   constructor(
     private readonly campaignsService: CampaignsService,
+    private readonly campaignBudgetGuard: CampaignBudgetGuardService,
     private readonly companiesService: CompaniesService,
     private readonly actionLogger: ActionLoggerService,
     private readonly campaignReviewTeam: CampaignReviewTeamService,
@@ -33,7 +49,24 @@ export class CampaignCreatorService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(CreativeBrief.name)
     private readonly creativeBriefModel: Model<CreativeBriefDocument>,
+    @InjectModel(CreativePackage.name)
+    private readonly creativePackageModel: Model<CreativePackageDocument>,
+    private readonly imageResizer: ImageResizerService,
   ) {}
+
+  /**
+   * Placement sizes guaranteed to exist before a launch uploads to Meta.
+   *
+   * Only 4:5 today, deliberately: asset_customization_rules is disabled (see
+   * MetaAdsService.buildImageAssetFeedSpec), so exactly ONE image per variant
+   * actually ships, and pickPrimaryImageSize prefers 4:5. Guaranteeing that
+   * one size is the entire win available right now — generating the other
+   * three would burn S3 on assets Meta will never request.
+   *
+   * When placement asset customization is re-enabled, widen this to
+   * ['4:5', '9:16'] so Stories/Reels get a real vertical instead of a crop.
+   */
+  private static readonly LAUNCH_RATIOS: readonly ExtendRatio[] = ['4:5'];
 
   /**
    * Phase G Step 1: Safety checks → Campaign Review Team → save as pending_approval → Slack notification.
@@ -240,11 +273,39 @@ export class CampaignCreatorService {
     const topicSlug = brief.topic.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
     const campaignName = `AGENT_${topicSlug}_${new Date().toISOString().split('T')[0]}`;
 
+    // Canonicalize the brief's product name so launch() resolves it by exact
+    // match. A brief naming a product that doesn't exist is NOT fatal here —
+    // the campaign is only pending_approval and nothing has spent money — but
+    // it must be loud: /approve then refuses to launch rather than guessing,
+    // and the approval preview shows it as a blocker the operator can fix with
+    // PATCH /config { productName }.
+    let campaignProductName = (brief.product ?? '').trim();
+    if (campaignProductName) {
+      try {
+        campaignProductName = findProductByName(
+          (company as any).products ?? [],
+          campaignProductName,
+        ).product.name;
+      } catch (err: any) {
+        this.logger.error(
+          `Brief ${brief.briefId} names product "${brief.product}", which does not resolve for tenant ${company.tenantId}: ${err.message} — campaign saved, but it will refuse to launch until productName is corrected.`,
+        );
+      }
+    } else {
+      this.logger.warn(
+        `Brief ${brief.briefId} has no product — campaign ${campaignName} will resolve its product at launch only if the tenant has exactly one active product.`,
+      );
+    }
+
     const campaign = await this.campaignModel.create({
       tenantId: company.tenantId,
       runId,
       briefId: brief.briefId,
       name: campaignName,
+      // Record the brief's product now, while we still have it. launch() reads
+      // this for the landing URL / pixel / custom conversion instead of
+      // re-deriving the product from conversionEvent hours later.
+      productName: campaignProductName,
       topic: brief.topic ?? '',
       angle: brief.angle ?? '',
       creativePackageId: creativePackage?._id?.toString() ?? '',
@@ -421,6 +482,7 @@ export class CampaignCreatorService {
       runId,
       briefId,
       name: `LP_TEST_${productName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 24)}_${dateTag}`,
+      productName: product.name,
       topic: briefData.topic,
       angle: briefData.angle,
       creativePackageId: (creativePackage as any)._id?.toString() ?? '',
@@ -469,27 +531,120 @@ export class CampaignCreatorService {
     company: CompanyDocument,
     accountId: string,
   ): Promise<CampaignDocument> {
-    // ── Atomic claim — prevents /approve double-launch race ──────────────────
-    // Was: findOne → check status → check metaCampaignId → later update.
-    // Race: two concurrent /approve calls both pass the read-then-check, both
-    // proceed into 60-90s of Meta API calls, both create live Meta campaigns,
-    // only one gets tracked in DB → orphan live campaign spending money. The
-    // single biggest production-time bug per the SRE review.
+    // ── Pre-flight: WHICH PRODUCT is this campaign selling? ──────────────────
+    // Runs BEFORE the atomic claim below, deliberately. Everything here is a
+    // pure read, and a failure must leave the campaign at 'pending_approval' —
+    // throwing after the claim would strand it in 'launching' forever (only
+    // the Meta-API block further down has a rollback handler).
     //
-    // Now: atomic findOneAndUpdate gates on (status=pending_approval AND
-    // metaCampaignId='') and immediately flips to 'launching'. If null
-    // returned, another /approve call already won the race — throw. Rollback
-    // path resets status to 'pending_approval' on launch failure.
-    const campaign = await this.campaignModel.findOneAndUpdate(
-      {
-        _id: campaignId,
-        tenantId: company.tenantId,
-        status: 'pending_approval',
-        $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
-      },
-      { $set: { status: 'launching' } },
-      { new: true },
-    ).exec();
+    // This used to be resolved 600 lines later, at ad-build time, by matching
+    // campaignConfig.conversionEvent against the product list with a
+    // `?? products[0]` fallback. On 2026-07-27 that silently pointed a
+    // "wish letter" campaign at a different product's landing page, pixel and
+    // custom conversion. Resolve it once, up front, and refuse to launch if it
+    // cannot be established with certainty — see resolve-campaign-product.ts.
+    const preflight = await this.campaignModel
+      .findOne({ _id: campaignId, tenantId: company.tenantId })
+      .lean()
+      .exec();
+    if (!preflight) {
+      throw new Error(`Campaign ${campaignId} not found for tenant ${company.tenantId}`);
+    }
+    // Report "already launched" / "wrong status" ahead of any product
+    // complaint — otherwise re-approving a live campaign reports a confusing
+    // product error instead of the real reason. The atomic claim below is
+    // still the authority; this only fixes which message wins.
+    if (preflight.metaCampaignId) {
+      throw new Error(`Campaign ${campaignId} already launched (metaCampaignId: ${preflight.metaCampaignId})`);
+    }
+    if (preflight.status !== 'pending_approval') {
+      throw new Error(`Campaign ${campaignId} cannot be launched (status: ${preflight.status} — must be pending_approval)`);
+    }
+    const preflightBrief = preflight.briefId
+      ? await this.campaignsService.findCreativeBrief(company.tenantId, preflight.briefId)
+      : null;
+    // Throws (leaving status untouched) when the product is missing, unknown,
+    // ambiguous, or has no usable landing URL.
+    const productResolution = resolveCampaignProduct(
+      company,
+      preflight as any,
+      preflightBrief as any,
+    );
+    const product = productResolution.product;
+    // Landing-page tests carry their two URLs on the ad sets themselves
+    // (landingUrlOverride), so the product's own landingUrl isn't the
+    // destination and needn't be set.
+    if (!(preflight as any).campaignConfig?.isLandingPageTest) {
+      assertProductLaunchable(product, 'launch');
+    }
+    if (productResolution.source !== 'campaign') {
+      this.logger.warn(
+        `Campaign ${campaignId} has no productName recorded — resolved "${product.name}" via ${productResolution.source}. Backfill campaign.productName so this never depends on inference.`,
+      );
+    }
+    if (productResolution.matchedLoosely) {
+      this.logger.warn(
+        `Campaign ${campaignId}: product "${productResolution.matchedLoosely.requested}" matched "${productResolution.matchedLoosely.matched}" only after normalizing case/spacing.`,
+      );
+    }
+    this.logger.log(
+      `Launch pre-flight OK: campaign=${campaignId} product="${product.name}" (via ${productResolution.source}) → ${product.landingUrl}`,
+    );
+
+    // Complete deterministic launch validation before reserving money or
+    // claiming the campaign. These failures leave it pending and consume no
+    // tenant budget capacity.
+    SafetyChecks.checkCampaignBudget(preflight.budget, company);
+    if (!company.meta?.accessToken) {
+      throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
+    }
+    if (!product.pageId && !company.meta?.pageId) {
+      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId} or product "${product.name}". Set product.pageId or company.meta.pageId — required for ad creative creation.`);
+    }
+    const preflightConfig = (preflight as any).campaignConfig;
+    if (!preflightConfig || !preflightConfig.adSets || preflightConfig.adSets.length === 0) {
+      throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
+    }
+    SafetyChecks.checkCapCoherence({
+      dailyBudget: preflight.budget ?? preflightConfig.budget,
+      cap: (preflight as any).spendCap,
+      startTime: (preflight as any).launchedAt ?? new Date(),
+      stopTime: (preflight as any).stopTime,
+    });
+
+    // Reserve on the tenant Company before the per-campaign claim. The
+    // versioned CAS closes the distinct-campaign race across app instances;
+    // after the claim, status=launching becomes the durable commitment.
+    const budgetReservation = await this.campaignBudgetGuard.reserve(
+      company.tenantId,
+      campaignId,
+      preflight.budget,
+    );
+
+    // ── Atomic per-campaign claim — prevents double approval of one draft ────
+    let campaign: CampaignDocument | null;
+    try {
+      campaign = await this.campaignModel.findOneAndUpdate(
+        {
+          _id: campaignId,
+          tenantId: company.tenantId,
+          status: 'pending_approval',
+          budget: preflight.budget,
+          ...((preflight as any).updatedAt
+            ? { updatedAt: (preflight as any).updatedAt }
+            : {}),
+          $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
+        },
+        { $set: { status: 'launching' } },
+        { new: true },
+      ).exec();
+    } catch (err) {
+      await this.releaseBudgetReservationSafely(budgetReservation);
+      throw err;
+    }
+    // Release only after the durable launching write. Cleanup failure leaves
+    // the reservation in place, so it fails closed instead of permitting spend.
+    await this.releaseBudgetReservationSafely(budgetReservation);
     if (!campaign) {
       // Distinguish "not found" from "already launching/launched" for clearer error
       const existing = await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).select('status metaCampaignId').lean().exec();
@@ -500,25 +655,37 @@ export class CampaignCreatorService {
       throw new Error(`Campaign ${campaignId} cannot be launched (status: ${existing.status} — must be pending_approval)`);
     }
 
-    // Load creative brief early — needed by the audience-expiry fallback path
-    // (line ~330) so warm/hot stages can be detected before the audience
-    // validator decides whether to fall back to advantage_plus or another LAL.
-    const creativeBrief = campaign.briefId
-      ? await this.campaignsService.findCreativeBrief(company.tenantId, campaign.briefId)
-      : null;
+    // Before Meta campaign creation starts, a failure can safely restore the
+    // draft to pending. After it starts, retain a reconcilable state because a
+    // real Meta object may exist even if an API response or rollback is lost.
+    let metaCampaignCreationStarted = false;
+    let knownMetaCampaignId = '';
+    let launchFinalized = false;
+    try {
 
-    if (!company.meta?.accessToken) {
-      throw new Error(`Meta Ads access token not configured for tenant ${company.tenantId}.`);
-    }
+    // Creative brief — needed by the audience-expiry fallback path (line ~330)
+    // so warm/hot stages can be detected before the audience validator decides
+    // whether to fall back to advantage_plus or another LAL. Already loaded by
+    // the pre-flight above (same briefId, the claim only changed `status`), so
+    // reuse it rather than re-reading.
+    const creativeBrief = preflightBrief;
 
-    if (!company.meta?.pageId) {
-      throw new Error(`Meta Page ID not configured for tenant ${company.tenantId}. Set company.meta.pageId — required for ad creative creation.`);
+    // Stamp the resolved product onto pre-productName campaigns so every later
+    // consumer (audit loop, creative replacement, ad backfill) reads a recorded
+    // fact instead of re-deriving one. Non-fatal: launch proceeds either way.
+    if (!(campaign as any).productName) {
+      try {
+        await this.campaignModel.updateOne(
+          { _id: campaignId, tenantId: company.tenantId },
+          { $set: { productName: product.name } },
+        );
+        (campaign as any).productName = product.name;
+      } catch (err: any) {
+        this.logger.warn(`Could not backfill productName on ${campaignId}: ${err.message}`);
+      }
     }
 
     const config = (campaign as any).campaignConfig;
-    if (!config || !config.adSets || config.adSets.length === 0) {
-      throw new Error(`No structured campaign config found for campaign ${campaignId}. Campaign Review Team output may be incomplete.`);
-    }
 
     // Landing-page A/B test campaigns are built with TWO deliberately-separate
     // ad sets that differ ONLY by destination URL (landingUrlOverride). The
@@ -535,7 +702,24 @@ export class CampaignCreatorService {
     const copyVariants = creativePackage?.copyVariants ?? [];
     const images = (creativePackage as any)?.images ?? [];
     const video = (creativePackage as any)?.video ?? null;
-    const videoUrl = video?.videoUrl ?? '';
+    // `videos[]` (additive) groups by variantIndex exactly like `images[]`
+    // does — two entries can share a variantIndex (multiple SIZES of the
+    // same video) or carry different variantIndex values (genuinely
+    // DIFFERENT videos, each paired with its own copy variant / ad set).
+    // Takes priority over the legacy singular `video` field, which the
+    // Heygen/AI generation path still populates and which only ever
+    // produces one video at one size for variant 0.
+    const videoSourcesByVariant: Record<number, Array<{ videoUrl: string; aspectRatio?: string }>> = {};
+    const rawVideos = (creativePackage as any)?.videos as any[] | undefined;
+    if (rawVideos?.length) {
+      for (const v of rawVideos) {
+        if (!v.videoUrl) continue;
+        (videoSourcesByVariant[v.variantIndex] ??= []).push({ videoUrl: v.videoUrl, aspectRatio: v.aspectRatio });
+      }
+    } else if (video?.videoUrl) {
+      videoSourcesByVariant[video.variantIndex ?? 0] = [{ videoUrl: video.videoUrl, aspectRatio: video.aspectRatio }];
+    }
+    const videoUrl = Object.values(videoSourcesByVariant)[0]?.[0]?.videoUrl ?? '';
 
     // Pre-launch: validate the audience IDs we actually use, one by one.
     // Previous approach (GET /customaudiences?limit=200) silently truncated
@@ -595,9 +779,11 @@ export class CampaignCreatorService {
     // For warm/hot briefs, expired-audience fallback must NOT degrade to
     // advantage_plus (that's cold prospecting). Try another live lookalike
     // from the product's metaAudiences first; if none exist, throw.
-    const launchProduct = creativeBrief
-      ? (company.products ?? []).find(p => p.name === ((creativeBrief as any).product ?? ''))
-      : null;
+    // Uses the pre-flight-resolved product — previously this was a second,
+    // independent brief-only lookup that resolved to null on every manual
+    // campaign, silently skipping the product's metaOptimizationGoal and its
+    // lookalike fallback pool.
+    const launchProduct = product;
 
     // ── optimization_goal normalization ──────────────────────────────────────
     // The Campaign Review LLM occasionally outputs invalid Meta enum values
@@ -610,27 +796,27 @@ export class CampaignCreatorService {
     //   2. Else: validate against Meta's valid-goal whitelist for OUTCOME_SALES
     //      campaigns. Invalid → default to OFFSITE_CONVERSIONS with warn.
     // Normalized value is persisted back to campaignConfig so audit/UI see truth.
-    const VALID_OPTIMIZATION_GOALS = new Set([
-      'OFFSITE_CONVERSIONS', 'VALUE', 'LANDING_PAGE_VIEWS', 'LINK_CLICKS',
-      'IMPRESSIONS', 'REACH', 'THRUPLAY', 'POST_ENGAGEMENT', 'PAGE_LIKES',
-      'AD_RECALL_LIFT', 'LEAD_GENERATION', 'QUALITY_LEAD', 'QUALITY_CALL',
-    ]);
     const productOptGoal = launchProduct?.metaOptimizationGoal;
     let optGoalNormalized = false;
     for (const adSet of config.adSets as any[]) {
       const llmValue = adSet.optimizationGoal;
-      let resolved: string;
-      if (productOptGoal) {
-        resolved = productOptGoal;
+      const launchObjective = config.objective ?? campaign.objective;
+      const resolved = resolveOptimizationGoalForLaunch({
+        objective: launchObjective,
+        requested: llmValue,
+        productGoal: productOptGoal,
+      });
+      if (
+        launchObjective === 'OUTCOME_SALES' &&
+        productOptGoal &&
+        VALID_OPTIMIZATION_GOALS.has(productOptGoal)
+      ) {
         if (llmValue !== productOptGoal) {
           this.logger.warn(`Ad set "${adSet.name}": LLM output optimizationGoal="${llmValue}" overridden by product.metaOptimizationGoal="${productOptGoal}" (operator choice wins).`);
           optGoalNormalized = true;
         }
-      } else if (llmValue && VALID_OPTIMIZATION_GOALS.has(llmValue)) {
-        resolved = llmValue;
-      } else {
-        this.logger.warn(`Ad set "${adSet.name}": invalid optimizationGoal="${llmValue}" from LLM — defaulting to OFFSITE_CONVERSIONS.`);
-        resolved = 'OFFSITE_CONVERSIONS';
+      } else if (!llmValue || !VALID_OPTIMIZATION_GOALS.has(llmValue)) {
+        this.logger.warn(`Ad set "${adSet.name}": invalid optimizationGoal="${llmValue}" — defaulting to ${resolved} for objective ${launchObjective}.`);
         optGoalNormalized = true;
       }
       adSet.optimizationGoal = resolved;
@@ -639,7 +825,7 @@ export class CampaignCreatorService {
       // Persist normalized config so the audit / dashboard / re-launch path
       // all see the value Meta actually receives — not the LLM's broken output.
       await this.campaignModel.updateOne(
-        { _id: campaignId },
+        { _id: campaignId, tenantId: company.tenantId },
         { $set: { 'campaignConfig.adSets': config.adSets } },
       );
     }
@@ -674,35 +860,66 @@ export class CampaignCreatorService {
       }
     }
 
-    // Consolidate: if multiple ad sets ended up as advantage_plus (same targeting),
-    // merge them into one ad set with all unique variant indices and full budget
-    const advantagePlusAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType === 'advantage_plus');
+    // Consolidate advantage_plus ad sets that are TRUE duplicates.
+    //
+    // This used to merge every advantage_plus ad set unconditionally, and that
+    // was correct while advantage_plus carried no targeting at all — any two
+    // were identical by construction, so running them separately just split
+    // budget between clones bidding against each other.
+    //
+    // Advantage+ ad sets now carry audience suggestions (interests, geo,
+    // locales, custom audience, exclusions), so two of them can be genuinely
+    // different hypotheses. Merging those silently destroys the experiment —
+    // exactly the A/B the Campaign Review Team prompt asks for. Group by a
+    // targeting signature and only collapse within a group.
+    const apSignature = (as: any) =>
+      JSON.stringify({
+        i: [...(as.interests ?? [])].map(String).sort(),
+        c: [...(as.geoLocations ?? [])].sort(),
+        r: [...(as.geoStates ?? [])].sort(),
+        y: [...(as.geoCities ?? [])].sort(),
+        l: [...(as.locales ?? [])].sort(),
+        a: as.metaAudienceId ?? null,
+        x: [...(as.excludeAudienceIds ?? [])].sort(),
+      });
+
     const otherAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType !== 'advantage_plus');
+    const apBySignature = new Map<string, any[]>();
+    for (const as of (config.adSets as any[]).filter((a: any) => a.audienceType === 'advantage_plus')) {
+      const sig = apSignature(as);
+      apBySignature.set(sig, [...(apBySignature.get(sig) ?? []), as]);
+    }
 
-    if (advantagePlusAdSets.length > 1 && !isLandingPageTest) {
-      // Merge all advantage_plus ad sets into one
-      const allVariants = [...new Set(advantagePlusAdSets.flatMap((as: any) => as.ads))].sort();
-      const totalBudgetPercent = advantagePlusAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
-      // Format precedence: mixed > both > video > image. 'mixed' (1 video + N image)
-      // is preferred when any source ad set wanted that — keeps creative diversity in
-      // the consolidated bucket without duplicating the single video across N variants.
-      const mergedCreativeFormat = advantagePlusAdSets.some((as: any) => as.creativeFormat === 'mixed') ? 'mixed'
-        : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'both') ? 'both'
-        : advantagePlusAdSets.some((as: any) => as.creativeFormat === 'video') ? 'video' : 'image';
+    if (!isLandingPageTest && [...apBySignature.values()].some((g) => g.length > 1)) {
+      const mergedGroups: any[] = [];
+      for (const group of apBySignature.values()) {
+        if (group.length === 1) {
+          mergedGroups.push(group[0]);
+          continue;
+        }
+        const allVariants = [...new Set(group.flatMap((as: any) => as.ads))].sort();
+        const totalBudgetPercent = group.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
+        // Format precedence: mixed > both > video > image. 'mixed' (1 video + N image)
+        // is preferred when any source ad set wanted that — keeps creative diversity in
+        // the consolidated bucket without duplicating the single video across N variants.
+        const mergedCreativeFormat = group.some((as: any) => as.creativeFormat === 'mixed') ? 'mixed'
+          : group.some((as: any) => as.creativeFormat === 'both') ? 'both'
+          : group.some((as: any) => as.creativeFormat === 'video') ? 'video' : 'image';
 
-      const merged = {
-        ...advantagePlusAdSets[0],
-        name: `ADVANTAGE_PLUS_${new Date().toISOString().split('T')[0]}`,
-        ads: allVariants,
-        budgetPercent: totalBudgetPercent,
-        creativeFormat: mergedCreativeFormat,
-        audienceType: 'advantage_plus',
-      };
-      delete merged.metaAudienceId;
-      delete merged.excludeAudienceIds;
-
-      config.adSets = [...otherAdSets, merged];
-      this.logger.log(`Consolidated ${advantagePlusAdSets.length} advantage_plus ad sets into 1 (budget: ${totalBudgetPercent}%, variants: ${allVariants.join(',')})`);
+        // Spread the first member so the group's shared targeting is preserved —
+        // it is identical across the group by definition of the signature, so
+        // nothing an operator chose is lost here.
+        mergedGroups.push({
+          ...group[0],
+          name: `ADVANTAGE_PLUS_${new Date().toISOString().split('T')[0]}`,
+          ads: allVariants,
+          budgetPercent: totalBudgetPercent,
+          creativeFormat: mergedCreativeFormat,
+          audienceType: 'advantage_plus',
+        });
+        this.logger.log(`Consolidated ${group.length} identically-targeted advantage_plus ad sets into 1 (budget: ${totalBudgetPercent}%, variants: ${allVariants.join(',')})`);
+      }
+      config.adSets = [...otherAdSets, ...mergedGroups];
     }
 
     // If only one ad set remains, give it 100% budget
@@ -800,14 +1017,21 @@ export class CampaignCreatorService {
 
     // Enforce per-format variant rules:
     //   video  → MUST be only the selected variant (video was generated for that one only)
-    //   image  → MUST include EVERY variant that has an image available
+    //   image  → by default MUST include every available image variant, UNLESS the LLM
+    //            has deliberately split them across multiple image ad sets in this same
+    //            campaign — in which case each variant just needs to appear in at least
+    //            ONE image ad set (the UNION across all image ad sets must stay complete;
+    //            individual ad sets can each carry a subset).
     //   mixed  → handled upstream by the split logic; pass through here
     //
-    // The Campaign Review Team prompt instructs the LLM to set ads=[0,1,2,3] for
-    // image ad sets, but it has historically narrowed to a single variant
-    // (e.g. May 2026 KAAL_SARPA campaign launched with ads=[1] only → 1 ad on
-    // Meta instead of 4, wasted 75% of generated creative). Enforce in TS so
-    // LLM drift can't kill variant diversity.
+    // The union check still catches the original failure mode this guarded against
+    // (May 2026 KAAL_SARPA campaign launched with a single ad set at ads=[1] only →
+    // 1 ad on Meta instead of 4, wasted 75% of generated creative — with one ad set,
+    // its own list IS the union, so a narrowed single ad set is still caught and
+    // expanded below) while now allowing a genuine deliberate split across ad sets —
+    // e.g. a retargeting ad set running the social-proof variant and a cold-prospecting
+    // ad set running the price-anchor variant — as long as nothing is dropped
+    // campaign-wide.
     const selectedCopyIndex = (creativePackage as any)?.selectedCopyIndex ?? 0;
     const availableImageVariants: number[] = ((creativePackage as any)?.images ?? [])
       .map((img: any) => img?.variantIndex)
@@ -823,14 +1047,40 @@ export class CampaignCreatorService {
           this.logger.warn(`Ad set "${adSet.name}": video format restricted to variant ${selectedCopyIndex} (was: [${adSet.ads}])`);
           adSet.ads = [selectedCopyIndex];
         }
-      } else if (adSet.creativeFormat === 'image' && allImageVariants.length > 0) {
-        const proposed = (adSet.ads ?? []).filter((v: number) => allImageVariants.includes(v));
-        // LLM narrowed below available — expand back to all available image variants.
-        if (proposed.length < allImageVariants.length) {
-          this.logger.warn(
-            `Ad set "${adSet.name}": image format had ads=[${adSet.ads}] — expanding to all available image variants [${allImageVariants.join(',')}] (${allImageVariants.length - proposed.length} variant(s) would otherwise be dropped)`,
+      }
+    }
+
+    if (allImageVariants.length > 0) {
+      const imageAdSets = (config.adSets as any[]).filter((as) => as.creativeFormat === 'image');
+      const union = new Set<number>();
+      for (const as of imageAdSets) {
+        for (const v of as.ads ?? []) if (allImageVariants.includes(v)) union.add(v);
+      }
+      const missing = allImageVariants.filter((v) => !union.has(v));
+
+      if (imageAdSets.length > 0 && missing.length === 0) {
+        // Every variant is covered by at least one image ad set — trust the
+        // LLM's split, just drop any stray/invalid indices and guard against
+        // an ad set ending up with zero ads.
+        for (const as of imageAdSets) {
+          as.ads = (as.ads ?? []).filter((v: number) => allImageVariants.includes(v));
+          if (as.ads.length === 0) as.ads = [...allImageVariants];
+        }
+        if (imageAdSets.length > 1) {
+          this.logger.log(
+            `Image variants split across ${imageAdSets.length} ad sets: ${imageAdSets.map((as) => `${as.name}=[${as.ads}]`).join(', ')}`,
           );
-          adSet.ads = [...allImageVariants];
+        }
+      } else if (imageAdSets.length > 0) {
+        // Not a valid split — some variant(s) are missing campaign-wide.
+        // Fall back to the safe behavior: every image ad set gets every variant.
+        for (const as of imageAdSets) {
+          if ((as.ads ?? []).length !== allImageVariants.length) {
+            this.logger.warn(
+              `Ad set "${as.name}": image ads=[${as.ads}] would leave variant(s) [${missing.join(',')}] uncovered campaign-wide — expanding to all available image variants [${allImageVariants.join(',')}]`,
+            );
+          }
+          as.ads = [...allImageVariants];
         }
       }
     }
@@ -852,16 +1102,40 @@ export class CampaignCreatorService {
     // Anchor to the product's historical CPA so Meta uses bid_strategy=COST_CAP
     // and stops chasing junk clicks. Custom/retarget audiences keep
     // LOWEST_COST_WITHOUT_CAP (the audience itself is the quality gate).
-    const briefProductForBid = (creativeBrief as any)?.product;
-    const productForBid = (company.products ?? []).find((p: any) => p.name === briefProductForBid)
-      ?? (company.products ?? []).find((p: any) => p.active)
-      ?? (company.products ?? [])[0];
-    const histCPA = productForBid?.performance?.avgCPA;
+    //
+    // Only valid for conversion-optimized ad sets: histCPA is the historical
+    // cost per PURCHASE. Applying it as a COST_CAP bid to a LANDING_PAGE_VIEWS
+    // (or LINK_CLICKS/REACH/IMPRESSIONS) ad set caps a ~₹1-50 event at a
+    // ~₹1000+ bid — Meta essentially never spends, near-total underdelivery.
+    // Hit in production 2026-07-16 on a manual Traffic-objective campaign.
+    // Non-conversion goals stay LOWEST_COST_WITHOUT_CAP, which is the
+    // correct default for them anyway — they were never the junk-traffic
+    // failure mode this cap was built to prevent.
+    // Uses the product resolved in the pre-flight — NOT a second lookup.
+    // This was `find(p => p.name === brief.product) ?? find(p => p.active)`,
+    // which on a manual campaign (no brief) took the tenant's FIRST ACTIVE
+    // product's avgCPA. Hit in production 2026-07-27: a "wish letter" ad set
+    // (breakeven ₹1,100) shipped with COST_CAP ₹1,400 — Nadi Report's CPA —
+    // authorising Meta to pay ₹300 more per sale than the product earns.
+    const histCPA = product?.performance?.avgCPA;
+    // A cost cap above breakeven is a guaranteed-loss configuration: it tells
+    // Meta the maximum acceptable price for a conversion is more than the
+    // conversion is worth. Warn rather than clamp — a product whose historical
+    // CPA genuinely exceeds breakeven is a real (bad) signal the operator
+    // needs to see, not something to paper over by silently bidding lower.
+    const breakevenCPA = getEffectiveConversionValue(product as any) * (product?.contributionMargin ?? 1);
+    if (typeof histCPA === 'number' && histCPA > 0 && breakevenCPA > 0 && histCPA > breakevenCPA) {
+      this.logger.warn(
+        `Product "${product?.name}" has avgCPA ₹${histCPA} but breakeven CPA is only ₹${Math.round(breakevenCPA)} — the COST_CAP below authorises Meta to buy conversions at a loss of ₹${Math.round(histCPA - breakevenCPA)} each. Lower the bid or fix the product's price/margin before scaling.`,
+      );
+    }
     if (typeof histCPA === 'number' && histCPA > 0) {
       const COLD_PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
+      const CONVERSION_GOALS = new Set(['OFFSITE_CONVERSIONS', 'VALUE']);
       let bidCapped = 0;
       for (const adSet of config.adSets as any[]) {
         if (!COLD_PROSPECTING_TYPES.has(adSet.audienceType)) continue;
+        if (!CONVERSION_GOALS.has(adSet.optimizationGoal)) continue;
         if (typeof adSet.bidAmountInr === 'number' && adSet.bidAmountInr > 0) continue;
         adSet.bidAmountInr = Math.round(histCPA);
         bidCapped++;
@@ -971,10 +1245,15 @@ export class CampaignCreatorService {
         for (const adSet of config.adSets as any[]) {
           if (!Array.isArray(adSet.interests) || adSet.interests.length === 0) continue;
           const before = adSet.interests.length;
+          // Log the IDs removed from THIS ad set, not the campaign-wide invalid
+          // list — printing the latter alongside a per-ad-set count produced
+          // lines like "dropped 2 invalid Meta interest ID(s) [4 ids]", which
+          // reads as though all four came out of this one ad set.
+          const removed = adSet.interests.filter((id: any) => invalidSet.has(String(id)));
           adSet.interests = adSet.interests.filter((id: any) => !invalidSet.has(String(id)));
           if (adSet.interests.length < before) {
             this.logger.warn(
-              `Ad set "${adSet.name}": dropped ${before - adSet.interests.length} invalid Meta interest ID(s) [${invalid.join(', ')}] — remaining ${adSet.interests.length}. Interest-type ad sets with ZERO remaining interests become broad targeting.`,
+              `Ad set "${adSet.name}": dropped ${removed.length} invalid Meta interest ID(s) [${removed.join(', ')}] — remaining ${adSet.interests.length}. Interest-type ad sets with ZERO remaining interests become broad targeting.`,
             );
           }
         }
@@ -1010,31 +1289,115 @@ export class CampaignCreatorService {
       }
     }
 
-    // Find the product for landing URL — match by brief.product name first, fallback to conversionEvent
-    // creativeBrief was loaded earlier (top of launch) for the audience-expiry guard.
-    const briefProduct = creativeBrief ? ((creativeBrief as any).product ?? '') : '';
-    const product = (company.products ?? []).find(p =>
-      briefProduct ? p.name === briefProduct : p.conversionEvent === config.conversionEvent,
-    ) ?? (company.products ?? [])[0];
-    const landingUrl = product?.landingUrl ?? '';
+    // Landing URL comes from the product resolved (and validated) in the
+    // pre-flight at the top of launch(). No re-derivation here: the old
+    // `find(p => p.conversionEvent === config.conversionEvent) ?? products[0]`
+    // is what shipped a campaign pointing at the wrong product's funnel.
+    const landingUrl = product.landingUrl ?? '';
 
-    const topicSlug = ((campaign as any).topic ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 30);
-    const campaignName = `AGENT_${topicSlug || 'CAMPAIGN'}_${new Date().toISOString().split('T')[0]}`;
+    // Shared with the approval preview so the operator approves the same name
+    // Meta receives — see meta-campaign-name.util.ts for the naming rules.
+    const campaignName = buildMetaCampaignName(campaign as any);
 
-    // Upload one image per variant to Meta
-    const imageHashes: Record<number, string> = {};
-    for (const img of images) {
-      if (img.imageUrl) {
+    // Upload every image to Meta — usually one per variant, but a variant can
+    // carry several (a human creative team's pre-made sizes, or a library
+    // package edited to add one): meta-ads.service.ts switches to placement
+    // asset customization (asset_feed_spec) whenever a variant resolves to
+    // more than one distinct hash, and falls back to the plain single-image
+    // path otherwise — so this loop doesn't need to know which case it's in.
+    // Guarantee the size Meta will actually serve exists as a real asset first.
+    // Without this, launch ships whatever single size the package happens to
+    // hold and Meta centre-crops it to fit each placement — which on a
+    // headline-top/CTA-bottom creative removes the hook AND the call to
+    // action, so the ad serves stripped of both and reads as weak creative.
+    // Canvas-extend is local CPU with no model call, so this costs a few
+    // hundred ms and zero API spend. Non-fatal: a failure here launches with
+    // whatever sizes the package already had, exactly as before.
+    let launchImages = images;
+    // Which asset satisfies which ratio, per variant, decided by measurement.
+    // Empty when resizing was skipped or failed — every read below tolerates that.
+    let sizesByVariant: RatioMap = {};
+    if (creativePackage && images.some((img: any) => img.imageUrl)) {
+      try {
+        const ensured = await this.imageResizer.ensureSizes(
+          images,
+          CampaignCreatorService.LAUNCH_RATIOS,
+          company.tenantId,
+          (creativePackage as any).runId ?? 'launch',
+          // Launch ignores `rejected` on purpose (see the schema comment on
+          // ImageCreative.rejected), so the sizes guaranteed here must cover
+          // the same set. Without this a rejected image would still ship to
+          // Meta while being the one asset skipped for resizing — landing it
+          // in exactly the centre-crop this whole path exists to prevent.
+          { includeRejected: true },
+        );
+        launchImages = ensured.images;
+        sizesByVariant = ensured.byRatio;
+        if (ensured.added > 0) {
+          // Persist so re-launching this package doesn't rebuild them.
+          await this.creativePackageModel.updateOne(
+            { _id: (creativePackage as any)._id, tenantId: company.tenantId },
+            { $set: { images: ensured.images } },
+          );
+          this.logger.log(`Added ${ensured.added} placement size(s) before launch — Meta has nothing left to crop`);
+        }
+      } catch (err: any) {
+        this.logger.warn(`Placement size generation failed, launching with existing sizes: ${err.message}`);
+      }
+    }
+
+    // Order and label the per-variant upload list BEFORE touching Meta.
+    //
+    // Both matter downstream and neither used to be decided anywhere:
+    // MetaAdsService.pickPrimaryImageSize selects with `images.find(i =>
+    // i.aspectRatio === '4:5')`, and buildImageAssetFeedSpec (when Dynamic
+    // Creative is enabled) treats the FIRST entry as the default for any
+    // unmatched placement. So position and tag together decide what actually
+    // serves — while `aspectRatio` on an images[] entry is only what was
+    // REQUESTED at generation time, and two entries on one variant can carry
+    // the same tag (a 1200x628 original tagged '16:9' plus a derived true
+    // 16:9). Left alone, Meta's asset was chosen by append order.
+    //
+    // So: the assets ensureSizes measured and guaranteed go first, in
+    // LAUNCH_RATIOS order, each labelled with the ratio it MEASURES rather
+    // than the one it claims. Everything else follows, relabelled from its
+    // own measurement where we have one. Same set uploaded as before — only
+    // the order and the labels are now decided rather than incidental.
+    const orderedForUpload: Record<number, Array<{ imageUrl: string; aspectRatio?: string }>> = {};
+    for (const img of launchImages) {
+      if (!img.imageUrl) continue;
+      const list = (orderedForUpload[img.variantIndex] ??= []);
+      if (list.some((e) => e.imageUrl === img.imageUrl)) continue; // same asset twice — upload once
+      list.push({ imageUrl: img.imageUrl, aspectRatio: classifyRatio(img.width, img.height) ?? img.aspectRatio });
+    }
+    for (const [variantKey, list] of Object.entries(orderedForUpload)) {
+      const guaranteed = sizesByVariant[Number(variantKey)] ?? {};
+      const preferred: Array<{ imageUrl: string; aspectRatio?: string }> = [];
+      for (const ratio of CampaignCreatorService.LAUNCH_RATIOS) {
+        const url = guaranteed[ratio];
+        if (!url || preferred.some((e) => e.imageUrl === url)) continue;
+        preferred.push({ imageUrl: url, aspectRatio: ratio });
+      }
+      orderedForUpload[Number(variantKey)] = [
+        ...preferred,
+        ...list.filter((e) => !preferred.some((p) => p.imageUrl === e.imageUrl)),
+      ];
+    }
+
+    const imageHashes: Record<number, { hash: string; aspectRatio?: string }[]> = {};
+    for (const [variantKey, list] of Object.entries(orderedForUpload)) {
+      const variant = Number(variantKey);
+      for (const img of list) {
         try {
           const hash = await this.metaAdsService.uploadImage(img.imageUrl, accountId, company.meta.accessToken);
-          imageHashes[img.variantIndex] = hash;
-          this.logger.log(`Image uploaded for variant ${img.variantIndex}: hash=${hash}`);
+          (imageHashes[variant] ??= []).push({ hash, aspectRatio: img.aspectRatio });
+          this.logger.log(`Image uploaded for variant ${variant} (${img.aspectRatio ?? 'default'}): hash=${hash}`);
         } catch (err: any) {
-          this.logger.warn(`Image upload failed for variant ${img.variantIndex}: ${err.message}`);
+          this.logger.warn(`Image upload failed for variant ${variant} (${img.aspectRatio ?? 'default'}): ${err.message}`);
         }
       }
     }
-    this.logger.log(`imageHashes: ${JSON.stringify(Object.keys(imageHashes).map(k => `v${k}=${imageHashes[Number(k)].slice(0, 8)}...`))}`);
+    this.logger.log(`imageHashes: ${JSON.stringify(Object.fromEntries(Object.entries(imageHashes).map(([k, v]) => [k, v.map(a => `${a.aspectRatio ?? 'default'}:${a.hash.slice(0, 8)}...`)])))}`);
 
     // Carousel path — if any ad set is creativeFormat=carousel, upload each
     // card image and build the carouselCards payload Meta needs at ad-creation
@@ -1079,72 +1442,146 @@ export class CampaignCreatorService {
       }
     }
 
-    // Upload video to Meta if available and any ad set needs it
+    // Upload every video (every size of every distinct video) to Meta if any
+    // ad set needs video — grouped by variantIndex so a variant with 2+
+    // distinct videoIds gets placement asset customization (same as images),
+    // while DIFFERENT variantIndexes stay entirely separate ads.
     const needsVideo = (config.adSets ?? []).some(
-      (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both',
+      (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both' || as.creativeFormat === 'mixed',
     );
-    let videoId: string | undefined;
-    let videoThumbnailHash: string | undefined;
-    if (needsVideo && videoUrl) {
-      try {
-        videoId = await this.metaAdsService.uploadVideo(
-          videoUrl, accountId, company.meta.accessToken,
-        );
-        this.logger.log(`Video uploaded to Meta: videoId=${videoId}`);
-        // Get thumbnail from video — required for video ad creatives
-        videoThumbnailHash = await this.metaAdsService.getVideoThumbnailHash(
-          videoId, accountId, company.meta.accessToken,
-        );
-        this.logger.log(`Video thumbnail hash: ${videoThumbnailHash ?? 'NONE — will use imageHash'}`);
-      } catch (err: any) {
-        this.logger.warn(`Video upload failed (proceeding without video): ${err.message}`);
+    const videoAssets: Record<number, Array<{ videoId: string; thumbnailHash?: string; aspectRatio?: string }>> = {};
+    if (needsVideo) {
+      for (const [variantIndexStr, sources] of Object.entries(videoSourcesByVariant)) {
+        const variantIndex = Number(variantIndexStr);
+        for (const src of sources) {
+          try {
+            const videoId = await this.metaAdsService.uploadVideo(
+              src.videoUrl, accountId, company.meta.accessToken,
+            );
+            this.logger.log(`Video uploaded for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): videoId=${videoId}`);
+            // Get thumbnail from video — required for video ad creatives
+            const thumbnailHash = await this.metaAdsService.getVideoThumbnailHash(
+              videoId, accountId, company.meta.accessToken,
+            );
+            this.logger.log(`Video thumbnail hash for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): ${thumbnailHash ?? 'NONE — will use imageHash'}`);
+            (videoAssets[variantIndex] ??= []).push({ videoId, thumbnailHash, aspectRatio: src.aspectRatio });
+          } catch (err: any) {
+            this.logger.warn(`Video upload failed for variant ${variantIndex} (${src.aspectRatio ?? 'default'}, proceeding without it): ${err.message}`);
+          }
+        }
       }
     }
 
-    // Launch: campaign → ad sets → ads via Meta Graph API.
-    // Wrapped in try/catch so failures reset status from 'launching' back to
-    // 'pending_approval', allowing retry. Without this, an exception during
-    // Meta API calls leaves the campaign stuck in 'launching' forever and
-    // the atomic claim above blocks all future /approve attempts.
+    // Pre-launch: validate product.customConversionId against the ACCOUNT
+    // actually being launched to — it's saved once on the product (tenant-
+    // global), but custom conversions are account-scoped in Meta, same
+    // failure shape as product.metaAudiences (see the purchaser-exclusion
+    // account-scoping note above). Shared with the add-ad-set path via
+    // MetaAdsService.validateCustomConversionId — see that method's comment
+    // for the 2026-07-16 (silent non-delivery) and 2026-08-07 (add-ad-set
+    // skipped this check entirely) incidents that shaped it.
+    const validatedCustomConversionId =
+      await this.metaAdsService.validateCustomConversionId(
+        accountId,
+        company.meta.accessToken,
+        product?.customConversionId,
+      );
+
+    // Launch: campaign → ad sets → ads via Meta Graph API. From this point
+    // onward, a timeout can hide a real Meta object, so never restore pending.
     let launchResult;
     try {
+      metaCampaignCreationStarted = true;
       launchResult = await this.metaAdsService.launchCampaign({
         accountId: accountId,
         accessToken: company.meta.accessToken,
-        pageId: company.meta.pageId,
+        pageId: product?.pageId ?? company.meta.pageId,
         pixelId: product?.pixelId ?? company.meta.pixelId,
+        // Gated on objective, not just product.metaAppId being set — a
+        // product can be configured for app tracking AND still run under a
+        // website-style objective (Traffic/Sales) intentionally, e.g. to get
+        // real fbclid-based user-level attribution via a landing page instead
+        // of Meta's native App Promotion ad format, which requires the ad's
+        // link to exactly match object_store_url (subcode 1885031, hit in
+        // production 2026-08-11) and gives no user-level data back to us.
+        // Without this gate, any app-tracked product would always take the
+        // application_id branch regardless of the objective actually chosen.
+        applicationId:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppId
+            : undefined,
+        objectStoreUrl:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppStoreUrl
+            : undefined,
+        objectStoreUrlIos:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppStoreUrlIos
+            : undefined,
+        objectStoreUrlAndroid:
+          (config.objective ?? 'OUTCOME_SALES') === 'OUTCOME_APP_PROMOTION'
+            ? product?.metaAppStoreUrlAndroid
+            : undefined,
         campaignName,
         budget: campaign.budget,
         objective: config.objective ?? 'OUTCOME_SALES',
         conversionEvent: config.conversionEvent ?? 'Purchase',
         customEventName: product?.customEventName,
-        customConversionId: product?.customConversionId,
+        customConversionId: validatedCustomConversionId,
         adSets: config.adSets,
         copyVariants: copyVariants.length > 0 ? copyVariants : [
           { primaryText: 'Check out our latest offer', headline: 'Learn More', cta: 'Learn More' },
         ],
         imageHashes,
-        videoThumbnailHash,
-        videoId,
+        videoAssets,
         selectedCopyIndex,
         landingUrl,
         declaredSpecialAdCategories: company.meta?.specialAdCategories ?? [],
         carouselCards: resolvedCarouselCards.length >= 2 ? resolvedCarouselCards : undefined,
       });
+      knownMetaCampaignId = launchResult.campaignId;
     } catch (err: any) {
-      // Reset claim so /approve can be retried
-      await this.campaignModel.updateOne(
-        { _id: campaignId, status: 'launching' },
-        { $set: { status: 'pending_approval' } },
-      );
-      this.logger.error(`Meta launch failed for campaign ${campaignId}, claim released for retry: ${err.message}`);
+      this.logger.error(`Meta launch failed for campaign ${campaignId}; status remains launching because a Meta campaign may exist and must be reconciled before retry: ${err.message}`);
       throw err;
     }
 
-    // Only activate if all expected ads were created
+    // Persist the returned Meta identity while the real campaign is still
+    // PAUSED. If activation fails, the object remains linked and reconcilable.
     const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
     const expectedAds = config.adSets.reduce((s: number, a: any) => s + (a.ads?.length ?? 0), 0);
     const fullyLaunched = totalAdsCreated >= expectedAds && totalAdsCreated > 0;
+    const launchedAt = new Date();
+    const buildPersistedAdSets = (status: 'active' | 'paused') => launchResult.adSets.map(as => ({
+      metaAdSetId: as.adSetId,
+      name: as.name,
+      budgetPercent: config.adSets.find((c: any) => c.name === as.name)?.budgetPercent ?? 0,
+      audienceType: config.adSets.find((c: any) => c.name === as.name)?.audienceType ?? '',
+      landingUrl: config.adSets.find((c: any) => c.name === as.name)?.landingUrlOverride ?? '',
+      status,
+      ads: as.ads.map(ad => ({
+        metaAdId: ad.adId,
+        copyVariantIndex: ad.copyVariantIndex,
+        hookStyle: copyVariants[ad.copyVariantIndex]?.hookStyle ?? '',
+        format: ad.format,
+        status,
+      })),
+    }));
+
+    const identityWrite = await this.campaignModel.updateOne(
+      { _id: campaignId, tenantId: company.tenantId, status: 'launching' },
+      {
+        $set: {
+          metaCampaignId: launchResult.campaignId,
+          metaAccountId: accountId,
+          launchedAt,
+          approvedAt: launchedAt,
+          adSets: buildPersistedAdSets('paused'),
+        },
+      },
+    );
+    if (identityWrite.matchedCount !== 1) {
+      throw new Error(`Could not persist Meta campaign ${launchResult.campaignId} on claimed campaign ${campaignId}`);
+    }
 
     if (fullyLaunched) {
       await this.metaAdsService.activateCampaign(
@@ -1157,35 +1594,25 @@ export class CampaignCreatorService {
       );
     }
 
-    // Save all Meta IDs to MongoDB
-    await this.campaignModel.updateOne(
-      { _id: campaignId },
+    const finalStatus = fullyLaunched ? 'active' : 'paused';
+    const finalWrite = await this.campaignModel.updateOne(
       {
-        status: fullyLaunched ? 'active' : 'paused',
+        _id: campaignId,
+        tenantId: company.tenantId,
+        status: 'launching',
         metaCampaignId: launchResult.campaignId,
-        metaAccountId: accountId,
-        launchedAt: new Date(),
-        approvedAt: new Date(),
-        adSets: launchResult.adSets.map(as => ({
-          metaAdSetId: as.adSetId,
-          name: as.name,
-          budgetPercent: config.adSets.find((c: any) => c.name === as.name)?.budgetPercent ?? 0,
-          audienceType: config.adSets.find((c: any) => c.name === as.name)?.audienceType ?? '',
-          // Record which destination URL this ad set served — empty for normal
-          // campaigns (all ad sets share product.landingUrl), set for the
-          // landing-page A/B test so the audit loop can attribute per-URL.
-          landingUrl: config.adSets.find((c: any) => c.name === as.name)?.landingUrlOverride ?? '',
-          status: 'active',
-          ads: as.ads.map(ad => ({
-            metaAdId: ad.adId,
-            copyVariantIndex: ad.copyVariantIndex,
-            hookStyle: copyVariants[ad.copyVariantIndex]?.hookStyle ?? '',
-            format: ad.format,    // 'video' | 'image' — required to attribute mixed-format performance
-            status: 'active',
-          })),
-        })),
+      },
+      {
+        $set: {
+          status: finalStatus,
+          adSets: buildPersistedAdSets(finalStatus),
+        },
       },
     );
+    if (finalWrite.matchedCount !== 1) {
+      throw new Error(`Could not finalize Meta campaign ${launchResult.campaignId} on claimed campaign ${campaignId}`);
+    }
+    launchFinalized = true;
 
     await this.actionLogger.log({
       tenantId: company.tenantId,
@@ -1202,6 +1629,55 @@ export class CampaignCreatorService {
     );
 
     return (await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).lean().exec()) as any;
+    } catch (err: any) {
+      if (!metaCampaignCreationStarted) {
+        try {
+          await this.campaignModel.updateOne(
+            {
+              _id: campaignId,
+              tenantId: company.tenantId,
+              status: 'launching',
+              $or: [{ metaCampaignId: '' }, { metaCampaignId: { $exists: false } }],
+            },
+            { $set: { status: 'pending_approval' } },
+          );
+        } catch (rollbackErr: any) {
+          this.logger.error(`Pre-Meta launch rollback failed for campaign ${campaignId}; leaving it launching: ${rollbackErr.message}`);
+        }
+      } else if (knownMetaCampaignId && !launchFinalized) {
+        try {
+          await this.metaAdsService.pauseCampaign(knownMetaCampaignId, company.meta.accessToken);
+          await this.campaignModel.updateOne(
+            { _id: campaignId, tenantId: company.tenantId, status: 'launching' },
+            {
+              $set: {
+                status: 'paused',
+                metaCampaignId: knownMetaCampaignId,
+                metaAccountId: accountId,
+                pauseReason: `Launch reconciliation after failure: ${err.message}`,
+                pausedAt: new Date(),
+              },
+            },
+          );
+          this.logger.error(`Launch failed after Meta campaign ${knownMetaCampaignId} was created; paused and retained for reconciliation: ${err.message}`);
+        } catch (pauseErr: any) {
+          this.logger.error(`CRITICAL: launch failed after Meta campaign ${knownMetaCampaignId} was created and automatic pause failed; campaign remains launching and counts against the cap: ${pauseErr.message}`);
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async releaseBudgetReservationSafely(
+    reservation: CampaignBudgetReservation,
+  ): Promise<void> {
+    try {
+      await this.campaignBudgetGuard.release(reservation);
+    } catch (err: any) {
+      // A leaked reservation is deliberately fail-closed: capacity is blocked,
+      // but no additional campaign is allowed to spend above the tenant cap.
+      this.logger.error(`CRITICAL: weekly budget reservation cleanup failed; capacity remains blocked safely. tenant=${reservation.tenantId} campaign=${reservation.campaignId} token=${reservation.token}: ${err.message}`);
+    }
   }
 
   /**
@@ -1270,15 +1746,39 @@ export class CampaignCreatorService {
       }
     }
 
-    // 3. Lookalike 1% from purchasers
+    // 3. Lookalike 1% from purchasers — ONLY once the seed is actually populated.
+    //
+    // This block used to create the lookalike immediately after creating the
+    // purchasers audience above. A pixel audience holds ZERO people at creation
+    // (Meta backfills it from pixel history over the following hours), and a
+    // lookalike seeded from an empty audience fails PERMANENTLY with
+    // operation_status 433 — Meta never retries, and its own error text says to
+    // delete and recreate.
+    //
+    // That is exactly what happened on 91astrology: purchasers created at epoch
+    // 1777838430, lookalike at 1777838432 — two seconds later. The result sat
+    // dead for months while STANDARD_COHORTS still described it as the "primary
+    // cold prospecting audience", so cold ad sets silently fell back to broad.
+    //
+    // Skipping here is not a loss: POST audiences/rebuild-lookalikes creates it
+    // on a later pass once the seed is ready (and repairs already-dead ones).
     const lookalikeSource = purchasersId ?? existingAudiences.find(a => a.name === purchasersName)?.id;
     const lookalikeName = `${brandPrefix}_Lookalike_1pct`;
     if (lookalikeSource && !existsByName(lookalikeName)) {
       try {
-        const lookalikeId = await this.metaAdsService.createLookalikeAudience(
-          accountId, accessToken, lookalikeName, lookalikeSource, 'IN', 0.01,
-        );
-        newAudiences.push({ id: lookalikeId, name: lookalikeName, type: 'lookalike', lookalikePercent: 1 });
+        const seed = await this.metaAdsService.getAudienceHealth(lookalikeSource, accessToken);
+        if (!seed.seedReady) {
+          this.logger.warn(
+            `Skipping lookalike "${lookalikeName}": seed "${purchasersName}" ${seed.reason}. ` +
+            `Creating it now would fail permanently (Meta operation_status 433). ` +
+            `Run POST /campaigns/${company.tenantId}/audiences/rebuild-lookalikes once the seed fills.`,
+          );
+        } else {
+          const lookalikeId = await this.metaAdsService.createLookalikeAudience(
+            accountId, accessToken, lookalikeName, lookalikeSource, 'IN', 0.01,
+          );
+          newAudiences.push({ id: lookalikeId, name: lookalikeName, type: 'lookalike', lookalikePercent: 1 });
+        }
       } catch (err: any) {
         this.logger.warn(`Failed to create lookalike audience: ${err.message}`);
       }

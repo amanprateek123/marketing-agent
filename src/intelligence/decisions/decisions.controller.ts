@@ -1,0 +1,200 @@
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { DecisionsService } from './decisions.service';
+import { DecisionStatus } from './intelligence-decision.schema';
+import { IntelligenceOrchestrator } from '../orchestrator/intelligence-orchestrator.service';
+import { CampaignsService } from '../../campaigns/campaigns.service';
+
+/**
+ * GET /api/v1/intelligence/:tenantId/decisions
+ *   Query params: status, campaignId, limit, since
+ * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/approve
+ *   Approves AND immediately executes the action on the live Meta campaign
+ *   (see DecisionsService.executeApprovedDecision). The automatic 30-min/
+ *   3-hour cascade itself never does this — shadowModeOnly stays enforced
+ *   there. Only an explicit human approval through this endpoint reaches
+ *   Meta.
+ * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/reject
+ * POST /api/v1/intelligence/:tenantId/decisions/:decisionId/retry-execution
+ *   Explicitly retries a previously failed Meta call. A normal duplicate
+ *   approval never retries automatically because the prior outcome may need
+ *   checking in Meta first.
+ * GET /api/v1/intelligence/:tenantId/decisions/summary
+ * GET /api/v1/intelligence/:tenantId/cycles
+ *   Query params: campaignId, limit — recent cascade cycles for this
+ *   tenant, each carrying the diagnosis narrative even when the cycle
+ *   proposed zero decisions. This is the "why did nothing happen" trail —
+ *   see IntelligenceOrchestrator.listRecentCycles / LearningEngine.
+ */
+@Controller('intelligence')
+export class DecisionsController {
+  constructor(
+    private readonly service: DecisionsService,
+    private readonly orchestrator: IntelligenceOrchestrator,
+    private readonly campaignsService: CampaignsService,
+  ) {}
+
+  @Get(':tenantId/decisions')
+  async list(
+    @Param('tenantId') tenantId: string,
+    @Query('status') status?: string,
+    @Query('campaignId') campaignId?: string,
+    @Query('limit') limit?: string,
+    @Query('sinceHours') sinceHours?: string,
+  ) {
+    let since: Date | undefined;
+    if (sinceHours) {
+      const h = parseInt(sinceHours, 10);
+      if (!Number.isFinite(h) || h <= 0 || h > 720) {
+        throw new BadRequestException('sinceHours must be 1..720');
+      }
+      since = new Date(Date.now() - h * 3600_000);
+    }
+    const decisions = await this.service.list({
+      tenantId,
+      status: (status as DecisionStatus) || undefined,
+      campaignId,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      since,
+    });
+    return { decisions, count: decisions.length };
+  }
+
+  @Get(':tenantId/decisions/summary')
+  async summary(@Param('tenantId') tenantId: string) {
+    return this.service.summary(tenantId);
+  }
+
+  /**
+   * GET /intelligence/:tenantId/decisions/:decisionId/trace
+   *
+   * The sixteen engine steps behind one decision, in plain English, each with
+   * the engine's own recorded output underneath it. Answers "how did it reach
+   * this?" — which the decision card alone can't, since that shows only the
+   * final recommendation and its one-paragraph reasoning.
+   *
+   * Reads exclusively from what the cycle already persisted. It never re-runs
+   * an engine, so opening a trace costs nothing and can't produce a different
+   * answer than the one that was actually acted on.
+   */
+  @Get(':tenantId/decisions/:decisionId/trace')
+  async trace(
+    @Param('tenantId') tenantId: string,
+    @Param('decisionId') decisionId: string,
+    @Query('includeLogs') includeLogs?: string,
+  ) {
+    return this.service.trace(tenantId, decisionId, includeLogs === 'true');
+  }
+
+  /**
+   * GET /api/v1/intelligence/:tenantId/cycles/:cycleId/trace
+   * The sixteen engine steps for one cascade run, in plain English.
+   */
+  @Get(':tenantId/cycles/:cycleId/trace')
+  async cycleTrace(
+    @Param('tenantId') tenantId: string,
+    @Param('cycleId') cycleId: string,
+    @Query('includeLogs') includeLogs?: string,
+  ) {
+    return this.service.cycleTrace(tenantId, cycleId, includeLogs === 'true');
+  }
+
+  @Get(':tenantId/cycles')
+  async cycles(
+    @Param('tenantId') tenantId: string,
+    @Query('campaignId') campaignId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const cycles = await this.orchestrator.listRecentCycles(
+      tenantId,
+      campaignId,
+      limit ? parseInt(limit, 10) : undefined,
+    );
+    // Cycle docs only carry campaignId/metaCampaignId — resolve names in one
+    // batch query so the "which campaign is this about" question the
+    // dashboard needs has an actual answer instead of a raw Mongo/Meta id.
+    const names = await this.campaignsService.findNamesByIds(tenantId, [
+      ...new Set(cycles.map((c) => c.campaignId)),
+    ]);
+    const enriched = cycles.map((c) => ({
+      ...c,
+      campaignName: names.get(c.campaignId) ?? '',
+    }));
+    return { cycles: enriched, count: enriched.length };
+  }
+
+  @Post(':tenantId/decisions/:decisionId/approve')
+  async approve(
+    @Param('tenantId') tenantId: string,
+    @Param('decisionId') decisionId: string,
+    @Body() body: { reviewer?: string; notes?: string },
+  ) {
+    const doc = await this.service.approve(
+      tenantId,
+      decisionId,
+      body?.reviewer,
+      body?.notes,
+    );
+    const result = await this.service.executeApprovedDecision(
+      tenantId,
+      decisionId,
+    );
+    return {
+      ok: true,
+      message: result.executed
+        ? 'Decision approved and applied to the live Meta campaign.'
+        : `Decision approved locally, but the Meta call failed: ${result.error}`,
+      executed: result.executed,
+      executionError: result.error,
+      decision: doc,
+    };
+  }
+
+  @Post(':tenantId/decisions/:decisionId/reject')
+  async reject(
+    @Param('tenantId') tenantId: string,
+    @Param('decisionId') decisionId: string,
+    @Body() body: { reason: string; reviewer?: string },
+  ) {
+    if (!body?.reason?.trim()) {
+      throw new BadRequestException('reason is required');
+    }
+    const doc = await this.service.reject(
+      tenantId,
+      decisionId,
+      body.reason,
+      body.reviewer,
+    );
+    return {
+      ok: true,
+      message: 'Decision rejected locally. Feedback recorded for learning.',
+      decision: doc,
+    };
+  }
+
+  @Post(':tenantId/decisions/:decisionId/retry-execution')
+  async retryExecution(
+    @Param('tenantId') tenantId: string,
+    @Param('decisionId') decisionId: string,
+  ) {
+    const result = await this.service.retryFailedExecution(
+      tenantId,
+      decisionId,
+    );
+    return {
+      ok: result.executed,
+      message: result.executed
+        ? 'Decision retry applied to the live Meta campaign.'
+        : `Decision retry was not applied: ${result.error}`,
+      executed: result.executed,
+      executionError: result.error,
+    };
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": "../..",
+  "testEnvironment": "node",
+  "testRegex": "test/intelligence/.*\\.(spec|int-spec)\\.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "transformIgnorePatterns": [
+    "node_modules/(?!(uuid)/)"
+  ],
+  "testTimeout": 60000,
+  "moduleNameMapper": {
+    "^src/(.*)$": "<rootDir>/src/$1",
+    "^uuid$": "<rootDir>/node_modules/uuid/dist-node/index.js"
+  },
+  "collectCoverageFrom": [
+    "src/intelligence/**/*.ts",
+    "!src/intelligence/**/*.spec.ts"
+  ],
+  "coverageDirectory": "<rootDir>/coverage-intelligence"
+}

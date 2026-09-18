@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
+import { ScheduleModule } from '@nestjs/schedule';
 import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
 import { ClaudeModule } from './claude/claude.module';
@@ -11,6 +12,12 @@ import { SchedulerModule } from './scheduler/scheduler.module';
 import { CreativeModule } from './creative/creative.module';
 import { CampaignsModule } from './campaigns/campaigns.module';
 import { LearningModule } from './learning/learning.module';
+import { IntelligenceModule } from './intelligence/intelligence.module';
+import { DashboardModule } from './dashboard/dashboard.module';
+import { AuthModule } from './auth/auth.module';
+import { PipelineBridgeModule } from './pipeline-bridge/pipeline-bridge.module';
+import { FoundryBridgeModule } from './foundry-bridge/foundry-bridge.module';
+import { CampaignCopilotModule } from './campaign-copilot/campaign-copilot.module';
 
 @Module({
   imports: [
@@ -24,7 +31,9 @@ import { LearningModule } from './learning/learning.module';
         connection: { url: config.get<string>('redis.url') },
       }),
     }),
+    ScheduleModule.forRoot(),
     DatabaseModule,
+    AuthModule,
     ClaudeModule,
     CompaniesModule,
     PipelineModule,
@@ -33,6 +42,11 @@ import { LearningModule } from './learning/learning.module';
     CreativeModule,
     CampaignsModule,
     LearningModule,
+    IntelligenceModule,
+    DashboardModule,
+    PipelineBridgeModule,
+    FoundryBridgeModule,
+    CampaignCopilotModule,
   ],
 })
 export class AppModule {}

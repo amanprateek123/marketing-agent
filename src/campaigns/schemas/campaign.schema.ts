@@ -3,8 +3,54 @@ import { HydratedDocument } from 'mongoose';
 
 export type CampaignDocument = HydratedDocument<Campaign>;
 
-export type CampaignStatus = 'pending_approval' | 'active' | 'paused' | 'completed' | 'failed' | 'superseded';
-export type CampaignSource = 'agent' | 'manual';
+export type CampaignStatus =
+  | 'pending_approval'
+  | 'launching'
+  | 'active'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'superseded';
+/**
+ * 'agent' = an AI workflow prepared this, including the full autonomous
+ *   pipeline and the operator-guided ChatGPT Campaign Copilot.
+ * 'human' = launched through the dashboard's manual Create Campaign form —
+ *   a person supplied targeting + creative directly, no AI review team.
+ * 'manual' = imported from Meta; the tenant created it directly in Ads Manager,
+ *   we only observe it. Never launched or safety-rail-managed by this system.
+ */
+export type CampaignSource = 'agent' | 'manual' | 'human';
+export type CampaignRevenueBasis =
+  | 'meta_action_value'
+  | 'configured_conversion_value'
+  | 'no_attributed_revenue'
+  | 'unknown';
+export type CampaignRevenueAttributionSource =
+  | 'custom_conversion'
+  | 'custom_event'
+  | 'standard_event'
+  | 'app_event'
+  | 'account_fallback'
+  | 'unresolved'
+  | 'unknown';
+export type CampaignMetricEvidenceState =
+  | 'observed'
+  | 'preserved'
+  | 'missing'
+  | 'unknown';
+
+/**
+ * 'agent' and 'human' campaigns were both launched BY this system (weekly
+ * budget cap, audit safety rails, auto-pause all apply). 'manual' campaigns
+ * were only ever imported for read-only tracking — treating them as managed
+ * would apply budget caps and auto-pause to spend the tenant controls outside
+ * this system entirely.
+ */
+export function isManagedCampaignSource(
+  source: CampaignSource | string | undefined,
+): boolean {
+  return source === 'agent' || source === 'human';
+}
 
 @Schema({ collection: 'campaigns', timestamps: true })
 export class Campaign {
@@ -20,13 +66,75 @@ export class Campaign {
   @Prop({ index: true, default: '' })
   briefId: string;
 
+  /**
+   * Which product on the company this campaign sells — the operator's (or the
+   * brief's) explicit choice, recorded at creation time.
+   *
+   * Load-bearing, not decorative: the landing URL, pixel, custom conversion /
+   * custom event and conversion value all come from this product at launch.
+   * Before this field existed, launch() re-derived the product by matching
+   * campaignConfig.conversionEvent against the product list and fell back to
+   * products[0] — which on 2026-07-27 shipped a "wish letter" campaign
+   * pointing at a different product's landing page, pixel and custom
+   * conversion, with no error raised. See resolve-campaign-product.ts.
+   *
+   * Empty only on campaigns created before this field (resolved from
+   * briefId → CreativeBrief.product, or refused outright when ambiguous).
+   */
+  @Prop({ index: true, default: '' })
+  productName: string;
+
   // 'agent' = launched by our system, 'manual' = synced from Meta (tenant created it)
   @Prop({ default: 'agent', index: true })
   source: CampaignSource;
 
+  /** Which in-product authoring surface prepared this campaign. */
+  @Prop({ default: '', index: true })
+  authoringMode: '' | 'campaign_copilot';
+
+  /** Stable join back to the persisted Campaign Copilot conversation. */
+  @Prop({ default: '', index: true })
+  copilotSessionId: string;
+
   // Last time this campaign was synced from Meta
   @Prop()
   syncedAt?: Date;
+
+  /**
+   * Row-level evidence for the campaign insight totals. `syncedAt` also moves
+   * when structure/status is refreshed, so it is not sufficient proof that a
+   * metrics row was returned by Meta in that attempt.
+   */
+  @Prop()
+  metricsRowObserved?: boolean;
+
+  @Prop()
+  metricsFetchComplete?: boolean;
+
+  @Prop({ default: 'unknown' })
+  metricsState?: CampaignMetricEvidenceState;
+
+  @Prop({ default: '' })
+  metricsSource?: string;
+
+  @Prop({ default: '' })
+  metricsSourceFingerprint?: string;
+
+  /** Exact Meta account currency when known; blank is intentionally unknown. */
+  @Prop({ default: '' })
+  metricsCurrency?: string;
+
+  @Prop()
+  metricsSyncedAt?: Date;
+
+  @Prop()
+  metricsLastAttemptedAt?: Date;
+
+  @Prop({ type: String, default: null })
+  metricsDateStart?: string | null;
+
+  @Prop({ type: String, default: null })
+  metricsDateStop?: string | null;
 
   @Prop({ default: '' })
   topic: string;
@@ -41,7 +149,7 @@ export class Campaign {
   metaCampaignId: string;
 
   @Prop({ default: '' })
-  metaAccountId: string;   // which Meta ad account this campaign was launched on
+  metaAccountId: string; // which Meta ad account this campaign was launched on
 
   @Prop({ required: true, default: 'pending_approval' })
   status: CampaignStatus;
@@ -54,6 +162,39 @@ export class Campaign {
 
   @Prop()
   launchedAt?: Date;
+
+  // ── Campaign structure (synced from Meta; determines which levers exist) ──
+
+  /** LOWEST_COST_WITHOUT_CAP / LOWEST_COST_WITH_BID_CAP / COST_CAP */
+  @Prop({ default: '' })
+  bidStrategy?: string;
+
+  /** AUCTION / RESERVED */
+  @Prop({ default: '' })
+  buyingType?: string;
+
+  /** AUTOMATED_SHOPPING_ADS = Advantage+ shopping campaign. GUIDED_CREATION = manual. */
+  @Prop({ default: '' })
+  smartPromotionType?: string;
+
+  @Prop({ type: [String], default: [] })
+  specialAdCategories?: string[];
+
+  /** Account-currency units (already ÷100 from Meta's minor units). 0 = no cap. */
+  @Prop({ default: 0 })
+  spendCap?: number;
+
+  /**
+   * Where the budget lives — the lever map for budget actions.
+   * 'abo' = adset budgets (shift_budget_between_adsets executable)
+   * 'cbo' = campaign budget (Advantage campaign budget / CBO — only campaign-level budget moves)
+   * 'asc' = Advantage+ shopping (campaign budget + creative levers only)
+   */
+  @Prop({ default: '' })
+  budgetModel?: string;
+
+  @Prop()
+  stopTime?: Date;
 
   @Prop()
   approvedAt?: Date;
@@ -89,11 +230,94 @@ export class Campaign {
   @Prop({ default: 0 })
   roas: number;
 
+  /** Meta action_values sum (or fallback: conversions × product.conversionValue), NET of refund haircut. ₹. */
+  @Prop({ default: 0 })
+  revenue: number;
+
+  /**
+   * How the top-level revenue figure was produced. Historic documents predate
+   * this field and remain `unknown`; never silently present those rows as
+   * observed Meta purchase value.
+   */
+  @Prop({
+    type: String,
+    enum: [
+      'meta_action_value',
+      'configured_conversion_value',
+      'no_attributed_revenue',
+      'unknown',
+    ],
+    default: 'unknown',
+  })
+  revenueBasis: CampaignRevenueBasis;
+
+  /** How the action type(s) used for conversions/revenue were resolved. */
+  @Prop({
+    type: String,
+    enum: [
+      'custom_conversion',
+      'custom_event',
+      'standard_event',
+      'app_event',
+      'account_fallback',
+      'unresolved',
+      'unknown',
+    ],
+    default: 'unknown',
+  })
+  revenueAttributionSource: CampaignRevenueAttributionSource;
+
+  /** Exact Meta action_type aliases considered for this campaign's return. */
+  @Prop({ type: [String], default: [] })
+  revenueAttributionActionTypes: string[];
+
+  /** Exact selected Meta action value before the configured refund adjustment. */
+  @Prop({ type: Number })
+  rawMetaActionValueGross?: number | null;
+
+  /** The same observed Meta value after the configured refund adjustment. */
+  @Prop({ type: Number })
+  rawMetaActionValueNet?: number | null;
+
+  /** Modeled return used only when Meta supplied no selected action value. */
+  @Prop({ type: Number })
+  configuredRevenueEstimateNet?: number | null;
+
+  /** Exact action_type/value rows retained for goal-specific result resolution. */
+  @Prop({ type: Object, default: null })
+  goalResultInputs?: {
+    actionCounts?: Record<string, number>;
+    actionValuesGross?: Record<string, number>;
+  } | null;
+
   @Prop({ default: 0 })
   ctr: number;
 
   @Prop({ default: 0 })
   cpc: number;
+
+  @Prop({ default: 0 })
+  reach: number;
+
+  @Prop({ default: 0 })
+  cpm: number;
+
+  /** Average frequency across the campaign's lifetime window — feeds runSafetyRails' hard fatigue pause. */
+  @Prop({ default: 0 })
+  frequency: number;
+
+  /**
+   * `date_stop` of the campaign-level insights row — the last day Meta's
+   * reporting pipeline actually covers. Feeds the audit staleness gate
+   * (detects Meta's own reporting lag, distinct from our own sync recency —
+   * see `syncedAt`). null = no insights row returned on the last sync.
+   */
+  @Prop({ type: String, default: null })
+  dataAsOf?: string | null;
+
+  /** Raw Meta effective_status (e.g. ADSET_PAUSED, WITH_ISSUES) — distinct from the internally-mapped `status` above. */
+  @Prop({ default: '' })
+  effectiveStatus?: string;
 
   @Prop()
   lastAuditedAt?: Date;
@@ -141,6 +365,14 @@ export class Campaign {
       ageMax?: number;
       gender?: string;
       geoLocations?: string[];
+      /** Meta region keys — take precedence over geoLocations at launch. */
+      geoStates?: string[];
+      /** Meta city keys — take precedence over geoLocations at launch. */
+      geoCities?: string[];
+      /** Meta locale IDs for language targeting. */
+      locales?: number[];
+      /** Device OS targeting — 'iOS'/'Android' to split into per-platform ad sets. */
+      userOs?: ('iOS' | 'Android')[];
       interests?: string[];
       optimizationGoal: string;
       ads: number[];
@@ -150,7 +382,15 @@ export class Campaign {
     pauseRules: string;
   };
 
-  // Raw Meta adsets + ads — populated during sync, shown on dashboard
+  /**
+   * Raw Meta adsets + ads — populated by CampaignSyncService.syncActiveCampaigns
+   * every 10 min, shown on dashboard. This is the canonical per-adset/per-ad
+   * dataset the old audit loop and the intelligence cascade are being
+   * consolidated onto (see campaign-sync.service.ts:720-792 for adsets,
+   * :578-648 for ads — the object-literal construction there is ground
+   * truth; this interface is documentation only, Mongoose stores it as
+   * Mixed/[Object] so it isn't enforced).
+   */
   @Prop({ type: [Object], default: [] })
   metaAdSets: {
     id: string;
@@ -160,23 +400,188 @@ export class Campaign {
     dailyBudget: number;
     lifetimeBudget: number;
     optimizationGoal: string;
+    /** Whether this exact ad-set insight row was returned in the last attempt. */
+    metricsRowObserved?: boolean;
+    metricsFetchComplete?: boolean;
+    metricsState?: CampaignMetricEvidenceState;
+    metricsSource?: string;
+    metricsSourceFingerprint?: string;
+    metricsCurrency?: string;
+    metricsSyncedAt?: Date;
+    metricsLastAttemptedAt?: Date;
+    // Money
     spend: number;
-    impressions: number;
-    clicks: number;
-    conversions: number;
-    ctr: number;
+    revenue: number;
+    revenueBasis?: CampaignRevenueBasis;
+    revenueAttributionSource?: CampaignRevenueAttributionSource;
+    revenueAttributionActionTypes?: string[];
+    rawMetaActionValueGross?: number | null;
+    rawMetaActionValueNet?: number | null;
+    configuredRevenueEstimateNet?: number | null;
+    goalResultInputs?: {
+      actionCounts?: Record<string, number>;
+      actionValuesGross?: Record<string, number>;
+    };
+    roas: number;
+    cpc: number;
+    cpm: number;
     cpa: number;
+    aov: number;
+    // Reach / delivery
+    impressions: number;
+    reach: number;
     frequency: number;
+    clicks: number;
+    inlineLinkClicks?: number;
+    ctr: number;
+    // Funnel
+    conversions: number;
+    addToCart: number;
+    initiateCheckout: number;
+    landingPageView: number;
+    cvr: number;
+    // Video watch counts + %
+    videoP25: number;
+    videoP50: number;
+    videoP75: number;
+    videoP100: number;
+    thruplay?: number;
+    videoP25Pct: number;
+    videoP50Pct: number;
+    videoP75Pct: number;
+    videoP100Pct: number;
+    // Rankings — Meta only computes these over a rolling 7d window; UNKNOWN
+    // (any value outside ABOVE_AVERAGE/AVERAGE/BELOW_AVERAGE) comes through as undefined
+    qualityRanking?: string;
+    engagementRanking?: string;
+    conversionRanking?: string;
+    // Delivery insight
+    learningStage: string;
+    effectiveStatus: string;
+    // Bidding / delivery config
+    bidAmount: number;
+    bidStrategy: string;
+    billingEvent: string;
+    attributionSpec?: unknown;
+    promotedObject?: unknown;
+    startTime: string;
+    endTime: string;
+    // Targeting — legacy summary strings (dashboard)
+    age: string;
+    gender: string;
+    placement: string;
+    audienceSize?: number;
+    interests: string[];
+    geo: string;
+    // Full structured targeting (custom audiences, exclusions, regions/cities,
+    // locales, Advantage flags) — see structureTargeting() in campaign-sync.service.ts
+    targetingDetail?: Record<string, unknown>;
+    rawTargeting?: Record<string, unknown>;
+    dateStart?: string;
+    dateStop?: string;
     ads: {
       id: string;
       name: string;
+      status: string;
+      effectiveStatus: string;
       hookStyle: string;
       format: string;
+      creativeId: string;
+      creativeName: string;
+      creativeBody: string;
+      creativeTitle: string;
+      creativeCta: string;
+      creativeLinkUrl: string;
+      creativeVideoId: string;
+      creativeImageHash: string;
+      thumbnailUrl: string;
+      isDynamicCreative: boolean;
+      // Money (lifetime window)
       spend: number;
+      revenue: number;
+      revenueBasis?: CampaignRevenueBasis;
+      revenueAttributionSource?: CampaignRevenueAttributionSource;
+      revenueAttributionActionTypes?: string[];
+      rawMetaActionValueGross?: number | null;
+      rawMetaActionValueNet?: number | null;
+      configuredRevenueEstimateNet?: number | null;
+      /** Inherited from the exact parent ad set used for this ad's metrics. */
+      attributionSpec?: unknown;
+      promotedObject?: unknown;
+      goalResultInputs?: {
+        actionCounts?: Record<string, number>;
+        actionValuesGross?: Record<string, number>;
+      };
+      metricsRowObserved?: boolean;
+      metricsFetchComplete?: boolean;
+      metricsState?: CampaignMetricEvidenceState;
+      metricsSource?: string;
+      metricsSourceFingerprint?: string;
+      metricsCurrency?: string;
+      metricsSyncedAt?: Date;
+      metricsLastAttemptedAt?: Date;
+      roas: number;
+      cpc: number;
+      cpm: number;
+      cpa: number;
+      aov: number;
+      // Reach / delivery
       impressions: number;
+      reach: number;
+      frequency: number;
       clicks: number;
       ctr: number;
-      cpc: number;
+      inlineLinkClicks: number;
+      outboundClicks: number;
+      linkCtr: number;
+      // Funnel
+      conversions: number;
+      addToCart: number;
+      initiateCheckout: number;
+      landingPageView: number;
+      cvr: number;
+      // Rankings (7d window)
+      qualityRanking?: string;
+      engagementRanking?: string;
+      conversionRanking?: string;
+      // Video
+      video3s: number;
+      thruplay: number;
+      hookRate: number;
+      holdRate: number;
+      videoP25: number;
+      videoP50: number;
+      videoP75: number;
+      videoP100: number;
+      videoP25Pct: number;
+      videoP50Pct: number;
+      videoP75Pct: number;
+      videoP100Pct: number;
+      dateStart?: string;
+      dateStop?: string;
+      // Recency window (7d) — fatigue/decay reads this, not lifetime
+      last7d?: {
+        spend: number;
+        impressions: number;
+        clicks: number;
+        ctr: number;
+        conversions: number;
+        revenue: number;
+        rawMetaActionValueGross?: number;
+        cpa: number;
+        dateStart?: string;
+        dateStop?: string;
+        metricsRowObserved?: boolean;
+        metricsFetchComplete?: boolean;
+        metricsSource?: string;
+        metricsSourceFingerprint?: string;
+        metricsCurrency?: string;
+        metricsSyncedAt?: Date;
+        goalResultInputs?: {
+          actionCounts?: Record<string, number>;
+          actionValuesGross?: Record<string, number>;
+        };
+      };
     }[];
   }[];
 
@@ -218,7 +623,7 @@ export class Campaign {
         ctr: number;
         cpc: number;
       };
-      ctrBaseline?: number;          // first 48h average CTR (for fatigue detection)
+      ctrBaseline?: number; // first 48h average CTR (for fatigue detection)
       baselineSetAt?: Date;
       replacementHistory?: {
         oldHook: string;
@@ -274,8 +679,14 @@ export class Campaign {
   @Prop({ type: [Object], default: [] })
   pendingActions: {
     actionId: string;
-    type: 'pause_ad' | 'pause_adset' | 'scale_adset' | 'replace_creative' | 'add_creative' | 'add_adset';
-    targetId: string;                 // Meta ad/adset/campaign ID
+    type:
+      | 'pause_ad'
+      | 'pause_adset'
+      | 'scale_adset'
+      | 'replace_creative'
+      | 'add_creative'
+      | 'add_adset';
+    targetId: string; // Meta ad/adset/campaign ID
     targetName: string;
     reason: string;
     /**
@@ -287,9 +698,9 @@ export class Campaign {
      * even though the timing guard had used the real value upstream.
      */
     priority?: 'low' | 'medium' | 'high';
-    metrics: Record<string, any>;     // relevant metrics + action-specific params
+    metrics: Record<string, any>; // relevant metrics + action-specific params
     recommendedAt: Date;
-    executeAt: Date;                  // recommendedAt + gracePeriod
+    executeAt: Date; // recommendedAt + gracePeriod
     status: 'pending' | 'executed' | 'overridden' | 'expired';
     executedAt?: Date;
     /**
@@ -299,8 +710,33 @@ export class Campaign {
      * "system applied this automatically per safety policy" in audit history.
      */
     autoApplied?: boolean;
-    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed';  // replace/add creative only
+    replacementStatus?: 'queued' | 'producing' | 'complete' | 'failed'; // replace/add creative only
   }[];
+
+  /**
+   * Progress of the most recent in-place Page swap (swap-page endpoint) —
+   * clones each live ad's creative with a corrected page_id, no new campaign/
+   * ad set/ad IDs. Runs fire-and-forget (40 ads × ~3 Meta calls each can take
+   * minutes, same ALB-timeout reasoning as /sync above) — the dashboard polls
+   * this field for live progress instead of waiting on the HTTP response.
+   */
+  @Prop({ type: Object, default: null })
+  pageSwapStatus?: {
+    status: 'running' | 'complete' | 'failed';
+    targetPageId: string;
+    total: number;
+    swapped: number;
+    failed: number;
+    startedAt: Date;
+    completedAt?: Date;
+    results: Array<{
+      adSetId: string;
+      adId: string;
+      status: 'swapped' | 'failed';
+      newCreativeId?: string;
+      error?: string;
+    }>;
+  } | null;
 }
 
 export const CampaignSchema = SchemaFactory.createForClass(Campaign);

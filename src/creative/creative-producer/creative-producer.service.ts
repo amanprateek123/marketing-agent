@@ -3,13 +3,20 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CompaniesService } from '../../companies/companies.service';
 import { CopyWriterService } from '../copy-writer/copy-writer.service';
-import { ImageGeneratorService } from '../image-generator/image-generator.service';
+import {
+  ImageGenerationProvider,
+  ImageGeneratorService,
+} from '../image-generator/image-generator.service';
 import { VideoGeneratorService } from '../video-generator/video-generator.service';
+import { HiggsfieldService } from '../video-generator/higgsfield.service';
 import { CreativeTeamService } from '../../teams/creative-team.service';
 import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../schemas/creative-package.schema';
+import { CreativeQaFailure, CreativeQaFailureDocument } from '../schemas/creative-qa-failure.schema';
 import { SlackService } from '../../delivery/slack.service';
 import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
+import { getFormatSpec, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../../common/creative/format-specs';
+import { GalleryService } from '../../gallery/gallery.service';
 
 export interface BriefData {
   topic: string;
@@ -24,9 +31,13 @@ export interface BriefData {
   targetSegment?: string;
   referenceVideoPrompt?: string;  // Original video prompt to replicate style for creative replacements
   forcedHookStyle?: string;        // when set, ALL variants must use this hookStyle (replace_creative path)
+  /** Explicit per-variant hookStyle plan (operator-picked from the dashboard) — overrides both the format's default variant count (becomes this array's length) and forcedHookStyle when set. Variant i MUST use hookStyles[i], in order. */
+  hookStyles?: string[];
   avoidHookStyles?: string[];      // hookStyles to avoid (saturated / fatigued)
   audienceStage?: 'cold' | 'warm' | 'hot';  // cold = prospecting, warm = retarget, hot = cart-recovery
   explorationArm?: boolean;                 // when true, Creative Team skips winningHooks/winningExemplars injection (closed-loop drift mitigation)
+  /** Forces a specific carousel narrative pattern instead of letting the LLM pick. Only used when format === 'carousel'. */
+  carouselPattern?: 'auto' | 'sequential' | 'tier_reveal' | 'story_arc' | 'differentiator_stack' | 'qa' | 'catalog_grid';
   /**
    * Exploit-winner marker — when set, Creative Team looks up the matching
    * HotWinner (via metaAdId) on company.learnings.hotWinners and injects a
@@ -50,6 +61,18 @@ export interface BriefData {
   // creative-producer resolves from segment.languages → product.languages → 'hinglish'.
   // Drives copy text, image overlay text, and (when language video lands) VO script.
   targetLanguage?: CanonicalLanguage;
+  /** Overrides the format's default image aspect ratio when the operator picks one explicitly. */
+  aspectRatio?: AspectRatio;
+  /** Image resolution/quality tier — defaults to '1K' inside ImageGeneratorService when omitted. */
+  imageResolution?: ImageResolution;
+  /** Video aspect ratio — defaults to '9:16' inside VideoGeneratorService when omitted. */
+  videoAspectRatio?: VideoAspectRatio;
+  /** Video resolution — defaults to '1080p' inside VideoGeneratorService when omitted. */
+  videoResolution?: VideoResolution;
+  /** Which engine renders the video — defaults to 'heygen' (the original/only path) when omitted. */
+  videoProvider?: 'heygen' | 'higgsfield';
+  /** Higgsfield model job_type (e.g. 'seedance_2_0') — only used when videoProvider === 'higgsfield'. Defaults to 'seedance_2_0'. */
+  higgsfieldJobType?: string;
 }
 
 @Injectable()
@@ -61,11 +84,15 @@ export class CreativeProducerService {
     private readonly copyWriter: CopyWriterService,
     private readonly imageGenerator: ImageGeneratorService,
     private readonly videoGenerator: VideoGeneratorService,
+    private readonly higgsfieldService: HiggsfieldService,
     private readonly creativeTeam: CreativeTeamService,
     private readonly creativeQa: CreativeQaService,
     private readonly slackService: SlackService,
+    private readonly galleryService: GalleryService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
+    @InjectModel(CreativeQaFailure.name)
+    private readonly creativeQaFailureModel: Model<CreativeQaFailureDocument>,
   ) {}
 
   async findByBriefId(tenantId: string, briefId: string): Promise<CreativePackageDocument | null> {
@@ -100,7 +127,20 @@ export class CreativeProducerService {
      * to re-produce. Existing completed package gets deleted, fresh production
      * runs. The pipeline orchestrator and resume paths keep default `false`.
      */
-    options?: { forceRegenerate?: boolean },
+    options?: {
+      forceRegenerate?: boolean;
+      /** Force the Creative Team's OpenAI sequential path even for CLI tenants. */
+      forceOpenAI?: boolean;
+      /** Per-build image renderer override; omitted callers keep tenant/global config. */
+      imageProvider?: ImageGenerationProvider;
+      /**
+       * Skip the legacy Claude vision pass. Used by Campaign Copilot so a
+       * ChatGPT-only build cannot invoke Claude indirectly. Prompt/copy safety
+       * and launch-time policy checks still run; rendered-image QA is reported
+       * as not checked by the Copilot session rather than falsely claimed.
+       */
+      skipVisionQa?: boolean;
+    },
   ): Promise<CreativePackageDocument> {
     const company = await this.companiesService.findByTenantId(tenantId);
     const forceRegenerate = options?.forceRegenerate === true;
@@ -183,6 +223,17 @@ export class CreativeProducerService {
 
     this.logger.log(`Creative production started: tenantId=${tenantId} briefId=${briefId} targetLanguage=${brief.targetLanguage}`);
 
+    // Format-spec registry — drives video skip + image aspect ratio for both
+    // the Creative Team path and the fallback path below.
+    const spec = getFormatSpec(brief.format);
+    // Operator-chosen overrides win over the format's default aspect ratio;
+    // resolution/video params have no format-level default, just the
+    // generator services' own ('1K' images, 9:16/1080p video).
+    const resolvedAspectRatio = brief.aspectRatio ?? spec.aspectRatio;
+    const resolvedImageResolution = brief.imageResolution ?? '1K';
+    const resolvedVideoAspectRatio = brief.videoAspectRatio ?? '9:16';
+    const resolvedVideoResolution = brief.videoResolution ?? '1080p';
+
     try {
       let copyPackage: { variants: any[]; selectedIndex: number; selectionReason: string } | null = null;
       let images: ImageCreative[] = [];
@@ -192,7 +243,12 @@ export class CreativeProducerService {
       try {
         // ── Creative Team path (primary) ───────────────────────────────────────
         this.logger.log(`Creative Team starting for briefId=${briefId}`);
-        const teamResult = await this.creativeTeam.run(brief, company, runId);
+        const teamResult = await this.creativeTeam.run(
+          brief,
+          company,
+          runId,
+          { forceOpenAI: options?.forceOpenAI },
+        );
 
         copyPackage = {
           variants: teamResult.variants,
@@ -211,7 +267,14 @@ export class CreativeProducerService {
           this.logger.log(`Generating ${teamResult.carouselCards!.length} carousel card images: tenantId=${tenantId} briefId=${briefId}`);
           const cardResults = await Promise.allSettled(
             teamResult.carouselCards!.map((card) =>
-              this.imageGenerator.generateFromPrompt(card.imagePrompt, company, runId),
+              this.imageGenerator.generateFromPrompt(
+                card.imagePrompt,
+                company,
+                runId,
+                resolvedAspectRatio,
+                resolvedImageResolution,
+                options?.imageProvider,
+              ),
             ),
           );
           carouselCards = teamResult.carouselCards!.map((card, i) => {
@@ -247,7 +310,14 @@ export class CreativeProducerService {
               const teamImagePrompt = teamResult.imagePrompts?.[i];
               if (teamImagePrompt) {
                 // Use the creative team's reviewed image prompt directly — skip re-writing via Claude
-                return this.imageGenerator.generateFromPrompt(teamImagePrompt, company, runId);
+                return this.imageGenerator.generateFromPrompt(
+                  teamImagePrompt,
+                  company,
+                  runId,
+                  resolvedAspectRatio,
+                  resolvedImageResolution,
+                  options?.imageProvider,
+                );
               }
               // Fallback: generate image prompt from scratch for this variant
               return this.imageGenerator.generateForVariant(
@@ -256,6 +326,9 @@ export class CreativeProducerService {
                 i,
                 company,
                 runId,
+                resolvedAspectRatio,
+                resolvedImageResolution,
+                options?.imageProvider,
               );
             }),
           );
@@ -263,10 +336,10 @@ export class CreativeProducerService {
           images = teamResult.variants.map((_: any, i: number) => {
             const result = imageResults[i];
             if (result.status === 'fulfilled') {
-              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, originalImageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
             }
             this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
-            return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '' };
+            return { variantIndex: i, imagePrompt: teamResult.imagePrompts?.[i] ?? '', imageUrl: '', aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
           });
         }
 
@@ -276,9 +349,39 @@ export class CreativeProducerService {
           ? teamResult.videoPrompt
           : JSON.stringify(teamResult.videoPrompt);
 
-        if (brief.format === 'meme') {
-          this.logger.log(`Video generation skipped — meme format uses static image only`);
+        if (spec.skipVideo) {
+          this.logger.log(`Video generation skipped — format '${brief.format}' is static-only`);
           video = null;
+        } else if (brief.videoProvider === 'higgsfield') {
+          const jobType = brief.higgsfieldJobType ?? 'seedance_2_0';
+          // Higgsfield's aspect_ratio enum has no 4:5 — closest portrait ratio it accepts is 3:4.
+          const higgsfieldAspectRatio = resolvedVideoAspectRatio === '4:5' ? '3:4' : resolvedVideoAspectRatio;
+          try {
+            const videoResult = await this.higgsfieldService.generateVideo(
+              jobType,
+              { prompt: videoPromptStr, aspect_ratio: higgsfieldAspectRatio, resolution: resolvedVideoResolution, duration: 5 },
+              async (jobId: string) => {
+                await this.creativePackageModel.updateOne(
+                  { _id: pkg._id },
+                  { higgsfieldJobId: jobId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution, provider: 'higgsfield', providerModel: jobType } },
+                );
+                this.logger.log(`Higgsfield jobId persisted: ${jobId} for briefId=${briefId}`);
+              },
+            );
+            video = {
+              variantIndex: selectedIndex,
+              videoPrompt: videoPromptStr,
+              videoUrl: videoResult.videoUrl,
+              videoThumbnailUrl: videoResult.thumbnailUrl,
+              aspectRatio: resolvedVideoAspectRatio,
+              resolution: resolvedVideoResolution,
+              provider: 'higgsfield',
+              providerModel: jobType,
+            };
+          } catch (videoErr: any) {
+            this.logger.error(`Higgsfield video generation failed (prompt saved): ${videoErr.message}`);
+            video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution, provider: 'higgsfield', providerModel: jobType };
+          }
         } else
         try {
           const videoResult = await this.videoGenerator.generateFromScript(
@@ -288,20 +391,24 @@ export class CreativeProducerService {
             async (videoId: string) => {
               await this.creativePackageModel.updateOne(
                 { _id: pkg._id },
-                { heygenVideoId: videoId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '' } },
+                { heygenVideoId: videoId, video: { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution } },
               );
               this.logger.log(`Heygen videoId persisted: ${videoId} for briefId=${briefId}`);
             },
+            resolvedVideoAspectRatio,
+            resolvedVideoResolution,
           );
           video = {
             variantIndex: selectedIndex,
             videoPrompt: videoPromptStr,
             videoUrl: videoResult.videoUrl,
             videoThumbnailUrl: videoResult.videoThumbnailUrl,
+            aspectRatio: resolvedVideoAspectRatio,
+            resolution: resolvedVideoResolution,
           };
         } catch (videoErr: any) {
           this.logger.error(`Video generation failed (prompt saved): ${videoErr.message}`);
-          video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '' };
+          video = { variantIndex: selectedIndex, videoPrompt: videoPromptStr, videoUrl: '', videoThumbnailUrl: '', aspectRatio: resolvedVideoAspectRatio, resolution: resolvedVideoResolution };
         }
 
         this.logger.log(
@@ -328,22 +435,32 @@ export class CreativeProducerService {
                 i,
                 company,
                 runId,
+                resolvedAspectRatio,
+                resolvedImageResolution,
+                options?.imageProvider,
               ),
             ),
           );
           images = copyPackage.variants.map((_: any, i: number) => {
             const result = imageResults[i];
             if (result.status === 'fulfilled') {
-              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl };
+              return { variantIndex: i, imagePrompt: result.value.imagePrompt, imageUrl: result.value.imageUrl, originalImageUrl: result.value.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
             }
             this.logger.error(`Image generation failed for variant ${i}: ${(result as any).reason?.message}`);
-            return { variantIndex: i, imagePrompt: '', imageUrl: '' };
+            return { variantIndex: i, imagePrompt: '', imageUrl: '', aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution };
           });
         } else {
           // No variants — generate one image from brief
           try {
-            const imgResult = await this.imageGenerator.generate(brief, company, runId);
-            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl }];
+            const imgResult = await this.imageGenerator.generate(
+              brief,
+              company,
+              runId,
+              resolvedAspectRatio,
+              resolvedImageResolution,
+              options?.imageProvider,
+            );
+            images = [{ variantIndex: 0, imagePrompt: imgResult.imagePrompt, imageUrl: imgResult.imageUrl, originalImageUrl: imgResult.imageUrl, aspectRatio: resolvedAspectRatio, resolution: resolvedImageResolution }];
           } catch (imgErr: any) {
             this.logger.error(`Image generation failed: ${imgErr.message}`);
           }
@@ -374,23 +491,34 @@ export class CreativeProducerService {
         });
         if (!qa.pass) {
           this.logger.warn(`Image QA dropped ${label}: ${qa.issues.join(' | ')} — prompt kept for regeneration`);
+          void this.creativeQaFailureModel.create({
+            tenantId, packageId: pkg._id.toString(), runId,
+            imageUrl: item.imageUrl, hookStyle, productName: brief.product ?? '',
+            issues: qa.issues, label,
+          }).catch((err: any) => this.logger.error(`Failed to log QA failure: ${err.message}`));
           item.imageUrl = '';
         }
       };
-      await Promise.all([
-        ...images.map((img: any) => verifyAndMaybeDrop(
-          img,
-          copyPackage?.variants?.[img.variantIndex]?.hookStyle,
-          copyPackage?.variants?.[img.variantIndex]?.headline,
-          `variant ${img.variantIndex} image`,
-        )),
-        ...carouselCards.map((card: any) => verifyAndMaybeDrop(
-          card,
-          undefined,
-          card.headline,
-          `carousel card ${card.slotIndex}`,
-        )),
-      ]);
+      if (options?.skipVisionQa) {
+        this.logger.warn(
+          `Rendered-image vision QA skipped for ChatGPT-only build: tenantId=${tenantId} briefId=${briefId} checked=false`,
+        );
+      } else {
+        await Promise.all([
+          ...images.map((img: any) => verifyAndMaybeDrop(
+            img,
+            copyPackage?.variants?.[img.variantIndex]?.hookStyle,
+            copyPackage?.variants?.[img.variantIndex]?.headline,
+            `variant ${img.variantIndex} image`,
+          )),
+          ...carouselCards.map((card: any) => verifyAndMaybeDrop(
+            card,
+            undefined,
+            card.headline,
+            `carousel card ${card.slotIndex}`,
+          )),
+        ]);
+      }
 
       // 'completed' must mean LAUNCHABLE: copy + at least one usable visual
       // (image with a real URL, carousel cards, or a video). The old rule only
@@ -409,6 +537,11 @@ export class CreativeProducerService {
         { _id: pkg._id },
         {
           status,
+          // Stamped here (not at creation) so it reflects the ACTUAL
+          // resolved product/language, not just what the caller requested —
+          // brief.targetLanguage is resolved above if it wasn't explicit.
+          productName: brief.product ?? '',
+          targetLanguage: brief.targetLanguage ?? '',
           ...(copyPackage && {
             copyVariants: copyPackage.variants,
             selectedCopyIndex: copyPackage.selectedIndex,
@@ -427,6 +560,12 @@ export class CreativeProducerService {
       );
 
       if (!allFailed) {
+        try {
+          await this.galleryService.autoPopulate(tenantId, brief.topic, pkg._id.toString(), images, video, carouselCards);
+        } catch (galleryErr: any) {
+          this.logger.error(`Gallery auto-populate failed for package ${pkg._id} — package saved: ${galleryErr.message}`);
+        }
+
         const slackWebhook = company.delivery?.slackWebhook;
         if (slackWebhook) {
           try {
@@ -462,7 +601,12 @@ export class CreativeProducerService {
     } catch (err: any) {
       await this.creativePackageModel.updateOne(
         { _id: pkg._id },
-        { status: 'failed', error: err.message },
+        {
+          status: 'failed',
+          error: err.message,
+          productName: brief.product ?? '',
+          targetLanguage: brief.targetLanguage ?? '',
+        },
       );
       this.logger.error(`Creative production failed: tenantId=${tenantId} briefId=${briefId} | ${err.message}`);
       throw err;

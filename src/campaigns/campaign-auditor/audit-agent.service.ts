@@ -8,6 +8,7 @@ import { AuditSignalPacket } from './signal-detector.service';
 import { AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
 import { ShadowActionService } from '../../learning/shadow-action.service';
 import { ActionOutcomeService } from '../../learning/action-outcome.service';
+import { VALID_FB_POSITIONS, VALID_IG_POSITIONS, VALID_AN_POSITIONS } from '../meta-ads/placement-presets';
 
 export type LeakDiagnosis =
   | 'creative_leak'         // CTR below benchmark / creativeFatigue
@@ -783,7 +784,7 @@ ${signals.banditAllocation.allocations.map(a => `  ${a.adSetName} (${a.adSetId})
 ${signals.opportunities.earlyFatigue.length > 0 ? signals.opportunities.earlyFatigue.map(f => `  ⚡ EARLY FATIGUE: ${f.adSetName} (${f.adSetId}) — CTR declining ${f.ctrDrop}%`).join('\n') : ''}
 ${signals.opportunities.readyForRetarget ? `  🎯 RETARGET READY: ${totalClicks} clicks, ${totalConv} conv after ${age.days} days` : ''}
 
-${signals.breakdowns.byPlacement.length > 0 ? `━━━ PLACEMENT BREAKDOWN (top 5 by spend; excluded placements marked) ━━━
+${signals.breakdowns.byPlacement.length > 0 ? `━━━ PLACEMENT BREAKDOWN (last 30d, top 5 by spend; excluded placements marked) ━━━
 ${signals.breakdowns.byPlacement
   .slice()
   .sort((a, b) => b.spend - a.spend)
@@ -798,9 +799,9 @@ ${signals.breakdowns.byPlacement
     return `  ${verdict} ${p.publisherPlatform}/${p.platformPosition}: ₹${p.spend.toFixed(0)} | ${p.clicks} clicks | ${p.conversions} conv | CTR ${p.ctr.toFixed(2)}% | CPA ${p.cpa > 0 ? `₹${p.cpa.toFixed(0)}` : '∞'}${tag}`;
   })
   .join('\n')}
-  RULE: When proposing narrow_placement, BASE THE DECISION ONLY ON PLACEMENTS WITHOUT ⛔. The ⛔ placements have already been excluded from the ad set's current Meta targeting — their lifetime spend is historical residue from before the exclusion landed, NOT live bleed. Do NOT propose narrow_placement when all loser placements are already ⛔. If one 🟢 placement is dominating conversions and no fresh 🔴 placement exists, the placement-leak is already resolved — move on to other leak types (creative_diversity, audience fatigue, LP).
+  RULE: When proposing narrow_placement, BASE THE DECISION ONLY ON PLACEMENTS WITHOUT ⛔. The ⛔ placements have already been excluded from the ad set's current Meta targeting — their spend above is last-30d residue from before the exclusion landed, NOT live bleed. Do NOT propose narrow_placement when all loser placements are already ⛔. If one 🟢 placement is dominating conversions and no fresh 🔴 placement exists, the placement-leak is already resolved — move on to other leak types (creative_diversity, audience fatigue, LP).
 ` : ''}
-${signals.breakdowns.byHour.length > 0 ? `━━━ HOURLY BREAKDOWN (last 14d, top 6 by spend; ad-account TZ) ━━━
+${signals.breakdowns.byHour.length > 0 ? `━━━ HOURLY BREAKDOWN (last 30d, top 6 by spend; ad-account TZ) ━━━
 ${signals.breakdowns.byHour
   .slice()
   .sort((a, b) => b.spend - a.spend)
@@ -847,7 +848,13 @@ ${signals.breakdowns.byDayOfWeek.length > 0 ? (() => {
   // "zero conversions is meaningful" elsewhere. For fintech (~99 clicks) we need
   // more evidence per DOW than spirituality (~49 clicks).
   const dowEvidenceFloor = signals.evidenceFloors.clicksForZeroConvSignal;
-  return `━━━ DAY-OF-WEEK PATTERN (last 14d aggregate; ad-account TZ) ━━━
+  // [CONSOLIDATED 2026-07-23] Was "last 14d aggregate" — the old live
+  // fetchDayOfWeekBreakdown pulled a fixed last_14d window. Now sourced from
+  // meta-deep-sync's BreakdownSnapshot 'dow' rollup, which aggregates
+  // whatever MetricTimeseries history exists for the campaign — up to 90
+  // days, less for younger campaigns. Label reflects the real (wider,
+  // usually more evidence per bucket) window instead of a stale number.
+  return `━━━ DAY-OF-WEEK PATTERN (up to last 90d aggregate; ad-account TZ) ━━━
 ${signals.breakdowns.byDayOfWeek.map(d => {
   const cvrRatio = avgCVR > 0 ? d.cvr / avgCVR : 1;
   const tag = cvrRatio >= 1.5 ? '🟢 STRONG'
@@ -927,13 +934,11 @@ Analyze at CAMPAIGN, AD SET, and AD level. Produce your verdict JSON.`;
                   this.logger.warn(`Dropping narrow_placement — invalid platform in ${JSON.stringify(platforms)}`);
                   return false;
                 }
-                // Validate position values against Meta API constants. Catches the
-                // `stream` vs `reels` confusion that locked 91astro to IG Feed for
+                // Validate position values against Meta API constants (shared with the
+                // operator-facing placement presets — see placement-presets.ts). Catches
+                // the `stream` vs `reels` confusion that locked 91astro to IG Feed for
                 // 18 hours in May 2026. CRITICAL: 'stream' = Instagram FEED (NOT Reels);
                 // 'reels' = Instagram REELS. They are different placements.
-                const VALID_FB_POSITIONS = new Set(['feed', 'right_hand_column', 'marketplace', 'video_feeds', 'story', 'search', 'instream_video', 'facebook_reels', 'facebook_reels_overlay']);
-                const VALID_IG_POSITIONS = new Set(['stream', 'story', 'explore', 'reels', 'shop', 'profile_feed', 'ig_search']);
-                const VALID_AN_POSITIONS = new Set(['classic', 'rewarded_video', 'instream_video']);
                 const fbPos = a.params?.facebookPositions;
                 const igPos = a.params?.instagramPositions;
                 const anPos = a.params?.audienceNetworkPositions;

@@ -1,0 +1,67 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks: [internal]
+
+  backend:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: .env
+    # This instance has no public IP and sits behind an ALB, which routes
+    # marketing.91astrology.com/api/* here directly (its own target group
+    # on port 8082). Change the host port below if 8082 is ever taken.
+    ports:
+      - "8082:8082"
+    volumes:
+      # Higgsfield CLI auth — file-based, no API-key/headless login exists.
+      # ../higgsfield-config (a SIBLING of this repo, same level as
+      # ../Marketing-Agent-Dashboard — not nested inside this repo, to keep
+      # live secrets clearly outside any git-tracked directory) must contain
+      # config.json + credentials.json copied from a machine where
+      # `higgsfield auth login` was already run in a browser (see DEPLOY.md).
+      # Mounted read-write (not :ro) because the CLI rewrites credentials.json
+      # in place on token refresh — a read-only mount would work until the
+      # access token expires, then start failing. Container runs as uid 1001
+      # (nestjs), whose $HOME is /home/nestjs (verified empirically against
+      # this same node:22-alpine base). If the host dir isn't owned by
+      # 1001:1001 (e.g. the deploy user has no chown permission), chmod 777
+      # the dir and 666 the two files instead — ownership doesn't need to
+      # match for the container's uid to read/write them, just permissions.
+      - ../higgsfield-config:/home/nestjs/.config/higgsfield
+    depends_on:
+      - mongo
+      - redis
+    networks: [internal]
+
+  frontend:
+    build:
+      context: ../Marketing-Agent-Dashboard
+      args:
+        NEXT_PUBLIC_API_URL: https://marketing.91astrology.com/api/v1
+    restart: unless-stopped
+    # ALB routes marketing.91astrology.com/* (everything else) here
+    # directly (its own target group on port 3002).
+    ports:
+      - "3002:3000"
+    depends_on:
+      - backend
+    networks: [internal]
+
+volumes:
+  mongo_data:
+  redis_data:
+
+networks:
+  internal:

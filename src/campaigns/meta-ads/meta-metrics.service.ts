@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
-import { extractConversions, extractActionValue } from './conversion-extractor.util';
+import { extractConversions, extractActionValue, appEventActionTypes } from './conversion-extractor.util';
 import { getRefundFactor } from '../../common/conversion-value.util';
 
 const META_API_VERSION = 'v21.0';
@@ -95,16 +95,18 @@ export class MetaMetricsService {
      * this param only nets down the real-pixel-revenue branch.
      */
     refundRatePercent?: number,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<FullCampaignMetrics> {
     const [campaign, adSets] = await Promise.all([
-      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent, customConversionId, refundRatePercent),
-      this.fetchAdSetMetrics(campaignId, accessToken, conversionEvent, customConversionId),
+      this.fetchCampaignMetrics(campaignId, accessToken, conversionValue, conversionEvent, customConversionId, refundRatePercent, applicationId),
+      this.fetchAdSetMetrics(campaignId, accessToken, conversionEvent, customConversionId, applicationId),
     ]);
 
     // Fetch per-ad metrics for each ad set in parallel
     const adSetsWithAds = await Promise.all(
       adSets.map(async (adSet) => {
-        const ads = await this.fetchAdMetrics(adSet.adSetId, accessToken, conversionEvent, customConversionId);
+        const ads = await this.fetchAdMetrics(adSet.adSetId, accessToken, conversionEvent, customConversionId, applicationId);
         return { ...adSet, ads };
       }),
     );
@@ -122,6 +124,8 @@ export class MetaMetricsService {
     conversionEvent?: string,
     customConversionId?: string,
     refundRatePercent?: number,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<CampaignMetrics> {
     this.logger.log(`Fetching campaign metrics: ${campaignId}`);
 
@@ -153,7 +157,7 @@ export class MetaMetricsService {
     // failed the `.size > 0` check inside extractConversions and silently
     // returned 0 conversions for every campaign using a Custom Conversion.
     // Hit on 2026-06-10: Nadi Leaf had 5 conversions, audit reported 0.
-    const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+    const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
     if (customConversionId) {
       conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
     }
@@ -200,8 +204,14 @@ export class MetaMetricsService {
    *
    * This is a temporary bridge until all callers pass the resolved product
    * directly. For now it accepts the same loose strings the existing API uses.
+   *
+   * applicationId (product.metaAppId) — when set alongside conversionEvent,
+   * this is an app-events product, not a pixel product. Meta reports its
+   * conversions under prefixed action_types (app_custom_event.other.<event>,
+   * mobile_app_install/omni_app_install), never the bare event name — see
+   * appEventActionTypes in conversion-extractor.util.ts.
    */
-  private buildConversionTypesSet(conversionEvent?: string): Set<string> {
+  private buildConversionTypesSet(conversionEvent?: string, applicationId?: string): Set<string> {
     const set = new Set<string>([
       'purchase', 'offsite_conversion.fb_pixel_purchase',
       'lead', 'offsite_conversion.fb_pixel_lead',
@@ -211,6 +221,10 @@ export class MetaMetricsService {
     const lower = conversionEvent.toLowerCase();
     // Standard event → already covered by base set above.
     if (['purchase', 'lead', 'completeregistration', 'subscribe'].includes(lower)) return set;
+    if (applicationId) {
+      for (const t of appEventActionTypes({ metaAppId: applicationId, conversionEvent })) set.add(t);
+      return set;
+    }
     // Custom event name (e.g. NADI_REPORT_PURCHASE_COMPLETED) — add as-is.
     if (conversionEvent !== 'CustomEvent') set.add(conversionEvent);
     // The Custom Conversion ID path is handled by passing the resolved Set in
@@ -230,6 +244,8 @@ export class MetaMetricsService {
     accessToken: string,
     conversionEvent?: string,
     customConversionId?: string,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<AdSetMetrics[]> {
     this.logger.log(`Fetching ad set metrics: campaign=${campaignId}`);
 
@@ -244,7 +260,7 @@ export class MetaMetricsService {
       },
     );
 
-    const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+    const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
     if (customConversionId) {
       conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
     }
@@ -281,6 +297,8 @@ export class MetaMetricsService {
     accessToken: string,
     conversionEvent?: string,
     customConversionId?: string,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<AdMetrics[]> {
     const response = await this.metaApiGet(
       `${META_API_BASE}/${adSetId}/insights`,
@@ -293,7 +311,7 @@ export class MetaMetricsService {
       },
     );
 
-    const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+    const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
     if (customConversionId) {
       conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
     }
@@ -403,6 +421,8 @@ export class MetaMetricsService {
     accessToken: string,
     conversionEvent?: string,
     customConversionId?: string,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<Array<{
     publisherPlatform: string;
     platformPosition: string;
@@ -423,7 +443,7 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
-      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
       if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
       return rows.map((r: any) => {
@@ -466,6 +486,8 @@ export class MetaMetricsService {
     accessToken: string,
     conversionEvent?: string,
     customConversionId?: string,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<Array<{
     age: string;
     gender: string;
@@ -488,7 +510,7 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
-      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
       if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
       return rows.map((r: any) => {
@@ -527,6 +549,8 @@ export class MetaMetricsService {
     accessToken: string,
     conversionEvent?: string,
     customConversionId?: string,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<Array<{
     dayOfWeek: number;             // 0=Sun, 6=Sat (matches Meta adset_schedule day numbering)
     dayLabel: string;              // 'Sun' | 'Mon' | ...
@@ -548,7 +572,7 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
-      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
       if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
 
@@ -598,6 +622,8 @@ export class MetaMetricsService {
     accessToken: string,
     conversionEvent?: string,
     customConversionId?: string,
+    /** product.metaAppId — see buildConversionTypesSet doc comment. */
+    applicationId?: string,
   ): Promise<Array<{
     hourOfDay: string;            // Meta returns "00:00:00 - 00:59:59" format
     spend: number;
@@ -617,7 +643,7 @@ export class MetaMetricsService {
           access_token: accessToken,
         },
       );
-      const conversionTypes = this.buildConversionTypesSet(conversionEvent);
+      const conversionTypes = this.buildConversionTypesSet(conversionEvent, applicationId);
       if (customConversionId) conversionTypes.add(`offsite_conversion.custom.${customConversionId}`);
       const rows: any[] = response.data?.data ?? [];
       return rows.map((r: any) => {

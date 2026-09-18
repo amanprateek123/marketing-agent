@@ -50,40 +50,72 @@ export function inferHookStyleFromCopy(
   // ── price_shock — explicit price/discount language. Check FIRST because
   //    "₹999 only" can also match urgency keywords downstream, but the price
   //    is the dominant hook.
-  if (/[₹$]\s*\d{2,}|rs\.?\s*\d{2,}|\d+\s*%\s*(off|discount|chhoot|kam)|flat\s*\d+|just\s*[₹$]?\s*\d+|sirf\s*[₹$]?\s*\d+|aaj\s*ka\s*offer/.test(combined)) {
+  if (
+    /[₹$]\s*\d{2,}|rs\.?\s*\d{2,}|\d+\s*%\s*(off|discount|chhoot|kam)|flat\s*\d+|just\s*[₹$]?\s*\d+|sirf\s*[₹$]?\s*\d+|aaj\s*ka\s*offer/.test(
+      combined,
+    )
+  ) {
     return 'price_shock';
   }
 
   // ── before_after — transformation language (kg lost, before/after, in N days)
-  if (/before\s*(?:&|and|\/|-)\s*after|kg\s*(?:loss|lost|gain|kam|less|more)|\d+\s*(?:days?|weeks?|din|hafte)\s*(?:me|in)|transformation|glow\s*up|naya|naye\s*you|new\s*me/.test(combined)) {
+  if (
+    /before\s*(?:&|and|\/|-)\s*after|kg\s*(?:loss|lost|gain|kam|less|more)|\d+\s*(?:days?|weeks?|din|hafte)\s*(?:me|in)|transformation|glow\s*up|naya|naye\s*you|new\s*me/.test(
+      combined,
+    )
+  ) {
     return 'before_after';
   }
 
   // ── social_proof — UGC, testimonials, ratings, customer counts (covers old `ugc` and `personal_story` buckets)
-  if (/ugc|testimonial|real\s*customer|actual\s*customer|meri\s*kahani|mere\s*saath\s*hua|meri\s*story|my\s*story|i\s*was|personal\s*story|maine\s*try|maine\s*use|mere\s*jaisa|hum\s*sab|satisfied\s*customer/.test(combined)) {
+  if (
+    /ugc|testimonial|real\s*customer|actual\s*customer|meri\s*kahani|mere\s*saath\s*hua|meri\s*story|my\s*story|i\s*was|personal\s*story|maine\s*try|maine\s*use|mere\s*jaisa|hum\s*sab|satisfied\s*customer/.test(
+      combined,
+    )
+  ) {
     return 'social_proof';
   }
-  if (/\d+[\s,]*(?:lakh|lac|k|thousand|crore|cr|hazaar)\+?\s*(?:customer|log|user|review|order|rating|happy|trust|families|families)|(?:4\.\d|5\.0|5\s*star)\s*(?:star|rating)?|top\s*rated|best\s*seller|#1|number\s*1|trusted\s*by|join\s+\d+/.test(combined)) {
+  if (
+    /\d+[\s,]*(?:lakh|lac|k|thousand|crore|cr|hazaar)\+?\s*(?:customer|log|user|review|order|rating|happy|trust|families|families)|(?:4\.\d|5\.0|5\s*star)\s*(?:star|rating)?|top\s*rated|best\s*seller|#1|number\s*1|trusted\s*by|join\s+\d+/.test(
+      combined,
+    )
+  ) {
     return 'social_proof';
   }
 
   // ── urgency — time/stock scarcity
-  if (/sirf\s*aaj|limited|abhi|last\s*chance|offer\s*ends|hurry|jaldi|kal\s*se|today\s*only|expir|deadline|closing|running\s*out|stock\s*khatam|few\s*left/.test(combined)) {
+  if (
+    /sirf\s*aaj|limited|abhi|last\s*chance|offer\s*ends|hurry|jaldi|kal\s*se|today\s*only|expir|deadline|closing|running\s*out|stock\s*khatam|few\s*left/.test(
+      combined,
+    )
+  ) {
     return 'urgency';
   }
 
   // ── pain_point — fear / problem / dosha (covers old `fear_then_relief`)
-  if (/problem|pareshaan|pareshan|tension|dard|struggle|takleef|mushkil|worry|anxious|scared|dar|bhay|crisis|failed|fail|negative|dosha|dosh|pap|grahan|sade\s*sati|dhaiya|tired|exhausted|stress|frustrated|suffering/.test(combined)) {
+  if (
+    /problem|pareshaan|pareshan|tension|dard|struggle|takleef|mushkil|worry|anxious|scared|dar|bhay|crisis|failed|fail|negative|dosha|dosh|pap|grahan|sade\s*sati|dhaiya|tired|exhausted|stress|frustrated|suffering/.test(
+      combined,
+    )
+  ) {
     return 'pain_point';
   }
 
   // ── curiosity_gap — secret, reveal, questions (covers old `curiosity` AND `question`)
-  if (/\?|kya\s*aap|kya\s*aapka|kya\s*ho|kyun|kaise|kitna|kaun\s*sa|kab|kya\s*pata|jaante\s*hain|did\s*you\s*know|are\s*you|do\s*you|have\s*you|secret|hidden|jaano|discover|pata\s*karo|reveal|untold|exclusive|insider|raaz|chhupayi|ankhon|khulasa|nobody\s*tells/.test(combined)) {
+  if (
+    /\?|kya\s*aap|kya\s*aapka|kya\s*ho|kyun|kaise|kitna|kaun\s*sa|kab|kya\s*pata|jaante\s*hain|did\s*you\s*know|are\s*you|do\s*you|have\s*you|secret|hidden|jaano|discover|pata\s*karo|reveal|untold|exclusive|insider|raaz|chhupayi|ankhon|khulasa|nobody\s*tells/.test(
+      combined,
+    )
+  ) {
     return 'curiosity_gap';
   }
 
   // ── bold_claim — guarantees, proofs, "the best"
-  if (/guaranteed|100\s*%|proven|scientific|authentic|original|genuine|sabse|best|certified|verified|fact|research|study|data|gold\s*standard|world['s]*\s*best/.test(combined)) {
+  if (
+    /guaranteed|100\s*%|proven|scientific|authentic|original|genuine|sabse|best|certified|verified|fact|research|study|data|gold\s*standard|world['s]*\s*best/.test(
+      combined,
+    )
+  ) {
     return 'bold_claim';
   }
 
@@ -97,10 +129,18 @@ export function inferHookStyleFromCopy(
  */
 export function inferAudienceType(adSetName: string): string {
   const lower = (adSetName ?? '').toLowerCase();
-  if (lower.includes('lookalike') || lower.includes('lal') || lower.includes('lla')) return 'lookalike';
-  if (lower.includes('advantage') || lower.includes('a+')) return 'advantage_plus';
-  if (lower.includes('retarget') || lower.includes('remarket')) return 'retarget';
-  if (lower.includes('interest') || lower.includes('inmarket')) return 'interest';
+  if (
+    lower.includes('lookalike') ||
+    lower.includes('lal') ||
+    lower.includes('lla')
+  )
+    return 'lookalike';
+  if (lower.includes('advantage') || lower.includes('a+'))
+    return 'advantage_plus';
+  if (lower.includes('retarget') || lower.includes('remarket'))
+    return 'retarget';
+  if (lower.includes('interest') || lower.includes('inmarket'))
+    return 'interest';
   if (lower.includes('broad')) return 'broad';
   if (lower.includes('performing')) return 'performing_export';
   if (lower.includes('custom')) return 'custom';
@@ -108,14 +148,62 @@ export function inferAudienceType(adSetName: string): string {
 }
 
 /**
+ * Infer audience type from Meta's actual targeting contract when available,
+ * with the ad-set name retained only as a compatibility fallback. A custom
+ * audience is materially different from cold/unknown delivery even when its
+ * ad-set name is opaque (for example "ATC 30 Days").
+ */
+export function inferAudienceTypeFromTargeting(
+  adSetName: string,
+  targeting?: Record<string, unknown> | null,
+): string {
+  const named = inferAudienceType(adSetName);
+  if (!targeting || typeof targeting !== 'object') return named;
+
+  const automation = targeting.targeting_automation as
+    | { advantage_audience?: unknown }
+    | undefined;
+  if (
+    automation?.advantage_audience === 1 ||
+    automation?.advantage_audience === true
+  ) {
+    return 'advantage_plus';
+  }
+
+  // Names can distinguish a lookalike/custom subtype that Meta represents in
+  // the same custom_audiences array, so preserve an explicit known label.
+  if (named !== 'other') return named;
+
+  const customAudiences = targeting.custom_audiences;
+  if (Array.isArray(customAudiences) && customAudiences.length > 0) {
+    return 'custom';
+  }
+
+  const interests = targeting.interests;
+  const flexibleSpec = targeting.flexible_spec;
+  if (
+    (Array.isArray(interests) && interests.length > 0) ||
+    (Array.isArray(flexibleSpec) && flexibleSpec.length > 0)
+  ) {
+    return 'interest';
+  }
+
+  return named;
+}
+
+/**
  * Infer creative format from Meta creative payload. Falls back to ad-name
  * hints when the creative object isn't shaped as expected. Returns one of:
  * 'video' | 'image' | 'carousel' | 'reel' | 'story' | 'unknown'.
  */
-export function inferFormatFromCreative(creative: any, adName: string = ''): string {
+export function inferFormatFromCreative(
+  creative: any,
+  adName: string = '',
+): string {
   // Primary path — use the creative object structure (most reliable)
   if (creative?.object_story_spec?.video_data) return 'video';
-  if (creative?.object_story_spec?.link_data?.child_attachments?.length > 0) return 'carousel';
+  if (creative?.object_story_spec?.link_data?.child_attachments?.length > 0)
+    return 'carousel';
   if (creative?.object_story_spec?.link_data) return 'image';
   if (creative?.asset_feed_spec?.videos?.length > 0) return 'video';
   if (creative?.asset_feed_spec?.images?.length > 0) return 'image';

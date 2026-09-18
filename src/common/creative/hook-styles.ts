@@ -39,9 +39,37 @@ export const HOOK_STYLES_MEME = [
   'meme_self_aware',
 ] as const;
 
-export type HookStyle = (typeof HOOK_STYLES_DR)[number] | (typeof HOOK_STYLES_MEME)[number];
+/**
+ * Screenshot-format hook styles. 4 styles — used only when brief.format === 'screenshot'.
+ * The "copy" for this format IS a fake chat/review thread, not ad prose.
+ */
+export const HOOK_STYLES_SCREENSHOT = [
+  'chat_advice_ask',
+  'chat_price_objection',
+  'review_screenshot',
+  'dm_testimonial',
+] as const;
 
-const ALL_VALID = new Set<string>([...HOOK_STYLES_DR, ...HOOK_STYLES_MEME]);
+/**
+ * Poll/quiz-format hook styles. 2 styles — used only when brief.format === 'poll_quiz'.
+ */
+export const HOOK_STYLES_POLL = [
+  'poll_would_you_rather',
+  'poll_which_are_you',
+] as const;
+
+export type HookStyle =
+  | (typeof HOOK_STYLES_DR)[number]
+  | (typeof HOOK_STYLES_MEME)[number]
+  | (typeof HOOK_STYLES_SCREENSHOT)[number]
+  | (typeof HOOK_STYLES_POLL)[number];
+
+const ALL_VALID = new Set<string>([
+  ...HOOK_STYLES_DR,
+  ...HOOK_STYLES_MEME,
+  ...HOOK_STYLES_SCREENSHOT,
+  ...HOOK_STYLES_POLL,
+]);
 
 /**
  * Validate a hookStyle string against the canonical taxonomy.
@@ -122,4 +150,48 @@ export const HOOK_STYLE_DESCRIPTIONS_MEME: Record<(typeof HOOK_STYLES_MEME)[numb
     "Structure: LINE 1 = voice the objection ('scroll karne wale the na?'), LINE 2 = the concrete reason to stop. " +
     "Sensory: second-person, present tense, conversational — reads like a reply, not a billboard. " +
     "BANNED: irony with no payoff (self-awareness must END in a real claim), mocking the customer.",
+};
+
+/**
+ * Specs for screenshot-format hookStyles. The "copy" IS a fake phone-UI conversation
+ * (chat thread, review screenshot, DM) — write actual message bubbles, not ad prose.
+ */
+export const HOOK_STYLE_DESCRIPTIONS_SCREENSHOT: Record<(typeof HOOK_STYLES_SCREENSHOT)[number], string> = {
+  chat_advice_ask:
+    "A WhatsApp-style thread where a friend asks for advice and gets pointed to the product. " +
+    "Example: 'Yaar career ko lekar bahut confuse hoon 😩' → 'Maine Nadi Report try kiya tha, kaafi clear ho gaya' → 'Link bhej?'. " +
+    "Structure: 3-4 short bubbles, alternating senders, last bubble is the soft CTA. " +
+    "BANNED: bubbles that read like ad copy — keep it typo-casual, real texting rhythm.",
+  chat_price_objection:
+    "A thread where one person raises the price objection and the other resolves it with a concrete fact. " +
+    "Example: '₹1799 thoda zyada nahi?' → 'Lifetime report hai, ek baar ka hai... aur personalized remedies bhi included hai'. " +
+    "Structure: objection bubble, then a specific-fact rebuttal bubble (not a generic reassurance). " +
+    "BANNED: the rebuttal being vague ('trust me it's worth it') — it must cite the actual differentiator.",
+  review_screenshot:
+    "A star-rating review card (App Store / Google review style) with a real-feeling name + specific outcome. " +
+    "Example: '★★★★★ Ritu S. — \"Mujhe pata chal gaya kab job switch karna sahi rahega, bilkul accurate\"'. " +
+    "Structure: name + city (optional) + one specific, checkable claim — never 'life changing'. " +
+    "BANNED: 5-star-only monotony language ('amazing', 'best ever') without a concrete detail.",
+  dm_testimonial:
+    "An Instagram-DM-style screenshot where a customer messages the brand's own account with a result. " +
+    "Example: 'Hii, wo jo aapne bataya tha career ke baare mein... bilkul waisा hi hua 😭🙏'. " +
+    "Structure: casual DM tone, one concrete callback to what the reading predicted, brand's short reply bubble. " +
+    "BANNED: overly polished corporate-sounding DM text — must read like a real customer's message.",
+};
+
+/**
+ * Specs for poll/quiz-format hookStyles. Copy is a question + exactly 2 options, framed
+ * to make the viewer mentally answer before they've consciously decided to engage.
+ */
+export const HOOK_STYLE_DESCRIPTIONS_POLL: Record<(typeof HOOK_STYLES_POLL)[number], string> = {
+  poll_would_you_rather:
+    "A binary 'would you rather' framed around two paths the audience actually faces, product resolves the tension. " +
+    "Example: 'Blind trust karoge ya apni kundli padhke decide karoge?' with two tappable-feeling options. " +
+    "Structure: question line + Option A / Option B, product tie-in in the caption below. " +
+    "BANNED: options that aren't genuinely both plausible — a fake choice reads as manipulative.",
+  poll_which_are_you:
+    "'Which one are you?' identity-split framed as two relatable personas, both resolved by the product. " +
+    "Example: 'Type A: Har decision se pehle Google karta hai. Type B: Seedha kundli dekhta hai.' " +
+    "Structure: two short persona labels + one-line description each, CTA invites the viewer to self-identify. " +
+    "BANNED: personas that are just 'good customer vs bad customer' — both must be genuinely relatable, not a strawman.",
 };

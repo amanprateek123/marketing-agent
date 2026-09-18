@@ -825,7 +825,7 @@ Format performance: Winning: ${winningFormats.join(', ')}. Losing: ${losingForma
 IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for ALL ${variantCount || 4} variants.
 - "mixed" (RECOMMENDED for prospecting): use ads: ${allVariantsArr} — selected variant ships as video, others as image. 1 video + ${Math.max(variantCount - 1, 3)} image ads in one ad set.
 - "video" ad sets → must use ads: [${selectedCopyIndex}] only (single video, video matches this variant's hook)
-- "image" ad sets → use ads: ${allVariantsArr} (each variant has its own image)
+- "image" ad sets → by default use ads: ${allVariantsArr} (each variant has its own image). If this campaign has MULTIPLE image ad sets targeting meaningfully different audiences AND you have a real creative-fit reason (e.g. a social-proof variant for retargeting warm buyers, a price-anchor variant for cold prospecting), you MAY split variants across those ad sets instead — assign each ad set a subset. HARD REQUIREMENT: the UNION of every image ad set's ads array must still include all ${variantCount || 4} variants — every variant must appear in at least one ad set, or it gets silently dropped. When unsure, default to giving every image ad set all variants.
 - "both" → DEPRECATED for prospecting (creates duplicate ads). Use "mixed" instead.`
       : `CREATIVE FORMAT — video vs image per ad set:
 Each ad set must have "creativeFormat": "video" | "image" | "mixed" | "both" | "carousel". Pick "carousel" ONLY when brief.format === "carousel" (the upstream Strategy Team chose carousel deliberately for a multi-part concept). When brief.format !== "carousel", DO NOT pick carousel — the creative producer won't have populated carouselCards and launch will degrade to image format.
@@ -837,7 +837,7 @@ No format data yet. Decide from first principles:
 IMPORTANT: Video was generated for Variant ${selectedCopyIndex} only. Image was generated for ALL ${variantCount || 4} variants.
 - "mixed" (RECOMMENDED for prospecting): use ads: ${allVariantsArr} — selected variant ships as video, others as image. 1 video + ${Math.max(variantCount - 1, 3)} image ads in one ad set.
 - "video" ad sets → must use ads: [${selectedCopyIndex}] only (single video, video matches this variant's hook)
-- "image" ad sets → use ads: ${allVariantsArr} (each variant has its own image)
+- "image" ad sets → by default use ads: ${allVariantsArr} (each variant has its own image). If this campaign has MULTIPLE image ad sets targeting meaningfully different audiences AND you have a real creative-fit reason (e.g. a social-proof variant for retargeting warm buyers, a price-anchor variant for cold prospecting), you MAY split variants across those ad sets instead — assign each ad set a subset. HARD REQUIREMENT: the UNION of every image ad set's ads array must still include all ${variantCount || 4} variants — every variant must appear in at least one ad set, or it gets silently dropped. When unsure, default to giving every image ad set all variants.
 - "both" → DEPRECATED for prospecting (creates duplicate ads, reuses single video across all variants). Use "mixed" instead.`;
 
     // ═════════════════════════════════════════════════════════════════════════

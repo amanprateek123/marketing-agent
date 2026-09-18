@@ -8,16 +8,43 @@ import { AgentType } from '../../claude/claude.types';
 import { CompaniesService } from '../../companies/companies.service';
 import { ActionLoggerService } from '../../common/action-logger/action-logger.service';
 import { CampaignsService } from '../campaigns.service';
-import { Campaign, CampaignDocument } from '../schemas/campaign.schema';
+import {
+  Campaign,
+  CampaignDocument,
+  isManagedCampaignSource,
+} from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
-import { AuditSnapshot, AuditSnapshotDocument } from '../schemas/audit-snapshot.schema';
-import { SignalDetectorService, AuditSignalPacket } from './signal-detector.service';
+import {
+  AuditSnapshot,
+  AuditSnapshotDocument,
+} from '../schemas/audit-snapshot.schema';
+import {
+  SignalDetectorService,
+  AuditSignalPacket,
+} from './signal-detector.service';
 import { AuditAgentService, AuditVerdict } from './audit-agent.service';
-import { MetaMetricsService, FullCampaignMetrics } from '../meta-ads/meta-metrics.service';
+import {
+  MetaMetricsService,
+  FullCampaignMetrics,
+} from '../meta-ads/meta-metrics.service';
+import { buildFullMetricsFromPersisted } from '../meta-ads/persisted-metrics.util';
+import {
+  readPlacementBreakdown,
+  readHourlyBreakdown,
+  readDayOfWeekBreakdown,
+} from '../meta-ads/breakdown-reader.util';
+import {
+  BreakdownSnapshot,
+  BreakdownSnapshotDocument,
+} from '../schemas/breakdown-snapshot.schema';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { withUtmParams } from '../meta-ads/meta-utm.util';
+import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
 import { SlackService } from '../../delivery/slack.service';
-import { IntelligenceBrief, IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-brief.schema';
+import {
+  IntelligenceBrief,
+  IntelligenceBriefDocument,
+} from '../../pipeline/schemas/intelligence-brief.schema';
 import { CreativeLearningService } from '../../learning/creative-learning.service';
 import { CampaignLearningService } from '../../learning/campaign-learning.service';
 import { ShadowActionService } from '../../learning/shadow-action.service';
@@ -76,8 +103,25 @@ const TARGETING_POSITION_TO_INSIGHTS: Record<string, string> = {
  * the byPlacement filter doesn't incorrectly exclude any.
  */
 const TARGETING_TO_INSIGHTS_POSITIONS: Record<string, string[]> = {
-  facebook: ['feed', 'right_hand_column', 'marketplace', 'video_feeds', 'facebook_stories', 'search', 'instream_video', 'facebook_reels'],
-  instagram: ['feed', 'instagram_stories', 'explore', 'instagram_reels', 'shop', 'profile_feed', 'ig_search'],
+  facebook: [
+    'feed',
+    'right_hand_column',
+    'marketplace',
+    'video_feeds',
+    'facebook_stories',
+    'search',
+    'instream_video',
+    'facebook_reels',
+  ],
+  instagram: [
+    'feed',
+    'instagram_stories',
+    'explore',
+    'instagram_reels',
+    'shop',
+    'profile_feed',
+    'ig_search',
+  ],
   audience_network: ['classic', 'rewarded_video', 'instream_video'],
   messenger: ['messenger_home', 'sponsored_messages', 'story'],
 };
@@ -106,6 +150,8 @@ export class CampaignAuditorService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(AuditSnapshot.name)
     private readonly snapshotModel: Model<AuditSnapshotDocument>,
+    @InjectModel(BreakdownSnapshot.name)
+    private readonly breakdownModel: Model<BreakdownSnapshotDocument>,
     @InjectQueue(QUEUES.CREATIVE_PRODUCTION)
     private readonly creativeQueue: Queue,
   ) {}
@@ -119,22 +165,121 @@ export class CampaignAuditorService {
     company: CompanyDocument,
     actionId: string,
   ): Promise<void> {
-    const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).exec();
-    if (!freshCampaign) return;
+    const freshCampaign = await this.campaignModel
+      .findOne({ _id: campaign._id })
+      .exec();
+    if (!freshCampaign) {
+      throw new Error(`Campaign ${campaign._id} not found during execution`);
+    }
 
     const pendingActions = (freshCampaign as any).pendingActions ?? [];
     const action = pendingActions.find((a: any) => a.actionId === actionId);
-    if (!action || action.status !== 'executed') return;
+    if (!action) throw new Error(`Approved action ${actionId} not found`);
+    if (action.status !== 'executed') {
+      throw new Error(
+        `Approved action ${actionId} is ${action.status}, not ready to execute`,
+      );
+    }
 
     // Re-run executePendingActions — it will pick up this action since status is 'executed'
-    await this.executePendingActions(freshCampaign, company);
+    const applied = await this.executePendingActions(
+      freshCampaign,
+      company,
+      actionId,
+    );
+    if (!applied) {
+      throw new Error(`Approved action ${actionId} was not applied`);
+    }
+  }
+
+  /**
+   * Execute a single action that originated OUTSIDE this audit loop's own
+   * recommend → grace-period pipeline — specifically, an IntelligenceDecision
+   * a human approved in the newer intelligence cascade (Meridian). That system
+   * has its own review gate (shadow_review → approved), so this intentionally
+   * skips createPendingAction's dedup/oscillation-cooldown checks (those guard
+   * THIS loop's own repeated proposals, not a one-off external approval) and
+   * pushes a pre-approved entry straight onto pendingActions. From there it
+   * rides the exact same executeAction → executeApprovedAction →
+   * executePendingActions path every other approved action uses, so it gets
+   * the same real Meta-call logic, retries, and optimizer-level safety guards.
+   * Throws on failure — callers persist the error onto their own record.
+   */
+  async executeExternalAction(
+    tenantId: string,
+    campaignId: string,
+    action: {
+      actionId: string;
+      type: string;
+      targetId: string;
+      targetName: string;
+      reason: string;
+      metrics: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    if (action.type === 'add_adset') {
+      throw new Error(
+        'add_adset is review-only: the required audience, product, landing-page, budget, and creative launch contract is not complete',
+      );
+    }
+
+    const campaign = await this.campaignModel
+      .findOne({ tenantId, _id: campaignId })
+      .exec();
+    if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken) {
+      throw new Error('No Meta access token configured for this tenant');
+    }
+
+    const pendingActions = (campaign as any).pendingActions ?? [];
+    if (!pendingActions.some((a: any) => a.actionId === action.actionId)) {
+      const now = new Date();
+      pendingActions.push({
+        actionId: action.actionId,
+        type: action.type,
+        targetId: action.targetId,
+        targetName: action.targetName,
+        reason: action.reason,
+        metrics: action.metrics,
+        recommendedAt: now,
+        executeAt: now,
+        status: 'pending',
+      });
+      await this.campaignModel.updateOne(
+        { tenantId, _id: campaignId },
+        { pendingActions },
+      );
+    }
+
+    try {
+      await this.campaignsService.executeAction(
+        tenantId,
+        campaignId,
+        action.actionId,
+      );
+      await this.executeApprovedAction(campaign, company, action.actionId);
+    } catch (err) {
+      // `executeAction` uses status='executed' as a pre-execution approval
+      // marker. If the actual Meta operation fails or is skipped, remove the
+      // external bridge row so campaign history cannot claim it executed and a
+      // later audit cannot auto-run it behind the review endpoint's back. The
+      // IntelligenceDecision remains the authoritative failed-attempt record.
+      await this.campaignModel.updateOne(
+        { tenantId, _id: campaignId },
+        { $pull: { pendingActions: { actionId: action.actionId } } },
+      );
+      throw err;
+    }
   }
 
   async audit(tenantId: string): Promise<AuditResult> {
     const company = await this.companiesService.findByTenantId(tenantId);
     const activeCampaigns = await this.campaignsService.findActive(tenantId);
 
-    this.logger.log(`Auditing ${activeCampaigns.length} active agent campaign(s) for tenantId=${tenantId}`);
+    this.logger.log(
+      `Auditing ${activeCampaigns.length} active agent campaign(s) for tenantId=${tenantId}`,
+    );
 
     const result: AuditResult = {
       tenantId,
@@ -148,14 +293,20 @@ export class CampaignAuditorService {
     // This is shared across all campaigns in the same account — distinguishes
     // "your campaign tanked" from "everyone's CPMs spiked this week".
     let marketEnvironment: AuditSignalPacket['marketEnvironment'] = null;
-    if (company.meta?.accessToken && company.meta?.accountId && activeCampaigns.length > 0) {
+    if (
+      company.meta?.accessToken &&
+      company.meta?.accountId &&
+      activeCampaigns.length > 0
+    ) {
       try {
         marketEnvironment = await this.metaMetrics.fetchAccountEnvironment(
           company.meta.accountId,
           company.meta.accessToken,
         );
       } catch (err: any) {
-        this.logger.warn(`Account CPM env fetch failed: ${err.message} — proceeding without it`);
+        this.logger.warn(
+          `Account CPM env fetch failed: ${err.message} — proceeding without it`,
+        );
       }
     }
 
@@ -163,7 +314,9 @@ export class CampaignAuditorService {
       try {
         await this.auditCampaign(campaign, company, result, marketEnvironment);
       } catch (err: any) {
-        this.logger.error(`Audit failed for campaign ${campaign.metaCampaignId}: ${err.message}`);
+        this.logger.error(
+          `Audit failed for campaign ${campaign.metaCampaignId}: ${err.message}`,
+        );
       }
     }
 
@@ -190,12 +343,18 @@ export class CampaignAuditorService {
     const isObjectId = /^[a-f0-9]{24}$/i.test(campaignId);
     const campaign = isObjectId
       ? await this.campaignModel.findOne({ tenantId, _id: campaignId }).exec()
-      : await this.campaignModel.findOne({ tenantId, metaCampaignId: campaignId }).exec();
+      : await this.campaignModel
+          .findOne({ tenantId, metaCampaignId: campaignId })
+          .exec();
     if (!campaign) {
-      throw new Error(`Campaign ${campaignId} not found for tenantId=${tenantId}`);
+      throw new Error(
+        `Campaign ${campaignId} not found for tenantId=${tenantId}`,
+      );
     }
 
-    this.logger.log(`Auditing single campaign ${campaign.metaCampaignId} for tenantId=${tenantId}`);
+    this.logger.log(
+      `Auditing single campaign ${campaign.metaCampaignId} for tenantId=${tenantId}`,
+    );
 
     const result: AuditResult = {
       tenantId,
@@ -215,14 +374,18 @@ export class CampaignAuditorService {
           company.meta.accessToken,
         );
       } catch (err: any) {
-        this.logger.warn(`Account CPM env fetch failed: ${err.message} — proceeding without it`);
+        this.logger.warn(
+          `Account CPM env fetch failed: ${err.message} — proceeding without it`,
+        );
       }
     }
 
     try {
       await this.auditCampaign(campaign, company, result, marketEnvironment);
     } catch (err: any) {
-      this.logger.error(`Audit failed for campaign ${campaign.metaCampaignId}: ${err.message}`);
+      this.logger.error(
+        `Audit failed for campaign ${campaign.metaCampaignId}: ${err.message}`,
+      );
       throw err;
     }
 
@@ -240,71 +403,117 @@ export class CampaignAuditorService {
     marketEnvironment: AuditSignalPacket['marketEnvironment'] = null,
   ): Promise<void> {
     if (!company.meta?.accessToken || !campaign.metaCampaignId) {
-      this.logger.warn(`Skipping campaign ${campaign._id}: no Meta credentials or campaignId`);
+      this.logger.warn(
+        `Skipping campaign ${campaign._id}: no Meta credentials or campaignId`,
+      );
       return;
     }
 
     // Skip campaigns less than 1 hour old — no meaningful data yet
     if (campaign.launchedAt) {
-      const ageHours = (Date.now() - new Date(campaign.launchedAt).getTime()) / (1000 * 60 * 60);
+      const ageHours =
+        (Date.now() - new Date(campaign.launchedAt).getTime()) /
+        (1000 * 60 * 60);
       if (ageHours < 1) {
-        this.logger.debug(`Skipping campaign ${campaign.metaCampaignId}: launched ${ageHours.toFixed(1)}h ago — too early`);
+        this.logger.debug(
+          `Skipping campaign ${campaign.metaCampaignId}: launched ${ageHours.toFixed(1)}h ago — too early`,
+        );
         return;
       }
     }
 
     // Skip campaigns older than 45 days — they should be paused or graduated by now
     if (campaign.launchedAt) {
-      const ageDays = (Date.now() - new Date(campaign.launchedAt).getTime()) / (1000 * 60 * 60 * 24);
+      const ageDays =
+        (Date.now() - new Date(campaign.launchedAt).getTime()) /
+        (1000 * 60 * 60 * 24);
       if (ageDays > 45) {
-        this.logger.debug(`Skipping campaign ${campaign.metaCampaignId}: ${Math.round(ageDays)}d old — too old for active auditing`);
+        this.logger.debug(
+          `Skipping campaign ${campaign.metaCampaignId}: ${Math.round(ageDays)}d old — too old for active auditing`,
+        );
         return;
       }
     }
 
-    // ── Fetch live metrics from Meta ──────────────────────────────────────────
-    // Match product to the one this campaign is actually selling
+    // ── Read persisted metrics ────────────────────────────────────────────────
+    // [CONSOLIDATED 2026-07-23] Was 4 live Meta API calls per audit cycle
+    // (fetchFullMetrics + 3 breakdown fetches, every ~3h per campaign).
+    // campaign-sync.service.ts (10-min cadence) and meta-deep-sync.service.ts
+    // (hourly) are now the sole Meta fetchers — read their persisted output
+    // instead. buildFullMetricsFromPersisted is synchronous (campaign is
+    // already loaded); the breakdown reads are the only I/O left here.
+    //
+    // Old live-fetch block, kept for reference:
+    //   const [full, byPlacement, byHour, byDayOfWeek] = await Promise.all([
+    //     this.metaMetrics.fetchFullMetrics(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionValue,
+    //       conversionEvent, customConversionId, product?.refundRatePercent,
+    //     ),
+    //     this.metaMetrics.fetchPlacementBreakdown(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionEvent, customConversionId,
+    //     ),
+    //     this.metaMetrics.fetchHourlyBreakdown(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionEvent, customConversionId,
+    //     ),
+    //     this.metaMetrics.fetchDayOfWeekBreakdown(
+    //       campaign.metaCampaignId, company.meta.accessToken, conversionEvent, customConversionId,
+    //     ),
+    //   ]);
+    // (conversionEvent/customConversionId were derived from `product` right below,
+    // same as they still are — only used by the live fetch, so no longer declared.)
+
+    // Match product to the one this campaign is actually selling. Read path:
+    // an unresolvable product must NOT abort the audit (that would strand the
+    // campaign with no safety rails), but it must be loud — conversionValue
+    // below feeds every ROAS, verdict and pause/scale decision, so the wrong
+    // product here quietly mis-judges the whole campaign.
     const brief = campaign.briefId
-      ? await this.briefModel.findOne({ tenantId: company.tenantId, briefId: campaign.briefId }).lean().exec()
+      ? await this.briefModel
+          .findOne({ tenantId: company.tenantId, briefId: campaign.briefId })
+          .lean()
+          .exec()
       : null;
-    const briefProduct = brief ? (brief as any).product : '';
-    const product = (company.products ?? []).find(p => briefProduct ? p.name === briefProduct : p.active)
-      ?? (company.products ?? []).find(p => p.active);
+    const { resolution: productResolution, error: productError } =
+      tryResolveCampaignProduct(company, campaign as any, brief as any);
+    if (!productResolution) {
+      // Severity tracks whether we can act on it. Campaigns this system
+      // launched get a warn — an unknown product means their verdicts are
+      // running on Meta's action_values alone, and productName is fixable.
+      // Imported campaigns ('manual') are observe-only: every action below is
+      // gated on isManagedCampaignSource, they never had a product recorded,
+      // and a tenant can have hundreds of them — warning on each, every audit
+      // cycle, would bury the ones that matter.
+      const message = `Campaign ${campaign.metaCampaignId} (${campaign.name}): cannot determine which product it sells — ${productError} Auditing with no product: ROAS falls back to Meta's own action_values and product-specific rules are skipped.`;
+      if (isManagedCampaignSource(campaign.source)) {
+        this.logger.warn(`${message} Set campaign.productName to fix.`);
+      } else {
+        this.logger.debug(message);
+      }
+    }
+    const product = productResolution?.product;
     // conversionValue serves as the FALLBACK when Meta's action_values return
     // empty (pixel without value param). For VBB-style dynamic-value setups we
     // prefer the actual event values; the static price is just the safety net.
     // NET of refunds — every ROAS downstream of this line (verdicts, winner
     // detection, ad-set ROAS at line ~387) judges net revenue, not bookings.
     const conversionValue = getEffectiveConversionValue(product);
-    const conversionEvent = product?.conversionEvent ?? 'Purchase';
-    const customConversionId = product?.customConversionId;
 
-    const [full, byPlacement, byHour, byDayOfWeek] = await Promise.all([
-      this.metaMetrics.fetchFullMetrics(
+    const full = buildFullMetricsFromPersisted(campaign);
+    const [byPlacement, byHour, byDayOfWeek] = await Promise.all([
+      readPlacementBreakdown(
+        this.breakdownModel,
+        company.tenantId,
         campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionValue,
-        conversionEvent,
-        customConversionId,
-        product?.refundRatePercent,
       ),
-      this.metaMetrics.fetchPlacementBreakdown(
+      readHourlyBreakdown(
+        this.breakdownModel,
+        company.tenantId,
         campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionEvent,
-        customConversionId,
       ),
-      this.metaMetrics.fetchHourlyBreakdown(
+      readDayOfWeekBreakdown(
+        this.breakdownModel,
+        company.tenantId,
         campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionEvent,
-        customConversionId,
-      ),
-      this.metaMetrics.fetchDayOfWeekBreakdown(
-        campaign.metaCampaignId,
-        company.meta.accessToken,
-        conversionEvent,
-        customConversionId,
       ),
     ]);
 
@@ -314,33 +523,54 @@ export class CampaignAuditorService {
     //   1. Meta's reporting pipeline lags — insights date_stop falls >48h
     //      behind. Pausing/scaling on a 2-day-old picture is how the auditor
     //      killed campaigns whose conversions had already landed.
-    //   2. The fetch silently returns an empty row (rate limit, truncation —
-    //      see the 449-campaign filter-URL bug) while the DB knows the
-    //      campaign has real spend. Zero-spend on a spending campaign is an
-    //      API failure, not a metric.
-    // Skip the whole audit cycle; the 6h cron retries with fresh data. DB
-    // metrics are NOT updated from a suspect fetch — that would poison sync.
+    //   2. campaign-sync itself has stopped refreshing this campaign — the
+    //      old check here was "did the live fetch we just made return ₹0
+    //      spend while the DB shows real spend" (a silent-API-failure
+    //      proxy). Now that we read Mongo directly, full.campaign.spend IS
+    //      campaign.spend — that comparison would always be false. The
+    //      equivalent signal is campaign.syncedAt going stale: campaign-sync
+    //      runs every ~10 min (Phase 0 also added a preserve-prior-value
+    //      guard there so a single rate-limited tick no longer zeroes
+    //      anything) — if syncedAt hasn't moved in 3x the audit cadence, the
+    //      sync pipeline itself is stalled and this data shouldn't be acted on.
+    // Skip the whole audit cycle; the next tick retries with fresh data.
     const STALE_DATA_HOURS = 48;
-    const dataAsOfMs = full.campaign.dataAsOf ? new Date(full.campaign.dataAsOf).getTime() : null;
+    const dataAsOfMs = full.campaign.dataAsOf
+      ? new Date(full.campaign.dataAsOf).getTime()
+      : null;
     // date_stop is a date (00:00) — a value of "yesterday" is normal reporting
     // cadence; only flag when even the day AFTER date_stop ended >48h ago.
-    const reportingLagMs = dataAsOfMs !== null
-      ? Date.now() - (dataAsOfMs + 24 * 60 * 60 * 1000)
+    const reportingLagMs =
+      dataAsOfMs !== null
+        ? Date.now() - (dataAsOfMs + 24 * 60 * 60 * 1000)
+        : null;
+    const reportingStale =
+      reportingLagMs !== null &&
+      reportingLagMs > STALE_DATA_HOURS * 60 * 60 * 1000;
+    const SYNC_STALE_HOURS = 9; // 3x the 3h audit cadence
+    const syncAgeMs = campaign.syncedAt
+      ? Date.now() - new Date(campaign.syncedAt).getTime()
       : null;
-    const reportingStale = reportingLagMs !== null && reportingLagMs > STALE_DATA_HOURS * 60 * 60 * 1000;
-    const emptyFetchOnSpendingCampaign = full.campaign.spend === 0 && (campaign.spend ?? 0) > 500;
-    if (reportingStale || emptyFetchOnSpendingCampaign) {
+    const syncStale =
+      syncAgeMs === null || syncAgeMs > SYNC_STALE_HOURS * 60 * 60 * 1000;
+    if (reportingStale || syncStale) {
       const why = reportingStale
         ? `insights date_stop=${full.campaign.dataAsOf} is >${STALE_DATA_HOURS}h behind`
-        : `fetch returned ₹0 spend but DB shows ₹${(campaign.spend ?? 0).toFixed(0)} — likely silent API failure`;
-      this.logger.warn(`Audit skipped for ${campaign.metaCampaignId}: stale/suspect Meta data (${why})`);
+        : `campaign-sync hasn't refreshed this campaign in >${SYNC_STALE_HOURS}h (syncedAt=${campaign.syncedAt?.toISOString() ?? 'never'}) — sync pipeline may be stalled`;
+      this.logger.warn(
+        `Audit skipped for ${campaign.metaCampaignId}: stale/suspect Meta data (${why})`,
+      );
       await this.actionLogger.log({
         tenantId: company.tenantId,
         agent: AgentType.CAMPAIGN_AUDITOR,
         action: 'audit_skipped_stale_data',
         reason: why,
-        outcome: 'No verdict — audit deferred to next cycle rather than deciding on stale data',
-        metadata: { campaignId: campaign._id.toString(), metaCampaignId: campaign.metaCampaignId },
+        outcome:
+          'No verdict — audit deferred to next cycle rather than deciding on stale data',
+        metadata: {
+          campaignId: campaign._id.toString(),
+          metaCampaignId: campaign.metaCampaignId,
+        },
       });
       void this.slackService.sendOpsAlert(
         `Audit skipped on stale/suspect Meta data (tenant=${company.tenantId}, campaign=${campaign.metaCampaignId}): ${why}`,
@@ -352,29 +582,33 @@ export class CampaignAuditorService {
     // Save ad-level metrics to campaign document
     await this.saveAdLevelMetrics(campaign, full);
 
-    // Update campaign-level live metrics
-    await this.campaignsService.updateMetrics(company.tenantId, campaign._id.toString(), {
-      spend: full.campaign.spend,
-      impressions: full.campaign.impressions,
-      clicks: full.campaign.clicks,
-      conversions: full.campaign.conversions,
-      roas: full.campaign.roas,
-      ctr: full.campaign.ctr,
-      cpc: full.campaign.cpc,
-    });
+    // Record that the audit ran. Top-line metrics no longer get written back
+    // here — full.campaign.* came from this same campaign doc, so re-writing
+    // it would just echo unchanged values (see touchLastAudited's doc comment).
+    await this.campaignsService.touchLastAudited(
+      company.tenantId,
+      campaign._id.toString(),
+    );
 
     // Execute any expired pending actions (agent campaigns only)
-    if (campaign.source === 'agent') {
+    if (isManagedCampaignSource(campaign.source)) {
       await this.executePendingActions(campaign, company);
     }
 
     // Pre-compute weekly spend — used by both safety rails and signal detector
-    const weeklySpend = await this.campaignsService.getWeeklySpend(company.tenantId);
+    const weeklySpend = await this.campaignsService.getWeeklySpend(
+      company.tenantId,
+    );
 
     // ── Layer 1: Safety rails (agent-created campaigns only) ──────────────────
     // Non-agent campaigns (manual/imported) are tracked for metrics but never auto-paused
-    if (campaign.source === 'agent') {
-      const safetyPaused = await this.runSafetyRails(campaign, full, company, weeklySpend);
+    if (isManagedCampaignSource(campaign.source)) {
+      const safetyPaused = await this.runSafetyRails(
+        campaign,
+        full,
+        company,
+        weeklySpend,
+      );
       if (safetyPaused) {
         result.paused++;
         return;
@@ -382,26 +616,32 @@ export class CampaignAuditorService {
     }
 
     // ── Layer 2: Signal detection ─────────────────────────────────────────────
-    const snapshots = await this.snapshotModel
+    const snapshots = (await this.snapshotModel
       .find({ tenantId: company.tenantId, campaignId: campaign._id.toString() })
       .sort({ auditedAt: -1 })
       .limit(10)
       .lean()
-      .exec() as AuditSnapshotDocument[];
+      .exec()) as AuditSnapshotDocument[];
 
     // Filter byPlacement to tag rows whose placement is ALREADY EXCLUDED from
     // the ad set's current Meta targeting. Without this, the audit reads cumulative
     // lifetime placement spend and re-fires the same narrow_placement recommendation
     // for already-restricted placements every cycle (the 6-consecutive-recommendations
     // loop on 91astro). Stale lifetime data lies; this filter tells the LLM the truth.
-    const taggedByPlacement = await this.tagByPlacementWithActiveTargeting(
-      campaign, full, byPlacement, company.meta.accessToken,
+    const taggedByPlacement = this.tagByPlacementWithActiveTargeting(
+      campaign,
+      byPlacement,
     );
 
     const signals = this.signalDetector.detect(
-      campaign, full, snapshots, company, weeklySpend, marketEnvironment,
+      campaign,
+      full,
+      snapshots,
+      company,
+      weeklySpend,
+      marketEnvironment,
       { byPlacement: taggedByPlacement, byHour, byDayOfWeek },
-      product,  // resolved from brief.product at line ~268 — prevents the cross-product CPA leak that caused Nadi Leaf to be audited against Nadi Report's ₹1,400 floor on 2026-06-10
+      product, // resolved from brief.product at line ~268 — prevents the cross-product CPA leak that caused Nadi Leaf to be audited against Nadi Report's ₹1,400 floor on 2026-06-10
     );
 
     // ── Save audit snapshot ───────────────────────────────────────────────────
@@ -421,10 +661,13 @@ export class CampaignAuditorService {
         cpa: full.campaign.cpa,
         frequency: full.campaign.frequency,
       },
-      adSets: full.adSets.map(as => ({
+      adSets: full.adSets.map((as) => ({
         metaAdSetId: as.adSetId,
         name: as.adSetName,
-        audienceType: (campaign as any).adSets?.find((a: any) => a.metaAdSetId === as.adSetId)?.audienceType ?? '',
+        audienceType:
+          (campaign as any).adSets?.find(
+            (a: any) => a.metaAdSetId === as.adSetId,
+          )?.audienceType ?? '',
         spend: as.spend,
         clicks: as.clicks,
         conversions: as.conversions,
@@ -433,8 +676,8 @@ export class CampaignAuditorService {
         roas: as.cpa > 0 && conversionValue > 0 ? conversionValue / as.cpa : 0,
         frequency: as.frequency,
       })),
-      ads: full.adSets.flatMap(as =>
-        as.ads.map(ad => {
+      ads: full.adSets.flatMap((as) =>
+        as.ads.map((ad) => {
           const localAd = (campaign as any).adSets
             ?.find((a: any) => a.metaAdSetId === as.adSetId)
             ?.ads?.find((a: any) => a.metaAdId === ad.adId);
@@ -499,9 +742,10 @@ export class CampaignAuditorService {
       // to fire any signal yet." Same all-green outcome, very different meaning —
       // case (b) feels safe but is actually blind. Heuristic: ≥50 clicks OR ≥1
       // conversion OR ≥3 snapshots = we have *some* basis to call this healthy.
-      const hasEvidence = full.campaign.clicks >= 50
-        || full.campaign.conversions >= 1
-        || snapshots.length >= 3;
+      const hasEvidence =
+        full.campaign.clicks >= 50 ||
+        full.campaign.conversions >= 1 ||
+        snapshots.length >= 3;
       const status = hasEvidence
         ? 'No anomalies — campaign healthy'
         : `No anomalies — INSUFFICIENT EVIDENCE (clicks=${full.campaign.clicks}, snapshots=${snapshots.length})`;
@@ -509,27 +753,47 @@ export class CampaignAuditorService {
         verdict: 'no_action' as const,
         urgency: null,
         contextInsight: `Day ${age.days.toFixed(0)} | ₹${full.campaign.spend.toFixed(0)} spent | ${conv} conversions | CTR ${full.campaign.ctr.toFixed(2)}% | ${status}`,
-        leakDiagnosis: 'none' as const,  // all-green means no leak identified by the rule set
+        leakDiagnosis: 'none' as const, // all-green means no leak identified by the rule set
         watchSignals: [] as string[],
         recommendedActions: [] as any[],
       };
       snapshotData.verdict = skipVerdict as any;
       await this.snapshotModel.create(snapshotData);
-      this.logger.debug(`All-green skip for campaign ${campaign.metaCampaignId}`);
+      this.logger.debug(
+        `All-green skip for campaign ${campaign.metaCampaignId}`,
+      );
 
       // Still run performance writeback even when skipping Claude
       if (campaign.launchedAt) {
         const ageMs = Date.now() - new Date(campaign.launchedAt).getTime();
         const ageDays = ageMs / (1000 * 60 * 60 * 24);
-        const written = await this.writePerformanceBack(campaign, full, ageDays);
+        const written = await this.writePerformanceBack(
+          campaign,
+          full,
+          ageDays,
+        );
         if (written) result.performanceWritten++;
       }
       return;
     }
 
-    const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).lean().exec();
-    const portfolioContext = await this.buildPortfolioContext(campaign, company);
-    const verdict = await this.auditAgent.analyze(freshCampaign ?? campaign, signals, snapshots, company, snapshotData, product, portfolioContext);
+    const freshCampaign = await this.campaignModel
+      .findOne({ _id: campaign._id })
+      .lean()
+      .exec();
+    const portfolioContext = await this.buildPortfolioContext(
+      campaign,
+      company,
+    );
+    const verdict = await this.auditAgent.analyze(
+      freshCampaign ?? campaign,
+      signals,
+      snapshots,
+      company,
+      snapshotData,
+      product,
+      portfolioContext,
+    );
 
     // Save verdict to snapshot
     snapshotData.verdict = verdict as any;
@@ -547,14 +811,27 @@ export class CampaignAuditorService {
     // current state.
     if (signals.hookSaturation && signals.hookSaturation.length > 0) {
       try {
-        const existing = (company.learnings?.creative?.audienceHookSaturation ?? {}) as Record<string, Record<string, { pct: number; updatedAt: Date }>>;
-        const merged: Record<string, Record<string, { pct: number; updatedAt: Date }>> = JSON.parse(JSON.stringify(existing));
+        const existing = (company.learnings?.creative?.audienceHookSaturation ??
+          {}) as Record<
+          string,
+          Record<string, { pct: number; updatedAt: Date }>
+        >;
+        const merged: Record<
+          string,
+          Record<string, { pct: number; updatedAt: Date }>
+        > = JSON.parse(JSON.stringify(existing));
         const now = new Date();
         for (const h of signals.hookSaturation) {
           if (!merged[h.audienceType]) merged[h.audienceType] = {};
-          merged[h.audienceType][h.hookStyle] = { pct: h.saturationPct, updatedAt: now };
+          merged[h.audienceType][h.hookStyle] = {
+            pct: h.saturationPct,
+            updatedAt: now,
+          };
         }
-        await this.companiesService.updateHookSaturation(company.tenantId, merged);
+        await this.companiesService.updateHookSaturation(
+          company.tenantId,
+          merged,
+        );
       } catch (err: any) {
         this.logger.warn(`Failed to persist hookSaturation: ${err.message}`);
       }
@@ -567,17 +844,19 @@ export class CampaignAuditorService {
     // Idempotent — upsertHotWinner keys on metaAdId and replaces with fresh metrics.
     if ((signals.opportunities.winnerCandidates ?? []).length > 0) {
       try {
-        const launchedBudget = (campaign as any)?.campaignConfig?.budget
-          ?? (campaign as any)?.budget
-          ?? 0;
+        const launchedBudget =
+          (campaign as any)?.campaignConfig?.budget ??
+          (campaign as any)?.budget ??
+          0;
         const briefTopic = (() => {
           // Best-effort topic surface; brief lookup is async and we don't want
           // to slow the audit path. Topic is decorative for clone diversification.
           const config = (campaign as any)?.campaignConfig;
           return (campaign as any)?.topic ?? config?.topic ?? undefined;
         })();
-        const productName = (campaign as any)?.productName
-          ?? (company.products ?? []).find(p => p.active)?.name;
+        const productName =
+          (campaign as any)?.productName ??
+          (company.products ?? []).find((p) => p.active)?.name;
 
         for (const winner of signals.opportunities.winnerCandidates) {
           await this.companiesService.upsertHotWinner(company.tenantId, {
@@ -620,26 +899,45 @@ export class CampaignAuditorService {
     // their live per-URL performance and record the verdict on the product —
     // NEVER auto-promote (the operator changes product.landingUrl if they agree).
     try {
-      await this.evaluateLandingPageTest(campaign, company, product, full, conversionValue);
+      await this.evaluateLandingPageTest(
+        campaign,
+        company,
+        product,
+        full,
+        conversionValue,
+      );
     } catch (err: any) {
-      this.logger.warn(`Landing-page test evaluation failed for ${campaign._id}: ${err.message}`);
+      this.logger.warn(
+        `Landing-page test evaluation failed for ${campaign._id}: ${err.message}`,
+      );
     }
 
     // ── Layer 4: Actions only for agent-created campaigns ────────────────────
     // Manual/imported campaigns: audit runs but no actions are created or executed
-    if (campaign.source === 'agent' && verdict.verdict === 'act') {
-      const gracePeriodHours = company.pipelineConfig?.pauseGracePeriodHours ?? 12;
+    if (isManagedCampaignSource(campaign.source) && verdict.verdict === 'act') {
+      const gracePeriodHours =
+        company.pipelineConfig?.pauseGracePeriodHours ?? 12;
       const ageDays = signals.campaignAge.days;
 
       // TypeScript-enforced timing rules — Claude cannot override
-      const recordTimingShadow = (action: any, reason: 'timing_guard_day_0_3' | 'timing_guard_day_3_7_growth' | 'early_pause_thin_evidence') => {
+      const recordTimingShadow = (
+        action: any,
+        reason:
+          | 'timing_guard_day_0_3'
+          | 'timing_guard_day_3_7_growth'
+          | 'early_pause_thin_evidence',
+      ) => {
         void this.shadowActions.recordBlocked({
           tenantId: company.tenantId,
           campaignId: campaign._id.toString(),
           metaCampaignId: campaign.metaCampaignId,
           proposedAction: {
-            type: action.type, targetId: action.targetId, targetName: action.targetName,
-            reason: action.reason, priority: action.priority, params: action.params,
+            type: action.type,
+            targetId: action.targetId,
+            targetName: action.targetName,
+            reason: action.reason,
+            priority: action.priority,
+            params: action.params,
           },
           blockedReason: reason,
           metricsAtT: {
@@ -656,8 +954,9 @@ export class CampaignAuditorService {
         });
       };
 
-      const allowedActions = verdict.recommendedActions.filter(action => {
-        const isPause = action.type === 'pause_ad' || action.type === 'pause_adset';
+      const allowedActions = verdict.recommendedActions.filter((action) => {
+        const isPause =
+          action.type === 'pause_ad' || action.type === 'pause_adset';
         // 'add_creative' is ADDITIVE — adds a variant for Meta to consider,
         // doesn't pause/redirect anything, doesn't change targeting. It's the
         // least disruptive action in the auditor's repertoire and is the
@@ -668,8 +967,8 @@ export class CampaignAuditorService {
         // Split allocation-changing growth (scale, add_adset) from purely
         // additive growth (add_creative) — only the former needs the timing guard.
         const isAdditive = action.type === 'add_creative';
-        const isAllocationGrowth = action.type === 'scale_adset' || action.type === 'add_adset';
-        const isCreativeFix = action.type === 'replace_creative';
+        const isAllocationGrowth =
+          action.type === 'scale_adset' || action.type === 'add_adset';
         // Throttle = less destructive than pause. The auditor prompt explicitly tells the LLM
         // to use these for safety-rail breaches in day 0-3 (e.g. budget cap creep). If a
         // high-priority pause is allowed through, a high-priority throttle must be too —
@@ -688,13 +987,24 @@ export class CampaignAuditorService {
             // (allowed below) as the escape hatch, so blocking the pause
             // doesn't strand a runaway campaign.
             if (isPause) {
-              const live = action.type === 'pause_adset'
-                ? (snapshotData.adSets as any[])?.find(as => as.metaAdSetId === action.targetId)
-                : (snapshotData.ads as any[])?.find(ad => ad.metaAdId === action.targetId);
+              const live =
+                action.type === 'pause_adset'
+                  ? (snapshotData.adSets as any[])?.find(
+                      (as) => as.metaAdSetId === action.targetId,
+                    )
+                  : (snapshotData.ads as any[])?.find(
+                      (ad) => ad.metaAdId === action.targetId,
+                    );
               const targetClicks = Number(live?.clicks ?? 0);
               const targetConversions = Number(live?.conversions ?? 0);
-              const clickFloor = Math.ceil(signals.evidenceFloors.clicksForZeroConvSignal * 0.5);
-              if (live && targetConversions === 0 && targetClicks < clickFloor) {
+              const clickFloor = Math.ceil(
+                signals.evidenceFloors.clicksForZeroConvSignal * 0.5,
+              );
+              if (
+                live &&
+                targetConversions === 0 &&
+                targetClicks < clickFloor
+              ) {
                 this.logger.warn(
                   `Timing guard: blocking ${action.type} on "${action.targetName}" — ${targetClicks} clicks < ${clickFloor} evidence floor (day ${ageDays.toFixed(1)}, 0 conv = noise, not a loser)`,
                 );
@@ -702,20 +1012,28 @@ export class CampaignAuditorService {
                 return false;
               }
             }
-            this.logger.log(`Timing guard: allowing high-priority ${action.type} on "${action.targetName}" in day 0-3 (safety exception)`);
+            this.logger.log(
+              `Timing guard: allowing high-priority ${action.type} on "${action.targetName}" in day 0-3 (safety exception)`,
+            );
             return true;
           }
           if (isAdditive && action.priority === 'high') {
-            this.logger.log(`Timing guard: allowing additive ${action.type} on "${action.targetName}" in day 0-3 (creative diversity correction — non-disruptive)`);
+            this.logger.log(
+              `Timing guard: allowing additive ${action.type} on "${action.targetName}" in day 0-3 (creative diversity correction — non-disruptive)`,
+            );
             return true;
           }
-          this.logger.warn(`Timing guard: blocking ${action.type} on "${action.targetName}" — campaign is ${ageDays.toFixed(1)}d old (< 3d)`);
+          this.logger.warn(
+            `Timing guard: blocking ${action.type} on "${action.targetName}" — campaign is ${ageDays.toFixed(1)}d old (< 3d)`,
+          );
           recordTimingShadow(action, 'timing_guard_day_0_3');
           return false;
         }
         if (ageDays < 7 && isAllocationGrowth) {
           // Day 3-7: pause + replace + additive allowed, NO allocation growth (scale/add_adset).
-          this.logger.warn(`Timing guard: blocking allocation-growth action ${action.type} — campaign is ${ageDays.toFixed(1)}d old (< 7d)`);
+          this.logger.warn(
+            `Timing guard: blocking allocation-growth action ${action.type} — campaign is ${ageDays.toFixed(1)}d old (< 7d)`,
+          );
           recordTimingShadow(action, 'timing_guard_day_3_7_growth');
           return false;
         }
@@ -726,13 +1044,20 @@ export class CampaignAuditorService {
         const metrics: Record<string, any> = { ...(action.params ?? {}) };
 
         if (action.type === 'replace_creative') {
-          metrics.replacementHook = this.pickReplacementHook(campaign, action.targetId, company);
-          metrics.fatiguedHook = (campaign as any).adSets
-            ?.flatMap((as: any) => as.ads ?? [])
-            ?.find((a: any) => a.metaAdId === action.targetId)?.hookStyle ?? '';
+          metrics.replacementHook = this.pickReplacementHook(
+            campaign,
+            action.targetId,
+            company,
+          );
+          metrics.fatiguedHook =
+            (campaign as any).adSets
+              ?.flatMap((as: any) => as.ads ?? [])
+              ?.find((a: any) => a.metaAdId === action.targetId)?.hookStyle ??
+            '';
         } else if (action.type === 'add_creative') {
-          metrics.hookStyle = action.params?.hookStyle
-            ?? this.pickReplacementHook(campaign, action.targetId, company);
+          metrics.hookStyle =
+            action.params?.hookStyle ??
+            this.pickReplacementHook(campaign, action.targetId, company);
         } else if (action.type === 'add_adset') {
           metrics.audienceType = action.params?.audienceType ?? 'retarget';
           metrics.targeting = action.params?.targeting ?? {};
@@ -740,7 +1065,9 @@ export class CampaignAuditorService {
         } else if (action.type === 'refresh_audience') {
           // Capture source ad set's current frequency + campaign-level CTR trend
           // so the optimizer can re-validate at execution time (gates: freq>4.5, CTR not declining).
-          const liveSourceAdSet = snapshotData.adSets?.find((as: any) => as.metaAdSetId === action.targetId);
+          const liveSourceAdSet = snapshotData.adSets?.find(
+            (as: any) => as.metaAdSetId === action.targetId,
+          );
           metrics.sourceFrequency = Number(liveSourceAdSet?.frequency ?? 0);
           metrics.sourceCtrTrend = signals.trends.ctrTrend;
         }
@@ -752,7 +1079,10 @@ export class CampaignAuditorService {
           reason: action.reason,
           priority: action.priority,
           metrics,
-          gracePeriodHours: action.priority === 'high' ? gracePeriodHours : gracePeriodHours * 2,
+          gracePeriodHours:
+            action.priority === 'high'
+              ? gracePeriodHours
+              : gracePeriodHours * 2,
         });
         if (created) result.actionsCreated++;
       }
@@ -762,16 +1092,21 @@ export class CampaignAuditorService {
       // The earlier executePendingActions() call (line ~266) ran BEFORE the verdict
       // produced new actions, so without this second pass auto-applied actions sit
       // in queue until the next 6h audit cycle — defeats the autonomy.
-      if (campaign.source === 'agent') {
-        const freshCampaign = await this.campaignModel.findOne({ _id: campaign._id }).exec();
-        if (freshCampaign) await this.executePendingActions(freshCampaign, company);
+      if (isManagedCampaignSource(campaign.source)) {
+        const freshCampaign = await this.campaignModel
+          .findOne({ _id: campaign._id })
+          .exec();
+        if (freshCampaign)
+          await this.executePendingActions(freshCampaign, company);
       }
 
       // Send Slack digest for "act" verdict
       try {
-        await this.sendAuditDigest(campaign, company, verdict, signals);
+        await this.sendAuditDigest(campaign, company, verdict);
       } catch (slackErr: any) {
-        this.logger.error(`Audit Slack digest failed — actions still created: ${slackErr.message}`);
+        this.logger.error(
+          `Audit Slack digest failed — actions still created: ${slackErr.message}`,
+        );
       }
     } else if (verdict.verdict === 'watch') {
       // Only notify Slack if there are specific watch signals
@@ -779,7 +1114,9 @@ export class CampaignAuditorService {
         try {
           await this.sendWatchNotification(campaign, company, verdict);
         } catch (slackErr: any) {
-          this.logger.error(`Audit watch Slack notification failed: ${slackErr.message}`);
+          this.logger.error(
+            `Audit watch Slack notification failed: ${slackErr.message}`,
+          );
         }
       }
     }
@@ -796,7 +1133,10 @@ export class CampaignAuditorService {
       action: `audit_${verdict.verdict}`,
       reason: verdict.contextInsight,
       outcome: `Verdict: ${verdict.verdict} | urgency: ${verdict.urgency ?? 'none'} | actions: ${verdict.recommendedActions.length}`,
-      metadata: { campaignId: campaign._id.toString(), metaCampaignId: campaign.metaCampaignId },
+      metadata: {
+        campaignId: campaign._id.toString(),
+        metaCampaignId: campaign.metaCampaignId,
+      },
     });
   }
 
@@ -819,59 +1159,109 @@ export class CampaignAuditorService {
    * Naming note: insights returns 'feed','instagram_reels','instagram_stories'
    * etc. while targeting uses 'feed','reels','story' — we normalize via a map.
    */
-  private async tagByPlacementWithActiveTargeting(
+  // [SUPERSEDED 2026-07-23] Was a live per-adset Meta call
+  // (this.metaAds.getAdSetTargeting) inside the loop below — redundant with
+  // campaign.metaAdSets[].rawTargeting, which campaign-sync.service.ts
+  // already persists every 10 min from the exact same underlying field
+  // (fields:'targeting' on the same /adsets endpoint). Kept here, commented,
+  // for reference — persisted-read implementation follows.
+  //
+  // private async tagByPlacementWithActiveTargeting(
+  //   campaign: CampaignDocument,
+  //   full: FullCampaignMetrics,
+  //   byPlacement: any[],
+  //   accessToken: string,
+  // ): Promise<any[]> {
+  //   if (!byPlacement?.length) return byPlacement;
+  //   const activeKeys = new Set<string>();
+  //   let allOpen = false;
+  //   try {
+  //     for (const adSet of full.adSets ?? []) {
+  //       const targeting = await this.metaAds.getAdSetTargeting(adSet.adSetId, accessToken);
+  //       if (!targeting) continue;
+  //       const platforms: string[] | null = targeting.publisher_platforms ?? null;
+  //       if (!platforms || platforms.length === 0) { allOpen = true; break; }
+  //       for (const p of platforms) {
+  //         const positions: string[] | null =
+  //           p === 'facebook' ? targeting.facebook_positions
+  //           : p === 'instagram' ? targeting.instagram_positions
+  //           : p === 'audience_network' ? targeting.audience_network_positions
+  //           : p === 'messenger' ? targeting.messenger_positions
+  //           : null;
+  //         if (!positions || positions.length === 0) {
+  //           for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) activeKeys.add(`${p}|${ip}`);
+  //         } else {
+  //           for (const pos of positions) {
+  //             const insightsPos = TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
+  //             activeKeys.add(`${p}|${insightsPos}`);
+  //           }
+  //         }
+  //       }
+  //     }
+  //   } catch (err: any) {
+  //     this.logger.warn(`Active-targeting fetch failed: ${err.message} — proceeding without byPlacement filter`);
+  //     return byPlacement;
+  //   }
+  //   return byPlacement.map((row) => ({
+  //     ...row,
+  //     excludedFromTargeting: allOpen ? false : !activeKeys.has(`${row.publisherPlatform}|${row.platformPosition}`),
+  //   }));
+  // }
+
+  private tagByPlacementWithActiveTargeting(
     campaign: CampaignDocument,
-    full: FullCampaignMetrics,
     byPlacement: any[],
-    accessToken: string,
-  ): Promise<any[]> {
+  ): any[] {
     if (!byPlacement?.length) return byPlacement;
 
     // Build the set of (platform, insights-position) combos currently active across
     // all ad sets in this campaign. Union — if ANY ad set delivers a placement,
-    // it's "active" at the campaign level.
+    // it's "active" at the campaign level. Reads campaign.metaAdSets[].rawTargeting
+    // (persisted by campaign-sync every 10 min) instead of a live per-adset fetch.
     const activeKeys = new Set<string>();
-    let allOpen = false;   // any ad set with null targeting = all-placements-active
+    let allOpen = false; // any ad set with null targeting = all-placements-active
 
-    try {
-      for (const adSet of (full.adSets ?? [])) {
-        const targeting = await this.metaAds.getAdSetTargeting(adSet.adSetId, accessToken);
-        if (!targeting) continue;
-        const platforms: string[] | null = targeting.publisher_platforms ?? null;
-        if (!platforms || platforms.length === 0) {
-          // null publisher_platforms = Meta Advantage+ Placements = all active
-          allOpen = true;
-          break;
-        }
-        for (const p of platforms) {
-          const positions: string[] | null =
-            p === 'facebook' ? targeting.facebook_positions
-            : p === 'instagram' ? targeting.instagram_positions
-            : p === 'audience_network' ? targeting.audience_network_positions
-            : p === 'messenger' ? targeting.messenger_positions
-            : null;
-          if (!positions || positions.length === 0) {
-            // null positions for a platform = all positions within that platform
-            // Mark every insights-position for that platform as active.
-            for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) {
-              activeKeys.add(`${p}|${ip}`);
-            }
-          } else {
-            for (const pos of positions) {
-              const insightsPos = TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
-              activeKeys.add(`${p}|${insightsPos}`);
-            }
+    for (const adSet of ((campaign as any).metaAdSets ?? []) as any[]) {
+      const targeting = adSet.rawTargeting;
+      if (!targeting) continue;
+      const platforms: string[] | null = targeting.publisher_platforms ?? null;
+      if (!platforms || platforms.length === 0) {
+        // null publisher_platforms = Meta Advantage+ Placements = all active
+        allOpen = true;
+        break;
+      }
+      for (const p of platforms) {
+        const positions: string[] | null =
+          p === 'facebook'
+            ? targeting.facebook_positions
+            : p === 'instagram'
+              ? targeting.instagram_positions
+              : p === 'audience_network'
+                ? targeting.audience_network_positions
+                : p === 'messenger'
+                  ? targeting.messenger_positions
+                  : null;
+        if (!positions || positions.length === 0) {
+          // null positions for a platform = all positions within that platform
+          // Mark every insights-position for that platform as active.
+          for (const ip of TARGETING_TO_INSIGHTS_POSITIONS[p] ?? []) {
+            activeKeys.add(`${p}|${ip}`);
+          }
+        } else {
+          for (const pos of positions) {
+            const insightsPos =
+              TARGETING_POSITION_TO_INSIGHTS[`${p}|${pos}`] ?? pos;
+            activeKeys.add(`${p}|${insightsPos}`);
           }
         }
       }
-    } catch (err: any) {
-      this.logger.warn(`Active-targeting fetch failed: ${err.message} — proceeding without byPlacement filter`);
-      return byPlacement;
     }
 
-    return byPlacement.map(row => ({
+    return byPlacement.map((row) => ({
       ...row,
-      excludedFromTargeting: allOpen ? false : !activeKeys.has(`${row.publisherPlatform}|${row.platformPosition}`),
+      excludedFromTargeting: allOpen
+        ? false
+        : !activeKeys.has(`${row.publisherPlatform}|${row.platformPosition}`),
     }));
   }
 
@@ -888,28 +1278,49 @@ export class CampaignAuditorService {
 
     // Campaign cap exceeded
     if (company.maxBudgetPerCampaign && spend > company.maxBudgetPerCampaign) {
-      await this.pauseCampaign(campaign, company, `Campaign spend ₹${spend.toFixed(0)} exceeded hard cap ₹${company.maxBudgetPerCampaign}`);
+      await this.pauseCampaign(
+        campaign,
+        company,
+        `Campaign spend ₹${spend.toFixed(0)} exceeded hard cap ₹${company.maxBudgetPerCampaign}`,
+      );
       return true;
     }
 
     // Weekly budget cap
     if (company.weeklyBudgetCap && weeklySpend > company.weeklyBudgetCap) {
-      await this.pauseCampaign(campaign, company, `Weekly spend ₹${weeklySpend.toFixed(0)} exceeded weekly cap ₹${company.weeklyBudgetCap}`);
+      await this.pauseCampaign(
+        campaign,
+        company,
+        `Weekly spend ₹${weeklySpend.toFixed(0)} exceeded weekly cap ₹${company.weeklyBudgetCap}`,
+      );
       return true;
     }
 
     // Frequency hard stop — audience fatigue (not just a warning)
     const maxFreq = company.pauseIfFrequencyAbove ?? 6;
     if (full.campaign.frequency > maxFreq * 1.5) {
-      await this.pauseCampaign(campaign, company, `Frequency ${full.campaign.frequency.toFixed(1)} critically high (limit ${maxFreq}x1.5) — severe audience fatigue`);
+      await this.pauseCampaign(
+        campaign,
+        company,
+        `Frequency ${full.campaign.frequency.toFixed(1)} critically high (limit ${maxFreq}x1.5) — severe audience fatigue`,
+      );
       return true;
     }
 
     // Stuck in learning with significant spend — compare against expected cumulative (dailyBudget × days)
     const coldStartDays = company.pipelineConfig?.coldStartDays ?? 14;
     const expectedSpendToDate = (campaign.budget ?? 0) * Math.max(ageDays, 1);
-    if (ageDays > coldStartDays * 2 && full.campaign.conversions === 0 && expectedSpendToDate > 0 && spend > expectedSpendToDate * 0.5) {
-      await this.pauseCampaign(campaign, company, `${Math.round(ageDays)}d with 0 conversions and ₹${spend.toFixed(0)} spent (${Math.round(spend / expectedSpendToDate * 100)}% of expected) — safety pause`);
+    if (
+      ageDays > coldStartDays * 2 &&
+      full.campaign.conversions === 0 &&
+      expectedSpendToDate > 0 &&
+      spend > expectedSpendToDate * 0.5
+    ) {
+      await this.pauseCampaign(
+        campaign,
+        company,
+        `${Math.round(ageDays)}d with 0 conversions and ₹${spend.toFixed(0)} spent (${Math.round((spend / expectedSpendToDate) * 100)}% of expected) — safety pause`,
+      );
       return true;
     }
 
@@ -932,14 +1343,17 @@ export class CampaignAuditorService {
     full: FullCampaignMetrics,
     conversionValue: number,
   ): Promise<void> {
-    if (!(campaign as any).campaignConfig?.isLandingPageTest || !product) return;
+    if (!(campaign as any).campaignConfig?.isLandingPageTest || !product)
+      return;
 
     // Join persisted ad sets (which carry the per-URL landingUrl) to live
     // metrics by adSetId.
     const arms = ((campaign as any).adSets ?? [])
       .filter((as: any) => as.landingUrl)
       .map((as: any) => {
-        const live = (full.adSets ?? []).find(a => a.adSetId === as.metaAdSetId);
+        const live = (full.adSets ?? []).find(
+          (a) => a.adSetId === as.metaAdSetId,
+        );
         const spend = live?.spend ?? 0;
         const conversions = live?.conversions ?? 0;
         return {
@@ -954,12 +1368,13 @@ export class CampaignAuditorService {
 
     // Identify the control arm by the test's stored controlUrl (falls back to
     // the product's current landingUrl, then to arms[0] for older records).
-    const controlUrl = product.landingPageTest?.controlUrl ?? product.landingUrl;
+    const controlUrl =
+      product.landingPageTest?.controlUrl ?? product.landingUrl;
     const control = arms.find((a: any) => a.url === controlUrl) ?? arms[0];
     const variant = arms.find((a: any) => a.url !== control.url) ?? arms[1];
 
-    const MIN_CONV_PER_ARM = 15;   // floor for a trustworthy per-arm CPA read
-    const DECISIVE_MARGIN = 0.15;  // leader CPA must beat laggard by ≥15% to call it
+    const MIN_CONV_PER_ARM = 15; // floor for a trustworthy per-arm CPA read
+    const DECISIVE_MARGIN = 0.15; // leader CPA must beat laggard by ≥15% to call it
 
     let leaderUrl: string | null = null;
     let marginPct = 0;
@@ -969,15 +1384,28 @@ export class CampaignAuditorService {
       marginPct = hi > 0 ? (hi - lo) / hi : 0;
       leaderUrl = control.cpa <= variant.cpa ? control.url : variant.url;
     }
-    const decided = control.conversions >= MIN_CONV_PER_ARM
-      && variant.conversions >= MIN_CONV_PER_ARM
-      && leaderUrl != null
-      && marginPct >= DECISIVE_MARGIN;
+    const decided =
+      control.conversions >= MIN_CONV_PER_ARM &&
+      variant.conversions >= MIN_CONV_PER_ARM &&
+      leaderUrl != null &&
+      marginPct >= DECISIVE_MARGIN;
 
     const round = (n: number | null) => (n == null ? null : Math.round(n));
     const evaluation = {
-      control: { url: control.url, conversions: control.conversions, spend: Math.round(control.spend), cpa: round(control.cpa), roas: Number(control.roas.toFixed(2)) },
-      variant: { url: variant.url, conversions: variant.conversions, spend: Math.round(variant.spend), cpa: round(variant.cpa), roas: Number(variant.roas.toFixed(2)) },
+      control: {
+        url: control.url,
+        conversions: control.conversions,
+        spend: Math.round(control.spend),
+        cpa: round(control.cpa),
+        roas: Number(control.roas.toFixed(2)),
+      },
+      variant: {
+        url: variant.url,
+        conversions: variant.conversions,
+        spend: Math.round(variant.spend),
+        cpa: round(variant.cpa),
+        roas: Number(variant.roas.toFixed(2)),
+      },
       leaderUrl,
       marginPct: Number((marginPct * 100).toFixed(1)),
       decided,
@@ -994,20 +1422,31 @@ export class CampaignAuditorService {
       next.winnerUrl = leaderUrl;
       next.concludedAt = new Date();
     }
-    await this.companiesService.setProductLandingPageTest(company.tenantId, product.name, next);
+    await this.companiesService.setProductLandingPageTest(
+      company.tenantId,
+      product.name,
+      next,
+    );
 
     if (decided) {
-      this.logger.log(`Landing-page test DECIDED for ${product.name}: winner=${leaderUrl} (CPA ${evaluation.marginPct}% better) — REPORT-ONLY, operator must promote.`);
+      this.logger.log(
+        `Landing-page test DECIDED for ${product.name}: winner=${leaderUrl} (CPA ${evaluation.marginPct}% better) — REPORT-ONLY, operator must promote.`,
+      );
       void this.slackService.sendOpsAlert(
         `🧪 Landing-page test result — ${company.tenantId} / ${product.name}\nWinner: ${leaderUrl}\nControl: ₹${evaluation.control.cpa} CPA (${evaluation.control.conversions} conv) · Variant: ₹${evaluation.variant.cpa} CPA (${evaluation.variant.conversions} conv) · ${evaluation.marginPct}% better.\nReport-only — promote it by setting product.landingUrl if you agree.`,
         { campaignId: campaign._id.toString() },
       );
     } else {
-      this.logger.log(`Landing-page test progress for ${product.name}: control ${control.conversions} conv / variant ${variant.conversions} conv (need ≥${MIN_CONV_PER_ARM} each + ≥${DECISIVE_MARGIN * 100}% CPA margin to call it).`);
+      this.logger.log(
+        `Landing-page test progress for ${product.name}: control ${control.conversions} conv / variant ${variant.conversions} conv (need ≥${MIN_CONV_PER_ARM} each + ≥${DECISIVE_MARGIN * 100}% CPA margin to call it).`,
+      );
     }
   }
 
-  private async saveAdLevelMetrics(campaign: CampaignDocument, full: FullCampaignMetrics): Promise<void> {
+  private async saveAdLevelMetrics(
+    campaign: CampaignDocument,
+    full: FullCampaignMetrics,
+  ): Promise<void> {
     const adSets = (campaign as any).adSets ?? [];
     if (adSets.length === 0) return;
 
@@ -1015,7 +1454,9 @@ export class CampaignAuditorService {
     const ageHours = ageMs / (1000 * 60 * 60);
 
     for (const adSet of adSets) {
-      const metaAdSet = full.adSets.find(a => a.adSetId === adSet.metaAdSetId);
+      const metaAdSet = full.adSets.find(
+        (a) => a.adSetId === adSet.metaAdSetId,
+      );
       if (!metaAdSet) continue;
 
       adSet.metrics = {
@@ -1051,7 +1492,10 @@ export class CampaignAuditorService {
       }
     }
 
-    await this.campaignModel.updateOne({ _id: campaign._id }, { adSets, lastAuditedAt: new Date() });
+    await this.campaignModel.updateOne(
+      { _id: campaign._id },
+      { adSets, lastAuditedAt: new Date() },
+    );
   }
 
   private async createPendingAction(
@@ -1094,7 +1538,9 @@ export class CampaignAuditorService {
     // in the first decision forever. Pending-only dedup keeps the queue clean
     // without silencing supersession.
     const existing = pendingActions.find(
-      (a: any) => a.targetId === action.targetId && a.type === action.type &&
+      (a: any) =>
+        a.targetId === action.targetId &&
+        a.type === action.type &&
         a.status === 'pending',
     );
     if (existing) return false;
@@ -1109,12 +1555,14 @@ export class CampaignAuditorService {
     if (action.type === 'add_creative') {
       const HOOK_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
       const recentSameHook = pendingActions.find(
-        (a: any) => a.targetId === action.targetId
-          && a.type === 'add_creative'
-          && a.metrics?.hookStyle === action.metrics?.hookStyle
-          && (a.status === 'pending' || a.status === 'executed')
-          && a.recommendedAt
-          && (Date.now() - new Date(a.recommendedAt).getTime()) < HOOK_DEDUP_WINDOW_MS,
+        (a: any) =>
+          a.targetId === action.targetId &&
+          a.type === 'add_creative' &&
+          a.metrics?.hookStyle === action.metrics?.hookStyle &&
+          (a.status === 'pending' || a.status === 'executed') &&
+          a.recommendedAt &&
+          Date.now() - new Date(a.recommendedAt).getTime() <
+            HOOK_DEDUP_WINDOW_MS,
       );
       if (recentSameHook) {
         this.logger.log(
@@ -1135,24 +1583,36 @@ export class CampaignAuditorService {
     const OSCILLATION_COOLDOWN_MS = 72 * 60 * 60 * 1000;
     const cooldownNow = Date.now();
     const expandsTarget = (a: any, targetId: string) =>
-      ((a.type === 'scale_adset' || a.type === 'add_adset') && a.targetId === targetId)
-      || (a.type === 'shift_budget_between_adsets' && String(a.metrics?.toAdSetId) === String(targetId));
+      ((a.type === 'scale_adset' || a.type === 'add_adset') &&
+        a.targetId === targetId) ||
+      (a.type === 'shift_budget_between_adsets' &&
+        String(a.metrics?.toAdSetId) === String(targetId));
     const contractsTarget = (a: any, targetId: string) =>
-      ((a.type === 'pause_adset' || a.type === 'pause_ad') && a.targetId === targetId)
-      || a.type === 'reduce_total_budget'   // campaign-level — touches every ad set
-      || (a.type === 'shift_budget_between_adsets' && a.targetId === targetId);  // donor side
+      ((a.type === 'pause_adset' || a.type === 'pause_ad') &&
+        a.targetId === targetId) ||
+      a.type === 'reduce_total_budget' || // campaign-level — touches every ad set
+      (a.type === 'shift_budget_between_adsets' && a.targetId === targetId); // donor side
     const recentlyExecuted = (pendingActions as any[]).filter(
-      (a: any) => a.status === 'executed' && a.executedAt
-        && cooldownNow - new Date(a.executedAt).getTime() < OSCILLATION_COOLDOWN_MS,
+      (a: any) =>
+        a.status === 'executed' &&
+        a.executedAt &&
+        cooldownNow - new Date(a.executedAt).getTime() <
+          OSCILLATION_COOLDOWN_MS,
     );
 
-    const newIsExpand = action.type === 'scale_adset' || action.type === 'add_adset'
-      || action.type === 'shift_budget_between_adsets';  // judged on its recipient
-    const newIsContract = action.type === 'pause_adset' || action.type === 'pause_ad'
-      || action.type === 'reduce_total_budget';
+    const newIsExpand =
+      action.type === 'scale_adset' ||
+      action.type === 'add_adset' ||
+      action.type === 'shift_budget_between_adsets'; // judged on its recipient
+    const newIsContract =
+      action.type === 'pause_adset' ||
+      action.type === 'pause_ad' ||
+      action.type === 'reduce_total_budget';
     if (newIsExpand) {
-      const expandTargetId = action.type === 'shift_budget_between_adsets'
-        ? String(action.metrics?.toAdSetId ?? '') : action.targetId;
+      const expandTargetId =
+        action.type === 'shift_budget_between_adsets'
+          ? String(action.metrics?.toAdSetId ?? '')
+          : action.targetId;
       // shift_budget is REVENUE-NEUTRAL rebalancing — the optimizer's primary
       // lever ("rebalance before pause") and exactly what you want right after
       // a campaign-level throttle (redistribute the smaller envelope toward
@@ -1160,10 +1620,12 @@ export class CampaignAuditorService {
       // (pause, or donor-side of a prior shift) conflicts with it; a
       // reduce_total_budget does not. True expansions (scale/add_adset) keep
       // the full contraction check including campaign-level reduce.
-      const conflict = recentlyExecuted.find(a =>
+      const conflict = recentlyExecuted.find((a) =>
         action.type === 'shift_budget_between_adsets'
-          ? (((a.type === 'pause_adset' || a.type === 'pause_ad') && a.targetId === expandTargetId)
-            || (a.type === 'shift_budget_between_adsets' && a.targetId === expandTargetId))
+          ? ((a.type === 'pause_adset' || a.type === 'pause_ad') &&
+              a.targetId === expandTargetId) ||
+            (a.type === 'shift_budget_between_adsets' &&
+              a.targetId === expandTargetId)
           : contractsTarget(a, expandTargetId),
       );
       if (conflict) {
@@ -1174,22 +1636,36 @@ export class CampaignAuditorService {
           tenantId: company.tenantId,
           campaignId: campaign._id.toString(),
           metaCampaignId: campaign.metaCampaignId,
-          proposedAction: { type: action.type, targetId: action.targetId, targetName: action.targetName, reason: action.reason, priority: action.priority, params: action.metrics },
+          proposedAction: {
+            type: action.type,
+            targetId: action.targetId,
+            targetName: action.targetName,
+            reason: action.reason,
+            priority: action.priority,
+            params: action.metrics,
+          },
           blockedReason: 'oscillation_cooldown',
           metricsAtT: {
-            spend: campaign.spend ?? 0, impressions: campaign.impressions ?? 0,
-            clicks: campaign.clicks ?? 0, conversions: campaign.conversions ?? 0,
-            ctr: campaign.ctr ?? 0, cpc: campaign.cpc ?? 0,
-            cpa: (campaign as any).cpa ?? 0, roas: campaign.roas ?? 0,
+            spend: campaign.spend ?? 0,
+            impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0,
+            conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0,
+            cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0,
+            roas: campaign.roas ?? 0,
             frequency: (campaign as any).frequency ?? 0,
           },
         });
         return false;
       }
     } else if (newIsContract && action.priority !== 'high') {
-      const conflict = recentlyExecuted.find(a => expandsTarget(a, action.targetId))
-        ?? (action.type === 'reduce_total_budget'
-          ? recentlyExecuted.find(a => a.type === 'scale_adset' || a.type === 'add_adset')
+      const conflict =
+        recentlyExecuted.find((a) => expandsTarget(a, action.targetId)) ??
+        (action.type === 'reduce_total_budget'
+          ? recentlyExecuted.find(
+              (a) => a.type === 'scale_adset' || a.type === 'add_adset',
+            )
           : undefined);
       if (conflict) {
         this.logger.warn(
@@ -1199,13 +1675,24 @@ export class CampaignAuditorService {
           tenantId: company.tenantId,
           campaignId: campaign._id.toString(),
           metaCampaignId: campaign.metaCampaignId,
-          proposedAction: { type: action.type, targetId: action.targetId, targetName: action.targetName, reason: action.reason, priority: action.priority, params: action.metrics },
+          proposedAction: {
+            type: action.type,
+            targetId: action.targetId,
+            targetName: action.targetName,
+            reason: action.reason,
+            priority: action.priority,
+            params: action.metrics,
+          },
           blockedReason: 'oscillation_cooldown',
           metricsAtT: {
-            spend: campaign.spend ?? 0, impressions: campaign.impressions ?? 0,
-            clicks: campaign.clicks ?? 0, conversions: campaign.conversions ?? 0,
-            ctr: campaign.ctr ?? 0, cpc: campaign.cpc ?? 0,
-            cpa: (campaign as any).cpa ?? 0, roas: campaign.roas ?? 0,
+            spend: campaign.spend ?? 0,
+            impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0,
+            conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0,
+            cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0,
+            roas: campaign.roas ?? 0,
             frequency: (campaign as any).frequency ?? 0,
           },
         });
@@ -1215,7 +1702,9 @@ export class CampaignAuditorService {
 
     const actionId = uuidv4();
     const now = new Date();
-    const executeAt = new Date(now.getTime() + action.gracePeriodHours * 60 * 60 * 1000);
+    const executeAt = new Date(
+      now.getTime() + action.gracePeriodHours * 60 * 60 * 1000,
+    );
 
     // Layer 3 — auto-apply for low-risk, reversible actions. Skips the human
     // approval gate so the autonomous loop closes end-to-end. Non-reversible
@@ -1232,10 +1721,26 @@ export class CampaignAuditorService {
     //   - Optimizer-side guards refuse actions that violate Meta business rules
     //   - Frequency/CTR/breakeven gates inside the optimizer prevent extreme moves
     //   - The verdict was produced by Sonnet against the LEAK DIAGNOSIS FRAMEWORK
-    const AUTO_APPLY_TYPES = new Set(['narrow_placement', 'add_creative', 'dayparting']);
+    const AUTO_APPLY_TYPES = new Set([
+      'narrow_placement',
+      'add_creative',
+      'dayparting',
+    ]);
     const shiftPercent = Number(action.metrics?.shiftPercent ?? 0);
-    const isSmallShift = action.type === 'shift_budget_between_adsets' && Number.isFinite(shiftPercent) && shiftPercent > 0 && shiftPercent <= 30;
-    const autoApply = AUTO_APPLY_TYPES.has(action.type) || isSmallShift;
+    const isSmallShift =
+      action.type === 'shift_budget_between_adsets' &&
+      Number.isFinite(shiftPercent) &&
+      shiftPercent > 0 &&
+      shiftPercent <= 30;
+    // scale_adset defaults to approval-gated (company.pipelineConfig.scaleRequiresApproval
+    // defaults true) — set false on the Settings page to let winning ad sets scale
+    // up immediately, same as the other Layer 3 types, instead of sitting until a
+    // human clicks approve.
+    const scaleAutoApply =
+      action.type === 'scale_adset' &&
+      company.pipelineConfig?.scaleRequiresApproval === false;
+    const autoApply =
+      AUTO_APPLY_TYPES.has(action.type) || isSmallShift || scaleAutoApply;
 
     pendingActions.push({
       actionId,
@@ -1265,37 +1770,64 @@ export class CampaignAuditorService {
       autoApplied: autoApply || undefined,
     });
 
-    await this.campaignModel.updateOne({ _id: campaign._id }, { pendingActions });
+    await this.campaignModel.updateOne(
+      { _id: campaign._id },
+      { pendingActions },
+    );
     if (autoApply) {
-      this.logger.log(`Auto-applied ${action.type} on "${action.targetName}" (Layer 3 low-risk auto-apply)`);
+      this.logger.log(
+        `Auto-applied ${action.type} on "${action.targetName}" (Layer 3 low-risk auto-apply)`,
+      );
     }
     return true;
   }
 
-  private async executePendingActions(campaign: CampaignDocument, company: CompanyDocument): Promise<void> {
+  private async executePendingActions(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+    requestedActionId?: string,
+  ): Promise<boolean> {
     const pendingActions = (campaign as any).pendingActions ?? [];
     const now = new Date();
     let updated = false;
+    let requestedActionApplied = false;
 
     for (const action of pendingActions) {
+      if (requestedActionId && action.actionId !== requestedActionId) continue;
       if (action.status !== 'pending' && action.status !== 'executed') continue;
       // Only execute if manually triggered (status = 'executed') or grace period expired
       const graceExpired = new Date(action.executeAt) <= now;
-      const manuallyApproved = action.status === 'executed' && action.executedAt;
+      const manuallyApproved =
+        action.status === 'executed' && action.executedAt;
 
       if (!graceExpired && !manuallyApproved) continue;
-      if (action.status === 'executed' && action.executedAt && new Date(action.executedAt) < new Date(now.getTime() - 60 * 1000)) continue; // already ran
+      if (
+        action.status === 'executed' &&
+        action.executedAt &&
+        new Date(action.executedAt) < new Date(now.getTime() - 60 * 1000)
+      )
+        continue; // already ran
 
       try {
         if (action.type === 'pause_ad') {
-          await this.metaAds.pauseAd(action.targetId, company.meta!.accessToken);
+          await this.metaAds.pauseAd(
+            action.targetId,
+            company.meta!.accessToken,
+          );
           for (const adSet of (campaign as any).adSets ?? []) {
-            const ad = adSet.ads.find((a: any) => a.metaAdId === action.targetId);
+            const ad = adSet.ads.find(
+              (a: any) => a.metaAdId === action.targetId,
+            );
             if (ad) ad.status = 'paused';
           }
         } else if (action.type === 'pause_adset') {
-          await this.metaAds.pauseAdSet(action.targetId, company.meta!.accessToken);
-          const adSet = ((campaign as any).adSets ?? []).find((a: any) => a.metaAdSetId === action.targetId);
+          await this.metaAds.pauseAdSet(
+            action.targetId,
+            company.meta!.accessToken,
+          );
+          const adSet = ((campaign as any).adSets ?? []).find(
+            (a: any) => a.metaAdSetId === action.targetId,
+          );
           if (adSet) adSet.status = 'paused';
         } else if (action.type === 'shift_budget_between_adsets') {
           // Revenue-neutral redistribution within the campaign — auto-executes on grace expiry.
@@ -1304,7 +1836,10 @@ export class CampaignAuditorService {
           const toAdSetId = action.metrics?.toAdSetId;
           const shiftPercent = Number(action.metrics?.shiftPercent);
           if (!toAdSetId) {
-            this.logger.warn(`shift_budget action missing metrics.toAdSetId — skipping`);
+            const message =
+              'shift_budget action missing metrics.toAdSetId — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.shiftBudgetBetweenAdSets(
@@ -1319,32 +1854,58 @@ export class CampaignAuditorService {
           // so it's lower-risk than scale_adset; explicit cap of 50% reduction in optimizer.
           const reductionPct = Number(action.metrics?.reductionPercent);
           if (!Number.isFinite(reductionPct) || reductionPct <= 0) {
-            this.logger.warn(`reduce_total_budget missing/invalid reductionPercent — skipping`);
+            const message =
+              'reduce_total_budget missing/invalid reductionPercent — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
-          await this.optimizer.reduceTotalBudget(campaign, company, reductionPct);
+          await this.optimizer.reduceTotalBudget(
+            campaign,
+            company,
+            reductionPct,
+          );
         } else if (action.type === 'narrow_placement') {
           // Disable bleeding placements — reversible (placements can be re-broadened).
           const publisherPlatforms = action.metrics?.publisherPlatforms;
-          if (!Array.isArray(publisherPlatforms) || publisherPlatforms.length === 0) {
-            this.logger.warn(`narrow_placement missing publisherPlatforms — skipping`);
+          if (
+            !Array.isArray(publisherPlatforms) ||
+            publisherPlatforms.length === 0
+          ) {
+            const message =
+              'narrow_placement missing publisherPlatforms — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
-          await this.optimizer.narrowAdSetPlacement(campaign, company, action.targetId, {
-            publisherPlatforms,
-            facebookPositions: action.metrics?.facebookPositions,
-            instagramPositions: action.metrics?.instagramPositions,
-            audienceNetworkPositions: action.metrics?.audienceNetworkPositions,
-            messengerPositions: action.metrics?.messengerPositions,
-          });
+          await this.optimizer.narrowAdSetPlacement(
+            campaign,
+            company,
+            action.targetId,
+            {
+              publisherPlatforms,
+              facebookPositions: action.metrics?.facebookPositions,
+              instagramPositions: action.metrics?.instagramPositions,
+              audienceNetworkPositions:
+                action.metrics?.audienceNetworkPositions,
+              messengerPositions: action.metrics?.messengerPositions,
+            },
+          );
         } else if (action.type === 'dayparting') {
           // Restrict delivery hours — reversible (schedule can be cleared).
           const schedule = action.metrics?.schedule;
           if (!Array.isArray(schedule) || schedule.length === 0) {
-            this.logger.warn(`dayparting missing schedule — skipping`);
+            const message = 'dayparting missing schedule — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
-          await this.optimizer.daypartAdSet(campaign, company, action.targetId, schedule);
+          await this.optimizer.daypartAdSet(
+            campaign,
+            company,
+            action.targetId,
+            schedule,
+          );
         } else if (action.type === 'refresh_audience') {
           // Audience swap — requires explicit approval since it pauses the source ad set
           // and creates a new one (Meta API write that can't be cleanly undone).
@@ -1352,19 +1913,30 @@ export class CampaignAuditorService {
           const newAudienceId = action.metrics?.newAudienceId;
           const useAdvantagePlus = action.metrics?.useAdvantagePlus === true;
           const sourceFreq = Number(action.metrics?.sourceFrequency);
-          const sourceCtrTrend = action.metrics?.sourceCtrTrend ?? 'insufficient_data';
+          const sourceCtrTrend =
+            action.metrics?.sourceCtrTrend ?? 'insufficient_data';
           if (!newAudienceId && !useAdvantagePlus) {
-            this.logger.warn(`refresh_audience missing newAudienceId / useAdvantagePlus — skipping`);
+            const message =
+              'refresh_audience missing newAudienceId / useAdvantagePlus — skipping';
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
           await this.optimizer.refreshAudience(
-            campaign, company, action.targetId,
+            campaign,
+            company,
+            action.targetId,
             { newAudienceId, useAdvantagePlus },
             { frequency: sourceFreq, ctrTrend: sourceCtrTrend },
           );
         } else if (action.type === 'scale_adset') {
-          // Scale requires explicit approval — only execute if manually approved (not grace-expired)
-          if (!manuallyApproved) continue;
+          // Scale requires explicit approval by default (company.pipelineConfig.scaleRequiresApproval,
+          // default true) — grace-period expiry alone isn't enough, unlike shift/reduce above.
+          // Set scaleRequiresApproval=false on the Settings page to let this auto-execute
+          // once the grace period passes too, same as the other budget actions.
+          const scaleNeedsApproval =
+            company.pipelineConfig?.scaleRequiresApproval !== false;
+          if (scaleNeedsApproval && !manuallyApproved) continue;
           await this.optimizer.scaleAdSet(campaign, company, action.targetId, {
             spend: campaign.spend ?? 0,
             impressions: campaign.impressions ?? 0,
@@ -1379,22 +1951,29 @@ export class CampaignAuditorService {
           // Replace creative requires explicit approval — auto-execute not supported yet
           if (!manuallyApproved) continue;
           // Pause the fatigued ad
-          await this.metaAds.pauseAd(action.targetId, company.meta!.accessToken);
+          await this.metaAds.pauseAd(
+            action.targetId,
+            company.meta!.accessToken,
+          );
           for (const adSet of (campaign as any).adSets ?? []) {
-            const ad = adSet.ads.find((a: any) => a.metaAdId === action.targetId);
+            const ad = adSet.ads.find(
+              (a: any) => a.metaAdId === action.targetId,
+            );
             if (ad) ad.status = 'paused_for_replacement';
           }
           // Use pre-computed hook from action creation, or recompute if missing
-          const replacementHook = action.metrics?.replacementHook
-            ?? this.pickReplacementHook(campaign, action.targetId, company);
+          const replacementHook =
+            action.metrics?.replacementHook ??
+            this.pickReplacementHook(campaign, action.targetId, company);
 
           // Track replacement lifecycle
           action.replacementStatus = 'queued';
 
           // Queue creative production job for autonomous replacement
-          const sourceAdSetId = (campaign as any).adSets
-            ?.find((as: any) => as.ads?.some((a: any) => a.metaAdId === action.targetId))
-            ?.metaAdSetId ?? '';
+          const sourceAdSetId =
+            (campaign as any).adSets?.find((as: any) =>
+              as.ads?.some((a: any) => a.metaAdId === action.targetId),
+            )?.metaAdSetId ?? '';
           await this.creativeQueue.add(
             `replace-creative-${action.targetId}`,
             {
@@ -1405,7 +1984,10 @@ export class CampaignAuditorService {
               fatiguedHook: action.metrics?.fatiguedHook ?? '',
               replacementHook,
               adSetId: sourceAdSetId,
-              audienceStage: this.deriveAudienceStageFromAdSet(campaign, sourceAdSetId),
+              audienceStage: this.deriveAudienceStageFromAdSet(
+                campaign,
+                sourceAdSetId,
+              ),
             },
             { attempts: 2, backoff: { type: 'exponential', delay: 60000 } },
           );
@@ -1426,8 +2008,9 @@ export class CampaignAuditorService {
         } else if (action.type === 'add_creative') {
           // Add fresh creative to winning ad set — requires approval
           if (!manuallyApproved) continue;
-          const hookStyle = action.metrics?.hookStyle
-            ?? this.pickReplacementHook(campaign, action.targetId, company);
+          const hookStyle =
+            action.metrics?.hookStyle ??
+            this.pickReplacementHook(campaign, action.targetId, company);
 
           action.replacementStatus = 'queued';
 
@@ -1438,34 +2021,52 @@ export class CampaignAuditorService {
               tenantId: company.tenantId,
               campaignId: campaign._id.toString(),
               briefId: campaign.briefId,
-              fatiguedAdId: '',  // empty = add new, don't replace
+              fatiguedAdId: '', // empty = add new, don't replace
               fatiguedHook: '',
               replacementHook: hookStyle,
-              adSetId: action.targetId,  // targetId is the ad set ID for add_creative
-              audienceStage: this.deriveAudienceStageFromAdSet(campaign, action.targetId),
+              adSetId: action.targetId, // targetId is the ad set ID for add_creative
+              audienceStage: this.deriveAudienceStageFromAdSet(
+                campaign,
+                action.targetId,
+              ),
             },
             { attempts: 2, backoff: { type: 'exponential', delay: 60000 } },
           );
 
-          this.logger.log(`Add creative queued for ad set ${action.targetId} with hook "${hookStyle}"`);
+          this.logger.log(
+            `Add creative queued for ad set ${action.targetId} with hook "${hookStyle}"`,
+          );
         } else if (action.type === 'add_adset') {
           // Add new ad set (retarget or narrowed) — requires approval
           if (!manuallyApproved) continue;
           let audienceType = action.metrics?.audienceType ?? 'retarget';
           const targeting = action.metrics?.targeting ?? {};
 
+          // Resolve the campaign's OWN product once — reused below both for
+          // the new ad set's conversion tracking (pixel/custom event/custom
+          // conversion) and for the new ad's landing page, so this can't
+          // point at a different product's pixel or URL the way
+          // `products.find(p => p.active)` used to (see note further down).
+          const {
+            resolution: adSetProductResolution,
+            error: adSetProductError,
+          } = tryResolveCampaignProduct(company, campaign as any, null);
+          const adSetProduct = adSetProductResolution?.product;
+
           // For retarget: find an existing retarget/custom audience from the product
           let retargetAudienceId: string | undefined;
           if (audienceType === 'retarget') {
             const product = (company.products ?? []).find((p: any) => p.active);
-            const retargetAud = (product?.metaAudiences ?? []).find((a: any) =>
-              a.type === 'custom' || a.type === 'retarget',
+            const retargetAud = (product?.metaAudiences ?? []).find(
+              (a: any) => a.type === 'custom' || a.type === 'retarget',
             );
             if (retargetAud) {
               retargetAudienceId = retargetAud.id;
             } else {
               // No retarget audience available — fall back to advantage_plus
-              this.logger.warn('No retarget audience found — falling back to advantage_plus for new ad set');
+              this.logger.warn(
+                'No retarget audience found — falling back to advantage_plus for new ad set',
+              );
               audienceType = 'advantage_plus';
             }
           }
@@ -1474,16 +2075,24 @@ export class CampaignAuditorService {
           const bestAdSet = (campaign as any).adSets?.find((as: any) =>
             as.ads?.some((a: any) => a.metrics?.conversions > 0),
           );
-          const bestVariantIndex = bestAdSet?.ads
-            ?.sort((a: any, b: any) => (b.metrics?.conversions ?? 0) - (a.metrics?.conversions ?? 0))[0]
-            ?.copyVariantIndex ?? 0;
+          const bestVariantIndex =
+            bestAdSet?.ads?.sort(
+              (a: any, b: any) =>
+                (b.metrics?.conversions ?? 0) - (a.metrics?.conversions ?? 0),
+            )[0]?.copyVariantIndex ?? 0;
 
           // Load creative package for the winning variant's copy + image
           const creativePackage = campaign.creativePackageId
-            ? await this.campaignsService.findCreativePackage(campaign.creativePackageId)
+            ? await this.campaignsService.findCreativePackage(
+                campaign.creativePackageId,
+              )
             : null;
-          const bestVariant = (creativePackage as any)?.copyVariants?.[bestVariantIndex];
-          const bestImage = ((creativePackage as any)?.images ?? []).find((img: any) => img.variantIndex === bestVariantIndex);
+          const bestVariant = (creativePackage as any)?.copyVariants?.[
+            bestVariantIndex
+          ];
+          const bestImage = ((creativePackage as any)?.images ?? []).find(
+            (img: any) => img.variantIndex === bestVariantIndex,
+          );
 
           // Carousel campaigns store creative in `carouselCards`, not `images[]`.
           // The current add_adset path is designed for single-image / video ads
@@ -1491,15 +2100,21 @@ export class CampaignAuditorService {
           // audience needs different launch logic (re-uploading N card images,
           // building child_attachments). Defer that to a follow-up — for now
           // skip the action and surface it for the operator to handle manually.
-          const sourceWasCarousel = ((creativePackage as any)?.carouselCards ?? []).length > 0
-            || (campaign as any).campaignConfig?.adSets?.[0]?.creativeFormat === 'carousel';
+          const sourceWasCarousel =
+            ((creativePackage as any)?.carouselCards ?? []).length > 0 ||
+            (campaign as any).campaignConfig?.adSets?.[0]?.creativeFormat ===
+              'carousel';
           if (sourceWasCarousel) {
-            this.logger.warn(`Skipping add_adset on carousel campaign ${campaign._id} — auto-clone of carousel ad sets not yet supported. Operator should clone manually if desired.`);
+            const message = `Skipping add_adset on carousel campaign ${campaign._id} — auto-clone of carousel ad sets not yet supported. Operator should clone manually if desired.`;
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
 
           if (!bestVariant) {
-            this.logger.warn(`No copy variant ${bestVariantIndex} found for add_adset — skipping`);
+            const message = `No copy variant ${bestVariantIndex} found for add_adset — skipping`;
+            this.logger.warn(message);
+            if (requestedActionId) throw new Error(message);
             continue;
           }
 
@@ -1508,26 +2123,39 @@ export class CampaignAuditorService {
           // Steal 20% budget from existing ad sets proportionally (total spend stays the same)
           const newAdSetPercent = 20;
           const existingAdSets = (campaign as any).adSets ?? [];
-          const activeAdSets = existingAdSets.filter((as: any) => as.status === 'active');
-          const totalExistingPercent = activeAdSets.reduce((s: number, as: any) => s + (as.budgetPercent ?? 0), 0);
+          const activeAdSets = existingAdSets.filter(
+            (as: any) => as.status === 'active',
+          );
+          const totalExistingPercent = activeAdSets.reduce(
+            (s: number, as: any) => s + (as.budgetPercent ?? 0),
+            0,
+          );
 
           if (totalExistingPercent > 0) {
-            const scaleFactor = (totalExistingPercent - newAdSetPercent) / totalExistingPercent;
+            const scaleFactor =
+              (totalExistingPercent - newAdSetPercent) / totalExistingPercent;
             for (const as of activeAdSets) {
               const oldPercent = as.budgetPercent ?? 0;
               as.budgetPercent = Math.round(oldPercent * scaleFactor);
               // Update budget on Meta
               const newBudget = campaign.budget * (as.budgetPercent / 100);
-              await this.metaAds.updateAdSetBudget(as.metaAdSetId, newBudget, company.meta!.accessToken);
+              await this.metaAds.updateAdSetBudget(
+                as.metaAdSetId,
+                newBudget,
+                company.meta!.accessToken,
+              );
             }
-            this.logger.log(`Redistributed budget: existing ad sets scaled to ${Math.round(scaleFactor * 100)}% to make room for ${newAdSetPercent}%`);
+            this.logger.log(
+              `Redistributed budget: existing ad sets scaled to ${Math.round(scaleFactor * 100)}% to make room for ${newAdSetPercent}%`,
+            );
           }
 
           // Inherit the existing campaign's optimization goal — adding a VALUE
           // ad set to an OFFSITE_CONVERSIONS campaign (or vice versa) splits
           // the learning signal and confuses ROAS comparison across ad sets.
           const inheritedOptimizationGoal =
-            (campaign as any).campaignConfig?.adSets?.[0]?.optimizationGoal ?? 'OFFSITE_CONVERSIONS';
+            (campaign as any).campaignConfig?.adSets?.[0]?.optimizationGoal ??
+            'OFFSITE_CONVERSIONS';
 
           // Create new ad set via Meta API
           const newAdSetId = await this.metaAds.createAdSetInCampaign(
@@ -1539,43 +2167,73 @@ export class CampaignAuditorService {
               audienceType,
               optimizationGoal: inheritedOptimizationGoal,
               ads: [bestVariantIndex],
-              ...(retargetAudienceId ? { metaAudienceId: retargetAudienceId } : {}),
+              ...(retargetAudienceId
+                ? { metaAudienceId: retargetAudienceId }
+                : {}),
               ...(audienceType !== 'retarget' ? targeting : {}),
             },
             campaign.budget,
             (campaign as any).campaignConfig?.conversionEvent ?? 'Purchase',
-            company.meta!.pixelId,
+            adSetProduct?.pixelId ?? company.meta!.pixelId,
+            adSetProduct?.customEventName,
+            adSetProduct?.customConversionId,
+            adSetProduct?.metaAppId,
+            adSetProduct?.metaAppStoreUrl,
+            adSetProduct?.metaAppStoreUrlIos,
+            adSetProduct?.metaAppStoreUrlAndroid,
           );
 
-          // Create an ad inside the new ad set using winning variant
+          // Create an ad inside the new ad set using winning variant.
+          // The destination comes from the campaign's OWN product — this used
+          // to be `products.find(p => p.active)`, i.e. the tenant's first
+          // active product regardless of what this campaign sells, which is
+          // how a scaled ad set could end up pointing at another product's
+          // landing page. If it can't be resolved, the ad set stays adless
+          // (visible, fixable) rather than live with a wrong link.
           let newAdId = '';
           if (bestImage?.imageUrl) {
-            const product = (company.products ?? []).find((p: any) => p.active);
-            const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;
-            const taggedLandingUrl = withUtmParams(product?.landingUrl ?? '', {
-              campaignName: campaign.name ?? String(campaign._id),
-              adSetName,
-              adName: newAdName,
-            });
-            try {
-              const { adId } = await this.metaAds.createAdInAdSet(
-                newAdSetId,
-                company.meta!.accessToken,
-                newAdName,
-                { primaryText: bestVariant.primaryText, headline: bestVariant.headline, cta: bestVariant.cta },
-                bestImage.imageUrl,
-                company.meta!.pageId ?? '',
-                taggedLandingUrl,
-                (company.meta as any)?.specialAdCategories ?? [],
+            const product = adSetProduct;
+            if (!product?.landingUrl) {
+              this.logger.error(
+                `Campaign ${campaign.metaCampaignId}: ad set ${newAdSetId} created but left WITHOUT an ad — ${adSetProductError ?? `product "${product?.name}" has no landingUrl`}. An adless ad set spends nothing and is fixable; an ad pointing at a guessed product's landing page is not. Set campaign.productName, then add the ad manually.`,
               );
-              newAdId = adId;
-            } catch (adErr: any) {
-              this.logger.error(`Failed to create ad in new ad set: ${adErr.message}`);
+            } else {
+              const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;
+              const taggedLandingUrl = withUtmParams(product.landingUrl, {
+                campaignName: campaign.name ?? String(campaign._id),
+                adSetName,
+                adName: newAdName,
+              });
+              try {
+                const { adId } = await this.metaAds.createAdInAdSet(
+                  newAdSetId,
+                  company.meta!.accessToken,
+                  newAdName,
+                  {
+                    primaryText: bestVariant.primaryText,
+                    headline: bestVariant.headline,
+                    cta: bestVariant.cta,
+                  },
+                  bestImage.imageUrl,
+                  product?.pageId ?? company.meta!.pageId ?? '',
+                  taggedLandingUrl,
+                  (company.meta as any)?.specialAdCategories ?? [],
+                );
+                newAdId = adId;
+              } catch (adErr: any) {
+                this.logger.error(
+                  `Failed to create ad in new ad set: ${adErr.message}`,
+                );
+              }
             }
           }
 
           // Activate the ad set
-          await this.metaAds.updateAdStatus(newAdSetId, 'ACTIVE', company.meta!.accessToken);
+          await this.metaAds.updateAdStatus(
+            newAdSetId,
+            'ACTIVE',
+            company.meta!.accessToken,
+          );
 
           // Track in campaign document
           const adSets = existingAdSets;
@@ -1585,21 +2243,30 @@ export class CampaignAuditorService {
             budgetPercent: newAdSetPercent,
             audienceType,
             status: 'active',
-            ads: newAdId ? [{
-              metaAdId: newAdId,
-              copyVariantIndex: bestVariantIndex,
-              hookStyle: bestVariant.hookStyle ?? '',
-              status: 'active',
-            }] : [],
+            ads: newAdId
+              ? [
+                  {
+                    metaAdId: newAdId,
+                    copyVariantIndex: bestVariantIndex,
+                    hookStyle: bestVariant.hookStyle ?? '',
+                    status: 'active',
+                  },
+                ]
+              : [],
           });
 
           await this.campaignModel.updateOne({ _id: campaign._id }, { adSets });
-          this.logger.log(`New ${audienceType} ad set created: ${newAdSetId}${newAdId ? ` with ad ${newAdId}` : ' (no ad — image missing)'}`);
+          this.logger.log(
+            `New ${audienceType} ad set created: ${newAdSetId}${newAdId ? ` with ad ${newAdId}` : ' (no ad — missing image, or product unresolved; see errors above)'}`,
+          );
+        } else {
+          throw new Error(`Unsupported pending action type: ${action.type}`);
         }
 
         action.status = 'executed';
         action.executedAt = now;
         updated = true;
+        if (requestedActionId) requestedActionApplied = true;
 
         // Measure what this action actually did: anchor metrics now, re-measure
         // at +24h/+72h via the shadow-eval job, label improved/worsened. Without
@@ -1609,31 +2276,52 @@ export class CampaignAuditorService {
         const measuredAdSetId =
           action.type === 'shift_budget_between_adsets'
             ? String(action.metrics?.toAdSetId ?? '')
-            // pause_ad / replace_creative target an AD — measure its parent ad set.
-            // Ad-set-targeted actions fall through to targetId itself.
-            : adSetsForContext.find(as => as.ads?.some((a: any) => a.metaAdId === action.targetId))?.metaAdSetId
-              ?? String(action.targetId ?? '');
-        const launchedAtMs = new Date((campaign as any).launchedAt ?? (campaign as any).createdAt ?? now).getTime();
+            : // pause_ad / replace_creative target an AD — measure its parent ad set.
+              // Ad-set-targeted actions fall through to targetId itself.
+              (adSetsForContext.find((as) =>
+                as.ads?.some((a: any) => a.metaAdId === action.targetId),
+              )?.metaAdSetId ?? String(action.targetId ?? ''));
+        const launchedAtMs = new Date(
+          (campaign as any).launchedAt ?? (campaign as any).createdAt ?? now,
+        ).getTime();
         void this.actionOutcomes.recordExecuted({
           tenantId: company.tenantId,
           campaignId: campaign._id.toString(),
           metaCampaignId: campaign.metaCampaignId,
           action: {
-            type: action.type, targetId: action.targetId, targetName: action.targetName,
-            reason: action.reason, priority: action.priority, params: action.metrics ?? {},
+            type: action.type,
+            targetId: action.targetId,
+            targetName: action.targetName,
+            reason: action.reason,
+            priority: action.priority,
+            params: action.metrics ?? {},
           },
-          trigger: manuallyApproved ? 'human_approved' : action.autoApplied ? 'auto_applied' : 'grace_expired',
+          trigger: manuallyApproved
+            ? 'human_approved'
+            : action.autoApplied
+              ? 'auto_applied'
+              : 'grace_expired',
           context: {
-            ageDays: Math.round(((now.getTime() - launchedAtMs) / (24 * 60 * 60 * 1000)) * 10) / 10,
-            productName: (company.products ?? []).find((p: any) => p.active)?.name,
-            audienceType: adSetsForContext.find(as => String(as.metaAdSetId) === measuredAdSetId)?.audienceType,
+            ageDays:
+              Math.round(
+                ((now.getTime() - launchedAtMs) / (24 * 60 * 60 * 1000)) * 10,
+              ) / 10,
+            productName: (company.products ?? []).find((p: any) => p.active)
+              ?.name,
+            audienceType: adSetsForContext.find(
+              (as) => String(as.metaAdSetId) === measuredAdSetId,
+            )?.audienceType,
             targetAdSetId: measuredAdSetId || undefined,
           },
           fallbackMetrics: {
-            spend: campaign.spend ?? 0, impressions: campaign.impressions ?? 0,
-            clicks: campaign.clicks ?? 0, conversions: campaign.conversions ?? 0,
-            ctr: campaign.ctr ?? 0, cpc: campaign.cpc ?? 0,
-            cpa: (campaign as any).cpa ?? 0, roas: campaign.roas ?? 0,
+            spend: campaign.spend ?? 0,
+            impressions: campaign.impressions ?? 0,
+            clicks: campaign.clicks ?? 0,
+            conversions: campaign.conversions ?? 0,
+            ctr: campaign.ctr ?? 0,
+            cpc: campaign.cpc ?? 0,
+            cpa: (campaign as any).cpa ?? 0,
+            roas: campaign.roas ?? 0,
           },
         });
 
@@ -1646,9 +2334,12 @@ export class CampaignAuditorService {
           metadata: { actionId: action.actionId, targetId: action.targetId },
         });
 
-        this.logger.log(`Pending action executed: ${action.type} on ${action.targetName}`);
+        this.logger.log(
+          `Pending action executed: ${action.type} on ${action.targetName}`,
+        );
       } catch (err: any) {
         this.logger.error(`Failed to execute pending action: ${err.message}`);
+        if (requestedActionId) throw err;
       }
     }
 
@@ -1658,6 +2349,7 @@ export class CampaignAuditorService {
         { pendingActions, adSets: (campaign as any).adSets },
       );
     }
+    return requestedActionApplied;
   }
 
   /**
@@ -1668,7 +2360,10 @@ export class CampaignAuditorService {
    * exists — deliberately), but it can refuse a mediocre scale and surface
    * the reallocation in contextInsight for the operator.
    */
-  private async buildPortfolioContext(campaign: CampaignDocument, company: CompanyDocument): Promise<string> {
+  private async buildPortfolioContext(
+    campaign: CampaignDocument,
+    company: CompanyDocument,
+  ): Promise<string> {
     try {
       const siblings = await this.campaignModel
         .find({
@@ -1685,9 +2380,12 @@ export class CampaignAuditorService {
         .exec();
       if (siblings.length === 0) return '';
 
-      const lines = siblings.map((s: any) =>
-        `  ${s.name || s._id}: ₹${(s.budget ?? 0).toFixed(0)}/day | spent ₹${(s.spend ?? 0).toFixed(0)} | ${s.conversions ?? 0} conv | ROAS ${(s.roas ?? 0).toFixed(2)}x`,
-      ).join('\n');
+      const lines = siblings
+        .map(
+          (s: any) =>
+            `  ${s.name || s._id}: ₹${(s.budget ?? 0).toFixed(0)}/day | spent ₹${(s.spend ?? 0).toFixed(0)} | ${s.conversions ?? 0} conv | ROAS ${(s.roas ?? 0).toFixed(2)}x`,
+        )
+        .join('\n');
       return `━━━ PORTFOLIO VIEW (tenant's other active agent campaigns, by ROAS) ━━━
 ${lines}
   RULE: Budget is shared across this portfolio (weekly cap). Before recommending scale_adset here, check this campaign earns it RELATIVE to the siblings — if a sibling runs materially higher ROAS (>1.5× this campaign's) with budget headroom, the next rupee belongs there, not here: skip the scale and say so in contextInsight so the operator can reallocate. The reverse too: if this campaign clearly leads the portfolio, a scale recommendation is stronger than its standalone numbers suggest.
@@ -1702,25 +2400,34 @@ ${lines}
     campaign: CampaignDocument,
     company: CompanyDocument,
     verdict: AuditVerdict,
-    signals: any,
   ): Promise<void> {
     const slackWebhook = company.delivery?.slackWebhook;
     if (!slackWebhook) return;
 
-    const actionsText = verdict.recommendedActions.length > 0
-      ? verdict.recommendedActions.map(a => {
-          const approvalHint = (a.type === 'scale_adset' || a.type === 'replace_creative')
-            ? `\n    _Requires approval:_ \`POST /api/v1/campaigns/${company.tenantId}/${campaign._id}/actions/{actionId}/approve\``
-            : '';
-          return `  • [${a.priority.toUpperCase()}] ${a.type.replace(/_/g, ' ')}: ${a.targetName}\n    _${a.reason}_${approvalHint}`;
-        }).join('\n')
-      : '  No specific actions recommended';
+    const actionsText =
+      verdict.recommendedActions.length > 0
+        ? verdict.recommendedActions
+            .map((a) => {
+              const approvalHint =
+                a.type === 'scale_adset' || a.type === 'replace_creative'
+                  ? `\n    _Requires approval:_ \`POST /api/v1/campaigns/${company.tenantId}/${campaign._id}/actions/{actionId}/approve\``
+                  : '';
+              return `  • [${a.priority.toUpperCase()}] ${a.type.replace(/_/g, ' ')}: ${a.targetName}\n    _${a.reason}_${approvalHint}`;
+            })
+            .join('\n')
+        : '  No specific actions recommended';
 
-    const watchText = verdict.watchSignals.length > 0
-      ? verdict.watchSignals.map(s => `  • ${s}`).join('\n')
-      : '';
+    const watchText =
+      verdict.watchSignals.length > 0
+        ? verdict.watchSignals.map((s) => `  • ${s}`).join('\n')
+        : '';
 
-    const urgencyEmoji = verdict.urgency === 'immediate' ? '🚨' : verdict.urgency === '48h' ? '⚠️' : '📊';
+    const urgencyEmoji =
+      verdict.urgency === 'immediate'
+        ? '🚨'
+        : verdict.urgency === '48h'
+          ? '⚠️'
+          : '📊';
 
     await this.slackService.sendMessage(
       slackWebhook,
@@ -1740,7 +2447,7 @@ ${lines}
     await this.slackService.sendMessage(
       slackWebhook,
       company.tenantId,
-      `👀 *Campaign Watch Signal*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n\n${verdict.contextInsight}\n\n*Signals to monitor:*\n${verdict.watchSignals.map(s => `  • ${s}`).join('\n')}`,
+      `👀 *Campaign Watch Signal*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n\n${verdict.contextInsight}\n\n*Signals to monitor:*\n${verdict.watchSignals.map((s) => `  • ${s}`).join('\n')}`,
     );
   }
 
@@ -1749,7 +2456,11 @@ ${lines}
     company: CompanyDocument,
     reason: string,
   ): Promise<void> {
-    await this.campaignsService.pause(company.tenantId, campaign._id.toString(), reason);
+    await this.campaignsService.pause(
+      company.tenantId,
+      campaign._id.toString(),
+      reason,
+    );
 
     await this.actionLogger.log({
       tenantId: company.tenantId,
@@ -1769,13 +2480,17 @@ ${lines}
           `🛑 *Campaign Auto-Paused (Safety Rail)*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Reason:* ${reason}`,
         );
       } catch (slackErr: any) {
-        this.logger.error(`Slack pause notification failed — campaign still paused: ${slackErr.message}`);
+        this.logger.error(
+          `Slack pause notification failed — campaign still paused: ${slackErr.message}`,
+        );
       }
     }
 
     this.campaignLearning
       .runRootCauseAnalysis(company.tenantId, campaign._id.toString())
-      .catch(err => this.logger.error(`Root cause analysis failed: ${err.message}`));
+      .catch((err) =>
+        this.logger.error(`Root cause analysis failed: ${err.message}`),
+      );
   }
 
   private async writePerformanceBack(
@@ -1783,7 +2498,10 @@ ${lines}
     full: FullCampaignMetrics,
     ageDays: number,
   ): Promise<boolean> {
-    const brief = await this.briefModel.findOne({ tenantId: campaign.tenantId, briefId: campaign.briefId }).lean().exec();
+    const brief = await this.briefModel
+      .findOne({ tenantId: campaign.tenantId, briefId: campaign.briefId })
+      .lean()
+      .exec();
     if (!brief) return false;
 
     // Campaign-level metrics (legacy — kept for back-compat with existing readers)
@@ -1797,14 +2515,31 @@ ${lines}
     // Per-hookStyle breakdown — legacy aggregation across ad sets. Mixed ad
     // sets (cold + retargeting) blend wins and losses under one hookStyle —
     // see adSetPerformance below for the disambiguated breakdown.
-    const hookPerformance: Record<string, { spend: number; conversions: number; clicks: number; impressions: number; ctr: number; conversionRate: number }> = {};
+    const hookPerformance: Record<
+      string,
+      {
+        spend: number;
+        conversions: number;
+        clicks: number;
+        impressions: number;
+        ctr: number;
+        conversionRate: number;
+      }
+    > = {};
     for (const adSet of (campaign as any).adSets ?? []) {
       for (const ad of adSet.ads ?? []) {
         const hook = ad.hookStyle || 'unknown';
         const metrics = ad.metrics;
         if (!metrics) continue;
         if (!hookPerformance[hook]) {
-          hookPerformance[hook] = { spend: 0, conversions: 0, clicks: 0, impressions: 0, ctr: 0, conversionRate: 0 };
+          hookPerformance[hook] = {
+            spend: 0,
+            conversions: 0,
+            clicks: 0,
+            impressions: 0,
+            ctr: 0,
+            conversionRate: 0,
+          };
         }
         hookPerformance[hook].spend += metrics.spend ?? 0;
         hookPerformance[hook].conversions += metrics.conversions ?? 0;
@@ -1823,13 +2558,18 @@ ${lines}
     // that previously got written to brief.day*Performance. Causal layer
     // (campaign-learning.runDeepRun) should read this instead of the blended
     // perf when constructing matched pairs.
-    const capturedAtDay: 7 | 14 | 30 = ageDays >= 30 ? 30 : ageDays >= 14 ? 14 : 7;
+    const capturedAtDay: 7 | 14 | 30 =
+      ageDays >= 30 ? 30 : ageDays >= 14 ? 14 : 7;
     const adSetPerformance: NonNullable<typeof brief.adSetPerformance> = [];
     for (const adSet of (campaign as any).adSets ?? []) {
       const m = adSet.metrics;
       if (!m) continue;
-      const hookStyles = Array.from(new Set((adSet.ads ?? []).map((a: any) => a.hookStyle).filter(Boolean))) as string[];
-      const formats = Array.from(new Set((adSet.ads ?? []).map((a: any) => a.format).filter(Boolean))) as string[];
+      const hookStyles = Array.from(
+        new Set((adSet.ads ?? []).map((a: any) => a.hookStyle).filter(Boolean)),
+      ) as string[];
+      const formats = Array.from(
+        new Set((adSet.ads ?? []).map((a: any) => a.format).filter(Boolean)),
+      ) as string[];
       adSetPerformance.push({
         adSetId: adSet.metaAdSetId,
         name: adSet.name,
@@ -1861,19 +2601,31 @@ ${lines}
       try {
         await this.creativeLearning.runQuickScan(campaign.tenantId);
       } catch (err: any) {
-        this.logger.error(`Quick scan failed (day7) — flag NOT flipped, will retry next audit: ${err.message}`);
+        this.logger.error(
+          `Quick scan failed (day7) — flag NOT flipped, will retry next audit: ${err.message}`,
+        );
         // Don't flip the flag. Don't return — still write metrics so dashboard sees them.
       }
       await this.briefModel.updateOne(
         { tenantId: campaign.tenantId, briefId: campaign.briefId },
-        { day7Performance: perf, hookPerformance, adSetPerformance, 'performanceWritten.day7': true },
+        {
+          day7Performance: perf,
+          hookPerformance,
+          adSetPerformance,
+          'performanceWritten.day7': true,
+        },
       );
       written = true;
     }
     if (ageDays >= 14 && !brief.performanceWritten?.day14) {
       await this.briefModel.updateOne(
         { tenantId: campaign.tenantId, briefId: campaign.briefId },
-        { day14Performance: perf, hookPerformance, adSetPerformance, 'performanceWritten.day14': true },
+        {
+          day14Performance: perf,
+          hookPerformance,
+          adSetPerformance,
+          'performanceWritten.day14': true,
+        },
       );
       written = true;
     }
@@ -1881,11 +2633,18 @@ ${lines}
       try {
         await this.campaignLearning.runDeepRun(campaign.tenantId);
       } catch (err: any) {
-        this.logger.error(`Deep run failed (day30) — flag NOT flipped, will retry next audit: ${err.message}`);
+        this.logger.error(
+          `Deep run failed (day30) — flag NOT flipped, will retry next audit: ${err.message}`,
+        );
       }
       await this.briefModel.updateOne(
         { tenantId: campaign.tenantId, briefId: campaign.briefId },
-        { day30Performance: perf, hookPerformance, adSetPerformance, 'performanceWritten.day30': true },
+        {
+          day30Performance: perf,
+          hookPerformance,
+          adSetPerformance,
+          'performanceWritten.day30': true,
+        },
       );
       written = true;
     }
@@ -1914,9 +2673,15 @@ ${lines}
     adSetId: string,
   ): 'cold' | 'warm' | 'hot' {
     if (!adSetId) return 'cold';
-    const adSet = (campaign?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId);
+    const adSet = (campaign?.adSets ?? []).find(
+      (as: any) => as.metaAdSetId === adSetId,
+    );
     const audienceType = adSet?.audienceType ?? 'unknown';
-    if (audienceType === 'retarget' || audienceType === 'custom' || audienceType === 'lookalike') {
+    if (
+      audienceType === 'retarget' ||
+      audienceType === 'custom' ||
+      audienceType === 'lookalike'
+    ) {
       return 'warm';
     }
     return 'cold';
@@ -1944,18 +2709,25 @@ ${lines}
     }
 
     // Winning hooks from learnings, ordered by past performance
-    const winningHooks: string[] = company.learnings?.creative?.winningHooks ?? [];
+    const winningHooks: string[] =
+      company.learnings?.creative?.winningHooks ?? [];
 
     // First: try winning hooks that aren't already used in this campaign
-    const fromLearnings = winningHooks.find(h => h !== fatiguedHook && !usedHooks.has(h));
+    const fromLearnings = winningHooks.find(
+      (h) => h !== fatiguedHook && !usedHooks.has(h),
+    );
     if (fromLearnings) return fromLearnings;
 
     // Second: try any winning hook that isn't the fatigued one (allow reuse across ad sets)
-    const anyWinning = winningHooks.find(h => h !== fatiguedHook);
+    const anyWinning = winningHooks.find((h) => h !== fatiguedHook);
     if (anyWinning) return anyWinning;
 
     // Third: fallback to default rotation, excluding fatigued hook
-    const fallback = DEFAULT_HOOKS.find(h => h !== fatiguedHook && !usedHooks.has(h));
-    return fallback ?? DEFAULT_HOOKS.find(h => h !== fatiguedHook) ?? 'benefit_led';
+    const fallback = DEFAULT_HOOKS.find(
+      (h) => h !== fatiguedHook && !usedHooks.has(h),
+    );
+    return (
+      fallback ?? DEFAULT_HOOKS.find((h) => h !== fatiguedHook) ?? 'benefit_led'
+    );
   }
 }

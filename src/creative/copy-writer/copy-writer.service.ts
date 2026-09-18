@@ -1,12 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ClaudeService } from '../../claude/claude.service';
+import { OpenAIChatService } from '../../openai/openai-chat.service';
 import { AgentType } from '../../claude/claude.types';
 import { LiveContextBuilder } from '../../companies/prompt-generator/live-context.builder';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { CopyVariant } from '../schemas/creative-package.schema';
-import { HOOK_STYLES_DR, HOOK_STYLE_DESCRIPTIONS } from '../../common/creative/hook-styles';
+import { getFormatSpec } from '../../common/creative/format-specs';
 import { resolveVertical } from '../../common/benchmarks/vertical-benchmarks';
-import { skillsForAgent, buildSkillBlock } from '../../common/skills/agent-skill-map';
+import { buildSkillBlock } from '../../common/skills/agent-skill-map';
 import { parseRobustJson } from '../../common/llm/robust-json-parser.util';
 import { getGrossConversionValue } from '../../common/conversion-value.util';
 import {
@@ -26,7 +26,7 @@ export class CopyWriterService {
   private readonly logger = new Logger(CopyWriterService.name);
 
   constructor(
-    private readonly claudeService: ClaudeService,
+    private readonly openaiChat: OpenAIChatService,
     private readonly liveContextBuilder: LiveContextBuilder,
   ) {}
 
@@ -42,6 +42,8 @@ export class CopyWriterService {
       conversionBridge: string;
       product?: string;                          // resolved to product entry below
       forcedHookStyle?: string;
+      /** Explicit per-variant hookStyle plan (operator-picked from the dashboard) — overrides both variantCount (becomes this array's length) and forcedHookStyle when set. Variant i MUST use hookStyles[i], in order. */
+      hookStyles?: string[];
       avoidHookStyles?: string[];
       audienceStage?: 'cold' | 'warm' | 'hot';   // cold = prospecting, warm = retarget, hot = cart-recovery
       targetLanguage?: CanonicalLanguage;        // pre-resolved by creative-producer; we re-resolve if missing
@@ -83,14 +85,26 @@ LOSING PATTERNS (avoid these):
       `.trim()
       : 'No learnings yet — use your best judgement.';
 
-    // Canonical hookStyle taxonomy — single source of truth shared with creative-team
-    // primary path and audit's pickReplacementHook. Drift here corrupts learning data.
-    // Each hookStyle now ships with a trigger+sensory+banned spec (HOOK_STYLE_DESCRIPTIONS)
-    // so the LLM writes copywriter-grade hooks instead of generic LLM slop.
-    const hookSpecBlock = HOOK_STYLES_DR.map(h => `  - ${h}: ${HOOK_STYLE_DESCRIPTIONS[h]}`).join('\n');
-    const hookStyleRule = brief.forcedHookStyle
-      ? `MUST be exactly "${brief.forcedHookStyle}" for ALL 4 variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle). Follow this spec exactly:\n  ${HOOK_STYLE_DESCRIPTIONS[brief.forcedHookStyle as keyof typeof HOOK_STYLE_DESCRIPTIONS] ?? 'see allowed list above'}`
-      : `one of [${HOOK_STYLES_DR.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle. Specs:\n${hookSpecBlock}`;
+    // Format-spec registry — single source of truth for format-specific prompt
+    // text, shared with creative-team.service.ts's primary path. This is what
+    // makes the fallback path format-aware instead of always producing a
+    // generic 4-variant DR ad regardless of brief.format.
+    const spec = getFormatSpec(brief.format);
+    const hookSpecBlock = spec.hookStyles.map(h => `  - ${h}: ${spec.hookStyleDescriptions[h]}`).join('\n');
+    // Operator-picked per-variant plan (dashboard) overrides both count and
+    // the forced-single-style path — variantCount becomes the plan's length.
+    const variantCount = brief.hookStyles?.length || spec.variantCount;
+    const hookStyleRule = brief.hookStyles && brief.hookStyles.length > 0
+      ? `Follow this EXACT per-variant plan (non-negotiable, operator-picked) — variant N (1-indexed, in this order) MUST use exactly this hookStyle:\n${brief.hookStyles.map((h, i) => `  Variant ${i + 1}: "${h}"${spec.hookStyleDescriptions[h] ? ` — ${spec.hookStyleDescriptions[h]}` : ''}`).join('\n')}`
+      : brief.forcedHookStyle
+        ? `MUST be exactly "${brief.forcedHookStyle}" for ALL ${variantCount} variants (forced replacement — variants differ on emotional position, voicing, and example, NOT on hookStyle). Follow this spec exactly:\n  ${spec.hookStyleDescriptions[brief.forcedHookStyle] ?? 'see allowed list above'}`
+        : `one of [${spec.hookStyles.map(h => `"${h}"`).join(', ')}] — each variant uses a DIFFERENT hookStyle. Specs:\n${hookSpecBlock}`;
+    // Shared "COPY RULES" bullet reminder — same 3-way branch as hookStyleRule, worded as a rule reminder rather than a spec.
+    const variantCountRule = brief.hookStyles && brief.hookStyles.length > 0
+      ? `Follow the EXACT per-variant hookStyle plan above, in order — do not deviate or reassign.`
+      : brief.forcedHookStyle
+        ? `All ${variantCount} variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.`
+        : `${variantCount} variants must use DIFFERENT hookStyles from the allowed list.`;
     const avoidBlock = brief.avoidHookStyles && brief.avoidHookStyles.length > 0
       ? `\n⚠ AVOID THESE HOOK STYLES (saturated/fatigued — do NOT generate variants with these): ${brief.avoidHookStyles.map(h => `"${h}"`).join(', ')}`
       : '';
@@ -146,16 +160,15 @@ LOSING PATTERNS (avoid these):
       ?? company.prompts?.campaignCreator
       ?? `You are the Creative Director for ${company.name}. Produce on-brand, policy-compliant, scroll-stopping Meta ad copy. Tone: ${company.tone}. Audience: ${company.targetAudience} in ${company.geography}.`;
 
-    const result = await this.claudeService.runAgent({
+    const result = await this.openaiChat.runChat({
       tenantId: company.tenantId,
       runId,
       agentType: AgentType.CREATIVE_PRODUCER,
-      systemPrompt,
-      liveContext: this.liveContextBuilder.build(company, brief.product),
-      skills: skillsForAgent('CREATIVE_TEAM'),
+      systemPrompt: `${systemPrompt}\n\n${this.liveContextBuilder.build(company, brief.product)}`,
+      expectJson: true,
       userMessage: `
 ${buildSkillBlock('CREATIVE_TEAM')}
-Write 4 ad copy variants for ${company.name} for the following content brief.
+Write ${variantCount} ad copy variants for ${company.name} for the following content brief.
 
 BRIEF:
 Topic: ${brief.topic}
@@ -188,7 +201,15 @@ ALL primaryText and headline output MUST be in this language and register.
 - Do NOT mix languages within a variant unless code-switching is natural to the register (e.g. Hinglish allows English connectors; pure Marathi/Tamil/Bengali should not casually mix in Hindi).
 ═══
 
-For each variant write:
+${spec.customCopyShape ? `FORMAT-SPECIFIC STRUCTURE (follow this exactly — do NOT default to a standard hook/value/price/CTA ad structure):
+${spec.copyGuidance}
+All primaryText/headline output MUST be in ${targetLanguage}.
+- hookStyle: ${hookStyleRule}${avoidBlock}
+
+FORMAT COPY RULES:
+- Follow the copy shape above exactly
+- Specific beats vague — BUT every specific must trace to BRIEF FACTS. If not cite-able, use a generic relatable pain.
+- ${variantCountRule}` : `For each variant write:
 - primaryText: the main ad body copy in ${targetLanguage}. Length: 3-5 sentences for cold, 4-5 sentences for warm-high-AOV, 1-2 sentences for hot. ${brief.audienceStage === 'hot' ? 'For hot stage, price line is OPTIONAL — omit if urgency reads stronger without it.' : `MUST mention product name AND price (${priceTag}).`}
 - headline: short punchy headline in ${targetLanguage} (5-7 words max)
 - cta: call to action button text — ${ctaWhitelist}
@@ -199,7 +220,7 @@ COPY RULES:
 - No generic phrases ("best quality", "amazing", "don't miss out")
 - ${brief.audienceStage === 'hot' ? 'Hot stage: price OPTIONAL per variant (buyer already knows it). Focus on urgency + deadline.' : `Price (${priceTag}) in EVERY variant — no exceptions`}
 - Hook → body → offer → CTA must form a logical chain. Headline's promise = what body delivers. No bait-and-switch.
-- ${brief.forcedHookStyle ? `All 4 variants use hookStyle "${brief.forcedHookStyle}" — differentiate by angle/emotion/voicing/example, not by hookStyle.` : '4 variants must use 4 DIFFERENT hookStyles from the allowed list.'}
+- ${variantCountRule}`}
 
 Also pick which variant is best for this brief and why — pick the one with the strongest coherent hook→body→CTA chain, not just the loudest hook.
 
@@ -214,7 +235,6 @@ Return ONLY valid JSON in this format:
 }
 \`\`\`
       `.trim(),
-      maxTurns: 3,
     });
 
     return this.parse(result.content);

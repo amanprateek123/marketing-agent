@@ -30,12 +30,14 @@ export class HeygenService {
   async generateVideoFromPrompt(
     prompt: string,
     onVideoIdReady?: (videoId: string) => Promise<void>,
+    aspectRatio: string = '9:16',
+    resolution: string = '1080p',
   ): Promise<{ videoUrl: string; thumbnailUrl: string }> {
     const apiKey = this.configService.get<string>('heygen.apiKey');
     if (!apiKey) throw new Error('HEYGEN_API_KEY not configured');
 
-    const videoId = await this.submitVideoAgentJob(apiKey, prompt);
-    this.logger.log(`Heygen video agent submitted: videoId=${videoId}`);
+    const videoId = await this.submitVideoAgentJob(apiKey, prompt, aspectRatio, resolution);
+    this.logger.log(`Heygen video agent submitted: videoId=${videoId} aspectRatio=${aspectRatio} resolution=${resolution}`);
 
     if (onVideoIdReady) await onVideoIdReady(videoId);
 
@@ -85,14 +87,16 @@ export class HeygenService {
   }
 
   // POST /v3/video-agents — natural language prompt → video_id
-  private async submitVideoAgentJob(apiKey: string, prompt: string): Promise<string> {
-    this.logger.log(`Heygen submitting video agent job (prompt: ${prompt.length} chars)`);
+  private async submitVideoAgentJob(apiKey: string, prompt: string, aspectRatio: string, resolution: string): Promise<string> {
+    this.logger.log(`Heygen submitting video agent job (prompt: ${prompt.length} chars, aspectRatio=${aspectRatio}, resolution=${resolution})`);
 
     try {
       const response = await axios.post(
         `${HEYGEN_API_BASE}/v3/video-agents`,
         {
           prompt: prompt.trim(),
+          aspect_ratio: aspectRatio,
+          resolution,
         },
         {
           headers: {

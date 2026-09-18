@@ -28,6 +28,22 @@ export type CanonicalLanguage =
   | 'malayalam'
   | 'urdu';
 
+/** Runtime list of every canonical language — e.g. for a language picker. */
+export const CANONICAL_LANGUAGES: CanonicalLanguage[] = [
+  'hinglish',
+  'hindi',
+  'english',
+  'marathi',
+  'tamil',
+  'telugu',
+  'bengali',
+  'gujarati',
+  'punjabi',
+  'kannada',
+  'malayalam',
+  'urdu',
+];
+
 const ALIASES: Record<string, CanonicalLanguage> = {
   // Common spellings / abbreviations the LLM or tenant config might use.
   hinglish: 'hinglish',

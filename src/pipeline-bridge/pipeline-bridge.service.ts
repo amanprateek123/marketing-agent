@@ -1,0 +1,243 @@
+import {
+  BadGatewayException,
+  HttpException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios, { AxiosInstance, AxiosError } from 'axios';
+import { StartRunDto } from './dto/start-run.dto';
+
+/**
+ * HTTP client for the external creative pipeline.
+ *
+ * The pipeline is a separate service on a separate box. It owns the whole
+ * creative lifecycle — authoring, layout, generation, resize — and this repo
+ * deliberately knows none of it: no schemas, no queues, no image models, just
+ * an HTTP call. Everything below is transport.
+ *
+ * Finished creatives do NOT come back through here. The pipeline pushes them
+ * into our own `POST /creative/:tenantId/packages/upload-bulk` when a run
+ * completes, so they arrive as ordinary CreativePackages and show up on
+ * /creatives, in the Gallery, and in campaign launch with no special-casing.
+ * This service is only the outbound half: start a run, then poll it.
+ */
+@Injectable()
+export class PipelineBridgeService {
+  private readonly logger = new Logger(PipelineBridgeService.name);
+  private readonly baseUrl: string;
+  private readonly token: string;
+  private readonly http: AxiosInstance;
+
+  constructor(private readonly config: ConfigService) {
+    this.baseUrl = (
+      this.config.get<string>('pipeline.url') ?? ''
+    ).replace(/\/+$/, '');
+    this.token = this.config.get<string>('pipeline.token') ?? '';
+    this.http = axios.create({
+      timeout: this.config.get<number>('pipeline.timeoutMs') ?? 30000,
+    });
+  }
+
+  isConfigured(): boolean {
+    return Boolean(this.baseUrl);
+  }
+
+  private assertConfigured(): void {
+    if (!this.isConfigured()) {
+      throw new ServiceUnavailableException(
+        'The creative pipeline is not configured (set PIPELINE_API_URL).',
+      );
+    }
+  }
+
+  private headers(): Record<string, string> {
+    return this.token
+      ? { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }
+      : { 'Content-Type': 'application/json' };
+  }
+
+  /**
+   * Forward one call and translate failures.
+   *
+   * The pipeline's own 4xx bodies (`{ error }`) are meaningful to the operator
+   * — "language is required for polished astro creatives", "at capacity, retry
+   * shortly" — so they are re-thrown with their original status rather than
+   * flattened into a generic 502. Only transport failures become 502.
+   */
+  private async forward<T>(
+    method: 'get' | 'post',
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
+    this.assertConfigured();
+    try {
+      const res = await this.http.request<T>({
+        method,
+        url: `${this.baseUrl}${path}`,
+        headers: this.headers(),
+        data: body,
+      });
+      return res.data;
+    } catch (err) {
+      const axiosErr = err as AxiosError<{ error?: string }>;
+      const status = axiosErr.response?.status;
+      const message =
+        axiosErr.response?.data?.error ?? axiosErr.message ?? 'pipeline error';
+      if (status && status >= 400 && status < 500) {
+        throw new HttpException(message, status);
+      }
+      this.logger.error(`pipeline ${method.toUpperCase()} ${path} failed: ${message}`);
+      throw new BadGatewayException(`Could not reach the creative pipeline: ${message}`);
+    }
+  }
+
+  /**
+   * POST /v1/packages/:packageId/resize — reframe a delivered creative into the other sizes.
+   *
+   * Addressed by package rather than run because that is what the detail page knows; the pipeline
+   * resolves it through the back-reference it records when pushing. A 404 means the package was not
+   * produced by the pipeline, which is the honest answer for one the dashboard generated itself.
+   */
+  async resizePackage(packageId: string): Promise<unknown> {
+    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/resize`);
+  }
+
+  /**
+   * GET /v1/packages/:packageId — is this creative the pipeline's, and what is its run?
+   *
+   * The detail page has to choose which engine its buttons drive before it renders them, and a
+   * CreativePackage carries no provenance field. A 404 is a legitimate answer, not an error: it
+   * means the dashboard's own generator made this one.
+   */
+  async getPackage(packageId: string): Promise<unknown> {
+    return this.forward('get', `/v1/packages/${encodeURIComponent(packageId)}`);
+  }
+
+  /**
+   * POST /v1/packages/:packageId/revise — re-author the brief from an instruction, then regenerate.
+   *
+   * Returns a NEW run id: the pipeline revises a clone so the source creative keeps its own
+   * artifacts and buttons, and the result arrives in the library as its own package.
+   */
+  async revisePackage(packageId: string, instruction: string): Promise<unknown> {
+    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/revise`, {
+      instruction,
+    });
+  }
+
+  /**
+   * POST /v1/packages/:packageId/regenerate — edit the delivered image in place.
+   *
+   * Same run, same package, pixels only. A 409 means the pipeline's ChatGPT session is logged out;
+   * that is a real recurring state and must be shown, not retried into a silent wait.
+   */
+  async regeneratePackage(
+    packageId: string,
+    instruction: string,
+    tag?: string,
+  ): Promise<unknown> {
+    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/regenerate`, {
+      instruction,
+      ...(tag ? { tag } : {}),
+    });
+  }
+
+  /** POST /v1/runs/:runId/clarify — answer a stalled revise so it can continue. */
+  async clarifyRun(runId: string, answer: string): Promise<unknown> {
+    return this.forward('post', `/v1/runs/${encodeURIComponent(runId)}/clarify`, { answer });
+  }
+
+  /** GET /v1/options — the option contract the Custom-brief form renders from. */
+  async getOptions(): Promise<unknown> {
+    return this.forward('get', '/v1/options');
+  }
+
+  /**
+   * POST /v1/uploads — forward reference image(s) to the pipeline.
+   *
+   * Not routed through `forward()` because that sets a JSON content type, and a multipart body must
+   * carry its own generated boundary. Uses `form-data` (already a transitive dep of axios' Node
+   * stack) so the boundary header comes from the form itself rather than being hand-written.
+   */
+  async uploadImages(
+    files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
+  ): Promise<unknown> {
+    this.assertConfigured();
+    const FormData = (await import('form-data')).default;
+    const form = new FormData();
+    for (const f of files) {
+      form.append('files', f.buffer, {
+        filename: f.originalname,
+        contentType: f.mimetype,
+      });
+    }
+    try {
+      const res = await this.http.request({
+        method: 'post',
+        url: `${this.baseUrl}/v1/uploads`,
+        headers: {
+          ...form.getHeaders(),
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        },
+        data: form,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+      return res.data;
+    } catch (err) {
+      const axiosErr = err as AxiosError<{ error?: string }>;
+      const status = axiosErr.response?.status;
+      const message =
+        axiosErr.response?.data?.error ?? axiosErr.message ?? 'upload failed';
+      if (status && status >= 400 && status < 500) {
+        throw new HttpException(message, status);
+      }
+      this.logger.error(`pipeline POST /v1/uploads failed: ${message}`);
+      throw new BadGatewayException(`Could not upload to the creative pipeline: ${message}`);
+    }
+  }
+
+  /**
+   * POST /v1/runs — start a run.
+   *
+   * `tenantId` is passed through so the pipeline can scope its push-back to the
+   * right tenant when the run finishes. It is not used for authorization there;
+   * this API's own JWT guard already did that.
+   */
+  async startRun(tenantId: string, dto: StartRunDto): Promise<unknown> {
+    const result = await this.forward('post', '/v1/runs', {
+      ...dto,
+      tenant_id: tenantId,
+    });
+    this.logger.log(
+      `started pipeline ${dto.method} run for ${tenantId}: ${JSON.stringify(result)}`,
+    );
+    return result;
+  }
+
+  /** GET /v1/runs/:runId — status, per-child progress, and artifact URLs. */
+  async getRun(runId: string): Promise<unknown> {
+    return this.forward('get', `/v1/runs/${encodeURIComponent(runId)}`);
+  }
+
+  /**
+   * GET /v1/runs/:runId/events — the progress stream, cursor-paged.
+   *
+   * Covers the run AND its batch children: a batch parent stops narrating once
+   * authoring finishes, so polling only the parent would show the run freeze.
+   */
+  async getEvents(runId: string, after: number): Promise<unknown> {
+    const cursor = Number.isFinite(after) && after > 0 ? after : 0;
+    return this.forward(
+      'get',
+      `/v1/runs/${encodeURIComponent(runId)}/events?after=${cursor}`,
+    );
+  }
+
+  /** GET /health — surfaced so the UI can say "pipeline offline" instead of just failing. */
+  async health(): Promise<unknown> {
+    return this.forward('get', '/health');
+  }
+}
