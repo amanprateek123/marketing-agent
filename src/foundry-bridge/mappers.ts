@@ -124,7 +124,11 @@ export function mapRunStep(step: Record<string, unknown>): BrainRunStep {
   const key = str(step.node_key) ?? `step_${num(step.idx) ?? 0}`;
   const s = (str(step.status) ?? '').toLowerCase();
   const state: BrainRunStep['state'] =
-    s === 'succeeded' || s === 'success' || s === 'completed' || s === 'done'
+    s === 'ok' ||
+    s === 'succeeded' ||
+    s === 'success' ||
+    s === 'completed' ||
+    s === 'done'
       ? 'done'
       : s === 'failed' || s === 'error'
         ? 'failed'
