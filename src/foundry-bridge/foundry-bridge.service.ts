@@ -1059,13 +1059,33 @@ export class FoundryBridgeService {
     // append assigns its own index in that case, which is the brain's normal behaviour.
     const existing = await this.brain.tryCall<Record<string, unknown>>(
       'conversation_read',
-      { session_id: sessionId, limit: 1 },
+      { session_id: sessionId, limit: 2 },
     );
     const lastTurn =
       existing && typeof existing.last_turn === 'number'
         ? existing.last_turn
         : null;
-    const turnIndex = lastTurn === null ? null : lastTurn + 1;
+    // AN UNANSWERED QUESTION IS RE-ASKED ON ITS OWN INDEX, NOT THE NEXT ONE.
+    //
+    // `lastTurn + 1` alone made the retry advice in the failure below a lie, and a measured one:
+    // four sends of one sentence produced turns 1, 2, 3 and 4 — the same question asked four
+    // times, which is exactly what pinning the index was meant to prevent. A turn is an EXCHANGE,
+    // so a trailing `user` row with no `brain` row beside it is a question still waiting for its
+    // answer, and the resend belongs on that index where ON CONFLICT DO NOTHING absorbs it.
+    const turns = Array.isArray(existing?.turns) ? existing.turns : [];
+    const tail =
+      turns.length > 0
+        ? (turns[turns.length - 1] as Record<string, unknown>)
+        : null;
+    const tailIsPendingQuestion =
+      tail !== null &&
+      tail.role === 'user' &&
+      typeof tail.turn_index === 'number';
+    const turnIndex = tailIsPendingQuestion
+      ? (tail.turn_index as number)
+      : lastTurn === null
+        ? null
+        : lastTurn + 1;
 
     try {
       await this.brain.call('conversation_append', {

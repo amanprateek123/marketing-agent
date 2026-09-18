@@ -208,19 +208,46 @@ export class McpClient {
       );
     }
     if (r.structuredContent && typeof r.structuredContent === 'object') {
-      return r.structuredContent as T;
+      return this.refuseIfNotOk(r.structuredContent, tool) as T;
     }
     for (const block of r.content ?? []) {
       if (block?.type === 'text' && typeof block.text === 'string') {
         try {
           const parsed: unknown = JSON.parse(block.text);
-          if (parsed && typeof parsed === 'object') return parsed as T;
+          if (parsed && typeof parsed === 'object') {
+            return this.refuseIfNotOk(parsed, tool) as T;
+          }
         } catch {
           continue;
         }
       }
     }
     throw new McpToolError(`${tool} returned no readable content`, tool);
+  }
+
+  /**
+   * A payload saying `ok: false` is a refusal, even when nothing upstream flagged it.
+   *
+   * Foundry's run API answers a forbidden agent with
+   * `{"ok": false, "error": "This token isn't allowed to run that agent."}` — HTTP 200, no
+   * JSON-RPC error, and `isError` unset. Read literally that is a successful call, so the caller
+   * went looking for `run_id`, did not find it, and reported "Foundry accepted the run but
+   * returned no run id" — which is both wrong and useless. The upstream had already said exactly
+   * what was wrong; the client threw the sentence away.
+   *
+   * Only `ok === false` counts. A missing `ok` is the normal shape for every brain tool
+   * (`{count, rows}`), and treating absence as failure would break all of them.
+   */
+  private refuseIfNotOk(payload: unknown, tool: string): unknown {
+    const p = payload as { ok?: unknown; error?: unknown };
+    if (p && typeof p === 'object' && p.ok === false) {
+      const detail =
+        typeof p.error === 'string'
+          ? p.error
+          : JSON.stringify(p.error ?? payload).slice(0, 400);
+      throw new McpToolError(`${tool} refused`, tool, detail);
+    }
+    return payload;
   }
 
   /**
