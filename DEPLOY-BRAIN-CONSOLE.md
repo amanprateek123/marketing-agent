@@ -38,6 +38,17 @@ BRAIN_MCP_TIMEOUT_MS=30000
 # console decision must still arrive carrying an identity that allowlist knows.
 # UNSET => gate decisions return 503 with a message naming this variable.
 BRAIN_APPROVAL_ACTOR_SLACK_ID=<a Slack id already on the brain's APPROVAL_SLACK_IDS>
+
+# Foundry BUILDER api — powers ONLY "show me this agent's schedules" and
+# "pause/resume one". This token can also rewrite prompts, edit graphs and deploy
+# versions, so the bridge constructs its client with a hard tool allowlist
+# (list_triggers, update_trigger) enforced at the transport: anything else throws
+# before a request is built. Verified — edit_node, deploy_confirm, save_node_code,
+# compile_and_publish and run_agent are all refused locally.
+# UNSET => the trigger routes 503 and nothing else changes.
+FOUNDRY_BUILDER_MCP_URL=https://foundry-api.alignbridge.ai/mcp/
+FOUNDRY_BUILDER_TOKEN=<ask Ujjwal — the Foundry builder token>
+FOUNDRY_BUILDER_TIMEOUT_MS=30000
 ```
 
 **Every one of these is optional in the sense that the app still boots without them.** That is
