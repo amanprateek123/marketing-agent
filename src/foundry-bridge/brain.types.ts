@@ -62,6 +62,15 @@ export interface BrainAgentDefinition {
 export interface BrainAgent extends BrainAgentDefinition {
   nextRunAt: string | null;
   lastRun: BrainRunSummary | null;
+  /**
+   * Whether the Foundry run token actually grants this agent.
+   *
+   * Separate from `status`, which is what the agent IS, and from `invocation`, which is who may
+   * start it. An agent can be live, on-demand, and still unrunnable here because the token was
+   * never widened to include it — and the only way the console could previously discover that was
+   * to start a run and read the refusal out of a 502.
+   */
+  runnable: boolean;
 }
 
 export type BrainRunStatus =

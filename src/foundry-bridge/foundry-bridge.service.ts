@@ -335,11 +335,19 @@ export class FoundryBridgeService {
    * newest-first, so the first row seen for an agent is its last run.
    */
   async getAgents(): Promise<BrainAgent[]> {
-    const listed = this.foundry.isConfigured()
-      ? await this.foundry.tryCall<{ runs?: unknown[] }>('list_runs', {
-          limit: 50,
-        })
-      : null;
+    const [listed, runnable] = await Promise.all([
+      this.foundry.isConfigured()
+        ? this.foundry.tryCall<{ runs?: unknown[] }>('list_runs', { limit: 50 })
+        : Promise.resolve(null),
+      this.foundry.isConfigured()
+        ? this.foundry.tryCall<{ agents?: unknown[] }>('list_runnable_agents')
+        : Promise.resolve(null),
+    ]);
+    const grantedIds = new Set(
+      ((runnable?.agents ?? []) as Array<{ agent_id?: string }>)
+        .map((a) => a?.agent_id)
+        .filter((id): id is string => typeof id === 'string'),
+    );
     const lastByAgent = new Map<BrainAgentKey, BrainRunSummary>();
     for (const raw of listed?.runs ?? []) {
       const row =
@@ -354,6 +362,11 @@ export class FoundryBridgeService {
         ? nextDailyCycle(new Date().toISOString())
         : null,
       lastRun: lastByAgent.get(definition.key) ?? null,
+      // Unreachable Foundry means unknown rather than refused — but `false` is the honest
+      // rendering either way, because a Run button that cannot work should not look like one
+      // that can. The console previously had no way to learn this except by starting a run and
+      // reading the refusal out of a 502.
+      runnable: grantedIds.has(definition.foundryAgentId),
     }));
   }
 
