@@ -204,7 +204,10 @@ export function mapCampaignRunSummary(
   };
 }
 
-function mapSteps(row: Row, gateByStage: Map<string, string>): BrainCampaignStep[] {
+function mapSteps(
+  row: Row,
+  gateByStage: Map<string, string>,
+): BrainCampaignStep[] {
   const stage = str(row.stage) ?? 'planned';
   const status = str(row.status) ?? 'open';
   const stoppedBadly = status === 'abandoned' || status === 'failed';
@@ -216,7 +219,9 @@ function mapSteps(row: Row, gateByStage: Map<string, string>): BrainCampaignStep
   // "Going live: Done" about a campaign that never launched. Where it got to and whether it
   // finished are two facts, and the second one decides how the last step reads.
   const reachedIndex =
-    stage === 'done' ? STEPS.length - 1 : STEPS.findIndex((s) => s.stage === stage);
+    stage === 'done'
+      ? STEPS.length - 1
+      : STEPS.findIndex((s) => s.stage === stage);
 
   return STEPS.map((step, index) => {
     let state: BrainStageState = 'idle';
@@ -255,7 +260,11 @@ function mapBrief(row: Row): BrainBriefField[] {
   const monitor = obj(row.monitor_config);
   const fields: BrainBriefField[] = [];
 
-  const push = (label: string, value: string | null, hint: string | null = null) => {
+  const push = (
+    label: string,
+    value: string | null,
+    hint: string | null = null,
+  ) => {
     if (value) fields.push({ label, value, hint });
   };
 
@@ -435,14 +444,16 @@ export function mapCampaignRun(
   } else if (str(row.status) === 'abandoned') {
     needsYou = 'This was cancelled and will not go live.';
   } else if (opts.blockedWhy) {
-    needsYou = 'This has been retried as often as it is allowed to be, and is waiting on a person.';
+    needsYou =
+      'This has been retried as often as it is allowed to be, and is waiting on a person.';
   }
 
   return {
     ...summary,
     // A cancelled run's headline says cancelled, not "finished". The stage is only the headline
     // while the run is still going somewhere.
-    headline: `${summary.product} — ${(summary.tone === 'progress' || summary.tone === 'waiting'
+    headline: `${summary.product} — ${(summary.tone === 'progress' ||
+    summary.tone === 'waiting'
       ? summary.stageLabel
       : summary.statusLabel
     ).toLowerCase()}`,

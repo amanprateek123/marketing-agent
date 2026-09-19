@@ -1331,7 +1331,8 @@ export class FoundryBridgeService {
           : String(row.pipeline_run_id);
       if (owner !== runId) continue;
       const stage = GATE_STAGE[String(row.gate)];
-      const id = row.id === null || row.id === undefined ? null : String(row.id);
+      const id =
+        row.id === null || row.id === undefined ? null : String(row.id);
       if (stage && id) byStage.set(stage, id);
     }
     return byStage;
