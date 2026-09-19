@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { FoundryBridgeController } from './foundry-bridge.controller';
 import { FoundryBridgeService } from './foundry-bridge.service';
+import { CreativeImageService } from './creative-image.service';
 
 /**
  * Bridge to Brain v2 and the marketing agents around it.
@@ -12,7 +13,7 @@ import { FoundryBridgeService } from './foundry-bridge.service';
  */
 @Module({
   controllers: [FoundryBridgeController],
-  providers: [FoundryBridgeService],
+  providers: [FoundryBridgeService, CreativeImageService],
   exports: [FoundryBridgeService],
 })
 export class FoundryBridgeModule {}

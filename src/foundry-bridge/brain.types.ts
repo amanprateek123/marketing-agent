@@ -441,3 +441,82 @@ export interface BrainState {
   agentsTotal: number;
   attention: BrainAttentionItem[];
 }
+
+/* ── The campaign run, in plain language ────────────────────────────────────────
+ *
+ * Everything below exists so the console can show a campaign being built WITHOUT
+ * showing how it is built. No Foundry run id, no agent id, no stage-dispatch row,
+ * no raw JSON reaches these shapes — the bridge does the translating, because a
+ * page that renders `{"ads_wanted":6}` has not explained anything to anyone.
+ *
+ * The rule from mappers.ts still holds: when a shape does not say something, say
+ * so. A missing score is null, not zero; an unjudged creative has no verdict.
+ */
+
+/** Colour/urgency for a chip. Kept separate from the raw status so the page never re-derives it. */
+export type BrainRunTone = 'progress' | 'waiting' | 'good' | 'bad' | 'idle';
+
+/** One row in the run list. */
+export interface BrainCampaignRunSummary {
+  runId: string;
+  product: string;
+  campaignType: string;
+  stageLabel: string;
+  statusLabel: string;
+  tone: BrainRunTone;
+  startedOn: string;
+  updatedAt: string | null;
+  creativesChosen: number | null;
+  creativesPlanned: number | null;
+  isLive: boolean;
+}
+
+/** One labelled fact from the brief. The page prints label/value and nothing else. */
+export interface BrainBriefField {
+  label: string;
+  value: string;
+  hint: string | null;
+}
+
+/** An audience the campaign will run against, described the way a person would say it. */
+export interface BrainCampaignAudience {
+  name: string;
+  budget: string | null;
+  adsPlanned: number | null;
+  excludes: string | null;
+  why: string | null;
+}
+
+/** One finished creative: the picture, and the words that ship with it. */
+export interface BrainCampaignCreative {
+  id: string;
+  imageUrl: string | null;
+  headline: string | null;
+  caption: string | null;
+  description: string | null;
+  callToAction: string | null;
+  language: string | null;
+  statusLabel: string;
+  tone: BrainRunTone;
+  score: number | null;
+  note: string | null;
+  style: string | null;
+}
+
+/** One of the four steps, named for what it does rather than which agent does it. */
+export interface BrainCampaignStep {
+  key: BrainStageKey;
+  label: string;
+  what: string;
+  state: BrainStageState;
+  gateId: string | null;
+}
+
+export interface BrainCampaignRun extends BrainCampaignRunSummary {
+  headline: string;
+  steps: BrainCampaignStep[];
+  brief: BrainBriefField[];
+  audiences: BrainCampaignAudience[];
+  whatHappened: string | null;
+  needsYou: string | null;
+}

@@ -14,6 +14,9 @@ import { SetTriggerEnabledDto } from './dto/trigger.dto';
 import { StartAgentRunDto } from './dto/start-agent-run.dto';
 import type {
   BrainAgent,
+  BrainCampaignCreative,
+  BrainCampaignRun,
+  BrainCampaignRunSummary,
   BrainConversation,
   BrainDecision,
   BrainEventPage,
@@ -81,6 +84,43 @@ export class FoundryBridgeController {
     @Param('tenantId') _tenantId: string,
   ): Promise<BrainPipelineRun | null> {
     return this.bridge.getPipeline();
+  }
+
+  /**
+   * GET /api/v1/brain/:tenantId/pipeline/runs?limit=N — every campaign run, newest first.
+   *
+   * The three routes below are the non-technical view of the same machinery `/pipeline` exposes.
+   * They exist separately rather than as a richer `/pipeline` because they answer a different
+   * question: `/pipeline` is "is anything in flight", these are "what did we build, and what is
+   * actually going out". Declared most-specific-first, as `runs/:runId/events` is above.
+   */
+  @Get(':tenantId/pipeline/runs')
+  async campaignRuns(
+    @Param('tenantId') _tenantId: string,
+    @Query('limit') limit?: string,
+  ): Promise<BrainCampaignRunSummary[]> {
+    const parsed = Number(limit);
+    return this.bridge.getCampaignRuns(
+      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 100) : 25,
+    );
+  }
+
+  /** GET /api/v1/brain/:tenantId/pipeline/runs/:runId/creatives — the ads that will go live. */
+  @Get(':tenantId/pipeline/runs/:runId/creatives')
+  async campaignRunCreatives(
+    @Param('tenantId') _tenantId: string,
+    @Param('runId') runId: string,
+  ): Promise<BrainCampaignCreative[]> {
+    return this.bridge.getCampaignRunCreatives(runId);
+  }
+
+  /** GET /api/v1/brain/:tenantId/pipeline/runs/:runId — one campaign run, in plain language. */
+  @Get(':tenantId/pipeline/runs/:runId')
+  async campaignRun(
+    @Param('tenantId') _tenantId: string,
+    @Param('runId') runId: string,
+  ): Promise<BrainCampaignRun> {
+    return this.bridge.getCampaignRun(runId);
   }
 
   /** GET /api/v1/brain/:tenantId/runs — recent runs across every agent on this console. */

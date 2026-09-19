@@ -136,6 +136,32 @@ export default () => ({
      */
     approvalActorSlackId: process.env.BRAIN_APPROVAL_ACTOR_SLACK_ID ?? '',
   },
+  /**
+   * Reading a finished creative's picture back out of S3, for the campaign-run view.
+   *
+   * TWO BUCKETS, TWO AWS ACCOUNTS, AND NEITHER IS PUBLIC. Verified 2026-09-19: every
+   * `creatives.image_url` in the brain returns 403 to an unauthenticated browser, so the console
+   * cannot render one with a plain <img src>. Nor is it one misconfigured bucket — the credentials
+   * differ per bucket, and each pair is refused by the other's:
+   *
+   *   91w-marketing-auto   reads with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+   *   91astrology-common   reads with ASTRO_AWS_ACCESS_KEY_ID / ASTRO_AWS_SECRET_ACCESS_KEY
+   *
+   * So the bucket chooses the credential, and an unrecognised bucket is a 404 rather than a guess
+   * with the wrong key. Leaving either pair unset is allowed and is not an error: that bucket's
+   * thumbnails fall back to the labelled placeholder the page already draws. That is the point —
+   * a picture we cannot fetch must never reach the browser as a broken image.
+   */
+  creativeImages: {
+    region:
+      process.env.CREATIVE_IMAGE_REGION ?? process.env.AWS_REGION ?? 'ap-south-1',
+    primaryBucket: process.env.CREATIVE_IMAGE_PRIMARY_BUCKET ?? '91w-marketing-auto',
+    primaryAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? '',
+    primarySecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
+    astroBucket: process.env.CREATIVE_IMAGE_ASTRO_BUCKET ?? '91astrology-common',
+    astroAccessKeyId: process.env.ASTRO_AWS_ACCESS_KEY_ID ?? '',
+    astroSecretAccessKey: process.env.ASTRO_AWS_SECRET_ACCESS_KEY ?? '',
+  },
   ops: {
     // System-failure alert channel (pipeline deaths, creative failures, stale-data
     // audit skips, Slack delivery failures). Separate from tenant webhooks — this

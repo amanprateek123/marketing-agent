@@ -17,8 +17,18 @@ import {
   mapRunEvents,
   mapRunSummary,
 } from './mappers';
+import {
+  isFinalisedCreative,
+  mapCampaignCreative,
+  mapCampaignRun,
+  mapCampaignRunSummary,
+} from './campaign-run.mapper';
+import { CreativeImageService } from './creative-image.service';
 import type {
   BrainAgent,
+  BrainCampaignCreative,
+  BrainCampaignRun,
+  BrainCampaignRunSummary,
   BrainConversation,
   BrainConversationTurn,
   BrainAgentKey,
@@ -77,7 +87,10 @@ export class FoundryBridgeService {
    */
   private readonly approvalActorSlackId: string;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly creativeImages: CreativeImageService,
+  ) {
     this.foundry = new McpClient(
       (this.config.get<string>('foundry.url') ?? '').trim(),
       (this.config.get<string>('foundry.token') ?? '').trim(),
@@ -1237,6 +1250,227 @@ export class FoundryBridgeService {
         enabled,
         status: typeof row.status === 'string' ? row.status : 'unknown',
       };
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /* ── The campaign run, in plain language ──────────────────────────────────────
+   *
+   * Everything below answers one question for a marketer — "what is being built, and what will
+   * actually go live?" — and deliberately answers nothing else. The translation lives in
+   * campaign-run.mapper.ts; this section is only about fetching the right rows to feed it.
+   */
+
+  /** Slug → display name, so the page says "Saathi Report" and never `saathi_report`. */
+  private async offeringNames(): Promise<Map<string, string>> {
+    const names = new Map<string, string>();
+    const read = await this.brain.tryCall<{ rows?: unknown[] }>('brain_read', {
+      table: 'offerings',
+      limit: 200,
+    });
+    for (const raw of read?.rows ?? []) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      const slug = typeof row.slug === 'string' ? row.slug : null;
+      const name =
+        typeof row.display_name === 'string' ? row.display_name : null;
+      if (slug && name) names.set(slug, name);
+    }
+    return names;
+  }
+
+  /**
+   * How many creatives each run has actually settled on.
+   *
+   * Read in ONE query and grouped here rather than one query per run: the list shows 25 runs, and
+   * 25 round trips to render a count column is a page that loads in seconds to say very little.
+   */
+  private async finalisedCountsByRun(): Promise<Map<string, number> | null> {
+    const read = await this.brain.tryCall<{ rows?: unknown[] }>('brain_read', {
+      table: 'creatives',
+      limit: 2000,
+    });
+    // NULL AND ZERO ARE DIFFERENT ANSWERS. If the read failed we do not know how many ads a run
+    // has, and reporting 0 would tell the operator a run produced nothing when it may have
+    // produced six. Null travels to the page as "—"; a real zero prints as 0.
+    if (!read) return null;
+    const counts = new Map<string, number>();
+    for (const raw of read.rows ?? []) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      if (!isFinalisedCreative(row)) continue;
+      const runId =
+        row.pipeline_run_id === null || row.pipeline_run_id === undefined
+          ? null
+          : String(row.pipeline_run_id);
+      if (!runId) continue;
+      counts.set(runId, (counts.get(runId) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  /** Which stage each open gate is holding up, for the run being viewed. */
+  private async gatesForRun(runId: string): Promise<Map<string, string>> {
+    const GATE_STAGE: Record<string, string> = {
+      plan: 'planned',
+      build: 'building',
+      launch: 'launching',
+    };
+    const byStage = new Map<string, string>();
+    const read = await this.brain.tryCall<{ rows?: unknown[] }>(
+      'approvals_pending',
+      { limit: 50 },
+    );
+    for (const raw of read?.rows ?? []) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      const owner =
+        row.pipeline_run_id === null || row.pipeline_run_id === undefined
+          ? null
+          : String(row.pipeline_run_id);
+      if (owner !== runId) continue;
+      const stage = GATE_STAGE[String(row.gate)];
+      const id = row.id === null || row.id === undefined ? null : String(row.id);
+      if (stage && id) byStage.set(stage, id);
+    }
+    return byStage;
+  }
+
+  /** The run list: every campaign the Brain has built or tried to, newest first. */
+  async getCampaignRuns(limit = 25): Promise<BrainCampaignRunSummary[]> {
+    this.assertBrain();
+    try {
+      const [read, names, counts] = await Promise.all([
+        this.brain.call<{ rows?: unknown[] }>('brain_read', {
+          table: 'pipeline_runs',
+          order: 'created_at.desc',
+          limit,
+        }),
+        this.offeringNames(),
+        this.finalisedCountsByRun(),
+      ]);
+      return (read.rows ?? [])
+        .filter(
+          (raw): raw is Record<string, unknown> =>
+            !!raw && typeof raw === 'object',
+        )
+        .map((row) =>
+          mapCampaignRunSummary(
+            row,
+            names.get(String(row.offering_slug)) ?? null,
+            counts ? (counts.get(String(row.id)) ?? 0) : null,
+          ),
+        )
+        .filter((r): r is BrainCampaignRunSummary => r !== null);
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /**
+   * One run in full.
+   *
+   * `pipeline_run_read` with an `id` deliberately bypasses the approved-plan-gate filter that the
+   * queue read applies — that filter decides what an agent may CLAIM, and this is a person asking
+   * to look. `include_blocked` is on for the same reason: a run stuck behind an unanswered gate is
+   * exactly the one someone opens this page to understand.
+   */
+  async getCampaignRun(runId: string): Promise<BrainCampaignRun> {
+    this.assertBrain();
+    const id = Number(runId);
+    if (!Number.isFinite(id) || id <= 0) {
+      throw new BadRequestException(`'${runId}' is not a campaign run id.`);
+    }
+    try {
+      const [read, names, gateByStage] = await Promise.all([
+        this.brain.call<{ rows?: unknown[]; blocked?: unknown[] }>(
+          'pipeline_run_read',
+          { id, include_blocked: true },
+        ),
+        this.offeringNames(),
+        this.gatesForRun(String(id)),
+      ]);
+
+      const row = [...(read.rows ?? []), ...(read.blocked ?? [])].find(
+        (raw): raw is Record<string, unknown> =>
+          !!raw && typeof raw === 'object',
+      );
+      if (!row) {
+        throw new NotFoundException(`There is no campaign run ${runId}.`);
+      }
+
+      const counts = await this.finalisedCountsByRun();
+      const mapped = mapCampaignRun(row, {
+        displayName: names.get(String(row.offering_slug)) ?? null,
+        chosen: counts ? (counts.get(String(id)) ?? 0) : null,
+        gateByStage,
+        blockedWhy:
+          typeof row.blocked_why === 'string' ? row.blocked_why : null,
+      });
+      if (!mapped) {
+        throw new NotFoundException(`Campaign run ${runId} could not be read.`);
+      }
+      return mapped;
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /**
+   * The creatives this run settled on — the ads that will actually go live.
+   *
+   * Only finalised ones. A run in mid-production has dozens of half-made rows whose pictures do
+   * not exist yet and whose copy is empty; showing them would answer "what is being attempted"
+   * when the question on this page is "what is going out".
+   */
+  async getCampaignRunCreatives(
+    runId: string,
+  ): Promise<BrainCampaignCreative[]> {
+    this.assertBrain();
+    const id = Number(runId);
+    if (!Number.isFinite(id) || id <= 0) {
+      throw new BadRequestException(`'${runId}' is not a campaign run id.`);
+    }
+    try {
+      const read = await this.brain.call<{ rows?: unknown[] }>('brain_read', {
+        table: 'creatives',
+        where: { pipeline_run_id: id },
+        limit: 200,
+      });
+      const finalised = (read.rows ?? [])
+        .filter(
+          (raw): raw is Record<string, unknown> =>
+            !!raw && typeof raw === 'object',
+        )
+        .filter(isFinalisedCreative);
+
+      // THE PICTURE IS SIGNED INTO THE PAYLOAD, NOT PROXIED THROUGH A ROUTE.
+      //
+      // A proxy route would have been the obvious shape, and it cannot work: every route on this
+      // controller sits behind the global JwtAuthGuard, and a browser's <img src> cannot carry an
+      // Authorization header. The thumbnail would 401 on a page the operator is already logged
+      // into. Signing costs an HMAC and no network call, so the URL travels inside the JSON the
+      // console already fetches with its token, and S3 serves the bytes directly.
+      return (
+        await Promise.all(
+          finalised.map(async (row) => {
+            const source =
+              typeof row.image_url === 'string' ? row.image_url : null;
+            // Offered only when we hold a key that opens that bucket — otherwise the page gets
+            // null and draws its placeholder, rather than an <img> that will 403.
+            let imageUrl: string | null = null;
+            if (this.creativeImages.canServe(source)) {
+              try {
+                imageUrl = await this.creativeImages.signedUrlFor(source);
+              } catch {
+                imageUrl = null;
+              }
+            }
+            return mapCampaignCreative(row, imageUrl);
+          }),
+        )
+      ).filter((c): c is BrainCampaignCreative => c !== null);
     } catch (err) {
       this.rethrow(err);
     }
