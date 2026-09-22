@@ -165,7 +165,19 @@ export class PipelineBridgeService {
     files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
   ): Promise<unknown> {
     this.assertConfigured();
-    const FormData = (await import('form-data')).default;
+    // `form-data` is CommonJS (`export = FormData`): `module.exports` IS the constructor and there
+    // is no `.default` on it. This project compiles with `module: commonjs` and WITHOUT
+    // `esModuleInterop`, so TypeScript emits a bare `require()` with no interop wrapper — `.default`
+    // was `undefined` at runtime while `allowSyntheticDefaultImports` still let it type-check. Every
+    // reference-image upload died on `new FormData()` with "FormData is not a constructor", which
+    // Nest reports as a 500; a brief with no images never reaches here, so the break looked
+    // user-specific rather than total. Prefer `.default` if a future toolchain adds it, else the
+    // module itself.
+    const imported = (await import('form-data')) as unknown as {
+      default?: typeof import('form-data');
+    };
+    const FormData =
+      imported.default ?? (imported as unknown as typeof import('form-data'));
     const form = new FormData();
     for (const f of files) {
       form.append('files', f.buffer, {
