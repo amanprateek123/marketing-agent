@@ -50,6 +50,26 @@ export class StartRunDto {
   @IsIn(['astro', 'automotive'])
   domain?: 'astro' | 'automotive';
 
+  /**
+   * WHICH 91Astrology product the creative is for — a `value` from
+   * GET /pipeline-bridge/:tenantId/options -> offerings.
+   *
+   * This field's absence was a live bug, and a textbook instance of the whitelist trap this
+   * file's header warns about. Without it declared here, `ValidationPipe({ whitelist: true })`
+   * stripped any product the creative page sent, so the pipeline received none, stamped
+   * `research_slug` NULL, and fell back to its manifest default — every dashboard astro creative
+   * was authored from the Nadi research pack, filed to the Nadi S3 folder and labelled "Nadi
+   * Report" regardless of the brief. 66 runs in 30 days (2026-09-23).
+   *
+   * Optional here rather than `@IsNotEmpty()` on purpose: the pipeline owns the rule (it is
+   * required for an astro create, not for automotive or research) and duplicating that condition
+   * here would give two places to keep in sync, which is what the `count` comment above warns
+   * about. The creative page enforces it in the UI so the operator cannot submit without one.
+   */
+  @IsOptional()
+  @IsString()
+  offering?: string;
+
   /** Required by the pipeline for polished astro creatives; it returns 400 if absent. */
   @IsOptional()
   @IsString()
