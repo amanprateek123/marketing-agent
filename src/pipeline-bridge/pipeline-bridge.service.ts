@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import { AddOfferingDto } from './dto/add-offering.dto';
 import { StartRunDto } from './dto/start-run.dto';
 
 /**
@@ -150,6 +151,7 @@ export class PipelineBridgeService {
   }
 
   /** GET /v1/options — the option contract the Custom-brief form renders from. */
+  /** GET /v1/options — the choices the Custom-brief form renders from. */
   async getOptions(): Promise<unknown> {
     return this.forward('get', '/v1/options');
   }
@@ -225,6 +227,25 @@ export class PipelineBridgeService {
     });
     this.logger.log(
       `started pipeline ${dto.method} run for ${tenantId}: ${JSON.stringify(result)}`,
+    );
+    return result;
+  }
+
+  /**
+   * POST /v1/offerings — onboard a new product from its landing page.
+   *
+   * Slow by nature: the pipeline scrapes the page with a headless browser before it answers, so
+   * this can take the better part of a minute. Left synchronous anyway — the caller needs the
+   * product to exist before it can pick it, and the pipeline's own timeout (`pipeline.timeoutMs`)
+   * already bounds the wait.
+   *
+   * Returns `{ offering, pack_path, gaps, ... }`. `gaps` matters to the UI: a pack can be written
+   * and still be thin, and a thin pack is how a product gets advertised on unverified substance.
+   */
+  async addOffering(tenantId: string, dto: AddOfferingDto): Promise<unknown> {
+    const result = await this.forward('post', '/v1/offerings', { ...dto });
+    this.logger.log(
+      `added pipeline offering for ${tenantId} from ${dto.landing_url}: ${JSON.stringify(result)}`,
     );
     return result;
   }

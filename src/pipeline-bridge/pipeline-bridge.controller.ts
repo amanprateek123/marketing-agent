@@ -10,6 +10,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
+import { AddOfferingDto } from './dto/add-offering.dto';
 import { StartRunDto } from './dto/start-run.dto';
 import { ClarifyDto, RegenerateDto, ReviseDto } from './dto/iterate.dto';
 import { PipelineBridgeService } from './pipeline-bridge.service';
@@ -47,6 +48,26 @@ export class PipelineBridgeController {
   @Get(':tenantId/health')
   async health(@Param('tenantId') _tenantId: string): Promise<unknown> {
     return this.bridge.health();
+  }
+
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/offerings
+   *
+   * Add a new 91Astrology product by giving its landing page. The pipeline scrapes that page into
+   * the research pack its authoring session reads, then registers the product so it becomes
+   * selectable everywhere — this form, Slack, and the MCP's allowed list.
+   *
+   * Slow and synchronous: there is a headless browser render in the middle. That is deliberate,
+   * because the caller's next action is to pick the product, which it cannot do until it exists.
+   *
+   * Only `landing_url` is required; the slug and display name are derived from it otherwise.
+   */
+  @Post(':tenantId/offerings')
+  async addOffering(
+    @Param('tenantId') tenantId: string,
+    @Body() dto: AddOfferingDto,
+  ): Promise<unknown> {
+    return this.bridge.addOffering(tenantId, dto);
   }
 
   /**
