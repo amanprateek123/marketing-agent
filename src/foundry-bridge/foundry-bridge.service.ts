@@ -919,6 +919,14 @@ export class FoundryBridgeService {
           decided_by_slack_id: this.approvalActorSlackId,
           decided_by_name: 'Marketing dashboard',
           decision_text: body.note ?? '',
+          // Slack's `approve at <amount>` has always been able to say "yes, but this much".
+          // The console could not, so an operator who wanted a different number had to accept the
+          // proposed one and correct it somewhere the record would not show. The brain stores this
+          // on the approval row; it does NOT re-fund the run by itself, which is why the UI says
+          // so plainly rather than implying the build will follow it.
+          ...(typeof body.amountOverrideInr === 'number'
+            ? { amount_override_inr: body.amountOverrideInr }
+            : {}),
         },
       );
       if (result.recorded === false) {
@@ -1461,7 +1469,13 @@ export class FoundryBridgeService {
             // Offered only when we hold a key that opens that bucket — otherwise the page gets
             // null and draws its placeholder, rather than an <img> that will 403.
             let imageUrl: string | null = null;
-            if (this.creativeImages.canServe(source)) {
+            if (this.creativeImages.isPubliclyReadable(source)) {
+              // Already world-readable — `publish` put it there and its URLs never expire. Signing
+              // it would need credentials this process may not hold, and six creatives rendered as
+              // "Preview unavailable" for exactly that reason: the console hid pictures that needed
+              // no credentials to see.
+              imageUrl = source;
+            } else if (this.creativeImages.canServe(source)) {
               try {
                 imageUrl = await this.creativeImages.signedUrlFor(source);
               } catch {
