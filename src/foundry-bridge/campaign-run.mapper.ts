@@ -18,6 +18,7 @@
  */
 
 import type {
+  BrainBudgetAuthority,
   BrainBriefField,
   BrainCampaignAudience,
   BrainCampaignCreative,
@@ -74,6 +75,43 @@ function asDate(value: string | null): string {
 /** ₹2500 → "₹2,500 a day". Indian digit grouping, because the reader is in India. */
 function rupeesPerDay(value: number): string {
   return `₹${value.toLocaleString('en-IN')} a day`;
+}
+
+/* ── Which budget governs the run ───────────────────────────────────────────── */
+
+/**
+ * `budget_authority` from `pipeline_run_read`, in the console's shape — or null when the row has
+ * none (a `brain_read` of the raw table, or a brain from before 2026-09-23).
+ *
+ * THIS REPLACES SUMMING THE AUDIENCE PLAN HERE. The sum is one of the budget's numbers, not the
+ * budget: run 94's contract summed to ₹5,000 while its approval said ₹6,000, and a page that added
+ * up the audiences printed the one the Builder was about to be overruled on. The brain holds both
+ * and compares them, so the page shows its answer and, when they disagree, its reason.
+ */
+export function mapBudgetAuthority(
+  value: unknown,
+): BrainBudgetAuthority | null {
+  const raw = obj(value);
+  if (!raw) return null;
+  const source = str(raw.source);
+  return {
+    authorisedDailyBudgetInr: num(raw.authorised_daily_budget_inr),
+    source,
+    sourceLabel: budgetSourceLabel(source),
+    contractTotalInr: num(raw.contract_total_inr),
+    // Only an explicit `true` is consistent. A missing flag is not a clean bill of health.
+    consistent: raw.consistent === true,
+    why: str(raw.why),
+  };
+}
+
+function budgetSourceLabel(source: string | null): string | null {
+  if (!source) return null;
+  const approval = /^approval:(\d+)$/.exec(source);
+  if (approval) return `The amount approved on gate ${approval[1]}`;
+  const plan = /^daily_plan:(\d{4}-\d{2}-\d{2})$/.exec(source);
+  if (plan) return `The day's plan for ${plan[1]}`;
+  return source;
 }
 
 /* ── The four steps ─────────────────────────────────────────────────────────── */
@@ -322,15 +360,17 @@ function mapBrief(row: Row): BrainBriefField[] {
     'A date or festival this campaign is timed around.',
   );
 
-  // Total daily spend, added up across the audiences rather than trusted from one field.
-  const total = arr(contract?.audience_plan).reduce<number>((sum, entry) => {
-    const budget = num(obj(entry)?.budget_value_inr);
-    return budget === null ? sum : sum + budget;
-  }, 0);
+  // The daily budget is the brain's answer to "how much may this spend a day", not a sum of the
+  // audiences done here — see mapBudgetAuthority.
+  const authority = mapBudgetAuthority(row.budget_authority);
+  const authorised =
+    authority?.authorisedDailyBudgetInr ?? authority?.contractTotalInr ?? null;
   push(
     'Daily budget',
-    total > 0 ? rupeesPerDay(total) : null,
-    'The rate this campaign spends per day once it is live.',
+    authorised !== null && authorised > 0 ? rupeesPerDay(authorised) : null,
+    authority?.sourceLabel
+      ? `Set by: ${authority.sourceLabel}.`
+      : 'The rate this campaign spends per day once it is live.',
   );
 
   const judgeAfter = num(monitor?.min_spend_before_judging_inr);
@@ -464,5 +504,6 @@ export function mapCampaignRun(
     // for a person, so it is the one internal field that passes through unchanged.
     whatHappened: str(row.notes),
     needsYou,
+    budgetAuthority: mapBudgetAuthority(row.budget_authority),
   };
 }

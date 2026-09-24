@@ -21,6 +21,7 @@ import type {
   BrainDecision,
   BrainEventPage,
   BrainGate,
+  BrainGateDecisionResult,
   BrainPipelineRun,
   BrainRunDetail,
   BrainRunSummary,
@@ -225,7 +226,7 @@ export class FoundryBridgeController {
     @Param('tenantId') _tenantId: string,
     @Param('gateId') gateId: string,
     @Body() dto: GateDecisionDto,
-  ): Promise<{ ok: true }> {
+  ): Promise<BrainGateDecisionResult> {
     return this.bridge.decideGate(gateId, dto);
   }
 
@@ -255,7 +256,9 @@ export class FoundryBridgeController {
    * POST /api/v1/brain/:tenantId/conversation/:sessionId/messages
    *
    * Writes the turn, then starts the run that answers it, and hands back the run id so the console
-   * streams the reply through the same events route everything else uses. The Brain writes its own
+   * streams the reply through the same events route everything else uses.
+   * `correlationId` is what the Brain (2.11.0+) stamps as the `run_id` of its answering turn, so the
+   * console matches the answer on it and falls back to `runId` for an older Brain. The Brain writes its own
    * side of the conversation when it commits — nothing here puts words in its mouth.
    */
   @Post(':tenantId/conversation/:sessionId/messages')
@@ -263,7 +266,7 @@ export class FoundryBridgeController {
     @Param('tenantId') _tenantId: string,
     @Param('sessionId') sessionId: string,
     @Body() dto: SendMessageDto,
-  ): Promise<{ runId: string; sessionId: string }> {
+  ): Promise<{ runId: string; correlationId: string; sessionId: string }> {
     return this.bridge.sendConversationMessage(
       sessionId,
       dto.message,

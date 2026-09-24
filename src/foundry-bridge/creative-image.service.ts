@@ -44,9 +44,11 @@ export class CreativeImageService {
     this.region =
       this.config.get<string>('creativeImages.region') ?? 'ap-south-1';
     this.publicBucket =
-      this.config.get<string>('creativeImages.astroBucket') ?? '91astrology-common';
+      this.config.get<string>('creativeImages.astroBucket') ??
+      '91astrology-common';
     this.publicPrefix =
-      this.config.get<string>('creativeImages.publicPrefix') ?? 'marketing-creatives/';
+      this.config.get<string>('creativeImages.publicPrefix') ??
+      'marketing-creatives/';
 
     const register = (bucket: string | undefined, creds: BucketCredentials) => {
       // A bucket with no credentials is not registered at all, so `isConfigured` can answer

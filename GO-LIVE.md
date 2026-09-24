@@ -1,6 +1,7 @@
 # Going live — 91 Astro marketing automation
 
-Written 2026-09-19. Everything here was verified against the live system, not assumed.
+Written 2026-09-19, updated 2026-09-24. Everything here was verified against the live system, not
+assumed — except where a line says otherwise.
 
 There are two tracks. **They do not block each other.** The Brain can run the company today without
 the dashboard being deployed; the deploy is what gives *you* the controls instead of me.
@@ -11,12 +12,44 @@ the dashboard being deployed; the deploy is what gives *you* the controls instea
 
 | | |
 |---|---|
-| Brain v2 | **2.10.1**, serving, 5 schedules live |
+| Brain v2 | **2.11.0**, serving, on its schedules. Accepts optional run inputs `correlation_id` and `turn_index`; the answering conversation turn's `run_id` is the `correlation_id` |
 | Brain v1 | **retired** 2026-09-19 — all 5 triggers paused |
 | Today's plan | written, zero-spend, `plan_missing: false` |
 | Creative pipeline | working end to end (kiro → gpt-image-2 → dashboard) |
 | `saathi_report` launch readiness | `ready: true` |
-| Dashboard console | built, merged to `data-enrich`, **not deployed** |
+| Console backend (`/api/v1/brain/*`) | **deployed** — the routes answer `401` unauthenticated, i.e. they exist behind the login |
+| Console frontend (Brain page) | **not deployed** — the production frontend predates the Brain page |
+| Brain env block in `marketing-agent/.env` | **not set** (see Track 1, Step 2) |
+| Dashboard `FOUNDRY_RUN_TOKEN` | **does not grant Brain v2** — the conversation tab records the turn but cannot start the run |
+
+---
+
+## What is left, in order (2026-09-24)
+
+1. **`marketing-agent/.env`: add the brain env block** from Track 1, Step 2 (`BRAIN_MCP_URL`,
+   `BRAIN_MCP_BEARER_TOKEN`, `BRAIN_APPROVAL_ACTOR_SLACK_ID`, and the Foundry run/builder values).
+2. **Mint a new dashboard `FOUNDRY_RUN_TOKEN` that grants Brain v2
+   `agt_01a08a637be471038bba2efa34cb8c92`** (plus the six on-demand agents it already has). Grants
+   are fixed at mint, so the current token cannot be edited to add it. Put it in
+   `marketing-agent/.env`.
+3. **Pull the catch-up branch into both repos and rebuild — the frontend especially.** Production's
+   frontend has no Brain page; it must be rebuilt from `data-enrich` (or from
+   `catchup/2026-09-24`, which is `data-enrich` fast-forwarded):
+
+   ```bash
+   cd /var/www/marketing/marketing-agent             && git fetch && git merge --ff-only origin/catchup/2026-09-24
+   cd /var/www/marketing/Marketing-Agent-Dashboard   && git fetch && git merge --ff-only origin/catchup/2026-09-24
+   cd /var/www/marketing/marketing-agent             && docker compose up -d --build
+   ```
+
+   `--ff-only` refuses rather than merges if the box has drifted from `data-enrich`; stop and look
+   if it does.
+4. **Higgsfield `credentials.json`** — video generation shells out to the `higgsfield` CLI, which
+   has no headless login. Copy `config.json` and `credentials.json` into
+   `/var/www/marketing/higgsfield-config/` (a sibling of both repos, owned by uid 1001), exactly as
+   DEPLOY.md §4b describes. Without it, video generation fails; nothing else is affected.
+5. Prove it: Track 1, Step 4 below.
+
 
 ---
 
@@ -92,6 +125,9 @@ cd ../Marketing-Agent-Dashboard        && git pull     # data-enrich
 cd ../marketing-agent && docker compose up -d --build
 ```
 
+Until `catchup/2026-09-24` is merged into `data-enrich`, use the `--ff-only` commands in "What is
+left, in order" above instead of a plain `git pull`.
+
 The dashboard repo must stay a **sibling directory** of `marketing-agent`, which owns the compose
 file.
 
@@ -116,7 +152,9 @@ there is, `NEXT_PUBLIC_BRAIN_MOCK` was set to `true` at build time.
 
 ## Track 2 — Tokens: what to mint, and what not to
 
-**Mint exactly one: `FOUNDRY_BUILDER_TOKEN`.** Everything else already exists.
+**Mint two: `FOUNDRY_BUILDER_TOKEN`, and a dashboard `FOUNDRY_RUN_TOKEN` that grants Brain v2
+(`agt_01a08a637be471038bba2efa34cb8c92`).** The existing dashboard run token does not grant the
+Brain, and a grant cannot be added to a token after it is minted.
 
 Foundry token grants are fixed at mint — you cannot edit them afterwards — which is why the system
 already uses **two separate run tokens**, deliberately:
@@ -124,7 +162,7 @@ already uses **two separate run tokens**, deliberately:
 | token | lives in | grants | why |
 |---|---|---|---|
 | **Brain's dispatch token** | `/etc/astro-brain/brain.env` → `FOUNDRY_RUN_TOKEN` | producer, curator, builder, **launcher**, monitor, report — **not the Brain** | the Brain starts the pipeline chain |
-| **Dashboard run token** | `marketing-agent/.env` → `FOUNDRY_RUN_TOKEN` | Brain + 6 | the dashboard starts on-demand agents and reads run history |
+| **Dashboard run token** | `marketing-agent/.env` → `FOUNDRY_RUN_TOKEN` | must be Brain v2 + 6 — **the current one does not grant Brain v2; mint a replacement** | the dashboard starts on-demand agents (the Brain, for the conversation tab) and reads run history |
 
 The Brain is excluded from its own dispatch token on purpose: *"letting it start itself invites a
 recursive loop with an ad account behind it."*
@@ -203,7 +241,9 @@ five reported success.
 
 | item | owner |
 |---|---|
-| Mint `FOUNDRY_BUILDER_TOKEN`, send this file + values to whoever has the box | you |
+| Mint `FOUNDRY_BUILDER_TOKEN` and a Brain-v2-granting dashboard `FOUNDRY_RUN_TOKEN`, send this file + values to whoever has the box | you |
+| Rebuild the production frontend (no Brain page yet) and set the brain env block | whoever has the box |
+| Higgsfield `credentials.json` on the box | whoever has the box |
 | Reject my fabricated wiki card `know_01a0b2c778b471a39190ce1b1f90e923` | you |
 | VLM chain is down — Gemini billing disabled (`brilliant-era-505511-q5`), GLM 401, Kimi quota. Authoring is fine on kiro; this is the vision/routing chain | you |
 | Rotate the Claude OAuth token and the run token (both pasted in chat) | you |

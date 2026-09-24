@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -8,6 +9,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import { AGENTS_BY_KEY, BRAIN_AGENTS } from './agents.registry';
 import { McpClient, McpToolError, McpTransportError } from './mcp.client';
 import {
@@ -20,6 +22,7 @@ import {
 import {
   isFinalisedCreative,
   mapCampaignCreative,
+  mapBudgetAuthority,
   mapCampaignRun,
   mapCampaignRunSummary,
 } from './campaign-run.mapper';
@@ -38,7 +41,9 @@ import type {
   BrainEventPage,
   BrainGate,
   BrainGateAction,
+  BrainBudgetRescale,
   BrainGateDecisionBody,
+  BrainGateDecisionResult,
   BrainIdea,
   BrainPipelineRun,
   BrainPipelineStage,
@@ -691,6 +696,10 @@ export class FoundryBridgeService {
               : 'running',
       headline: `${typeof row.offering_slug === 'string' ? row.offering_slug : 'A product'} — ${humanizeKey(current)}`,
       stages,
+      // The brain's statement of which budget governs this run and whether the contract agrees.
+      // consistent:false is the Builder's signal to stop, so the console shows it rather than
+      // presenting either number as settled.
+      budgetAuthority: mapBudgetAuthority(row.budget_authority),
     };
   }
 
@@ -833,6 +842,17 @@ export class FoundryBridgeService {
       slackPermalink: null,
       expiresAt: null,
       runId: null,
+      spendGate:
+        gate === 'plan' ||
+        gate === 'build' ||
+        gate === 'launch' ||
+        gate === 'scale'
+          ? gate
+          : null,
+      pipelineRunId:
+        row.pipeline_run_id === null || row.pipeline_run_id === undefined
+          ? null
+          : String(row.pipeline_run_id),
       payload: isPlan
         ? {
             kind: 'plan_approval',
@@ -884,11 +904,15 @@ export class FoundryBridgeService {
    * two very different ways — an authorization fault (the gate stays decidable) or a gate that was
    * already decided (it never will be) — and both must reach the operator as errors. Returning
    * `{ok: true}` on either would close the card in front of them over a gate that is still open.
+   *
+   * WHAT THE AMOUNT DID COMES BACK WITH THE DECISION. An approval with an amount can rescale a
+   * run's contract, or be skipped with a reason; either way the brain says which, and that answer is
+   * returned rather than dropped, so the console reports what happened instead of predicting it.
    */
   async decideGate(
     gateId: string,
     body: BrainGateDecisionBody,
-  ): Promise<{ ok: true }> {
+  ): Promise<BrainGateDecisionResult> {
     this.assertBrain();
     if (gateId === 'ideas:proposed') return this.decideIdeas(body);
     if (!gateId.startsWith('approval:')) {
@@ -919,11 +943,11 @@ export class FoundryBridgeService {
           decided_by_slack_id: this.approvalActorSlackId,
           decided_by_name: 'Marketing dashboard',
           decision_text: body.note ?? '',
-          // Slack's `approve at <amount>` has always been able to say "yes, but this much".
-          // The console could not, so an operator who wanted a different number had to accept the
-          // proposed one and correct it somewhere the record would not show. The brain stores this
-          // on the approval row; it does NOT re-fund the run by itself, which is why the UI says
-          // so plainly rather than implying the build will follow it.
+          // Slack's `approve at <amount>` — "yes, but this much". It is not just recorded: on an
+          // approved BUILD gate the brain rescales the open run's audience_plan daily budgets to
+          // this amount in the same transaction; on a PLAN gate it does so only when the gate names
+          // exactly one pipeline_run_id (otherwise it reports budget_rescale_skipped with why); on
+          // a LAUNCH gate the Launcher applies it to the live Meta ad-set budget at activation.
           ...(typeof body.amountOverrideInr === 'number'
             ? { amount_override_inr: body.amountOverrideInr }
             : {}),
@@ -940,7 +964,7 @@ export class FoundryBridgeService {
             : `This gate was not re-decided: ${why}`,
         );
       }
-      return { ok: true };
+      return mapDecisionResult(result);
     } catch (err) {
       this.rethrow(err);
     }
@@ -955,7 +979,7 @@ export class FoundryBridgeService {
    */
   private async decideIdeas(
     body: BrainGateDecisionBody,
-  ): Promise<{ ok: true }> {
+  ): Promise<BrainGateDecisionResult> {
     const selected = new Set(body.selectedIds ?? []);
     if (body.action === 'approve' && selected.size === 0) {
       throw new BadRequestException(
@@ -997,7 +1021,7 @@ export class FoundryBridgeService {
         `${ids.length - failures.length} of ${ids.length} ideas updated. Failed: ${failures.join('; ')}`,
       );
     }
-    return { ok: true };
+    return { ok: true, budgetRescale: null, budgetRescaleSkipped: null };
   }
 
   // ── conversation ─────────────────────────────────────────────────────────
@@ -1098,7 +1122,7 @@ export class FoundryBridgeService {
     sessionId: string,
     message: string,
     mode?: string,
-  ): Promise<{ runId: string; sessionId: string }> {
+  ): Promise<{ runId: string; correlationId: string; sessionId: string }> {
     this.assertBrain();
     const text = (message ?? '').trim();
     if (!text) throw new BadRequestException('A message is required.');
@@ -1107,60 +1131,73 @@ export class FoundryBridgeService {
     // append assigns its own index in that case, which is the brain's normal behaviour.
     const existing = await this.brain.tryCall<Record<string, unknown>>(
       'conversation_read',
-      { session_id: sessionId, limit: 2 },
+      // The tail's full text decides whether this send is a RESEND of it, so ask for more than the
+      // Brain's 400-character default — a clipped tail can never compare equal.
+      { session_id: sessionId, limit: 2, content_chars: 4000 },
     );
     const lastTurn =
       existing && typeof existing.last_turn === 'number'
         ? existing.last_turn
         : null;
-    // AN UNANSWERED QUESTION IS RE-ASKED ON ITS OWN INDEX, NOT THE NEXT ONE.
-    //
-    // `lastTurn + 1` alone made the retry advice in the failure below a lie, and a measured one:
-    // four sends of one sentence produced turns 1, 2, 3 and 4 — the same question asked four
-    // times, which is exactly what pinning the index was meant to prevent. A turn is an EXCHANGE,
-    // so a trailing `user` row with no `brain` row beside it is a question still waiting for its
-    // answer, and the resend belongs on that index where ON CONFLICT DO NOTHING absorbs it.
     const turns = Array.isArray(existing?.turns) ? existing.turns : [];
     const tail =
       turns.length > 0
         ? (turns[turns.length - 1] as Record<string, unknown>)
         : null;
-    const tailIsPendingQuestion =
-      tail !== null &&
-      tail.role === 'user' &&
-      typeof tail.turn_index === 'number';
-    const turnIndex = tailIsPendingQuestion
-      ? (tail.turn_index as number)
-      : lastTurn === null
-        ? null
-        : lastTurn + 1;
+    const { turnIndex, isResend } = chooseUserTurnIndex(tail, lastTurn, text);
 
+    let recordedIndex = turnIndex;
     try {
-      await this.brain.call('conversation_append', {
-        session_id: sessionId,
-        role: 'user',
-        content: text,
-        surface: 'dashboard',
-        ...(turnIndex === null ? {} : { turn_index: turnIndex }),
-      });
+      const appended = await this.brain.call<Record<string, unknown>>(
+        'conversation_append',
+        {
+          session_id: sessionId,
+          role: 'user',
+          content: text,
+          surface: 'dashboard',
+          ...(turnIndex === null ? {} : { turn_index: turnIndex }),
+        },
+      );
+      if (typeof appended?.turn_index === 'number') {
+        recordedIndex = appended.turn_index;
+      }
+      // THE APPEND'S ANSWER IS READ, NOT ASSUMED. `conversation_append` is ON CONFLICT DO NOTHING,
+      // and `deduplicated: true` means a row was ALREADY at (session, turn, role) — this text was
+      // not written. That is the intended outcome for a resend of the same pending question and for
+      // nothing else: on a fresh index it means another surface wrote that turn between the read and
+      // the append, and starting a run now would answer someone else's question while telling this
+      // operator that theirs was recorded.
+      if (appended?.deduplicated === true && !isResend) {
+        throw new ConflictException(
+          `Turn ${recordedIndex ?? '?'} of this thread was written by someone else a moment ago, ` +
+            'so your message was NOT recorded and no run was started. Send it again — it will ' +
+            'land on the next turn.',
+        );
+      }
     } catch (err) {
       this.rethrow(err);
     }
 
+    // THE CORRELATION ID IS MINTED HERE and handed to the run as an input. Brain v2 (2.11.0+)
+    // writes it as the `run_id` of the brain turn that answers, so the console matches an answer
+    // to the send that asked for it by an id it already holds, instead of by Foundry's run id.
+    const correlationId = randomUUID();
     try {
       const { runId } = await this.startRun('brain', {
         message: text,
         session_id: sessionId,
         ...(mode ? { mode } : {}),
+        correlation_id: correlationId,
+        ...(recordedIndex === null ? {} : { turn_index: recordedIndex }),
       });
-      return { runId, sessionId };
+      return { runId, correlationId, sessionId };
     } catch (err) {
       // Say what actually happened. "Failed to send" would be wrong — the message IS recorded, and
       // an operator told otherwise would either retype it or assume the Brain ignored them.
       const reason =
         err instanceof Error ? err.message : 'the run could not be started';
       throw new BadGatewayException(
-        `Your message was recorded${turnIndex === null ? '' : ` as turn ${turnIndex}`}, but no run ` +
+        `Your message was recorded${recordedIndex === null ? '' : ` as turn ${recordedIndex}`}, but no run ` +
           `started to answer it: ${reason} Sending it again is safe — it lands on the same turn ` +
           'rather than asking twice.',
       );
@@ -1496,6 +1533,96 @@ const GATE_ACTIONS: BrainGateAction[] = [
   { key: 'approve', label: 'Approve', tone: 'primary', requiresNote: false },
   { key: 'reject', label: 'Reject', tone: 'danger', requiresNote: true },
 ];
+
+/**
+ * The part of `approval_record`'s answer that says what an amount DID: `budget_rescale` (the
+ * contracts it rescaled) and `budget_rescale_skipped` (why it touched none).
+ */
+export function mapDecisionResult(
+  result: Record<string, unknown>,
+): BrainGateDecisionResult {
+  const list = Array.isArray(result.budget_rescale)
+    ? result.budget_rescale
+    : null;
+  const num = (v: unknown): number | null => {
+    const n = typeof v === 'string' ? Number(v) : v;
+    return typeof n === 'number' && Number.isFinite(n) ? n : null;
+  };
+  const budgetRescale =
+    list === null
+      ? null
+      : list
+          .filter(
+            (e): e is Record<string, unknown> => !!e && typeof e === 'object',
+          )
+          .map((e): BrainBudgetRescale => {
+            const cap =
+              e.exceeds_adset_cap && typeof e.exceeds_adset_cap === 'object'
+                ? (e.exceeds_adset_cap as Record<string, unknown>)
+                : null;
+            return {
+              pipelineRunId: String(e.pipeline_run_id ?? '?'),
+              source: typeof e.source === 'string' ? e.source : null,
+              authorisedDailyBudgetInr: num(e.authorised_daily_budget_inr),
+              contractTotalBeforeInr: num(e.contract_total_before_inr),
+              contractTotalInr: num(e.contract_total_inr),
+              rescaled: e.rescaled === true,
+              why: typeof e.why === 'string' ? e.why : null,
+              exceedsAdsetCap: cap
+                ? {
+                    capInr: num(cap.cap_inr),
+                    entries: Array.isArray(cap.entries)
+                      ? cap.entries.map((x) => String(x))
+                      : [],
+                    note: typeof cap.note === 'string' ? cap.note : null,
+                  }
+                : null,
+            };
+          });
+  const skipped = result.budget_rescale_skipped;
+  return {
+    ok: true,
+    budgetRescale,
+    budgetRescaleSkipped:
+      typeof skipped === 'string' && skipped.trim() ? skipped : null,
+  };
+}
+
+/**
+ * Which turn index a user's message belongs on.
+ *
+ * A turn is an EXCHANGE: a `user` row and the `brain` row answering it share one index. So a
+ * trailing `user` row with no answer beside it is a question still waiting.
+ *
+ * A RESEND OF THAT QUESTION is pinned to its index, where `conversation_append`'s ON CONFLICT DO
+ * NOTHING absorbs it — `lastTurn + 1` alone once turned four sends of one sentence into turns 1-4.
+ *
+ * A DIFFERENT MESSAGE after an unanswered one is NOT pinned there. Pinning it would be swallowed by
+ * that same conflict rule: the new text would never be written, and the run started for it would
+ * answer the old question. It goes on the next index instead.
+ *
+ * `null` means "let the Brain choose" — the thread could not be read.
+ */
+export function chooseUserTurnIndex(
+  tail: Record<string, unknown> | null,
+  lastTurn: number | null,
+  text: string,
+): { turnIndex: number | null; isResend: boolean } {
+  if (
+    tail !== null &&
+    tail.role === 'user' &&
+    typeof tail.turn_index === 'number' &&
+    tail.content_clipped !== true &&
+    typeof tail.content === 'string' &&
+    tail.content.trim() === text.trim()
+  ) {
+    return { turnIndex: tail.turn_index, isResend: true };
+  }
+  return {
+    turnIndex: lastTurn === null ? null : lastTurn + 1,
+    isResend: false,
+  };
+}
 
 /**
  * The next 04:30 UTC — 10:00 IST, the Brain's daily portfolio review.

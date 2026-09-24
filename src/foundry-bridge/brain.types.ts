@@ -296,6 +296,8 @@ export interface BrainPipelineRun {
   status: BrainRunStatus;
   headline: string;
   stages: BrainPipelineStage[];
+  /** Null when the brain's read carried no `budget_authority` (an older brain). */
+  budgetAuthority?: BrainBudgetAuthority | null;
 }
 
 /**
@@ -371,7 +373,18 @@ export interface BrainGate {
   payload: BrainGatePayload;
   actions: BrainGateAction[];
   selection: 'none' | 'single' | 'multiple';
+  /**
+   * The brain's own gate type for a spend gate (`approvals.gate`), null for idea/creative gates.
+   *
+   * `kind` folds build, launch and scale into `campaign_launch` for layout, but what an
+   * "approve at <amount>" DOES differs per gate type, so the console needs the real one to say it.
+   */
+  spendGate?: BrainSpendGate | null;
+  /** The pipeline run this gate names, when it names one. A plan gate usually does not. */
+  pipelineRunId?: string | null;
 }
+
+export type BrainSpendGate = 'plan' | 'build' | 'launch' | 'scale';
 
 export interface BrainGateDecisionBody {
   action: BrainGateActionKey;
@@ -380,12 +393,71 @@ export interface BrainGateDecisionBody {
   /**
    * "Approve, but at this daily amount" — the console's equivalent of Slack's `approve at <n>`.
    *
-   * Recorded on the approval row as `amount_override_inr`. It states what the approver actually
-   * authorised; it does NOT re-fund the run, because nothing downstream reads it back — the build
-   * follows the pipeline run's own contract. The UI says so rather than letting the number imply
-   * more than it does.
+   * Recorded on the approval row as `amount_override_inr`, and it is NOT only a record. On an
+   * approved decision the brain's `approval_record` acts on it, per gate type:
+   *
+   *   - BUILD gate: the open run's `creative_contract.audience_plan` daily budgets are RESCALED to
+   *     sum to this amount (stamped `budget_source = approval:<id>`), in the same transaction as the
+   *     decision. That contract is what the Builder builds from.
+   *   - PLAN gate: rescaled the same way ONLY when the gate names exactly one `pipeline_run_id`.
+   *     A plan gate covering several runs (or none) is ambiguous — day total or one launch? — so
+   *     nothing is rescaled and the reason comes back as `budget_rescale_skipped`.
+   *   - LAUNCH gate: the Launcher applies the amount to the live Meta ad-set budget when it
+   *     activates the campaign.
+   *
+   * What the brain actually did comes back on the decision (`BrainGateDecisionResult`), and the
+   * console shows it rather than predicting it.
    */
   amountOverrideInr?: number;
+}
+
+/** One contract the brain rescaled because an approval carried an amount. */
+export interface BrainBudgetRescale {
+  pipelineRunId: string;
+  /** `approval:<id>` — the decision that now governs this run's budget. */
+  source: string | null;
+  authorisedDailyBudgetInr: number | null;
+  contractTotalBeforeInr: number | null;
+  contractTotalInr: number | null;
+  /** False when the contract had nothing to rescale (no daily audience budgets) — `why` says so. */
+  rescaled: boolean;
+  why: string | null;
+  /** Set when a rescaled audience is above Meta MCP's per-ad-set daily cap; Meta will refuse it. */
+  exceedsAdsetCap: {
+    capInr: number | null;
+    entries: string[];
+    note: string | null;
+  } | null;
+}
+
+/**
+ * What a gate decision did, beyond being recorded.
+ *
+ * `budgetRescale` is null when the brain said nothing about budgets (no amount was given, or an
+ * older brain); an empty list means it considered the amount and touched no contract, which is
+ * exactly when `budgetRescaleSkipped` carries the reason.
+ */
+export interface BrainGateDecisionResult {
+  ok: true;
+  budgetRescale: BrainBudgetRescale[] | null;
+  budgetRescaleSkipped: string | null;
+}
+
+/**
+ * Which budget governs a pipeline run, as the brain states it (`pipeline_run_read` →
+ * `budget_authority`). The console reads this rather than summing the audience plan itself: the
+ * sum is only one of the numbers, and the brain is the one place that compares them.
+ */
+export interface BrainBudgetAuthority {
+  authorisedDailyBudgetInr: number | null;
+  /** Raw source: `approval:<id>` or `daily_plan:<date>`, or null when nothing authorises it. */
+  source: string | null;
+  /** The same, in words: "Approved amount (gate 48)" or "The day's plan for 2026-09-23". */
+  sourceLabel: string | null;
+  contractTotalInr: number | null;
+  /** False means the contract and the authority disagree — the Builder must not build it. */
+  consistent: boolean;
+  why: string | null;
 }
 
 /**
@@ -528,4 +600,6 @@ export interface BrainCampaignRun extends BrainCampaignRunSummary {
   audiences: BrainCampaignAudience[];
   whatHappened: string | null;
   needsYou: string | null;
+  /** Which budget governs this run and whether its contract agrees — from the brain, not summed here. */
+  budgetAuthority: BrainBudgetAuthority | null;
 }
