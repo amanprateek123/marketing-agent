@@ -159,6 +159,9 @@ export default () => ({
     primaryAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? '',
     primarySecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
     astroBucket: process.env.CREATIVE_IMAGE_ASTRO_BUCKET ?? '91astrology-common',
+    // The ONLY prefix inside the astro bucket that is world-readable. Outside it the bucket
+    // returns AccessDenied, so bucket alone is not a permissions answer.
+    publicPrefix: process.env.CREATIVE_IMAGE_PUBLIC_PREFIX ?? 'marketing-creatives/',
     astroAccessKeyId: process.env.ASTRO_AWS_ACCESS_KEY_ID ?? '',
     astroSecretAccessKey: process.env.ASTRO_AWS_SECRET_ACCESS_KEY ?? '',
   },

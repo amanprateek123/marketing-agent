@@ -34,12 +34,19 @@ interface BucketCredentials {
 export class CreativeImageService {
   private readonly logger = new Logger(CreativeImageService.name);
   private readonly region: string;
+  /** Where `publish` puts world-readable copies, and the only prefix inside it that is public. */
+  private readonly publicBucket: string;
+  private readonly publicPrefix: string;
   private readonly credentialsByBucket = new Map<string, BucketCredentials>();
   private readonly clients = new Map<string, S3Client>();
 
   constructor(private readonly config: ConfigService) {
     this.region =
       this.config.get<string>('creativeImages.region') ?? 'ap-south-1';
+    this.publicBucket =
+      this.config.get<string>('creativeImages.astroBucket') ?? '91astrology-common';
+    this.publicPrefix =
+      this.config.get<string>('creativeImages.publicPrefix') ?? 'marketing-creatives/';
 
     const register = (bucket: string | undefined, creds: BucketCredentials) => {
       // A bucket with no credentials is not registered at all, so `isConfigured` can answer
@@ -102,6 +109,28 @@ export class CreativeImageService {
   canServe(imageUrl: string | null): boolean {
     const parsed = this.parse(imageUrl);
     return parsed !== null && this.credentialsByBucket.has(parsed.bucket);
+  }
+
+  /**
+   * True when the object is world-readable and needs no signature at all.
+   *
+   * WHY THIS IS SEPARATE FROM `canServe`. A creative that has been through write-mcp's `publish`
+   * lives in the astro bucket under the public prefix, and that tool says so in as many words:
+   * "These URLs are permanent and unsigned." Six such creatives rendered as "Preview unavailable"
+   * because this service would only emit an image it could SIGN, and signing needs credentials the
+   * local harness does not have — so it hid pictures that required no credentials to see.
+   *
+   * The prefix matters, not just the bucket: 91astrology-common returns AccessDenied for objects
+   * outside whatever its policy covers, which is the same trap `fetch_bytes` fell into on the
+   * creativebot side by treating a routing answer as a permissions answer.
+   */
+  isPubliclyReadable(imageUrl: string | null): boolean {
+    const parsed = this.parse(imageUrl);
+    if (!parsed) return false;
+    return (
+      parsed.bucket === this.publicBucket &&
+      parsed.key.startsWith(this.publicPrefix)
+    );
   }
 
   /**
