@@ -70,6 +70,23 @@ export class StartRunDto {
   @IsString()
   offering?: string;
 
+  /**
+   * WHICH disclaimer the creative carries — a `value` from
+   * GET /pipeline-bridge/:tenantId/options -> disclaimers, keyed by domain.
+   *
+   * Declared for exactly the reason `offering` above is: without it,
+   * `ValidationPipe({ whitelist: true })` deletes it before the bridge sees it, and the operator's
+   * choice vanishes with no error anywhere.
+   *
+   * Optional, and deliberately NOT constrained with `@IsIn` here: the legal values differ by
+   * domain and are owned by the pipeline, which answers 400 naming them. Listing them again here
+   * would be the second copy the `count` note warns about. Omitted means the domain default —
+   * for astro, no disclaimer.
+   */
+  @IsOptional()
+  @IsString()
+  disclaimer_choice?: string;
+
   /** Required by the pipeline for polished astro creatives; it returns 400 if absent. */
   @IsOptional()
   @IsString()
