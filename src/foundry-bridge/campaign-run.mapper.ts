@@ -18,6 +18,7 @@
  */
 
 import type {
+  BrainBet,
   BrainBudgetAuthority,
   BrainBriefField,
   BrainCampaignAudience,
@@ -29,6 +30,7 @@ import type {
   BrainStageKey,
   BrainStageState,
 } from './brain.types';
+import { mapBets } from './experiments.mapper';
 
 type Row = Record<string, unknown>;
 
@@ -390,33 +392,68 @@ function mapBrief(row: Row): BrainBriefField[] {
   return fields;
 }
 
-function mapAudiences(row: Row): BrainCampaignAudience[] {
+/** An audience kind as a person would say it; the audience's own key is an internal handle. */
+export function audienceName(kind: string | null): string {
+  if (!kind) return 'Audience';
+  if (kind === 'lookalike') return 'People similar to past buyers';
+  if (kind === 'interest' || kind === 'interests')
+    return 'People with matching interests';
+  if (kind === 'retargeting') return 'People who already visited';
+  if (kind === 'warm') return 'People who already know us';
+  if (kind === 'custom') return 'Our own customer list';
+  if (kind === 'broad') return 'Broad audience';
+  return titleize(kind);
+}
+
+/** The key an audience-plan entry is known by, which a hypothesis' `adset_entry_key` names. */
+export function audienceEntryKey(entry: Row): string | null {
+  return (
+    str(entry.key) ??
+    str(entry.entry_key) ??
+    str(entry.adset_entry_key) ??
+    str(entry.audience_key) ??
+    null
+  );
+}
+
+/**
+ * The hypothesis an audience-plan entry carries: its own `hypothesis_id`, else a hypothesis whose
+ * `adset_entry_key` names the entry. Null when neither says.
+ */
+export function audienceBetRow(entry: Row, hypotheses: Row[]): Row | null {
+  const hid = entry.hypothesis_id;
+  if (hid !== null && hid !== undefined && String(hid).trim()) {
+    const hit = hypotheses.find((h) => String(h.id) === String(hid));
+    if (hit) return hit;
+  }
+  const key = audienceEntryKey(entry);
+  if (key) {
+    const hit = hypotheses.find((h) => str(h.adset_entry_key) === key);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function mapAudiences(
+  row: Row,
+  betFor: (entry: Row) => BrainBet | null,
+): BrainCampaignAudience[] {
   const contract = obj(row.creative_contract);
   return arr(contract?.audience_plan)
     .map((entry) => obj(entry))
     .filter((entry): entry is Row => entry !== null)
     .map((entry) => {
-      const kind = str(entry.kind);
       const budget = num(entry.budget_value_inr);
       const excluded = arr(entry.excluded_audience_ids).length;
       return {
-        // The audience's own key is an internal handle ("nadi-lalook-180d-attachment"); say what
-        // kind of audience it is instead, which is the part that means anything.
-        name: kind
-          ? kind === 'lookalike'
-            ? 'People similar to past buyers'
-            : kind === 'interest'
-              ? 'People with matching interests'
-              : kind === 'retargeting'
-                ? 'People who already visited'
-                : titleize(kind)
-          : 'Audience',
+        name: audienceName(str(entry.kind)),
         budget: budget === null ? null : rupeesPerDay(budget),
         adsPlanned: num(entry.ads_wanted),
         excludes: excluded
           ? `Skips ${excluded} group${excluded === 1 ? '' : 's'}, including recent buyers`
           : null,
         why: str(entry.rationale),
+        bet: betFor(entry),
       };
     });
 }
@@ -424,6 +461,7 @@ function mapAudiences(row: Row): BrainCampaignAudience[] {
 export function mapCampaignCreative(
   row: Row,
   imageUrl: string | null,
+  bet: BrainBet | null = null,
 ): BrainCampaignCreative | null {
   const key = str(row.creative_key);
   if (!key) return null;
@@ -455,6 +493,7 @@ export function mapCampaignCreative(
     score: num(row.score),
     note: str(row.judged_notes),
     style: style || null,
+    bet,
   };
 }
 
@@ -465,12 +504,18 @@ export function mapCampaignRun(
     chosen?: number | null;
     gateByStage?: Map<string, string>;
     blockedWhy?: string | null;
+    /** The run's hypothesis rows (hypotheses_read by pipeline_run_id). */
+    hypotheses?: Row[];
+    /** slug → display name, for the bets. */
+    names?: Map<string, string>;
   } = {},
 ): BrainCampaignRun | null {
   const summary = mapCampaignRunSummary(row, opts.displayName, opts.chosen);
   if (!summary) return null;
 
   const gateByStage = opts.gateByStage ?? new Map<string, string>();
+  const hypotheses = opts.hypotheses ?? [];
+  const bets = mapBets(hypotheses, opts.names ?? new Map<string, string>());
   const steps = mapSteps(row, gateByStage);
   const waiting = steps.find((s) => s.state === 'waiting_for_human');
 
@@ -499,11 +544,17 @@ export function mapCampaignRun(
     ).toLowerCase()}`,
     steps,
     brief: mapBrief(row),
-    audiences: mapAudiences(row),
+    audiences: mapAudiences(row, (entry) => {
+      const hit = audienceBetRow(entry, hypotheses);
+      return hit
+        ? (bets.find((b) => b.ref === `exp-${String(hit.id)}`) ?? null)
+        : null;
+    }),
     // `notes` is the Brain's own sentence about why this run exists. It is already prose meant
     // for a person, so it is the one internal field that passes through unchanged.
     whatHappened: str(row.notes),
     needsYou,
     budgetAuthority: mapBudgetAuthority(row.budget_authority),
+    bets,
   };
 }

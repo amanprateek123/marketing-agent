@@ -166,7 +166,7 @@ describe('buildPlanView', () => {
     expect(view.totalDailyInr).toBe(4000);
     expect(view.budgetInr).toBe(5000);
     expect(view.unspentInr).toBe(1000);
-    expect(view.runs).toEqual([
+    expect(view.runs).toMatchObject([
       {
         product: 'Saathi Report',
         typeLabel: 'Test',
@@ -195,6 +195,63 @@ describe('buildPlanView', () => {
     expect(JSON.stringify(view.testing)).not.toMatch(
       /\bH\d+\b|hook_type|ctr_pct/,
     );
+  });
+
+  it('groups bets per run and names each ad set with its audience bet', () => {
+    const view = buildPlanView({
+      approval,
+      dailyPlan,
+      runs: [
+        {
+          ...runs[0],
+          creative_contract: {
+            audience_plan: [
+              {
+                entry_key: 'lal_1',
+                kind: 'lookalike',
+                budget_value_inr: 1500,
+                hypothesis_id: 130,
+              },
+              { entry_key: 'int_1', kind: 'interest', budget_value_inr: 1000 },
+            ],
+          },
+        },
+        runs[1],
+      ],
+      hypotheses: [
+        { ...hypotheses[0], pipeline_run_id: 94, links: ['pipeline_run:94'] },
+        {
+          id: 130,
+          kind: 'seed',
+          level: 'audience',
+          status: 'proposed',
+          offering_slug: 'saathi_report',
+          attribute: 'audience_kind',
+          value: 'lookalike',
+          metric: 'roas',
+          direction: 'better',
+          comparison: 'campaign_siblings',
+          adset_entry_key: 'lal_1',
+          links: [{ target_kind: 'pipeline_run', target_id: '94' }],
+        },
+        // Nadi's run is the only one decision 8 opened, so a run-less bet on 8 is its.
+        { ...hypotheses[1], decision_id: 8 },
+      ],
+      names,
+    });
+    const [saathi, nadi] = view.runs;
+    expect(saathi.bets.map((b) => b.levelLabel)).toEqual(['Ad', 'Audience']);
+    expect(saathi.audiences).toEqual([
+      {
+        name: 'People similar to past buyers',
+        budgetInr: 1500,
+        bet: 'Ad sets aimed at people similar to past buyers will earn a better return on ad spend than the other ads in the same campaign.',
+      },
+      { name: 'People with matching interests', budgetInr: 1000, bet: null },
+    ]);
+    expect(nadi.bets).toHaveLength(1);
+    expect(nadi.bets[0].kindLabel).toBe('New twist on a proven idea');
+    expect(JSON.stringify(view.runs)).not.toMatch(/lal_1|audience_kind|\b94\b/);
   });
 
   it('falls back to the cleaned text when the day plan is missing', () => {

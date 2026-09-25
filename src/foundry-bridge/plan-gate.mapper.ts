@@ -22,15 +22,21 @@
  */
 
 import type {
+  BrainPlanAudience,
   BrainPlanClaim,
   BrainPlanRun,
   BrainPlanView,
 } from './brain.types';
-import { CAMPAIGN_TYPE_LABEL } from './campaign-run.mapper';
+import {
+  CAMPAIGN_TYPE_LABEL,
+  audienceBetRow,
+  audienceName,
+} from './campaign-run.mapper';
 import {
   dayLabel,
   kindLabel,
   levelLabel,
+  linkedIds,
   mixSentence,
   renderClaim,
   stripInternalIds,
@@ -74,6 +80,30 @@ function titleize(slug: string): string {
     .trim()
     .toLowerCase()
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Whether a hypothesis is one of this run's bets: it names the run, links to it, is listed in the
+ * run's `hypothesis_ids`, or (only when the decision opened this one run) shares its decision.
+ */
+export function belongsToRun(h: Row, run: Row, runs: Row[]): boolean {
+  const runId = run.id === null || run.id === undefined ? null : String(run.id);
+  if (runId && linkedIds(h, 'pipeline_run').has(runId)) return true;
+  const listed = list(run.hypothesis_ids).map((x) => String(x));
+  if (listed.includes(String(h.id))) return true;
+  const decision =
+    run.decision_id === null || run.decision_id === undefined
+      ? null
+      : String(run.decision_id);
+  const hDecision =
+    h.decision_id === null || h.decision_id === undefined
+      ? null
+      : String(h.decision_id);
+  if (!decision || decision !== hDecision) return false;
+  // A hypothesis that names no run, on a decision that opened exactly this one.
+  const sameDecision = runs.filter((r) => String(r.decision_id) === decision);
+  const hRun = h.pipeline_run_id;
+  return sameDecision.length === 1 && (hRun === null || hRun === undefined);
 }
 
 /**
@@ -201,10 +231,33 @@ export function buildPlanView(input: PlanViewInput): BrainPlanView {
     if (slug) runsPerSlug.set(slug, (runsPerSlug.get(slug) ?? 0) + 1);
   }
 
+  // Retired claims are not part of what the day is testing.
+  const live = input.hypotheses.filter(
+    (h) => str(h.status) !== 'retired' && str(h.attribute),
+  );
+  const claimOf = (h: Row): BrainPlanClaim => ({
+    claim: renderClaim(h),
+    kindLabel: kindLabel(str(h.kind)),
+    levelLabel: levelLabel(str(h.level)),
+    product: nameOf(str(h.offering_slug)),
+  });
+
   const planRuns: BrainPlanRun[] = runs.map((run) => {
     const slug = str(run.offering_slug);
     const contract = obj(run.creative_contract);
     const audiencePlan = list(contract?.audience_plan);
+    const own = live.filter((h) => belongsToRun(h, run, runs));
+    const audiences: BrainPlanAudience[] = audiencePlan
+      .map((raw) => obj(raw))
+      .filter((entry): entry is Row => entry !== null)
+      .map((entry) => {
+        const hit = audienceBetRow(entry, live);
+        return {
+          name: audienceName(str(entry.kind)),
+          budgetInr: num(entry.budget_value_inr),
+          bet: hit ? renderClaim(hit) : null,
+        };
+      });
     return {
       product: nameOf(slug) ?? 'A product',
       typeLabel:
@@ -212,19 +265,12 @@ export function buildPlanView(input: PlanViewInput): BrainPlanView {
       dailyBudgetInr: runBudget(run, allocationBySlug, runsPerSlug),
       creatives: num(run.target_creative_count),
       adSets: audiencePlan.length ? audiencePlan.length : null,
+      bets: own.map(claimOf),
+      audiences,
     };
   });
 
-  // Retired claims are not part of what the day is testing.
-  const live = input.hypotheses.filter(
-    (h) => str(h.status) !== 'retired' && str(h.attribute),
-  );
-  const testing: BrainPlanClaim[] = live.map((h) => ({
-    claim: renderClaim(h),
-    kindLabel: kindLabel(str(h.kind)),
-    levelLabel: levelLabel(str(h.level)),
-    product: nameOf(str(h.offering_slug)),
-  }));
+  const testing: BrainPlanClaim[] = live.map(claimOf);
 
   const reasoning = str(dailyPlan.reasoning);
   return {

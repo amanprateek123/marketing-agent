@@ -253,6 +253,8 @@ export interface BrainDecision {
     direction: 'up' | 'down' | 'flat';
   } | null;
   runId: string | null;
+  /** What the decision said it expected to happen, as a sentence; null when it did not say. */
+  expected?: string | null;
 }
 
 export type BrainStageKey = 'producer' | 'curator' | 'builder' | 'launcher';
@@ -388,6 +390,8 @@ export interface BrainGate {
    * When the brain rows are missing, `structured` is false and only `summaryText` is filled.
    */
   plan?: BrainPlanView | null;
+  /** A build / launch / scale gate's bets: what the run it releases is testing. */
+  bets?: BrainBet[] | null;
 }
 
 export type BrainSpendGate = 'plan' | 'build' | 'launch' | 'scale';
@@ -572,6 +576,8 @@ export interface BrainCampaignAudience {
   adsPlanned: number | null;
   excludes: string | null;
   why: string | null;
+  /** The audience bet this ad set tests, or null. */
+  bet: BrainBet | null;
 }
 
 /** One finished creative: the picture, and the words that ship with it. */
@@ -588,6 +594,8 @@ export interface BrainCampaignCreative {
   score: number | null;
   note: string | null;
   style: string | null;
+  /** The idea this ad is testing, or null. */
+  bet: BrainBet | null;
 }
 
 /** One of the four steps, named for what it does rather than which agent does it. */
@@ -608,6 +616,8 @@ export interface BrainCampaignRun extends BrainCampaignRunSummary {
   needsYou: string | null;
   /** Which budget governs this run and whether its contract agrees — from the brain, not summed here. */
   budgetAuthority: BrainBudgetAuthority | null;
+  /** Every bet this run carries. */
+  bets: BrainBet[];
 }
 
 /* ── Experiments (hypotheses), in plain language ─────────────────────────────
@@ -674,6 +684,91 @@ export interface BrainExperiment {
   since: string | null;
   /** The same moment as an ISO timestamp, for sorting and relative time; not for display. */
   sinceAt: string | null;
+  /** For a new twist: what it changes from the idea it builds on, as a sentence. Null otherwise. */
+  change: string | null;
+  /** How many ads, ad sets and live campaigns carry it. Null when nothing is attached yet. */
+  carriedBy: BrainBetCarriers | null;
+}
+
+/** What carries a bet — counted, never named by id. */
+export interface BrainBetCarriers {
+  ads: number;
+  adSets: number;
+  campaigns: number;
+  /** "Carried by 3 ads and 1 live campaign." */
+  sentence: string;
+}
+
+/**
+ * A bet (hypothesis) shown next to the thing that tests it: a creative, an ad set, a gate, a
+ * decision, a live campaign. The same plain words as an experiment card, without the progress bars.
+ */
+export interface BrainBet {
+  /** Opaque support reference. Details only. */
+  ref: string;
+  claim: string;
+  kind: 'proven' | 'variant' | 'seed' | 'other';
+  kindLabel: string;
+  levelLabel: string;
+  statusLabel: string;
+  statusMeaning: string;
+  tone: BrainExperimentTone;
+  product: string | null;
+  change: string | null;
+  carriedBy: BrainBetCarriers | null;
+  /** Judged bets only: the result sentence. */
+  result: BrainExperimentResult | null;
+}
+
+/** One shelf of experiments with whether the brain cut the read short. */
+export interface BrainExperimentPage {
+  experiments: BrainExperiment[];
+  /** True when the brain had more than it could return: the list is the newest part, not all. */
+  truncated: boolean;
+}
+
+/** An idea that has worked before, from the brain's proven catalogue. */
+export interface BrainProvenIdea {
+  ref: string;
+  productKey: string | null;
+  product: string | null;
+  levelLabel: string;
+  /** "Ads that open with a question" — the idea, without a prediction. */
+  idea: string;
+  /** "Proven" (two or more wins, or one confident one) | "Promising" (one win). */
+  tierLabel: string;
+  tone: BrainExperimentTone;
+  /** "Worked in 3 tests, failed in 1." */
+  evidence: string;
+  confirmations: number;
+  refutations: number;
+}
+
+export interface BrainProvenCatalogue {
+  proven: BrainProvenIdea[];
+  /** Ideas that only ever failed — what not to retry. */
+  refuted: BrainProvenIdea[];
+  /** True when the brain has nothing proven in this scope yet. */
+  empty: boolean;
+  truncated: boolean;
+}
+
+/** The bets on one live campaign, and how long the Monitor must leave them alone. */
+export interface BrainCampaignBets {
+  /** False when the campaign was not built by this pipeline — it carries no bets by design. */
+  found: boolean;
+  bets: BrainBet[];
+  /** "2 Oct" — the Monitor will not pause what carries an active bet before this. Null if none. */
+  protectedUntil: string | null;
+  protectedUntilAt: string | null;
+  /** One plain sentence explaining the protection, or why there are no bets. */
+  note: string | null;
+}
+
+/** A decision's bets and what the decision expected. */
+export interface BrainDecisionBets {
+  expected: string | null;
+  bets: BrainBet[];
 }
 
 export interface BrainExperimentProductCount {
@@ -689,12 +784,26 @@ export interface BrainExperimentSummary {
   products: BrainExperimentProductCount[];
   /** True when the brain cut a read short, so a count is a floor rather than the total. */
   partial: boolean;
+  /** Tests that got an answer in the last 7 days; null when it could not be read. */
+  learnedThisWeek?: number | null;
 }
 
 /* ── The plan gate, as facts ─────────────────────────────────────────────── */
 
+/** One ad set in a planned campaign, and the audience bet it carries. */
+export interface BrainPlanAudience {
+  /** "People similar to past buyers". */
+  name: string;
+  budgetInr: number | null;
+  /** The audience bet as a sentence, or null when the ad set carries none. */
+  bet: string | null;
+}
+
 export interface BrainPlanRun {
   product: string;
+  /** The bets this campaign carries. */
+  bets: BrainPlanClaim[];
+  audiences: BrainPlanAudience[];
   /** "New launch" | "Test" | "Always-on" | … */
   typeLabel: string;
   dailyBudgetInr: number | null;

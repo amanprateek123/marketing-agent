@@ -1,4 +1,5 @@
 import { AGENTS_BY_KEY, BRAIN_AGENTS } from './agents.registry';
+import { expectedSentence } from './experiments.mapper';
 import type {
   BrainAgentKey,
   BrainAllocation,
@@ -364,6 +365,7 @@ export function mapDecision(
           }
         : null,
     runId: str(row.run_id),
+    expected: expectedSentence(row.expected_outcome),
   };
 }
 

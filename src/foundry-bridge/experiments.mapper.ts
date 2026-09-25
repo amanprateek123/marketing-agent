@@ -26,6 +26,8 @@
  */
 
 import type {
+  BrainBet,
+  BrainBetCarriers,
   BrainExperiment,
   BrainExperimentProductCount,
   BrainExperimentProgress,
@@ -33,6 +35,8 @@ import type {
   BrainExperimentSummary,
   BrainExperimentTone,
   BrainExperimentView,
+  BrainProvenCatalogue,
+  BrainProvenIdea,
 } from './brain.types';
 
 type Row = Record<string, unknown>;
@@ -51,6 +55,20 @@ function obj(value: unknown): Row | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Row)
     : null;
+}
+
+/** A JSONB column may arrive parsed or as its JSON text; accept both. Empty objects count as none. */
+function record(value: unknown): Row | null {
+  let v = value;
+  if (typeof v === 'string') {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  const o = obj(v);
+  return o && Object.keys(o).length ? o : null;
 }
 
 /** `pain_point` → `pain point`. Lowercase: these land mid-sentence. */
@@ -94,6 +112,12 @@ const ATTRIBUTE_LABEL: Record<string, string> = {
   age_band: 'age group',
   audience_strategy: 'audience',
   advantage_audience: "Meta's automatic audience",
+  placement: 'where ads show',
+  audience_kind: 'audience type',
+  kind: 'audience type',
+  price_point: 'price',
+  offer: 'offer',
+  campaign_type: 'campaign type',
 };
 
 export function attributeLabel(attribute: string | null): string {
@@ -145,6 +169,23 @@ const VALUE_LABEL: Record<string, string> = {
   advantage_plus: "Meta's automatic",
   automatic: 'automatic',
   manual: 'hand-picked',
+  warm: 'people who already know us',
+  custom: 'our own customer list',
+  launch: 'new launch',
+  new_launch: 'new launch',
+  test: 'test',
+  always_on: 'always-on',
+  evergreen: 'always-on',
+  seasonal: 'seasonal',
+  festival: 'festival',
+  feed: 'feeds',
+  feeds: 'feeds',
+  stories: 'Stories',
+  story: 'Stories',
+  discount: 'a discount',
+  bundle: 'a bundle',
+  free_trial: 'a free trial',
+  none: 'no offer',
 };
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -179,7 +220,17 @@ export function valueLabel(attribute: string | null, value: unknown): string {
     if (key === 'false' || key === 'off' || key === '0') return 'off';
   }
 
-  if (attribute === 'placement_mode' || key.includes('+')) {
+  if (attribute === 'price_point' || attribute === 'price') {
+    const n = Number(key.replace(/^(?:inr|rs\.?|₹)\s*/i, ''));
+    if (Number.isFinite(n) && n > 0)
+      return `₹${Math.round(n).toLocaleString('en-IN')}`;
+  }
+
+  if (
+    attribute === 'placement_mode' ||
+    attribute === 'placement' ||
+    key.includes('+')
+  ) {
     const parts = key
       .split(/[+,]/)
       .map((p) => p.trim())
@@ -293,6 +344,23 @@ export function statusMeta(status: string | null): {
 
 /* ── The claim ──────────────────────────────────────────────────────────── */
 
+/** "People similar to past buyers" for an audience kind, else the humanised value. */
+function audienceKindPhrase(value: unknown, fallback: string): string {
+  const key = String(value ?? '')
+    .trim()
+    .toLowerCase();
+  const phrase: Record<string, string> = {
+    lookalike: 'people similar to past buyers',
+    interest: 'people with matching interests',
+    interests: 'people with matching interests',
+    retargeting: 'people who already visited',
+    warm: 'people who already know us',
+    custom: 'our own customer list',
+    broad: 'a broad audience',
+  };
+  return phrase[key] ?? `a ${fallback} audience`;
+}
+
 /** The subject of the sentence: "Ads that open with a question", "Showing ads in all placements". */
 function subjectFor(attribute: string | null, value: unknown): string {
   const v = valueLabel(attribute, value);
@@ -310,7 +378,19 @@ function subjectFor(attribute: string | null, value: unknown): string {
     case 'track':
       return `Ads in the ${v} creative style`;
     case 'placement_mode':
+    case 'placement':
       return `Showing ads in ${v}`;
+    case 'audience_kind':
+    case 'kind':
+      return `Ad sets aimed at ${audienceKindPhrase(value, v)}`;
+    case 'price_point':
+      return `Selling at ${v}`;
+    case 'offer':
+      return v === 'no offer'
+        ? 'Running without an offer'
+        : `Leading with ${v}`;
+    case 'campaign_type':
+      return `Running it as a ${v} campaign`;
     case 'device_targeting':
       return `Showing ads on ${v} devices`;
     case 'gender_targeting':
@@ -451,9 +531,14 @@ export function renderProgress(
 ): BrainExperimentProgress {
   const level = str(row.level) ?? 'creative';
   const defaults = DEFAULT_FLOORS[level] ?? DEFAULT_FLOORS.creative;
-  const floors = obj(row.floors) ?? {};
   const withSide = obj(perf?.with) ?? {};
   const judgement = obj(perf?.judgement);
+  // The row's own floors first (a hypothesis may be opened with stricter ones), then the floors
+  // the judge actually applied, and the level default only when neither says.
+  const own = record(row.floors) ?? {};
+  const judged = record(judgement?.floors) ?? {};
+  const floor = (key: string): number | null =>
+    num(own[key]) ?? num(judged[key]);
 
   const horizon = num(row.horizon_days) ?? defaults.horizon_days;
   const activated = str(row.activated_at);
@@ -470,9 +555,9 @@ export function renderProgress(
   const status = str(row.status);
   return {
     spentInr: Math.round(num(withSide.spend) ?? 0),
-    neededInr: num(floors.min_spend_inr) ?? defaults.min_spend_inr,
+    neededInr: floor('min_spend_inr') ?? defaults.min_spend_inr,
     impressions: Math.round(num(withSide.impressions) ?? 0),
-    neededImpressions: num(floors.min_impressions) ?? defaults.min_impressions,
+    neededImpressions: floor('min_impressions') ?? defaults.min_impressions,
     daysLeft,
     note:
       status === 'proposed'
@@ -638,6 +723,8 @@ export interface ExperimentContext {
   names: Map<string, string>;
   /** hypothesis id → its perf_by_hypothesis row (testing only). */
   perf?: Map<string, Row>;
+  /** hypothesis id → row, for "what changed from its parent" when a row has no `delta_from`. */
+  parents?: Map<string, Row>;
   now?: Date;
 }
 
@@ -677,6 +764,8 @@ export function mapExperiment(
     result: ctx.view === 'testing' ? null : renderResult(row),
     since: humanDate(sinceAt, now),
     sinceAt,
+    change: renderChange(row, parentOf(row, ctx.parents)),
+    carriedBy: carriedBy(row),
   };
 }
 
@@ -749,4 +838,269 @@ export function stripInternalIds(text: string): string {
     .replace(/[ \t]+([,.;:)])/g, '$1')
     .replace(/^[ \t]+|[ \t]+$/gm, '')
     .trim();
+}
+
+/* ── Links, parents, bets ───────────────────────────────────────────────── */
+
+export interface HypothesisLink {
+  kind: string;
+  id: string;
+}
+
+/**
+ * A hypothesis's links, in either shape the brain sends: full rows carry
+ * `[{target_kind, target_id}]`, compact rows `"kind:id"` strings.
+ */
+export function parseLinks(value: unknown): HypothesisLink[] {
+  let v = value;
+  if (typeof v === 'string') {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(v)) return [];
+  const out: HypothesisLink[] = [];
+  for (const entry of v) {
+    if (typeof entry === 'string') {
+      const at = entry.indexOf(':');
+      if (at > 0 && at < entry.length - 1) {
+        out.push({ kind: entry.slice(0, at), id: entry.slice(at + 1) });
+      }
+      continue;
+    }
+    const o = obj(entry);
+    const kind = str(o?.target_kind) ?? str(o?.kind);
+    const raw = o?.target_id ?? o?.id;
+    const id = raw === null || raw === undefined ? null : String(raw).trim();
+    if (kind && id) out.push({ kind, id });
+  }
+  return out;
+}
+
+/** The ids of one kind this row is attached to: its links plus its own scope column. */
+export function linkedIds(row: Row, kind: string): Set<string> {
+  const ids = new Set(
+    parseLinks(row.links)
+      .filter((l) => l.kind === kind)
+      .map((l) => l.id),
+  );
+  const column: Record<string, string> = {
+    creative: 'creative_key',
+    adset: 'adset_id',
+    campaign: 'meta_campaign_id',
+    pipeline_run: 'pipeline_run_id',
+    decision: 'decision_id',
+  };
+  const own = column[kind] ? row[column[kind]] : null;
+  if (own !== null && own !== undefined && String(own).trim()) {
+    ids.add(String(own).trim());
+  }
+  return ids;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "Carried by 3 ads, 2 ad sets and 1 live campaign." — counts only, never an id. */
+export function carriedBy(row: Row): BrainBetCarriers | null {
+  const ads = linkedIds(row, 'creative').size;
+  const adSets = linkedIds(row, 'adset').size;
+  const campaigns = linkedIds(row, 'campaign').size;
+  if (!ads && !adSets && !campaigns) return null;
+  const parts = [
+    ads ? plural(ads, 'ad', 'ads') : null,
+    adSets ? plural(adSets, 'ad set', 'ad sets') : null,
+    campaigns ? plural(campaigns, 'live campaign', 'live campaigns') : null,
+  ].filter((p): p is string => p !== null);
+  return {
+    ads,
+    adSets,
+    campaigns,
+    sentence: `Carried by ${listWords(parts)}.`,
+  };
+}
+
+function parentOf(row: Row, parents?: Map<string, Row>): Row | null {
+  const pid = row.parent_hypothesis_id;
+  if (pid === null || pid === undefined || !parents) return null;
+  return parents.get(String(pid)) ?? null;
+}
+
+/**
+ * What a new twist changes from the idea it builds on. `delta_from` ({attribute, from_value,
+ * to_value}) is the brain's own record; the parent row is the fallback. Null for a row that
+ * builds on nothing.
+ */
+export function renderChange(row: Row, parent: Row | null): string | null {
+  const delta = record(row.delta_from);
+  if (delta) {
+    const attribute = str(delta.attribute) ?? str(row.attribute);
+    const from = delta.from_value ?? delta.from;
+    const to = delta.to_value ?? delta.to ?? row.value;
+    const hasFrom = from !== null && from !== undefined && String(from).trim();
+    return hasFrom
+      ? `Keeps the proven idea but changes the ${attributeLabel(attribute)} from ${valueLabel(attribute, from)} to ${valueLabel(attribute, to)}.`
+      : `Keeps the proven idea but sets the ${attributeLabel(attribute)} to ${valueLabel(attribute, to)}.`;
+  }
+  const hasParent =
+    row.parent_hypothesis_id !== null && row.parent_hypothesis_id !== undefined;
+  if (!hasParent) return null;
+  const attribute = str(row.attribute);
+  if (parent && str(parent.attribute)) {
+    const pAttr = str(parent.attribute);
+    if (pAttr === attribute && String(parent.value) !== String(row.value)) {
+      return `Keeps the proven idea but changes the ${attributeLabel(attribute)} from ${valueLabel(attribute, parent.value)} to ${valueLabel(attribute, row.value)}.`;
+    }
+    return `Builds on “${subjectFor(pAttr, parent.value)}” and sets the ${attributeLabel(attribute)} to ${valueLabel(attribute, row.value)}.`;
+  }
+  return `Builds on an idea that worked before and sets the ${attributeLabel(attribute)} to ${valueLabel(attribute, row.value)}.`;
+}
+
+/** A hypothesis row → the bet shown beside whatever tests it. Null for a row with no claim. */
+export function mapBet(
+  row: Row,
+  ctx: { names: Map<string, string>; parents?: Map<string, Row> },
+): BrainBet | null {
+  const id = row.id === null || row.id === undefined ? null : String(row.id);
+  if (!id || !str(row.attribute)) return null;
+  const slug = str(row.offering_slug);
+  const status = str(row.status);
+  const kind = str(row.kind);
+  const meta = statusMeta(status);
+  return {
+    ref: `exp-${id}`,
+    claim: renderClaim(row),
+    kind:
+      kind === 'proven' || kind === 'variant' || kind === 'seed'
+        ? kind
+        : 'other',
+    kindLabel: kindLabel(kind),
+    levelLabel: levelLabel(str(row.level)),
+    statusLabel: meta.label,
+    statusMeaning: meta.meaning,
+    tone: meta.tone,
+    product: slug ? (ctx.names.get(slug) ?? capitalise(words(slug))) : null,
+    change: renderChange(row, parentOf(row, ctx.parents)),
+    carriedBy: carriedBy(row),
+    result: renderResult(row),
+  };
+}
+
+/** Rows → bets, de-duplicated by id and newest first, each row's parent looked up among them. */
+export function mapBets(rows: Row[], names: Map<string, string>): BrainBet[] {
+  const byId = new Map<string, Row>();
+  for (const row of rows) {
+    if (row.id === null || row.id === undefined) continue;
+    const key = String(row.id);
+    // A full row beats a compact one for the same id.
+    const prev = byId.get(key);
+    if (!prev || Object.keys(row).length > Object.keys(prev).length) {
+      byId.set(key, row);
+    }
+  }
+  return [...byId.values()]
+    .sort((a, b) => Number(b.id) - Number(a.id))
+    .map((row) => mapBet(row, { names, parents: byId }))
+    .filter((b): b is BrainBet => b !== null);
+}
+
+/* ── The proven catalogue ───────────────────────────────────────────────── */
+
+export function mapProvenIdea(
+  row: Row,
+  names: Map<string, string>,
+  refuted = false,
+): BrainProvenIdea | null {
+  const attribute = str(row.attribute);
+  if (!attribute) return null;
+  const slug = str(row.offering_slug);
+  const confirmations = num(row.confirmations) ?? 0;
+  const refutations = num(row.refutations) ?? 0;
+  const tier = str(row.tier);
+  const key =
+    str(row.catalogue_key) ??
+    [slug ?? 'all', str(row.level) ?? '', attribute, String(row.value)].join(
+      '|',
+    );
+  const tierLabel = refuted
+    ? "Didn't work"
+    : tier === 'proven'
+      ? 'Proven'
+      : 'Promising';
+  const evidence = refuted
+    ? `Failed in ${plural(refutations, 'test', 'tests')} — not worth retrying.`
+    : `Worked in ${plural(confirmations, 'test', 'tests')}${refutations ? `, failed in ${refutations}` : ''}.`;
+  return {
+    ref: `idea-${key}`,
+    productKey: slug,
+    product: slug ? (names.get(slug) ?? capitalise(words(slug))) : null,
+    levelLabel: levelLabel(str(row.level)),
+    idea: `${subjectFor(attribute, row.value)}.`,
+    tierLabel,
+    tone: refuted ? 'bad' : tier === 'proven' ? 'good' : 'progress',
+    evidence,
+    confirmations,
+    refutations,
+  };
+}
+
+export function mapProvenCatalogue(
+  read: Row | null,
+  names: Map<string, string>,
+): BrainProvenCatalogue {
+  const rows = Array.isArray(read?.rows) ? (read.rows as unknown[]) : [];
+  const refuted = Array.isArray(read?.refuted)
+    ? (read.refuted as unknown[])
+    : [];
+  const proven = rows
+    .map((r) => obj(r))
+    .filter((r): r is Row => r !== null)
+    .map((r) => mapProvenIdea(r, names))
+    .filter((r): r is BrainProvenIdea => r !== null);
+  return {
+    proven,
+    refuted: refuted
+      .map((r) => obj(r))
+      .filter((r): r is Row => r !== null)
+      .map((r) => mapProvenIdea(r, names, true))
+      .filter((r): r is BrainProvenIdea => r !== null),
+    empty: proven.length === 0,
+    truncated: read?.truncated === true,
+  };
+}
+
+/** A decision's `expected_outcome` (JSONB, free-form) as one sentence, or null. */
+export function expectedSentence(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const parsed = record(value);
+    if (!parsed) return stripInternalIds(value) || null;
+    return expectedSentence(parsed);
+  }
+  const o = obj(value);
+  if (!o) return null;
+  for (const key of [
+    'summary',
+    'statement',
+    'text',
+    'description',
+    'expectation',
+    'expected',
+  ]) {
+    const text = str(o[key]);
+    if (text) return stripInternalIds(text) || null;
+  }
+  const metric = str(o.metric);
+  const target = num(o.target) ?? num(o.value) ?? num(o.threshold);
+  if (metric && target !== null) {
+    const dir = str(o.direction);
+    const verb =
+      dir === 'down' || dir === 'below' || dir === 'worse'
+        ? 'at most'
+        : 'at least';
+    return `Expected ${metricLabel(metric)} of ${verb} ${formatRate(metric, target)}.`;
+  }
+  return null;
 }

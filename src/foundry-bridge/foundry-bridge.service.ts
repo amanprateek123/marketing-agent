@@ -30,12 +30,25 @@ import { CreativeImageService } from './creative-image.service';
 import {
   VIEW_STATUSES,
   dayLabel,
+  expectedSentence,
+  linkedIds,
+  mapBets,
   mapExperiment,
+  mapProvenCatalogue,
   summariseExperiments,
 } from './experiments.mapper';
-import { buildPlanView, planHeadline } from './plan-gate.mapper';
+import {
+  buildPlanView,
+  planDecisionIds,
+  planHeadline,
+} from './plan-gate.mapper';
 import type {
   BrainAgent,
+  BrainBet,
+  BrainCampaignBets,
+  BrainDecisionBets,
+  BrainExperimentPage,
+  BrainProvenCatalogue,
   BrainCampaignCreative,
   BrainCampaignRun,
   BrainCampaignRunSummary,
@@ -780,6 +793,35 @@ export class FoundryBridgeService {
       gates.push(gate);
     }
 
+    // A build / launch / scale gate shows what the run it releases is testing, and says which
+    // product it is for instead of a run number.
+    const spendGates = gates.filter(
+      (g) => g.spendGate && g.spendGate !== 'plan' && g.pipelineRunId,
+    );
+    if (spendGates.length) {
+      const names = await this.offeringNames();
+      await Promise.all(
+        spendGates.map(async (gate) => {
+          const runId = Number(gate.pipelineRunId);
+          if (!Number.isInteger(runId) || runId <= 0) return;
+          const rows = await this.betRowsFor({ pipeline_run_id: runId });
+          gate.bets = mapBets(rows, names).filter((b) => b.tone !== 'idle');
+          const slug =
+            gate.product ??
+            (rows.find((r) => typeof r.offering_slug === 'string')
+              ?.offering_slug as string | undefined) ??
+            null;
+          const productName = slug ? (names.get(slug) ?? null) : null;
+          if (productName) {
+            gate.title = `${humanizeKey(gate.spendGate ?? 'launch')} approval — ${productName}`;
+            if (gate.payload.kind === 'campaign_launch') {
+              gate.payload.campaign.name = productName;
+            }
+          }
+        }),
+      );
+    }
+
     // A plan gate carries its day plan as facts read from the brain. planViewFor never throws: a
     // failed read degrades to `structured: false` with the cleaned text, not to a missing gate.
     if (planRows.size) {
@@ -900,8 +942,34 @@ export class FoundryBridgeService {
         }),
       ),
     );
+    // The runs this gate releases carry their own bets (an audience bet names the run, not the
+    // decision), so each is read by pipeline_run_id too.
+    const owned = planDecisionIds(row, dailyPlan);
+    const runIds = rowsOf(runsRead)
+      .filter(
+        (r) =>
+          owned === null ||
+          (r.decision_id !== null &&
+            r.decision_id !== undefined &&
+            owned.has(String(r.decision_id))),
+      )
+      .map((r) => Number(r.id))
+      .filter((n) => Number.isInteger(n) && n > 0)
+      .slice(0, 10);
+    const runReads = await Promise.all(
+      runIds.map((pipeline_run_id) =>
+        this.brain.tryCall<{ rows?: unknown[] }>('hypotheses_read', {
+          pipeline_run_id,
+          compact: false,
+          limit: 40,
+        }),
+      ),
+    );
     const seen = new Set<string>();
-    const hypotheses = hypothesisReads.flatMap(rowsOf).filter((h) => {
+    const hypotheses = [
+      ...hypothesisReads.flatMap(rowsOf),
+      ...runReads.flatMap(rowsOf),
+    ].filter((h) => {
       const id = String(h.id);
       if (seen.has(id)) return false;
       seen.add(id);
@@ -928,7 +996,7 @@ export class FoundryBridgeService {
       kind: isPlan ? 'plan_approval' : 'campaign_launch',
       title: isPlan
         ? `Day plan${planDate ? ` for ${dayLabel(planDate) ?? planDate}` : ''}`
-        : `${humanizeKey(gate)} gate — run ${row.pipeline_run_id ?? '?'}`,
+        : `${humanizeKey(gate)} approval`,
       summary,
       askedBy: 'Brain',
       askedAt:
@@ -970,10 +1038,9 @@ export class FoundryBridgeService {
         : {
             kind: 'campaign_launch',
             campaign: {
-              name:
-                typeof row.creative_key === 'string'
-                  ? row.creative_key
-                  : `Run ${row.pipeline_run_id ?? '?'}`,
+              // Replaced by the product's name once the gate list is assembled; an id is never
+              // the campaign's name.
+              name: 'This campaign',
               objective: humanizeKey(gate),
               dailyBudget:
                 typeof row.amount_override_inr === 'number'
@@ -1413,26 +1480,41 @@ export class FoundryBridgeService {
     view: BrainExperimentView,
     product?: string | null,
   ): Promise<BrainExperiment[]> {
+    return (await this.getExperimentPage(view, product)).experiments;
+  }
+
+  /**
+   * One shelf, and whether it is all of it. The brain cuts every answer to ~16KB (about 12 full
+   * rows), so a busy status is re-read one LEVEL at a time: five smaller reads that each fit, and
+   * `truncated` stays true only when one level alone still overflows.
+   */
+  async getExperimentPage(
+    view: BrainExperimentView,
+    product?: string | null,
+  ): Promise<BrainExperimentPage> {
     this.assertBrain();
     try {
       const [reads, names] = await Promise.all([
         Promise.all(
           VIEW_STATUSES[view].map((status) =>
-            this.brain.call<{ rows?: unknown[] }>('hypotheses_read', {
+            this.readHypothesesDeep({
               statuses: [status],
               ...(product ? { offering_slug: product } : {}),
-              compact: false,
-              limit: 40,
             }),
           ),
         ),
         this.offeringNames(),
       ]);
+      const seen = new Set<string>();
       const rows = reads
-        .flatMap((read) => read.rows ?? [])
-        .filter(
-          (r): r is Record<string, unknown> => !!r && typeof r === 'object',
-        );
+        .flatMap((read) => read.rows)
+        .filter((r) => {
+          const id = String(r.id);
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+      const parents = new Map(rows.map((r) => [String(r.id), r]));
 
       const perf = new Map<string, Record<string, unknown>>();
       if (view === 'testing') {
@@ -1464,10 +1546,194 @@ export class FoundryBridgeService {
       }
 
       const now = new Date();
-      return rows
-        .map((row) => mapExperiment(row, { view, names, perf, now }))
-        .filter((e): e is BrainExperiment => e !== null)
-        .sort((a, b) => (b.sinceAt ?? '').localeCompare(a.sinceAt ?? ''));
+      return {
+        experiments: rows
+          .map((row) => mapExperiment(row, { view, names, perf, parents, now }))
+          .filter((e): e is BrainExperiment => e !== null)
+          .sort((a, b) => (b.sinceAt ?? '').localeCompare(a.sinceAt ?? '')),
+        truncated: reads.some((r) => r.truncated),
+      };
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /**
+   * hypotheses_read, full rows, with the envelope worked around: when the full read is cut short,
+   * a compact read of the same filter adds the rows that did not fit (compact rows carry the claim
+   * fields and links; their comparison wording falls back to the default). Throws like `call`.
+   */
+  private async readHypotheses(
+    args: Record<string, unknown>,
+    limit = 40,
+  ): Promise<{ rows: Record<string, unknown>[]; truncated: boolean }> {
+    const rowsOf = (read: { rows?: unknown[] } | null) =>
+      (read?.rows ?? []).filter(
+        (r): r is Record<string, unknown> => !!r && typeof r === 'object',
+      );
+    const full = await this.brain.call<{
+      rows?: unknown[];
+      truncated?: boolean;
+    }>('hypotheses_read', { ...args, compact: false, limit });
+    const rows = rowsOf(full);
+    if (full.truncated !== true) return { rows, truncated: false };
+    const compact = await this.brain.tryCall<{
+      rows?: unknown[];
+      truncated?: boolean;
+    }>('hypotheses_read', { ...args, compact: true, limit });
+    const have = new Set(rows.map((r) => String(r.id)));
+    for (const r of rowsOf(compact)) {
+      if (!have.has(String(r.id))) rows.push(r);
+    }
+    return { rows, truncated: compact ? compact.truncated === true : true };
+  }
+
+  /** readHypotheses, re-read per level when the whole filter does not fit in one answer. */
+  private async readHypothesesDeep(
+    args: Record<string, unknown>,
+  ): Promise<{ rows: Record<string, unknown>[]; truncated: boolean }> {
+    const first = await this.readHypotheses(args);
+    if (!first.truncated || args.level) return first;
+    const LEVELS = ['creative', 'audience', 'placement', 'campaign', 'product'];
+    const perLevel = await Promise.all(
+      LEVELS.map((level) => this.readHypotheses({ ...args, level })),
+    );
+    const seen = new Set<string>();
+    const rows = [...perLevel.flatMap((r) => r.rows), ...first.rows].filter(
+      (r) => {
+        const id = String(r.id);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      },
+    );
+    return { rows, truncated: perLevel.some((r) => r.truncated) };
+  }
+
+  /** Bets for a filter, never throwing: a failed read is no bets, not a broken page. */
+  private async betRowsFor(
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>[]> {
+    try {
+      return (await this.readHypotheses(args)).rows;
+    } catch {
+      return [];
+    }
+  }
+
+  /** What has worked before — the brain's proven catalogue, in words. */
+  async getProven(
+    product?: string | null,
+    level?: string | null,
+  ): Promise<BrainProvenCatalogue> {
+    this.assertBrain();
+    try {
+      const [read, names] = await Promise.all([
+        this.brain.call<Record<string, unknown>>('proven_catalogue', {
+          ...(product ? { offering_slug: product } : {}),
+          ...(level ? { level } : {}),
+          compact: true,
+          limit: 60,
+        }),
+        this.offeringNames(),
+      ]);
+      return mapProvenCatalogue(read, names);
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /**
+   * The bets on one live campaign, and the date before which the Monitor leaves them alone.
+   *
+   *   campaign_intent (meta_campaign_id)  → found?, the run that built it
+   *   hypotheses_read (meta_campaign_id)  → bets scoped to the campaign
+   *   hypotheses_read (pipeline_run_id)   → bets the run carries into it
+   *   monitor_thresholds                  → judge_from = "protected until"
+   */
+  async getCampaignBets(metaCampaignId: string): Promise<BrainCampaignBets> {
+    this.assertBrain();
+    const id = String(metaCampaignId).trim();
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      throw new BadRequestException('That is not a campaign reference.');
+    }
+    try {
+      const [intent, thresholds, names, byCampaign] = await Promise.all([
+        this.brain.tryCall<Record<string, unknown>>('campaign_intent', {
+          meta_campaign_id: id,
+        }),
+        this.brain.tryCall<Record<string, unknown>>('monitor_thresholds', {
+          meta_campaign_id: id,
+        }),
+        this.offeringNames(),
+        this.betRowsFor({ meta_campaign_id: id }),
+      ]);
+      const runId =
+        intent?.pipeline_run_id === null ||
+        intent?.pipeline_run_id === undefined
+          ? null
+          : Number(intent.pipeline_run_id);
+      const byRun =
+        runId && Number.isInteger(runId) && runId > 0
+          ? await this.betRowsFor({ pipeline_run_id: runId })
+          : [];
+      const bets = mapBets([...byCampaign, ...byRun], names);
+      const judgeFrom =
+        typeof thresholds?.judge_from === 'string'
+          ? thresholds.judge_from.slice(0, 10)
+          : null;
+      const hasActive = bets.some((b) => b.tone === 'progress');
+      const future =
+        judgeFrom !== null &&
+        judgeFrom >= new Date().toISOString().slice(0, 10);
+      const protectedUntil =
+        judgeFrom && hasActive && future ? dayLabel(judgeFrom) : null;
+      const found = intent ? intent.found !== false : bets.length > 0;
+      return {
+        found,
+        bets,
+        protectedUntil,
+        protectedUntilAt: protectedUntil ? judgeFrom : null,
+        note: !found
+          ? 'This campaign was not built by the Brain, so it is not testing any of its ideas.'
+          : protectedUntil
+            ? `The Brain will not pause the ads testing these ideas before ${protectedUntil}, unless they start losing money fast.`
+            : bets.length
+              ? null
+              : 'This campaign is not testing any ideas.',
+      };
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /** One decision's bets, and what it expected — opened when a person expands the decision. */
+  async getDecisionBets(decisionId: string): Promise<BrainDecisionBets> {
+    this.assertBrain();
+    const id = Number(decisionId);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new BadRequestException('That is not a decision reference.');
+    }
+    try {
+      const [rows, names, decision] = await Promise.all([
+        this.readHypotheses({ decision_id: id }).then((r) => r.rows),
+        this.offeringNames(),
+        this.brain.tryCall<{ rows?: unknown[] }>('brain_read', {
+          table: 'decisions',
+          where: { id },
+          limit: 1,
+        }),
+      ]);
+      const row = (decision?.rows ?? [])[0];
+      return {
+        expected:
+          row && typeof row === 'object'
+            ? expectedSentence(
+                (row as Record<string, unknown>).expected_outcome,
+              )
+            : null,
+        bets: mapBets(rows, names),
+      };
     } catch (err) {
       this.rethrow(err);
     }
@@ -1493,7 +1759,7 @@ export class FoundryBridgeService {
         (read.rows ?? []).filter(
           (r): r is Record<string, unknown> => !!r && typeof r === 'object',
         );
-      return summariseExperiments(
+      const summary = summariseExperiments(
         {
           testing: rowsOf(reads[0]),
           learned: rowsOf(reads[1]),
@@ -1502,6 +1768,27 @@ export class FoundryBridgeService {
         names,
         reads.some((r) => r.truncated === true),
       );
+      // "Learned this week": compact rows carry no judged_at, so the newest judged rows are read
+      // in full and counted by it. A failed read is null ("not known"), never 0.
+      const recent = await this.brain.tryCall<{
+        rows?: unknown[];
+        truncated?: boolean;
+      }>('hypotheses_read', {
+        statuses: VIEW_STATUSES.learned,
+        compact: false,
+        limit: 40,
+      });
+      if (recent) {
+        const weekAgo = Date.now() - 7 * 86_400_000;
+        summary.learnedThisWeek = rowsOf(recent).filter((r) => {
+          const at =
+            typeof r.judged_at === 'string' ? Date.parse(r.judged_at) : NaN;
+          return Number.isFinite(at) && at >= weekAgo;
+        }).length;
+      } else {
+        summary.learnedThisWeek = null;
+      }
+      return summary;
     } catch (err) {
       this.rethrow(err);
     }
@@ -1653,8 +1940,13 @@ export class FoundryBridgeService {
         throw new NotFoundException(`There is no campaign run ${runId}.`);
       }
 
-      const counts = await this.finalisedCountsByRun();
+      const [counts, hypotheses] = await Promise.all([
+        this.finalisedCountsByRun(),
+        this.betRowsFor({ pipeline_run_id: id }),
+      ]);
       const mapped = mapCampaignRun(row, {
+        hypotheses,
+        names,
         displayName: names.get(String(row.offering_slug)) ?? null,
         chosen: counts ? (counts.get(String(id)) ?? 0) : null,
         gateByStage,
@@ -1686,11 +1978,32 @@ export class FoundryBridgeService {
       throw new BadRequestException(`'${runId}' is not a campaign run id.`);
     }
     try {
-      const read = await this.brain.call<{ rows?: unknown[] }>('brain_read', {
-        table: 'creatives',
-        where: { pipeline_run_id: id },
-        limit: 200,
-      });
+      const [read, hypotheses, names] = await Promise.all([
+        this.brain.call<{ rows?: unknown[] }>('brain_read', {
+          table: 'creatives',
+          where: { pipeline_run_id: id },
+          limit: 200,
+        }),
+        this.betRowsFor({ pipeline_run_id: id }),
+        this.offeringNames(),
+      ]);
+      const bets = mapBets(hypotheses, names);
+      const betByRef = new Map(bets.map((b) => [b.ref, b]));
+      // A creative's bet: its own hypothesis_id, else a creative-level hypothesis linked to it.
+      const betFor = (row: Record<string, unknown>): BrainBet | null => {
+        const hid = row.hypothesis_id;
+        if (hid !== null && hid !== undefined) {
+          const hit = betByRef.get(`exp-${String(hid)}`);
+          if (hit) return hit;
+        }
+        const key =
+          typeof row.creative_key === 'string' ? row.creative_key : null;
+        if (!key) return null;
+        const h = hypotheses.find(
+          (x) => x.level === 'creative' && linkedIds(x, 'creative').has(key),
+        );
+        return h ? (betByRef.get(`exp-${String(h.id)}`) ?? null) : null;
+      };
       const finalised = (read.rows ?? [])
         .filter(
           (raw): raw is Record<string, unknown> =>
@@ -1726,7 +2039,7 @@ export class FoundryBridgeService {
                 imageUrl = null;
               }
             }
-            return mapCampaignCreative(row, imageUrl);
+            return mapCampaignCreative(row, imageUrl, betFor(row));
           }),
         )
       ).filter((c): c is BrainCampaignCreative => c !== null);

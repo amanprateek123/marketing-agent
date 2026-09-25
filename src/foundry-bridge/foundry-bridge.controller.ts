@@ -23,6 +23,10 @@ import type {
   BrainEventPage,
   BrainExperiment,
   BrainExperimentSummary,
+  BrainExperimentPage,
+  BrainProvenCatalogue,
+  BrainCampaignBets,
+  BrainDecisionBets,
   BrainGate,
   BrainGateDecisionResult,
   BrainPipelineRun,
@@ -102,11 +106,56 @@ export class FoundryBridgeController {
     @Param('tenantId') _tenantId: string,
     @Query('view') view?: string,
     @Query('product') product?: string,
-  ): Promise<BrainExperiment[]> {
-    return this.bridge.getExperiments(
-      isExperimentView(view) ? view : 'testing',
+    @Query('paged') paged?: string,
+  ): Promise<BrainExperiment[] | BrainExperimentPage> {
+    const shelf = isExperimentView(view) ? view : 'testing';
+    const scope = product && product.trim() ? product.trim() : null;
+    // `paged=1` returns {experiments, truncated} so the page can say when the list is only the
+    // newest part; without it the bare array older consoles expect.
+    if (paged === '1' || paged === 'true') {
+      return this.bridge.getExperimentPage(shelf, scope);
+    }
+    return this.bridge.getExperiments(shelf, scope);
+  }
+
+  /**
+   * GET /api/v1/brain/:tenantId/proven?product=<productKey>&level=<level>
+   *
+   * The proven catalogue — ideas that have worked before (proven / promising) and the ones that
+   * only ever failed — in words. Built from accepted learnings and confirmed tests.
+   */
+  @Get(':tenantId/proven')
+  async proven(
+    @Param('tenantId') _tenantId: string,
+    @Query('product') product?: string,
+    @Query('level') level?: string,
+  ): Promise<BrainProvenCatalogue> {
+    const LEVELS = ['creative', 'audience', 'placement', 'campaign', 'product'];
+    return this.bridge.getProven(
       product && product.trim() ? product.trim() : null,
+      level && LEVELS.includes(level) ? level : null,
     );
+  }
+
+  /**
+   * GET /api/v1/brain/:tenantId/campaigns/:metaCampaignId/bets — the ideas a live campaign is
+   * testing and the date before which the Brain leaves them running.
+   */
+  @Get(':tenantId/campaigns/:metaCampaignId/bets')
+  async campaignBets(
+    @Param('tenantId') _tenantId: string,
+    @Param('metaCampaignId') metaCampaignId: string,
+  ): Promise<BrainCampaignBets> {
+    return this.bridge.getCampaignBets(metaCampaignId);
+  }
+
+  /** GET /api/v1/brain/:tenantId/decisions/:decisionId/bets — what one decision is testing. */
+  @Get(':tenantId/decisions/:decisionId/bets')
+  async decisionBets(
+    @Param('tenantId') _tenantId: string,
+    @Param('decisionId') decisionId: string,
+  ): Promise<BrainDecisionBets> {
+    return this.bridge.getDecisionBets(decisionId);
   }
 
   /**
