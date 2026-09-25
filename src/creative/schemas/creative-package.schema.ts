@@ -51,6 +51,18 @@ export interface ImageCreative {
   // human-made asset, so the resizer may still use it as an extend source,
   // and its aspectRatio is what the uploader tagged rather than a measurement.
   uploadedSizeOf?: string;
+  // Every imageUrl this variant has previously carried, oldest first, pushed
+  // whenever a Rewrite or a Retry replaces the image in place.
+  //
+  // Those two actions overwrite `imageUrl` on the SAME entry — that is what
+  // makes them different from a pipeline revise, which lands as a new package
+  // — and until this existed the previous image was simply gone: no history,
+  // no undo, and nothing in the UI to say a result had been discarded. A
+  // rewrite someone dislikes is exactly when the old one is wanted back.
+  //
+  // URLs only. The assets already live in S3 and are not deleted by the
+  // overwrite, so keeping the pointer is enough to show and restore them.
+  previousImageUrls?: string[];
   // Soft-delete, reversible — never read by campaign launch code, so a
   // rejected-but-still-referenced-by-a-campaign asset stays fully launchable.
   // GalleryService's live-resolve join skips rejected assets, so this alone

@@ -1006,6 +1006,25 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
     return { status: 'started', creativePackageId, message: 'Video prompt regeneration started. Poll GET /packages/:id for result.' };
   }
 
+
+  /**
+   * The `previousImageUrls` history for an entry about to be overwritten in place.
+   *
+   * Rewrite, Retry and Edit all replace `imageUrl` on the SAME entry — that is what distinguishes
+   * them from a pipeline revise, which lands as a new package. Without this the replaced image is
+   * unrecoverable the instant the new one arrives, which is exactly when someone wants it back.
+   * URLs only: the S3 objects are not deleted by the overwrite.
+   */
+  private withHistory(
+    entry: { imageUrl?: string; previousImageUrls?: string[] } | undefined,
+    nextUrl: string,
+  ): string[] {
+    const history = [...(entry?.previousImageUrls ?? [])];
+    const replaced = entry?.imageUrl;
+    if (replaced && replaced !== nextUrl && !history.includes(replaced)) history.push(replaced);
+    return history;
+  }
+
   /**
    * POST /api/v1/creative/:tenantId/packages/:creativePackageId/regenerate-image-prompt
    * Re-generate the image prompt from scratch using the brief data + new direct response specs.
@@ -1140,7 +1159,8 @@ Return ONLY the image prompt, nothing else.
             const resolvedAspectRatio = existingEntry?.aspectRatio ?? body.aspectRatio;
             // Fresh generation — new base image, so any prior edit chain no longer applies.
             if (existingIdx >= 0) {
-              images[existingIdx] = { variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, originalImageUrl: imageResult.imageUrl, editInstructions: [], aspectRatio: resolvedAspectRatio, resolution };
+              const history = this.withHistory(images[existingIdx], imageResult.imageUrl);
+              images[existingIdx] = { variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, originalImageUrl: imageResult.imageUrl, editInstructions: [], aspectRatio: resolvedAspectRatio, resolution, previousImageUrls: history };
             } else {
               images.push({ variantIndex: i, imagePrompt: newImagePrompt, imageUrl: imageResult.imageUrl, originalImageUrl: imageResult.imageUrl, editInstructions: [], aspectRatio: resolvedAspectRatio, resolution });
             }
@@ -1271,7 +1291,7 @@ Return ONLY the image prompt, nothing else.
         const updatedImages = [...images];
         const idx = updatedImages.indexOf(imageEntry);
         // Fresh generation — new base image, so any prior edit chain no longer applies.
-        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, originalImageUrl: result.imageUrl, editInstructions: [], aspectRatio, resolution };
+        if (idx >= 0) updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, originalImageUrl: result.imageUrl, editInstructions: [], aspectRatio, resolution, previousImageUrls: this.withHistory(updatedImages[idx], result.imageUrl) };
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
           { $set: { images: updatedImages } },
@@ -1334,7 +1354,7 @@ Return ONLY the image prompt, nothing else.
         const updatedImages = [...images];
         const idx = updatedImages.indexOf(imageEntry);
         if (idx >= 0) {
-          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, originalImageUrl, editInstructions: allInstructions, aspectRatio, resolution };
+          updatedImages[idx] = { ...updatedImages[idx], imageUrl: result.imageUrl, originalImageUrl, editInstructions: allInstructions, aspectRatio, resolution, previousImageUrls: this.withHistory(updatedImages[idx], result.imageUrl) };
         }
         await this.creativePackageModel.updateOne(
           { _id: creativePackageId, tenantId },
