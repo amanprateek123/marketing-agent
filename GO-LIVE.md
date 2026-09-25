@@ -27,7 +27,9 @@ the dashboard being deployed; the deploy is what gives *you* the controls instea
 ## What is left, in order (2026-09-24)
 
 1. **`marketing-agent/.env`: add the brain env block** from Track 1, Step 2 (`BRAIN_MCP_URL`,
-   `BRAIN_MCP_BEARER_TOKEN`, `BRAIN_APPROVAL_ACTOR_SLACK_ID`, and the Foundry run/builder values).
+   `BRAIN_MCP_BEARER_TOKEN`, `BRAIN_APPROVAL_ACTOR_SLACK_ID`, `BRAIN_AUTH_USERNAME`,
+   `BRAIN_AUTH_PASSWORD`, and the Foundry run/builder values). Without `BRAIN_AUTH_*` the Brain
+   console answers 503 — the shared login can no longer open it.
 2. **Mint a new dashboard `FOUNDRY_RUN_TOKEN` that grants Brain v2
    `agt_01a08a637be471038bba2efa34cb8c92`** (plus the six on-demand agents it already has). Grants
    are fixed at mint, so the current token cannot be edited to add it. Put it in
@@ -89,6 +91,15 @@ FOUNDRY_RUN_TIMEOUT_MS=60000
 BRAIN_MCP_URL=https://creative.91wheels.com/brain-mcp
 BRAIN_MCP_BEARER_TOKEN=<copy, do not mint>
 BRAIN_MCP_TIMEOUT_MS=30000
+
+# --- The Brain login -------------------------------------------------------------
+# A SEPARATE username/password (owner supplies the values; never commit them). It is
+# the ONLY login that can open /api/v1/brain/*; the shared AUTH_EMAIL login gets 403.
+# UNSET => every Brain route returns 503 "Brain login not configured".
+# Gate decisions are recorded as principal dash:brain:<username> (decided_by_principal)
+# alongside the Slack id below, which the brain still requires until migration 049.
+BRAIN_AUTH_USERNAME=<owner supplies>
+BRAIN_AUTH_PASSWORD=<owner supplies>
 
 # --- Who a console gate decision is recorded as ----------------------------------
 # NOT a token. The brain enforces APPROVAL_SLACK_IDS inside approval_record, in SQL,

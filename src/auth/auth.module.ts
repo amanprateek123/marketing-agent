@@ -6,6 +6,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { RolesGuard } from './roles';
 
 @Module({
   imports: [
@@ -40,6 +41,8 @@ import { JwtAuthGuard } from './jwt-auth.guard';
     // bearer token unless explicitly @Public(). Registering it here (rather
     // than in AppModule) keeps all auth wiring in one module.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    // Registered after JwtAuthGuard so it sees `req.user`. Inert on routes without @Roles().
+    { provide: APP_GUARD, useClass: RolesGuard },
   ],
 })
 export class AuthModule {}

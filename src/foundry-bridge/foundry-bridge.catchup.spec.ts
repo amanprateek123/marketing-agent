@@ -307,3 +307,25 @@ describe('budget_authority', () => {
     expect(run?.budgetAuthority).toBeNull();
   });
 });
+
+describe('gate decisions carry the Brain login principal', () => {
+  it('sends the principal and display name, and still the Slack id until migration 049', async () => {
+    const { service, brain } = makeService({
+      approval_record: { recorded: true },
+    });
+    await service.decideGate(
+      'approval:9',
+      { action: 'reject', note: 'no' },
+      { principal: 'dash:brain:owner', displayName: 'owner' },
+    );
+    expect(
+      brain.calls.find((c) => c.tool === 'approval_record')?.args,
+    ).toMatchObject({
+      id: 9,
+      decision: 'rejected',
+      decided_by_slack_id: 'U_TEST',
+      decided_by_name: 'owner',
+      decided_by_principal: 'dash:brain:owner',
+    });
+  });
+});
