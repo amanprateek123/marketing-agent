@@ -7,6 +7,10 @@ export default () => ({
     email: process.env.AUTH_EMAIL ?? '',
     password: process.env.AUTH_PASSWORD ?? '',
     jwtSecret: process.env.AUTH_JWT_SECRET ?? '',
+    // The separate Brain login (role `brain`) — the only principal that can see or act on the
+    // Brain. Unset => every /api/v1/brain/* route answers 503, never open.
+    brainUsername: process.env.BRAIN_AUTH_USERNAME ?? '',
+    brainPassword: process.env.BRAIN_AUTH_PASSWORD ?? '',
     // How long an issued token stays valid, in seconds. Plain seconds (not
     // a '7d'-style string) to avoid @nestjs/jwt's stricter expiresIn type
     // and keep the env value unambiguous. Default 604800 = 7 days —
@@ -51,7 +55,8 @@ export default () => ({
      * into a manual campaign (campaigns/new/page.tsx), which would bake an
      * expiring link into a live Meta ad.
      */
-    signMediaUrls: (process.env.S3_SIGN_MEDIA_URLS ?? '').toLowerCase() === 'true',
+    signMediaUrls:
+      (process.env.S3_SIGN_MEDIA_URLS ?? '').toLowerCase() === 'true',
   },
   google: {
     aiApiKey: process.env.GOOGLE_AI_API_KEY ?? '',
@@ -154,11 +159,15 @@ export default () => ({
    */
   creativeImages: {
     region:
-      process.env.CREATIVE_IMAGE_REGION ?? process.env.AWS_REGION ?? 'ap-south-1',
-    primaryBucket: process.env.CREATIVE_IMAGE_PRIMARY_BUCKET ?? '91w-marketing-auto',
+      process.env.CREATIVE_IMAGE_REGION ??
+      process.env.AWS_REGION ??
+      'ap-south-1',
+    primaryBucket:
+      process.env.CREATIVE_IMAGE_PRIMARY_BUCKET ?? '91w-marketing-auto',
     primaryAccessKeyId: process.env.AWS_ACCESS_KEY_ID ?? '',
     primarySecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? '',
-    astroBucket: process.env.CREATIVE_IMAGE_ASTRO_BUCKET ?? '91astrology-common',
+    astroBucket:
+      process.env.CREATIVE_IMAGE_ASTRO_BUCKET ?? '91astrology-common',
     // The ONLY prefix inside the astro bucket that is world-readable. Outside it the bucket
     // returns AccessDenied, so bucket alone is not a permissions answer.
     publicPrefix:

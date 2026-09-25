@@ -83,6 +83,12 @@ import type {
  * blanks the console, because "could not read" and "there is nothing" are different facts and the
  * console draws them differently.
  */
+/** Who decided a gate in the console: the Brain login's principal (`dash:brain:<username>`). */
+export interface GateDecisionActor {
+  principal: string;
+  displayName: string;
+}
+
 @Injectable()
 export class FoundryBridgeService {
   private readonly logger = new Logger(FoundryBridgeService.name);
@@ -1013,6 +1019,7 @@ export class FoundryBridgeService {
   async decideGate(
     gateId: string,
     body: BrainGateDecisionBody,
+    actor?: GateDecisionActor,
   ): Promise<BrainGateDecisionResult> {
     this.assertBrain();
     if (gateId === 'ideas:proposed') return this.decideIdeas(body);
@@ -1041,8 +1048,14 @@ export class FoundryBridgeService {
         {
           id,
           decision: body.action === 'approve' ? 'approved' : 'rejected',
+          // Still required by the brain's APPROVAL_SLACK_IDS allowlist until migration 049 moves
+          // it to APPROVAL_PRINCIPALS; then this line is dropped and `decided_by_principal` is
+          // the identity (C2). An older brain strips the unknown field (non-strict zod object).
           decided_by_slack_id: this.approvalActorSlackId,
-          decided_by_name: 'Marketing dashboard',
+          decided_by_name: actor?.displayName || 'Marketing dashboard',
+          ...(actor?.principal
+            ? { decided_by_principal: actor.principal }
+            : {}),
           decision_text: body.note ?? '',
           // Slack's `approve at <amount>` — "yes, but this much". It is not just recorded: on an
           // approved BUILD gate the brain rescales the open run's audience_plan daily budgets to

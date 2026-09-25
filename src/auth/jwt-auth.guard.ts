@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { IS_PUBLIC_KEY } from './public.decorator';
+import { AuthUser } from './roles';
 
 /**
  * Applied globally (APP_GUARD, see auth.module.ts) — every route under the
@@ -36,15 +37,21 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('Missing bearer token');
     }
 
+    let payload: { sub?: unknown; role?: unknown };
     try {
-      // Signature + expiry verification only (jwtService.verifyAsync throws
-      // on either failure). Payload isn't attached to the request — this
-      // system has no per-request user identity beyond "is this the
-      // operator," so there's nothing downstream to read off it yet.
-      await this.jwt.verifyAsync(token);
+      // Signature + expiry verification (verifyAsync throws on either).
+      payload = await this.jwt.verifyAsync(token);
     } catch {
       throw new UnauthorizedException('Invalid or expired token');
     }
+    // Attached for RolesGuard and for anything that records who acted. A
+    // token without a role claim predates roles and is the shared
+    // workspace login — never `brain`.
+    const user: AuthUser = {
+      sub: typeof payload.sub === 'string' ? payload.sub : '',
+      role: payload.role === 'brain' ? 'brain' : 'workspace',
+    };
+    (request as Request & { user?: AuthUser }).user = user;
     return true;
   }
 

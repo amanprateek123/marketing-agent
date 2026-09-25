@@ -6,7 +6,9 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import { AuthedRequest, brainPrincipal, Roles } from '../auth/roles';
 import { FoundryBridgeService } from './foundry-bridge.service';
 import { SendMessageDto } from './dto/conversation.dto';
 import { GateDecisionDto } from './dto/gate-decision.dto';
@@ -43,10 +45,15 @@ import type {
  * Every route sits behind the global JwtAuthGuard; there is no `@Public()` here. Neither upstream
  * token — Foundry's or the brain's — is ever sent to the browser.
  *
+ * BRAIN LOGIN ONLY. `@Roles('brain')` sits on the class, so every route here — and every route
+ * added here later — requires the separate BRAIN_AUTH_* login. The shared workspace login gets 403;
+ * with BRAIN_AUTH_* unset every route answers 503 (closed, never open). See src/auth/roles.ts.
+ *
  * `tenantId` is accepted and ignored. The Brain is single-tenant: one brand, one ad account, one
  * portfolio. The parameter is in the path because the rest of this dashboard is addressed that way
  * and a console whose URLs did not match the others would be the odd one out for no gain.
  */
+@Roles('brain')
 @Controller('brain')
 export class FoundryBridgeController {
   constructor(private readonly bridge: FoundryBridgeService) {}
@@ -261,8 +268,14 @@ export class FoundryBridgeController {
     @Param('tenantId') _tenantId: string,
     @Param('gateId') gateId: string,
     @Body() dto: GateDecisionDto,
+    @Req() req: AuthedRequest,
   ): Promise<BrainGateDecisionResult> {
-    return this.bridge.decideGate(gateId, dto);
+    // RolesGuard has already required a brain principal; the decision is recorded under it.
+    const user = req.user!;
+    return this.bridge.decideGate(gateId, dto, {
+      principal: brainPrincipal(user),
+      displayName: user.sub,
+    });
   }
 
   // ── conversation ─────────────────────────────────────────────────────────
