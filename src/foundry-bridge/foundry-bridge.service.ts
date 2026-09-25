@@ -27,6 +27,11 @@ import {
   mapCampaignRunSummary,
 } from './campaign-run.mapper';
 import { CreativeImageService } from './creative-image.service';
+import {
+  VIEW_STATUSES,
+  mapExperiment,
+  summariseExperiments,
+} from './experiments.mapper';
 import type {
   BrainAgent,
   BrainCampaignCreative,
@@ -39,6 +44,9 @@ import type {
   BrainAttentionItem,
   BrainDecision,
   BrainEventPage,
+  BrainExperiment,
+  BrainExperimentSummary,
+  BrainExperimentView,
   BrainGate,
   BrainGateAction,
   BrainBudgetRescale,
@@ -1295,6 +1303,112 @@ export class FoundryBridgeService {
         enabled,
         status: typeof row.status === 'string' ? row.status : 'unknown',
       };
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /* ── Experiments ──────────────────────────────────────────────────────────────
+   *
+   * The brain's hypotheses, shelved three ways and translated by experiments.mapper.ts. One
+   * hypotheses_read PER STATUS rather than one for the view: full rows are ~1.3KB and the brain
+   * cuts every answer to ~16KB, so a single read of two statuses would let the busier one crowd
+   * the other off the page.
+   */
+
+  async getExperiments(
+    view: BrainExperimentView,
+    product?: string | null,
+  ): Promise<BrainExperiment[]> {
+    this.assertBrain();
+    try {
+      const [reads, names] = await Promise.all([
+        Promise.all(
+          VIEW_STATUSES[view].map((status) =>
+            this.brain.call<{ rows?: unknown[] }>('hypotheses_read', {
+              statuses: [status],
+              ...(product ? { offering_slug: product } : {}),
+              compact: false,
+              limit: 40,
+            }),
+          ),
+        ),
+        this.offeringNames(),
+      ]);
+      const rows = reads
+        .flatMap((read) => read.rows ?? [])
+        .filter(
+          (r): r is Record<string, unknown> => !!r && typeof r === 'object',
+        );
+
+      const perf = new Map<string, Record<string, unknown>>();
+      if (view === 'testing') {
+        const active = rows
+          .filter((r) => r.status === 'active')
+          .map((r) => Number(r.id))
+          .filter((n) => Number.isInteger(n) && n > 0);
+        const chunks: number[][] = [];
+        for (let i = 0; i < active.length; i += 10) {
+          chunks.push(active.slice(i, i + 10));
+        }
+        // tryCall: progress is the garnish, not the dish. A perf read that fails leaves the bars
+        // at "results are not available", and the claims still render.
+        const perfReads = await Promise.all(
+          chunks.map((hypothesis_ids) =>
+            this.brain.tryCall<{ rows?: unknown[] }>('perf_by_hypothesis', {
+              hypothesis_ids,
+            }),
+          ),
+        );
+        for (const read of perfReads) {
+          for (const raw of read?.rows ?? []) {
+            if (!raw || typeof raw !== 'object') continue;
+            const p = raw as Record<string, unknown>;
+            const id = p.hypothesis_id ?? p.id;
+            if (id !== null && id !== undefined) perf.set(String(id), p);
+          }
+        }
+      }
+
+      const now = new Date();
+      return rows
+        .map((row) => mapExperiment(row, { view, names, perf, now }))
+        .filter((e): e is BrainExperiment => e !== null)
+        .sort((a, b) => (b.sinceAt ?? '').localeCompare(a.sinceAt ?? ''));
+    } catch (err) {
+      this.rethrow(err);
+    }
+  }
+
+  /** Counts per shelf and per product. Compact rows: this only needs status and product. */
+  async getExperimentSummary(): Promise<BrainExperimentSummary> {
+    this.assertBrain();
+    try {
+      const views = ['testing', 'learned', 'dropped'] as const;
+      const [reads, names] = await Promise.all([
+        Promise.all(
+          views.map((view) =>
+            this.brain.call<{ rows?: unknown[]; truncated?: boolean }>(
+              'hypotheses_read',
+              { statuses: VIEW_STATUSES[view], compact: true, limit: 200 },
+            ),
+          ),
+        ),
+        this.offeringNames(),
+      ]);
+      const rowsOf = (read: { rows?: unknown[] }) =>
+        (read.rows ?? []).filter(
+          (r): r is Record<string, unknown> => !!r && typeof r === 'object',
+        );
+      return summariseExperiments(
+        {
+          testing: rowsOf(reads[0]),
+          learned: rowsOf(reads[1]),
+          dropped: rowsOf(reads[2]),
+        },
+        names,
+        reads.some((r) => r.truncated === true),
+      );
     } catch (err) {
       this.rethrow(err);
     }

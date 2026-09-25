@@ -12,6 +12,7 @@ import { SendMessageDto } from './dto/conversation.dto';
 import { GateDecisionDto } from './dto/gate-decision.dto';
 import { SetTriggerEnabledDto } from './dto/trigger.dto';
 import { StartAgentRunDto } from './dto/start-agent-run.dto';
+import { isExperimentView } from './experiments.mapper';
 import type {
   BrainAgent,
   BrainCampaignCreative,
@@ -20,6 +21,8 @@ import type {
   BrainConversation,
   BrainDecision,
   BrainEventPage,
+  BrainExperiment,
+  BrainExperimentSummary,
   BrainGate,
   BrainGateDecisionResult,
   BrainPipelineRun,
@@ -72,6 +75,38 @@ export class FoundryBridgeController {
   @Get(':tenantId/gates')
   async gates(@Param('tenantId') _tenantId: string): Promise<BrainGate[]> {
     return this.bridge.getGates();
+  }
+
+  /**
+   * GET /api/v1/brain/:tenantId/experiments/summary — how many experiments sit on each shelf
+   * (testing / learned / dropped), overall and per product. `partial: true` means the brain cut a
+   * read short and a count is a floor.
+   */
+  @Get(':tenantId/experiments/summary')
+  async experimentSummary(
+    @Param('tenantId') _tenantId: string,
+  ): Promise<BrainExperimentSummary> {
+    return this.bridge.getExperimentSummary();
+  }
+
+  /**
+   * GET /api/v1/brain/:tenantId/experiments?view=testing|learned|dropped&product=<productKey>
+   *
+   * Plain-language experiments: a claim sentence, a kind and status label, progress for live tests
+   * and a result sentence for judged ones. No attribute codes, enum values or ids reach the page;
+   * `ref` is opaque. An unknown `view` is treated as `testing` rather than refused — the tab's
+   * default shelf.
+   */
+  @Get(':tenantId/experiments')
+  async experiments(
+    @Param('tenantId') _tenantId: string,
+    @Query('view') view?: string,
+    @Query('product') product?: string,
+  ): Promise<BrainExperiment[]> {
+    return this.bridge.getExperiments(
+      isExperimentView(view) ? view : 'testing',
+      product && product.trim() ? product.trim() : null,
+    );
   }
 
   /**

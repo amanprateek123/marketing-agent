@@ -603,3 +603,84 @@ export interface BrainCampaignRun extends BrainCampaignRunSummary {
   /** Which budget governs this run and whether its contract agrees — from the brain, not summed here. */
   budgetAuthority: BrainBudgetAuthority | null;
 }
+
+/* ── Experiments (hypotheses), in plain language ─────────────────────────────
+ *
+ * Built by experiments.mapper.ts. The page never sees an attribute code, a metric code, a status
+ * enum or a hypothesis id: every string here is already the sentence a marketer reads. `ref` is
+ * opaque and exists only for a collapsed "Details → Copy reference".
+ */
+
+/** Which shelf an experiment sits on. testing = proposed+active, learned = confirmed+refuted,
+ *  dropped = retired+inconclusive. */
+export type BrainExperimentView = 'testing' | 'learned' | 'dropped';
+
+/** Colour for a chip; the page maps it to a chip class and never re-derives it from a status. */
+export type BrainExperimentTone =
+  | 'progress'
+  | 'waiting'
+  | 'good'
+  | 'bad'
+  | 'idle';
+
+/** How far a live test has got towards having enough data to be judged. */
+export interface BrainExperimentProgress {
+  spentInr: number;
+  neededInr: number | null;
+  impressions: number;
+  neededImpressions: number | null;
+  /** Days until the test's time is up; 0 once it has passed; null before it has started. */
+  daysLeft: number | null;
+  /** One plain sentence on where it stands ("Still collecting results."), or null. */
+  note: string | null;
+}
+
+/** What a finished test showed. */
+export interface BrainExperimentResult {
+  /** e.g. "It worked: 2.1% vs 1.4% click rate." */
+  sentence: string;
+  /** "Early signal" | "Fairly sure" | "Confident", or null when no confidence was recorded. */
+  confidenceLabel: string | null;
+}
+
+export interface BrainExperiment {
+  /** Opaque support reference. Details only — never printed as content. */
+  ref: string;
+  /** Opaque filter key for `?product=`; not for display. */
+  productKey: string | null;
+  /** Display name ("Saathi Report"), or null when the experiment is not tied to one product. */
+  product: string | null;
+  /** "Ad" | "Audience" | "Placement" | "Campaign" | "Product". */
+  levelLabel: string;
+  /** The claim as a sentence: "Ads that open with a question will get more clicks than …". */
+  claim: string;
+  /** "Proven idea" | "New twist on a proven idea" | "Exploring". */
+  kindLabel: string;
+  kind: 'proven' | 'variant' | 'seed' | 'other';
+  statusLabel: string;
+  statusMeaning: string;
+  tone: BrainExperimentTone;
+  /** Testing view only; null elsewhere. */
+  progress: BrainExperimentProgress | null;
+  /** Learned / dropped views only; null elsewhere. */
+  result: BrainExperimentResult | null;
+  /** Human date: "24 Sep" / "Today" — when it started (testing) or was judged (learned/dropped). */
+  since: string | null;
+  /** The same moment as an ISO timestamp, for sorting and relative time; not for display. */
+  sinceAt: string | null;
+}
+
+export interface BrainExperimentProductCount {
+  productKey: string;
+  product: string;
+  testing: number;
+  learned: number;
+  dropped: number;
+}
+
+export interface BrainExperimentSummary {
+  views: Record<BrainExperimentView, number>;
+  products: BrainExperimentProductCount[];
+  /** True when the brain cut a read short, so a count is a floor rather than the total. */
+  partial: boolean;
+}
