@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Param, Body, NotFoundException, BadRequestException, Logger, Query, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Body, NotFoundException, BadRequestException, UnprocessableEntityException, Logger, Query, UseInterceptors, UploadedFile } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -883,7 +883,16 @@ export class CreativeController {
       .lean()
       .exec();
 
-    if (!brief) return { error: 'No brief found for this package — cannot regenerate prompt' };
+    // A failure MUST NOT be a 200. The dashboard's buttons start work here and then poll the
+    // package for a changed URL; a 200 carrying an {error} body looks exactly like "started", so
+    // the UI span for its full 3-minute poll budget and then gave up silently. That was already
+    // found once for Retry (see the note in the detail page's pollUntil) and fixed only there —
+    // these are the same defect on the other four buttons.
+    if (!brief) {
+      throw new UnprocessableEntityException(
+        'No brief found for this creative — its prompt cannot be rewritten. Produce it through full creative production first.',
+      );
+    }
 
     const product = (company.products ?? []).find(p => p.name === (brief as any).product)
       ?? (company.products ?? []).find(p => p.active)
@@ -1026,7 +1035,16 @@ Return ONLY the Heygen prompt text. No explanation, no JSON, no labels.
       .lean()
       .exec();
 
-    if (!brief) return { error: 'No brief found for this package — cannot regenerate prompt' };
+    // A failure MUST NOT be a 200. The dashboard's buttons start work here and then poll the
+    // package for a changed URL; a 200 carrying an {error} body looks exactly like "started", so
+    // the UI span for its full 3-minute poll budget and then gave up silently. That was already
+    // found once for Retry (see the note in the detail page's pollUntil) and fixed only there —
+    // these are the same defect on the other four buttons.
+    if (!brief) {
+      throw new UnprocessableEntityException(
+        'No brief found for this creative — its prompt cannot be rewritten. Produce it through full creative production first.',
+      );
+    }
 
     const product = (company.products ?? []).find(p => p.name === (brief as any).product)
       ?? (company.products ?? []).find(p => p.active)
@@ -1236,7 +1254,9 @@ Return ONLY the image prompt, nothing else.
     const imageEntry = this.resolveImageEntry(images, variantIndex, body.aspectRatio);
 
     if (!imageEntry?.imagePrompt) {
-      return { error: `No imagePrompt saved for variant ${variantIndex} — run full creative production first` };
+      throw new UnprocessableEntityException(
+        `No imagePrompt saved for variant ${variantIndex} — run full creative production first`,
+      );
     }
 
     const aspectRatio: AspectRatio = body.aspectRatio ?? imageEntry.aspectRatio ?? '9:16';
@@ -1290,7 +1310,9 @@ Return ONLY the image prompt, nothing else.
     const imageEntry = this.resolveImageEntry(images, variantIndex, body.aspectRatio);
 
     if (!imageEntry?.imageUrl) {
-      return { error: `No image exists yet for variant ${variantIndex} — generate one first` };
+      throw new UnprocessableEntityException(
+        `No image exists yet for variant ${variantIndex} — generate one first`,
+      );
     }
 
     const aspectRatio: AspectRatio = body.aspectRatio ?? imageEntry.aspectRatio ?? '9:16';
@@ -1339,7 +1361,11 @@ Return ONLY the image prompt, nothing else.
     if (!pkg) throw new NotFoundException(`Creative package ${creativePackageId} not found`);
 
     const video = (pkg as any).video;
-    if (!video?.videoPrompt) return { error: 'No videoPrompt saved — run full creative production first' };
+    if (!video?.videoPrompt) {
+      throw new UnprocessableEntityException(
+        'No videoPrompt saved — run full creative production first',
+      );
+    }
 
     const aspectRatio: AspectRatio = body.aspectRatio ?? video.aspectRatio ?? '9:16';
     const resolution: VideoResolution = body.resolution ?? video.resolution ?? '1080p';
