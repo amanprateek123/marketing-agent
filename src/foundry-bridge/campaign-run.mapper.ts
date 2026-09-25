@@ -173,7 +173,7 @@ const STATUS_TONE: Record<string, BrainRunTone> = {
   abandoned: 'idle',
 };
 
-const CAMPAIGN_TYPE_LABEL: Record<string, string> = {
+export const CAMPAIGN_TYPE_LABEL: Record<string, string> = {
   launch: 'New launch',
   test: 'Test',
   evergreen: 'Always-on',

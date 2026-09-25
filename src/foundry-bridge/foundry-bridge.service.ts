@@ -29,9 +29,11 @@ import {
 import { CreativeImageService } from './creative-image.service';
 import {
   VIEW_STATUSES,
+  dayLabel,
   mapExperiment,
   summariseExperiments,
 } from './experiments.mapper';
+import { buildPlanView, planHeadline } from './plan-gate.mapper';
 import type {
   BrainAgent,
   BrainCampaignCreative,
@@ -55,6 +57,7 @@ import type {
   BrainIdea,
   BrainPipelineRun,
   BrainPipelineStage,
+  BrainPlanView,
   BrainRunDetail,
   BrainRunSummary,
   BrainStageKey,
@@ -764,6 +767,7 @@ export class FoundryBridgeService {
 
     const seen = new Set<string>();
     const gates: BrainGate[] = [];
+    const planRows = new Map<BrainGate, Record<string, unknown>>();
     for (const raw of [...(pending?.rows ?? []), ...(unposted?.rows ?? [])]) {
       const row =
         raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
@@ -771,7 +775,24 @@ export class FoundryBridgeService {
         row.id === undefined || row.id === null ? null : String(row.id);
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      gates.push(this.mapApprovalGate(id, row));
+      const gate = this.mapApprovalGate(id, row);
+      if (gate.spendGate === 'plan') planRows.set(gate, row);
+      gates.push(gate);
+    }
+
+    // A plan gate carries its day plan as facts read from the brain. planViewFor never throws: a
+    // failed read degrades to `structured: false` with the cleaned text, not to a missing gate.
+    if (planRows.size) {
+      const names = await this.offeringNames();
+      await Promise.all(
+        [...planRows].map(async ([gate, row]) => {
+          const plan = await this.planViewFor(row, names);
+          gate.plan = plan;
+          // The card's one-line summary was the Slack text ("PLAN 2026-09-25 — daily total ₹4000
+          // …"); say the same thing in words.
+          gate.summary = planHeadline(plan);
+        }),
+      );
     }
 
     const proposed = (ideas?.rows ?? [])
@@ -824,6 +845,78 @@ export class FoundryBridgeService {
     return gates;
   }
 
+  /**
+   * One plan gate's day, from the rows the gate snapshots — not from its Slack text.
+   *
+   *   daily_plans (plan_date)         → the allocations, the governed budget and the reasoning
+   *   pipeline_runs (plan_date)       → filtered to the gate's decision_ids (approval snapshot,
+   *                                     else the plan's): the runs this approval releases
+   *   hypotheses_read (decision_id)   → what those decisions are testing
+   *
+   * Every read is a tryCall. A missing day-plan row gives `structured: false`, and the page falls
+   * back to the cleaned summary text.
+   */
+  private async planViewFor(
+    row: Record<string, unknown>,
+    names: Map<string, string>,
+  ): Promise<BrainPlanView> {
+    const planDate =
+      typeof row.plan_date === 'string' ? row.plan_date.slice(0, 10) : null;
+    const rowsOf = (read: { rows?: unknown[] } | null) =>
+      (read?.rows ?? []).filter(
+        (r): r is Record<string, unknown> => !!r && typeof r === 'object',
+      );
+    const [planRead, runsRead] = planDate
+      ? await Promise.all([
+          this.brain.tryCall<{ rows?: unknown[] }>('brain_read', {
+            table: 'daily_plans',
+            where: { plan_date: planDate },
+            limit: 1,
+          }),
+          this.brain.tryCall<{ rows?: unknown[] }>('brain_read', {
+            table: 'pipeline_runs',
+            where: { plan_date: planDate },
+            order: 'id.asc',
+            limit: 50,
+          }),
+        ])
+      : [null, null];
+    const dailyPlan = rowsOf(planRead)[0] ?? null;
+
+    const snapshot = Array.isArray(row.decision_ids)
+      ? row.decision_ids
+      : Array.isArray(dailyPlan?.decision_ids)
+        ? dailyPlan.decision_ids
+        : [];
+    const decisionIds = [...new Set(snapshot.map((x) => Number(x)))].filter(
+      (n) => Number.isInteger(n) && n > 0,
+    );
+    const hypothesisReads = await Promise.all(
+      decisionIds.slice(0, 10).map((decision_id) =>
+        this.brain.tryCall<{ rows?: unknown[] }>('hypotheses_read', {
+          decision_id,
+          compact: false,
+          limit: 40,
+        }),
+      ),
+    );
+    const seen = new Set<string>();
+    const hypotheses = hypothesisReads.flatMap(rowsOf).filter((h) => {
+      const id = String(h.id);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+
+    return buildPlanView({
+      approval: row,
+      dailyPlan,
+      runs: rowsOf(runsRead),
+      hypotheses,
+      names,
+    });
+  }
+
   private mapApprovalGate(id: string, row: Record<string, unknown>): BrainGate {
     const gate = typeof row.gate === 'string' ? row.gate : 'plan';
     const summary = typeof row.summary === 'string' ? row.summary : '';
@@ -834,7 +927,7 @@ export class FoundryBridgeService {
       gateId: `approval:${id}`,
       kind: isPlan ? 'plan_approval' : 'campaign_launch',
       title: isPlan
-        ? `Day plan${planDate ? ` for ${planDate}` : ''}`
+        ? `Day plan${planDate ? ` for ${dayLabel(planDate) ?? planDate}` : ''}`
         : `${humanizeKey(gate)} gate — run ${row.pipeline_run_id ?? '?'}`,
       summary,
       askedBy: 'Brain',

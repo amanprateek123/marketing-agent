@@ -382,6 +382,12 @@ export interface BrainGate {
   spendGate?: BrainSpendGate | null;
   /** The pipeline run this gate names, when it names one. A plan gate usually does not. */
   pipelineRunId?: string | null;
+  /**
+   * A PLAN gate's day plan, as structured facts read from the brain (daily_plans, pipeline_runs,
+   * hypotheses by decision_id) — never parsed out of the Slack text. Null on every other gate.
+   * When the brain rows are missing, `structured` is false and only `summaryText` is filled.
+   */
+  plan?: BrainPlanView | null;
 }
 
 export type BrainSpendGate = 'plan' | 'build' | 'launch' | 'scale';
@@ -683,4 +689,42 @@ export interface BrainExperimentSummary {
   products: BrainExperimentProductCount[];
   /** True when the brain cut a read short, so a count is a floor rather than the total. */
   partial: boolean;
+}
+
+/* ── The plan gate, as facts ─────────────────────────────────────────────── */
+
+export interface BrainPlanRun {
+  product: string;
+  /** "New launch" | "Test" | "Always-on" | … */
+  typeLabel: string;
+  dailyBudgetInr: number | null;
+  creatives: number | null;
+  adSets: number | null;
+}
+
+export interface BrainPlanClaim {
+  claim: string;
+  kindLabel: string;
+  levelLabel: string;
+  product: string | null;
+}
+
+export interface BrainPlanView {
+  /** "Thursday, 25 Sep", or null when the gate names no date. */
+  dateLabel: string | null;
+  /** Sum of the day's allocations. */
+  totalDailyInr: number | null;
+  /** The day's governed budget. */
+  budgetInr: number | null;
+  unspentInr: number | null;
+  runs: BrainPlanRun[];
+  testing: BrainPlanClaim[];
+  /** "4 proven ideas, 2 new twists", or null when nothing is being tested. */
+  mix: string | null;
+  /** The Brain's reasoning for the day, with internal ids removed. */
+  why: string | null;
+  /** False when the brain rows could not be read; render `summaryText` instead. */
+  structured: boolean;
+  /** The gate's own text with the Slack reply line and internal ids removed. Always present. */
+  summaryText: string;
 }
