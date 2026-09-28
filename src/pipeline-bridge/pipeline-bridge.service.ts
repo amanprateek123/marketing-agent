@@ -184,6 +184,30 @@ export class PipelineBridgeService {
     });
   }
 
+  /** POST /v1/runs/:id/language — answer `awaiting_language`; several languages split the run. */
+  setLanguage(runId: string, body: { language?: string; languages?: string[] }): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'language'), body);
+  }
+
+  /** POST /v1/runs/:id/image-kind — answer `awaiting_image_kind`. */
+  setImageKind(runId: string, kind: string, text?: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'image-kind'), { kind, ...(text ? { text } : {}) });
+  }
+
+  /** POST /v1/runs/:id/offering — answer `awaiting_offering` with a product slug from /v1/options. */
+  setOffering(runId: string, offering: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'offering'), { offering });
+  }
+
+  /**
+   * POST /v1/runs/:id/disclaimer — the small print. Astro answers it at `awaiting_offering` (one gate
+   * with the product: the status holds until both are answered); automotive at
+   * `awaiting_automotive_gates`. creativebot owns and checks the allowed values.
+   */
+  setDisclaimer(runId: string, choice: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'disclaimer'), { choice });
+  }
+
   /** POST /v1/ideas/:runId/discard — drop the idea behind the RUN showing it (Slack's Delete idea). */
   discardIdea(ideaId: string, reason: string): Promise<unknown> {
     return this.forward(

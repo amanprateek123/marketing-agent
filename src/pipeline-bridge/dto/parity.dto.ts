@@ -113,3 +113,38 @@ export class LearnDecisionDto {
   @IsString()
   text?: string;
 }
+
+/** `language` for one, `languages` to split the run across several. At least one is required. */
+export class LanguageDto {
+  @IsOptional()
+  @IsString()
+  language?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  languages?: string[];
+}
+
+export class ImageKindDto {
+  @IsIn(['overlay', 'product', 'imitate', 'imitate_text'])
+  kind: 'overlay' | 'product' | 'imitate' | 'imitate_text';
+
+  @IsOptional()
+  @IsString()
+  text?: string;
+}
+
+export class OfferingDto {
+  @IsString()
+  @IsNotEmpty()
+  offering: string;
+}
+
+/** Not re-validated: the allowed choices differ by domain and creativebot answers with the list. */
+export class DisclaimerDto {
+  @IsString()
+  @IsNotEmpty()
+  choice: string;
+}

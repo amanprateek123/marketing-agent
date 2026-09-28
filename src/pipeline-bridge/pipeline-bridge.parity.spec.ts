@@ -8,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../auth/roles';
 import {
   CampaignFieldsDto,
+  ImageKindDto,
   LearnDecisionDto,
   ResearchSourcesDto,
 } from './dto/parity.dto';
@@ -79,6 +80,24 @@ describe('PipelineBridgeService — creative parity proxies', () => {
       '/runs/41/logo',
       { include: true, disclaimer: 'tnc' },
     ],
+    ['language', () => service.setLanguage('41', { language: 'Hindi' }), 'post', '/runs/41/language', { language: 'Hindi' }],
+    [
+      'languages',
+      () => service.setLanguage('41', { languages: ['Hindi', 'English'] }),
+      'post',
+      '/runs/41/language',
+      { languages: ['Hindi', 'English'] },
+    ],
+    ['image kind', () => service.setImageKind('41', 'product'), 'post', '/runs/41/image-kind', { kind: 'product' }],
+    [
+      'image kind + text',
+      () => service.setImageKind('41', 'imitate_text', 'Book now'),
+      'post',
+      '/runs/41/image-kind',
+      { kind: 'imitate_text', text: 'Book now' },
+    ],
+    ['offering', () => service.setOffering('41', 'nadi'), 'post', '/runs/41/offering', { offering: 'nadi' }],
+    ['disclaimer', () => service.setDisclaimer('41', 'none'), 'post', '/runs/41/disclaimer', { choice: 'none' }],
     [
       'run anyway',
       () => service.runAnyway('41'),
@@ -281,6 +300,7 @@ describe('PipelineBridgeController — parity guards', () => {
   const bridge = {
     editCampaignFields: jest.fn().mockResolvedValue({ ok: true }),
     expandConcept: jest.fn().mockResolvedValue({ ok: true }),
+    setLanguage: jest.fn().mockResolvedValue({ ok: true }),
     decideLearnProposal: jest.fn().mockResolvedValue({ ok: true }),
   } as unknown as PipelineBridgeService;
   const controller = new PipelineBridgeController(bridge);
@@ -322,6 +342,12 @@ describe('PipelineBridgeController — parity guards', () => {
         } as never,
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('a language answer needs at least one language, and a list wins over a single one', () => {
+    expect(() => controller.setLanguage('41', { languages: [' '] } as never)).toThrow(BadRequestException);
+    void controller.setLanguage('41', { language: 'Tamil', languages: ['Hindi'] } as never);
+    expect(bridge.setLanguage).toHaveBeenCalledWith('41', { languages: ['Hindi'] });
   });
 
   it('expand takes a concept index, never a direction id', () => {
@@ -367,6 +393,12 @@ describe('parity DTOs survive the whitelist', () => {
       metatype: CampaignFieldsDto,
     });
     expect(out).toEqual(body);
+  });
+
+  it('an unknown image kind is refused before it reaches creativebot', async () => {
+    await expect(
+      pipe.transform({ kind: 'painting' }, { type: 'body', metatype: ImageKindDto }),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('an unknown learning decision is refused', async () => {

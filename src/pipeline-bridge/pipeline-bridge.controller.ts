@@ -22,6 +22,10 @@ import {
   DiscardIdeaDto,
   LearnDecisionDto,
   LogoDto,
+  LanguageDto,
+  ImageKindDto,
+  OfferingDto,
+  DisclaimerDto,
   RetryDto,
   ResearchPdfDto,
   ResearchRerunDto,
@@ -311,6 +315,35 @@ export class PipelineBridgeController {
     @Body() dto: LogoDto,
   ): Promise<unknown> {
     return this.bridge.setLogo(runId, dto.include, dto.disclaimer);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/language — at `awaiting_language`. */
+  @Post(':tenantId/runs/:runId/language')
+  setLanguage(@Param('runId') runId: string, @Body() dto: LanguageDto): Promise<unknown> {
+    const languages = (dto.languages ?? []).map((l) => l.trim()).filter(Boolean);
+    const language = dto.language?.trim();
+    if (!language && languages.length === 0) {
+      throw new BadRequestException('Choose at least one language.');
+    }
+    return this.bridge.setLanguage(runId, languages.length ? { languages } : { language });
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/image-kind — at `awaiting_image_kind`. */
+  @Post(':tenantId/runs/:runId/image-kind')
+  setImageKind(@Param('runId') runId: string, @Body() dto: ImageKindDto): Promise<unknown> {
+    return this.bridge.setImageKind(runId, dto.kind, dto.text?.trim() || undefined);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/offering — at `awaiting_offering`. */
+  @Post(':tenantId/runs/:runId/offering')
+  setOffering(@Param('runId') runId: string, @Body() dto: OfferingDto): Promise<unknown> {
+    return this.bridge.setOffering(runId, dto.offering);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/disclaimer — astro or automotive small print. */
+  @Post(':tenantId/runs/:runId/disclaimer')
+  setDisclaimer(@Param('runId') runId: string, @Body() dto: DisclaimerDto): Promise<unknown> {
+    return this.bridge.setDisclaimer(runId, dto.choice);
   }
 
   /** POST /api/v1/pipeline-bridge/:tenantId/ideas/:runId/discard — the RUN showing the idea, as Slack's button carried. */
