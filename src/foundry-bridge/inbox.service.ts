@@ -97,7 +97,9 @@ export class InboxService {
       this.config.get<number>('foundry.timeoutMs') ?? 60000,
       'foundry',
     );
-    this.panelsBaseUrl = (this.config.get<string>('brain.panelsBaseUrl') ?? '').trim();
+    this.panelsBaseUrl = (
+      this.config.get<string>('brain.panelsBaseUrl') ?? ''
+    ).trim();
   }
 
   private assertBrain(): void {
@@ -113,11 +115,13 @@ export class InboxService {
     tool: string,
     args: Record<string, unknown> = {},
   ): Promise<Read<T>> {
-    if (!this.brain.isConfigured()) return { state: 'could_not_load', value: null };
+    if (!this.brain.isConfigured())
+      return { state: 'could_not_load', value: null };
     try {
       return { state: 'ok', value: await this.brain.call<T>(tool, args) };
     } catch (err) {
-      if (isUnknownTool(err)) return { state: 'not_available_yet', value: null };
+      if (isUnknownTool(err))
+        return { state: 'not_available_yet', value: null };
       this.logger.warn(`brain ${tool} unavailable: ${(err as Error).message}`);
       return { state: 'could_not_load', value: null };
     }
@@ -134,10 +138,14 @@ export class InboxService {
     } catch (err) {
       if (isUnknownTool(err)) throw new NotImplementedException(NOT_YET);
       if (err instanceof McpToolError) {
-        throw new BadRequestException(err.detail ? `${err.message}: ${err.detail}` : err.message);
+        throw new BadRequestException(
+          err.detail ? `${err.message}: ${err.detail}` : err.message,
+        );
       }
       if (err instanceof McpTransportError) {
-        throw new BadGatewayException("We couldn't reach the Brain. Try again in a minute.");
+        throw new BadGatewayException(
+          "We couldn't reach the Brain. Try again in a minute.",
+        );
       }
       throw err;
     }
@@ -146,23 +154,29 @@ export class InboxService {
   // ── inbox ────────────────────────────────────────────────────────────────
 
   async getInbox(viewer?: string | null): Promise<BrainInbox> {
-    const [summary, gates, questions, alerts, reports, waiting] = await Promise.all([
-      this.read('inbox_summary'),
-      this.readGates(),
-      this.readQuestions({ since_days: 14, limit: 30 }, viewer),
-      this.readAlerts(true),
-      this.readReports({ unread_only: true, limit: 20 }),
-      this.readWaiting(),
-    ]);
+    const [summary, gates, questions, alerts, reports, waiting] =
+      await Promise.all([
+        this.read('inbox_summary'),
+        this.readGates(),
+        this.readQuestions({ since_days: 14, limit: 30 }, viewer),
+        this.readAlerts(true),
+        this.readReports({ unread_only: true, limit: 20 }),
+        this.readWaiting(),
+      ]);
     const openQuestions = questions.value?.filter((q) => q.open) ?? [];
     return {
-      counts: countsFrom(summary.state === 'ok' ? (summary.value as Record<string, unknown>) : null, {
-        gates: gates.value?.length ?? 0,
-        questions: openQuestions.length,
-        reports: reports.value?.length ?? 0,
-        alerts: alerts.value?.length ?? 0,
-        waiting: waiting.value?.length ?? 0,
-      }),
+      counts: countsFrom(
+        summary.state === 'ok'
+          ? (summary.value as Record<string, unknown>)
+          : null,
+        {
+          gates: gates.value?.length ?? 0,
+          questions: openQuestions.length,
+          reports: reports.value?.length ?? 0,
+          alerts: alerts.value?.length ?? 0,
+          waiting: waiting.value?.length ?? 0,
+        },
+      ),
       gates: gates.value ?? [],
       questions: questions.value ?? [],
       alerts: alerts.value ?? [],
@@ -202,8 +216,13 @@ export class InboxService {
     };
   }
 
-  private async readAlerts(openOnly: boolean): Promise<Read<BrainInboxAlert[]>> {
-    const r = await this.read('alerts_list', { open_only: openOnly, limit: 50 });
+  private async readAlerts(
+    openOnly: boolean,
+  ): Promise<Read<BrainInboxAlert[]>> {
+    const r = await this.read('alerts_list', {
+      open_only: openOnly,
+      limit: 50,
+    });
     if (r.state !== 'ok') return { state: r.state, value: null };
     return {
       state: 'ok',
@@ -213,7 +232,9 @@ export class InboxService {
     };
   }
 
-  private async readReports(args: Record<string, unknown>): Promise<Read<BrainReport[]>> {
+  private async readReports(
+    args: Record<string, unknown>,
+  ): Promise<Read<BrainReport[]>> {
     const r = await this.read('reports_list', args);
     if (r.state !== 'ok') return { state: r.state, value: null };
     return {
@@ -230,10 +251,14 @@ export class InboxService {
       if (runs === null) return { state: 'not_available_yet', value: null };
       return {
         state: 'ok',
-        value: runs.map(mapWaitingRun).filter((w): w is BrainWaitingRun => w !== null),
+        value: runs
+          .map(mapWaitingRun)
+          .filter((w): w is BrainWaitingRun => w !== null),
       };
     } catch (err) {
-      this.logger.warn(`waiting creative runs unavailable: ${(err as Error).message}`);
+      this.logger.warn(
+        `waiting creative runs unavailable: ${(err as Error).message}`,
+      );
       return { state: 'could_not_load', value: null };
     }
   }
@@ -246,7 +271,10 @@ export class InboxService {
    * One page of reports, newest first. `reports_list` has no offset, so page N asks for the first
    * N pages plus one row and slices — the extra row is how `hasMore` is known without a count.
    */
-  async getReports(kind: string | null, page: number): Promise<BrainReportPage> {
+  async getReports(
+    kind: string | null,
+    page: number,
+  ): Promise<BrainReportPage> {
     const per = InboxService.REPORTS_PER_PAGE;
     const p = Math.max(1, Math.min(page, 20));
     const r = await this.readReports({
@@ -305,7 +333,10 @@ export class InboxService {
   }
 
   async getCompetitors(): Promise<BrainCompetitorList> {
-    const [r, names] = await Promise.all([this.read('competitors_read'), this.names()]);
+    const [r, names] = await Promise.all([
+      this.read('competitors_read'),
+      this.names(),
+    ]);
     return {
       state: r.state,
       competitors: r.state === 'ok' ? competitorsOf(r.value, names) : [],
@@ -319,9 +350,11 @@ export class InboxService {
     const seen = new Set<string>();
     const competitors = list.map((c) => {
       const name = c.name.trim();
-      if (!name) throw new BadRequestException('Every competitor needs a name.');
+      if (!name)
+        throw new BadRequestException('Every competitor needs a name.');
       const key = name.toLowerCase();
-      if (seen.has(key)) throw new BadRequestException(`"${name}" is listed twice.`);
+      if (seen.has(key))
+        throw new BadRequestException(`"${name}" is listed twice.`);
       seen.add(key);
       return {
         name,
@@ -335,7 +368,10 @@ export class InboxService {
   }
 
   async getFindings(): Promise<BrainCompetitorFindingList> {
-    const r = await this.read('competitor_findings', { since_days: 30, limit: 40 });
+    const r = await this.read('competitor_findings', {
+      since_days: 30,
+      limit: 40,
+    });
     return {
       state: r.state,
       findings: rowsOf(r.value, 'findings', 'observations')
@@ -393,14 +429,20 @@ export class InboxService {
       );
     }
     try {
-      const started = await this.foundry.call<Record<string, unknown>>('run_agent', {
-        agent_id: agent.foundryAgentId,
-        inputs: {},
-        wait_seconds: 0,
-        include_summary: false,
-      });
+      const started = await this.foundry.call<Record<string, unknown>>(
+        'run_agent',
+        {
+          agent_id: agent.foundryAgentId,
+          inputs: {},
+          wait_seconds: 0,
+          include_summary: false,
+        },
+      );
       const runId = typeof started.run_id === 'string' ? started.run_id : null;
-      if (!runId) throw new BadGatewayException("Competitor research didn't start. Try again.");
+      if (!runId)
+        throw new BadGatewayException(
+          "Competitor research didn't start. Try again.",
+        );
       return { runId };
     } catch (err) {
       if (err instanceof McpToolError) {
@@ -409,7 +451,9 @@ export class InboxService {
         );
       }
       if (err instanceof McpTransportError) {
-        throw new BadGatewayException("We couldn't reach Foundry. Try again in a minute.");
+        throw new BadGatewayException(
+          "We couldn't reach Foundry. Try again in a minute.",
+        );
       }
       throw err;
     }

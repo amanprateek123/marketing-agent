@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, Put, Query, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Put,
+  Query,
+  Req,
+} from '@nestjs/common';
 import { AuthedRequest, brainPrincipal, Roles } from '../auth/roles';
 import { InboxService } from './inbox.service';
 import {
@@ -46,7 +55,8 @@ export class InboxController {
     @Query('kind') kind?: string,
     @Query('page') page?: string,
   ): Promise<BrainReportPage> {
-    const k = kind && /^[a-z0-9_]{1,40}$/i.test(kind.trim()) ? kind.trim() : null;
+    const k =
+      kind && /^[a-z0-9_]{1,40}$/i.test(kind.trim()) ? kind.trim() : null;
     const n = Number(page);
     return this.inbox.getReports(k, Number.isInteger(n) && n > 0 ? n : 1);
   }
@@ -94,7 +104,9 @@ export class InboxController {
 
   /** GET /api/v1/brain/:tenantId/competitors/findings — what competitors are running. */
   @Get(':tenantId/competitors/findings')
-  async findings(@Param('tenantId') _tenantId: string): Promise<BrainCompetitorFindingList> {
+  async findings(
+    @Param('tenantId') _tenantId: string,
+  ): Promise<BrainCompetitorFindingList> {
     return this.inbox.getFindings();
   }
 
@@ -114,7 +126,12 @@ export class InboxController {
     @Body() dto: CandidateDecisionDto,
     @Req() req: AuthedRequest,
   ): Promise<{ ok: true }> {
-    return this.inbox.decideCandidate(id, dto.decision, dto.reason, brainPrincipal(req.user!));
+    return this.inbox.decideCandidate(
+      id,
+      dto.decision,
+      dto.reason,
+      brainPrincipal(req.user!),
+    );
   }
 
   /** POST /api/v1/brain/:tenantId/competitors/run — start Competitor Research now. */
@@ -125,7 +142,9 @@ export class InboxController {
 
   /** GET /api/v1/brain/:tenantId/competitors */
   @Get(':tenantId/competitors')
-  async competitors(@Param('tenantId') _tenantId: string): Promise<BrainCompetitorList> {
+  async competitors(
+    @Param('tenantId') _tenantId: string,
+  ): Promise<BrainCompetitorList> {
     return this.inbox.getCompetitors();
   }
 

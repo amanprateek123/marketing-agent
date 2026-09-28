@@ -50,7 +50,9 @@ export class AlertsService {
       ...(alert.dedupeKey ? { dedupe_key: alert.dedupeKey } : {}),
     };
     if (!this.brain.isConfigured()) {
-      this.logger.error(`ALERT (brain not configured) [${payload.severity}] ${payload.title} — ${payload.body}`);
+      this.logger.error(
+        `ALERT (brain not configured) [${payload.severity}] ${payload.title} — ${payload.body}`,
+      );
       return;
     }
     try {
@@ -73,10 +75,18 @@ export class AlertsService {
     severity: AlertSeverity = 'critical',
   ): Promise<void> {
     const [first, ...rest] = message.split('\n');
-    const detail = context && Object.keys(context).length
-      ? `\n\nDetails: ${Object.entries(context).map(([k, v]) => `${k} ${String(v)}`).join(', ')}`
-      : '';
-    await this.raise({ kind, severity, title: first, body: `${rest.join('\n')}${detail}`.trim() || first });
+    const detail =
+      context && Object.keys(context).length
+        ? `\n\nDetails: ${Object.entries(context)
+            .map(([k, v]) => `${k} ${String(v)}`)
+            .join(', ')}`
+        : '';
+    await this.raise({
+      kind,
+      severity,
+      title: first,
+      body: `${rest.join('\n')}${detail}`.trim() || first,
+    });
   }
 }
 

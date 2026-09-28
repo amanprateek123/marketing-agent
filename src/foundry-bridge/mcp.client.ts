@@ -315,6 +315,8 @@ export function isUnknownTool(err: unknown): boolean {
     /tool\b[^.]*\bnot found/i.test(text) ||
     /not found:?\s*tool/i.test(text) ||
     /-32601|method not found/i.test(text) ||
-    /not (?:available|exposed|granted) (?:to|for) (?:this )?(?:identity|role|token)/i.test(text)
+    /not (?:available|exposed|granted) (?:to|for) (?:this )?(?:identity|role|token)/i.test(
+      text,
+    )
   );
 }

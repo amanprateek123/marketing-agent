@@ -36,7 +36,11 @@ function str(value: unknown): string | null {
 
 function num(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+  if (
+    typeof value === 'string' &&
+    value.trim() &&
+    Number.isFinite(Number(value))
+  ) {
     return Number(value);
   }
   return null;
@@ -65,7 +69,8 @@ export function humanise(value: string): string {
 
 /** Rows out of `{rows}`, `{items}`, `{<key>}` or a bare array. */
 export function rowsOf(payload: unknown, ...keys: string[]): Row[] {
-  if (Array.isArray(payload)) return payload.map(obj).filter((r): r is Row => r !== null);
+  if (Array.isArray(payload))
+    return payload.map(obj).filter((r): r is Row => r !== null);
   const p = obj(payload);
   if (!p) return [];
   for (const key of [...keys, 'rows', 'items']) {
@@ -92,10 +97,15 @@ export function askedByLabel(value: unknown, viewer?: string | null): string {
   }
   const lower = s.toLowerCase();
   if (lower.includes('brain')) return 'The Brain';
-  if (lower.includes('daemon') || lower.includes('worker') || lower === 'system') {
+  if (
+    lower.includes('daemon') ||
+    lower.includes('worker') ||
+    lower === 'system'
+  ) {
     return 'The system';
   }
-  if (lower.includes('creative') || lower.includes('pipeline')) return 'The creative pipeline';
+  if (lower.includes('creative') || lower.includes('pipeline'))
+    return 'The creative pipeline';
   if (lower.includes('monitor')) return 'The spend monitor';
   if (lower.includes('analyst')) return 'The performance analyst';
   if (lower.startsWith('agent:')) return humanise(s.slice(6));
@@ -130,19 +140,30 @@ const QUESTION_STATUS: Record<string, string> = {
   cancelled: 'Withdrawn',
 };
 
-export function mapQuestion(row: Row, viewer?: string | null): BrainInboxQuestion | null {
+export function mapQuestion(
+  row: Row,
+  viewer?: string | null,
+): BrainInboxQuestion | null {
   const id = ref(row.id);
   const question = str(row.question) ?? str(row.text) ?? str(row.body);
   if (!id || !question) return null;
   const answer = str(row.answer) ?? str(row.answer_text);
-  const status = (str(row.status) ?? (answer ? 'answered' : 'open')).toLowerCase();
-  const open = !answer && !['answered', 'delivered', 'closed', 'expired', 'cancelled'].includes(status);
+  const status = (
+    str(row.status) ?? (answer ? 'answered' : 'open')
+  ).toLowerCase();
+  const open =
+    !answer &&
+    !['answered', 'delivered', 'closed', 'expired', 'cancelled'].includes(
+      status,
+    );
   const kind = str(row.kind);
   return {
     ref: id,
     question,
     askedBy: askedByLabel(row.asked_by_principal ?? row.asked_by, viewer),
-    kindLabel: kind ? (QUESTION_KIND[kind.toLowerCase()] ?? humanise(kind)) : null,
+    kindLabel: kind
+      ? (QUESTION_KIND[kind.toLowerCase()] ?? humanise(kind))
+      : null,
     statusLabel: QUESTION_STATUS[status] ?? humanise(status),
     open,
     answer,
@@ -193,7 +214,9 @@ export function mapAlert(row: Row): BrainInboxAlert | null {
     severityLabel: SEVERITY_LABEL[severity],
     title,
     body: str(row.body) ?? '',
-    sourceLabel: source ? (SOURCE_LABEL[source.toLowerCase()] ?? humanise(source)) : null,
+    sourceLabel: source
+      ? (SOURCE_LABEL[source.toLowerCase()] ?? humanise(source))
+      : null,
     raisedAt: str(row.created_at),
     acknowledged: Boolean(str(row.acknowledged_at)),
   };
@@ -217,7 +240,10 @@ export function reportKindLabel(kind: string): string {
   return REPORT_KIND[kind.toLowerCase()] ?? humanise(kind);
 }
 
-const VERDICT: Record<string, { label: string; tone: BrainReport['verdictTone'] }> = {
+const VERDICT: Record<
+  string,
+  { label: string; tone: BrainReport['verdictTone'] }
+> = {
   good: { label: 'Going well', tone: 'good' },
   ok: { label: 'On track', tone: 'good' },
   on_track: { label: 'On track', tone: 'good' },
@@ -276,7 +302,10 @@ export function mapFigures(value: unknown): BrainReportFigure[] {
       if (!key) continue;
       const shown = figureValue(key, f.value);
       if (shown === null) continue;
-      out.push({ label: str(f.label) ?? FIGURE_LABEL[key] ?? humanise(key), value: shown });
+      out.push({
+        label: str(f.label) ?? FIGURE_LABEL[key] ?? humanise(key),
+        value: shown,
+      });
     }
     return out;
   }
@@ -306,7 +335,12 @@ export function mapReport(row: Row, panelsBaseUrl = ''): BrainReport | null {
   if (!id) return null;
   const kind = str(row.kind) ?? 'report';
   const verdictKey = (str(row.verdict) ?? '').toLowerCase();
-  const verdict = verdictKey ? (VERDICT[verdictKey] ?? { label: humanise(verdictKey), tone: 'neutral' as const }) : null;
+  const verdict = verdictKey
+    ? (VERDICT[verdictKey] ?? {
+        label: humanise(verdictKey),
+        tone: 'neutral' as const,
+      })
+    : null;
   const headline = str(row.headline) ?? str(row.title) ?? reportKindLabel(kind);
   const date = str(row.report_date);
   return {
@@ -368,7 +402,9 @@ export function mapWaitingRun(raw: unknown): BrainWaitingRun | null {
     str(row.question) ??
     str(row.clarification_question) ??
     str(clar?.question) ??
-    (Array.isArray(row.questions) ? str((row.questions as unknown[])[0]) : null);
+    (Array.isArray(row.questions)
+      ? str((row.questions as unknown[])[0])
+      : null);
   if (!question) return null;
   return {
     runRef,
@@ -382,7 +418,13 @@ export function mapWaitingRun(raw: unknown): BrainWaitingRun | null {
 
 export function countsFrom(
   summary: Row | null,
-  fallback: { gates: number; questions: number; reports: number; alerts: number; waiting: number },
+  fallback: {
+    gates: number;
+    questions: number;
+    reports: number;
+    alerts: number;
+    waiting: number;
+  },
 ): BrainInboxCounts {
   const pick = (key: string, fb: number) => {
     const n = summary ? num(summary[key]) : null;
@@ -406,7 +448,10 @@ export function countsFrom(
 
 /* ── Competitors ────────────────────────────────────────────────────────── */
 
-function productsOf(value: unknown, names: Map<string, string>): BrainProductOption[] {
+function productsOf(
+  value: unknown,
+  names: Map<string, string>,
+): BrainProductOption[] {
   if (!Array.isArray(value)) return [];
   const out: BrainProductOption[] = [];
   for (const raw of value) {
@@ -417,7 +462,10 @@ function productsOf(value: unknown, names: Map<string, string>): BrainProductOpt
   return out;
 }
 
-export function mapCompetitor(raw: unknown, names: Map<string, string>): BrainCompetitor | null {
+export function mapCompetitor(
+  raw: unknown,
+  names: Map<string, string>,
+): BrainCompetitor | null {
   const row = obj(raw);
   const name = str(row?.name);
   if (!row || !name) return null;
@@ -430,7 +478,10 @@ export function mapCompetitor(raw: unknown, names: Map<string, string>): BrainCo
 }
 
 /** The config value `competitors` as the brain returns it: `{competitors:[…]}` or a bare list. */
-export function competitorsOf(payload: unknown, names: Map<string, string>): BrainCompetitor[] {
+export function competitorsOf(
+  payload: unknown,
+  names: Map<string, string>,
+): BrainCompetitor[] {
   const list = Array.isArray(payload)
     ? payload
     : Array.isArray(obj(payload)?.competitors)
@@ -438,7 +489,9 @@ export function competitorsOf(payload: unknown, names: Map<string, string>): Bra
       : Array.isArray(obj(obj(payload)?.value)?.competitors)
         ? (obj(obj(payload)!.value)!.competitors as unknown[])
         : [];
-  return list.map((c) => mapCompetitor(c, names)).filter((c): c is BrainCompetitor => c !== null);
+  return list
+    .map((c) => mapCompetitor(c, names))
+    .filter((c): c is BrainCompetitor => c !== null);
 }
 
 const ANGLE_WORDS: Record<string, string> = {
@@ -488,14 +541,25 @@ export function mapFinding(row: Row): BrainCompetitorFinding | null {
   };
 }
 
-export function mapCandidate(row: Row, names: Map<string, string>): BrainCompetitorCandidate | null {
+export function mapCandidate(
+  row: Row,
+  names: Map<string, string>,
+): BrainCompetitorCandidate | null {
   const id = ref(row.id);
   const claim =
-    str(row.statement) ?? str(row.claim) ?? str(row.learning) ?? str(row.text) ?? str(row.summary);
+    str(row.statement) ??
+    str(row.claim) ??
+    str(row.learning) ??
+    str(row.text) ??
+    str(row.summary);
   if (!id || !claim) return null;
   const slug = str(row.offering_slug);
   const detail = obj(row.detail);
-  const evidence = str(row.evidence_summary) ?? str(row.evidence) ?? str(detail?.evidence) ?? str(row.rationale);
+  const evidence =
+    str(row.evidence_summary) ??
+    str(row.evidence) ??
+    str(detail?.evidence) ??
+    str(row.rationale);
   return {
     ref: id,
     claim,
