@@ -128,7 +128,13 @@ export default () => ({
     // The 91astro brain's MCP server — the same URL and token the creative pipeline already uses,
     // so there is one credential for one server rather than two that can drift apart.
     url: process.env.BRAIN_MCP_URL ?? '',
-    token: process.env.BRAIN_MCP_BEARER_TOKEN ?? '',
+    // The brain's `dashboard` identity (BRAIN_DASHBOARD_TOKEN): the inbox, reports, alerts and
+    // competitor tools are granted to it and to nobody the Foundry connector uses. Falls back to the
+    // shared pipeline token while the dashboard token is not issued yet — the new tools then answer
+    // "unknown tool" and the pages say "not available yet" rather than failing.
+    token:
+      (process.env.BRAIN_DASHBOARD_TOKEN ?? '').trim() ||
+      (process.env.BRAIN_MCP_BEARER_TOKEN ?? ''),
     timeoutMs: parseInt(process.env.BRAIN_MCP_TIMEOUT_MS ?? '30000', 10),
     /**
      * The Slack id a console gate decision is recorded under.
@@ -140,6 +146,11 @@ export default () => ({
      * variable rather than failing upstream and leaving a gate that will not close.
      */
     approvalActorSlackId: process.env.BRAIN_APPROVAL_ACTOR_SLACK_ID ?? '',
+    /**
+     * Where the panels site lives, for a report whose `page_ref` is a path rather than a full URL.
+     * Unset = such a report simply has no "Open the full report" link.
+     */
+    panelsBaseUrl: process.env.PANELS_BASE_URL ?? '',
   },
   /**
    * Reading a finished creative's picture back out of S3, for the campaign-run view.

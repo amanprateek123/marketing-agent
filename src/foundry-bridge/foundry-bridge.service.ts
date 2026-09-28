@@ -1815,6 +1815,11 @@ export class FoundryBridgeService {
    */
 
   /** Slug → display name, so the page says "Saathi Report" and never `saathi_report`. */
+  /** slug → display name for every offering. Public for the inbox and competitor pages. */
+  async productNames(): Promise<Map<string, string>> {
+    return this.offeringNames();
+  }
+
   private async offeringNames(): Promise<Map<string, string>> {
     const names = new Map<string, string>();
     const read = await this.brain.tryCall<{ rows?: unknown[] }>('brain_read', {

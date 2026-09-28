@@ -269,6 +269,30 @@ export class PipelineBridgeService {
     );
   }
 
+  /**
+   * GET /v1/runs?status=awaiting_clarification — creative runs parked on a question for a person.
+   *
+   * For the "Waiting on you" page. Returns null — not an empty list — when the pipeline is not
+   * configured or does not have this list yet (404/405), so the page can say "not available yet"
+   * instead of "nothing is waiting". Any other failure throws as usual.
+   */
+  async listWaitingRuns(limit = 20): Promise<unknown[] | null> {
+    if (!this.isConfigured()) return null;
+    try {
+      const out = await this.forward<unknown>(
+        'get',
+        `/v1/runs?status=awaiting_clarification&limit=${limit}`,
+      );
+      if (Array.isArray(out)) return out;
+      const runs = (out as { runs?: unknown })?.runs;
+      return Array.isArray(runs) ? runs : [];
+    } catch (err) {
+      const status = (err as HttpException)?.getStatus?.();
+      if (status === 404 || status === 405) return null;
+      throw err;
+    }
+  }
+
   /** GET /health — surfaced so the UI can say "pipeline offline" instead of just failing. */
   async health(): Promise<unknown> {
     return this.forward('get', '/health');

@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { FoundryBridgeController } from './foundry-bridge.controller';
 import { FoundryBridgeService } from './foundry-bridge.service';
 import { CreativeImageService } from './creative-image.service';
+import { InboxController } from './inbox.controller';
+import { InboxService } from './inbox.service';
+import { PipelineBridgeModule } from '../pipeline-bridge/pipeline-bridge.module';
 
 /**
  * Bridge to Brain v2 and the marketing agents around it.
@@ -12,8 +15,10 @@ import { CreativeImageService } from './creative-image.service';
  * in the other without anything here having to synchronise them.
  */
 @Module({
-  controllers: [FoundryBridgeController],
-  providers: [FoundryBridgeService, CreativeImageService],
-  exports: [FoundryBridgeService],
+  // PipelineBridgeModule: the inbox lists creative runs waiting on an answer.
+  imports: [PipelineBridgeModule],
+  controllers: [FoundryBridgeController, InboxController],
+  providers: [FoundryBridgeService, CreativeImageService, InboxService],
+  exports: [FoundryBridgeService, InboxService],
 })
 export class FoundryBridgeModule {}

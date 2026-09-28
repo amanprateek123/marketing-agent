@@ -297,3 +297,24 @@ export class McpClient {
     }
   }
 }
+
+/**
+ * True when the server was reached and said it has no such tool (or will not show it to this
+ * identity, which looks the same from here).
+ *
+ * The inbox, reports, alerts and competitor tools ship in the brain alongside this bridge. Until
+ * that brain is deployed — or while BRAIN_DASHBOARD_TOKEN is unset and the shared token cannot see
+ * them — every call answers "unknown tool". That is "not available yet", not a fault, and the
+ * console says so in those words instead of an error.
+ */
+export function isUnknownTool(err: unknown): boolean {
+  if (!(err instanceof McpToolError)) return false;
+  const text = `${err.message} ${err.detail ?? ''}`;
+  return (
+    /unknown tool/i.test(text) ||
+    /tool\b[^.]*\bnot found/i.test(text) ||
+    /not found:?\s*tool/i.test(text) ||
+    /-32601|method not found/i.test(text) ||
+    /not (?:available|exposed|granted) (?:to|for) (?:this )?(?:identity|role|token)/i.test(text)
+  );
+}
