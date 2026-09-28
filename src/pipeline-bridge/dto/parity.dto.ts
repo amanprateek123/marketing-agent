@@ -16,10 +16,21 @@ import {
  * the action looks ignored. Values the pipeline owns (model names) are NOT re-validated here.
  */
 
+/** Only the models Slack's "Switch model" menu offered; creativebot refuses others with the list. */
 export class SetModelDto {
   @IsString()
   @IsNotEmpty()
   model: string;
+
+  @IsOptional()
+  @IsString()
+  quality?: string;
+}
+
+export class RetryDto {
+  @IsOptional()
+  @IsIn(['preview', 'full'])
+  step?: 'preview' | 'full';
 }
 
 export class ApproveStageDto {
@@ -61,6 +72,11 @@ export class BadgeDto {
 export class LogoDto {
   @IsBoolean()
   include: boolean;
+
+  /** Answers the sibling disclaimer gate in the same call (`tnc` | `ex_showroom`). */
+  @IsOptional()
+  @IsString()
+  disclaimer?: string;
 }
 
 export class ResearchSourcesDto {

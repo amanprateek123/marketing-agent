@@ -32,9 +32,10 @@ export class PipelineBridgeService {
   private readonly http: AxiosInstance;
 
   constructor(private readonly config: ConfigService) {
-    this.baseUrl = (
-      this.config.get<string>('pipeline.url') ?? ''
-    ).replace(/\/+$/, '');
+    this.baseUrl = (this.config.get<string>('pipeline.url') ?? '').replace(
+      /\/+$/,
+      '',
+    );
     this.token = this.config.get<string>('pipeline.token') ?? '';
     this.http = axios.create({
       timeout: this.config.get<number>('pipeline.timeoutMs') ?? 30000,
@@ -55,7 +56,10 @@ export class PipelineBridgeService {
 
   private headers(): Record<string, string> {
     return this.token
-      ? { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' }
+      ? {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        }
       : { 'Content-Type': 'application/json' };
   }
 
@@ -87,11 +91,18 @@ export class PipelineBridgeService {
       const pipelineSaid =
         axiosErr.response?.data?.error ?? axiosErr.response?.data?.message;
       if (status && status >= 400 && status < 500) {
-        throw new HttpException(pipelineSaid ?? plainPipelineRefusal(status), status);
+        throw new HttpException(
+          pipelineSaid ?? plainPipelineRefusal(status),
+          status,
+        );
       }
       const message = pipelineSaid ?? axiosErr.message ?? 'pipeline error';
-      this.logger.error(`pipeline ${method.toUpperCase()} ${path} failed: ${message}`);
-      throw new BadGatewayException(`Could not reach the creative pipeline: ${message}`);
+      this.logger.error(
+        `pipeline ${method.toUpperCase()} ${path} failed: ${message}`,
+      );
+      throw new BadGatewayException(
+        `Could not reach the creative pipeline: ${message}`,
+      );
     }
   }
 
@@ -110,8 +121,12 @@ export class PipelineBridgeService {
   }
 
   /** POST /v1/runs/:id/retry — start a failed run again from where it stopped. */
-  retryRun(runId: string): Promise<unknown> {
-    return this.forward('post', this.run(runId, 'retry'));
+  retryRun(runId: string, step?: 'preview' | 'full'): Promise<unknown> {
+    return this.forward(
+      'post',
+      this.run(runId, 'retry'),
+      step ? { step } : undefined,
+    );
   }
 
   /** POST /v1/runs/:id/run-anyway — override a quality-check block. */
@@ -120,8 +135,11 @@ export class PipelineBridgeService {
   }
 
   /** POST /v1/runs/:id/model — pick the image model for this run. */
-  setModel(runId: string, model: string): Promise<unknown> {
-    return this.forward('post', this.run(runId, 'model'), { model });
+  setModel(runId: string, model: string, quality?: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'model'), {
+      model,
+      ...(quality ? { quality } : {}),
+    });
   }
 
   /** POST /v1/runs/:id/approve — Gate A (`preview`) or Gate B (`full`). */
@@ -135,7 +153,10 @@ export class PipelineBridgeService {
   }
 
   /** PUT /v1/runs/:id/campaign-fields — save the operator's edits to the ad copy. */
-  editCampaignFields(runId: string, fields: Record<string, unknown>): Promise<unknown> {
+  editCampaignFields(
+    runId: string,
+    fields: Record<string, unknown>,
+  ): Promise<unknown> {
     return this.forward('put', this.run(runId, 'campaign-fields'), fields);
   }
 
@@ -146,17 +167,30 @@ export class PipelineBridgeService {
 
   /** POST /v1/runs/:id/badge — use an uploaded image as the badge. */
   setBadge(runId: string, uploadId: string): Promise<unknown> {
-    return this.forward('post', this.run(runId, 'badge'), { upload_id: uploadId });
+    return this.forward('post', this.run(runId, 'badge'), {
+      upload_id: uploadId,
+    });
   }
 
   /** POST /v1/runs/:id/logo — include the logo or leave it off. */
-  setLogo(runId: string, include: boolean): Promise<unknown> {
-    return this.forward('post', this.run(runId, 'logo'), { include });
+  setLogo(
+    runId: string,
+    include: boolean,
+    disclaimer?: string,
+  ): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'logo'), {
+      include,
+      ...(disclaimer ? { disclaimer } : {}),
+    });
   }
 
-  /** POST /v1/ideas/:id/discard — drop an idea with a reason. */
+  /** POST /v1/ideas/:runId/discard — drop the idea behind the RUN showing it (Slack's Delete idea). */
   discardIdea(ideaId: string, reason: string): Promise<unknown> {
-    return this.forward('post', `/v1/ideas/${encodeURIComponent(ideaId)}/discard`, { reason });
+    return this.forward(
+      'post',
+      `/v1/ideas/${encodeURIComponent(ideaId)}/discard`,
+      { reason },
+    );
   }
 
   private research(researchId: string, suffix: string): string {
@@ -169,7 +203,11 @@ export class PipelineBridgeService {
   }
 
   /** POST /v1/research/:id/sources — confirm the sources, or override them with `urls`. */
-  confirmResearchSources(researchId: string, confirm: boolean, urls?: string[]): Promise<unknown> {
+  confirmResearchSources(
+    researchId: string,
+    confirm: boolean,
+    urls?: string[],
+  ): Promise<unknown> {
     return this.forward('post', this.research(researchId, 'sources'), {
       confirm,
       ...(urls?.length ? { urls } : {}),
@@ -177,7 +215,10 @@ export class PipelineBridgeService {
   }
 
   /** POST /v1/research/:id/rerun — reuse the earlier research, or run it fresh. */
-  rerunResearch(researchId: string, choice: 'reuse' | 'rerun'): Promise<unknown> {
+  rerunResearch(
+    researchId: string,
+    choice: 'reuse' | 'rerun',
+  ): Promise<unknown> {
     return this.forward('post', this.research(researchId, 'rerun'), { choice });
   }
 
@@ -190,21 +231,30 @@ export class PipelineBridgeService {
   buildDirection(researchId: string, direction: string): Promise<unknown> {
     return this.forward(
       'post',
-      this.research(researchId, `directions/${encodeURIComponent(direction)}/build`),
+      this.research(
+        researchId,
+        `directions/${encodeURIComponent(direction)}/build`,
+      ),
     );
   }
 
-  /** POST /v1/research/:id/directions/:d/expand — develop one direction further. */
-  expandDirection(researchId: string, direction: string): Promise<unknown> {
+  /** POST /v1/research/:id/directions/:conceptIndex/expand — develop a culled concept (by its `index`; concepts have no db id). */
+  expandConcept(researchId: string, conceptIndex: string): Promise<unknown> {
     return this.forward(
       'post',
-      this.research(researchId, `directions/${encodeURIComponent(direction)}/expand`),
+      this.research(
+        researchId,
+        `directions/${encodeURIComponent(conceptIndex)}/expand`,
+      ),
     );
   }
 
   /** POST /v1/research/pdf — start research from an uploaded PDF. */
   researchFromPdf(uploadId: string, product: string): Promise<unknown> {
-    return this.forward('post', '/v1/research/pdf', { upload_id: uploadId, product });
+    return this.forward('post', '/v1/research/pdf', {
+      upload_id: uploadId,
+      product,
+    });
   }
 
   /** GET /v1/learn/proposals — learnings waiting for a Brain decision (the old /learnings flow). */
@@ -215,9 +265,17 @@ export class PipelineBridgeService {
   /** POST /v1/learn/proposals/:id — approve, reject, or edit-and-approve one proposal. */
   decideLearnProposal(
     proposalId: string,
-    body: { decision: 'approve' | 'reject' | 'edit'; text?: string; decided_by: string },
+    body: {
+      decision: 'approve' | 'reject' | 'edit';
+      text?: string;
+      decided_by: string;
+    },
   ): Promise<unknown> {
-    return this.forward('post', `/v1/learn/proposals/${encodeURIComponent(proposalId)}`, body);
+    return this.forward(
+      'post',
+      `/v1/learn/proposals/${encodeURIComponent(proposalId)}`,
+      body,
+    );
   }
 
   /**
@@ -228,7 +286,10 @@ export class PipelineBridgeService {
    * produced by the pipeline, which is the honest answer for one the dashboard generated itself.
    */
   async resizePackage(packageId: string): Promise<unknown> {
-    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/resize`);
+    return this.forward(
+      'post',
+      `/v1/packages/${encodeURIComponent(packageId)}/resize`,
+    );
   }
 
   /**
@@ -248,10 +309,17 @@ export class PipelineBridgeService {
    * Returns a NEW run id: the pipeline revises a clone so the source creative keeps its own
    * artifacts and buttons, and the result arrives in the library as its own package.
    */
-  async revisePackage(packageId: string, instruction: string): Promise<unknown> {
-    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/revise`, {
-      instruction,
-    });
+  async revisePackage(
+    packageId: string,
+    instruction: string,
+  ): Promise<unknown> {
+    return this.forward(
+      'post',
+      `/v1/packages/${encodeURIComponent(packageId)}/revise`,
+      {
+        instruction,
+      },
+    );
   }
 
   /**
@@ -265,15 +333,23 @@ export class PipelineBridgeService {
     instruction: string,
     tag?: string,
   ): Promise<unknown> {
-    return this.forward('post', `/v1/packages/${encodeURIComponent(packageId)}/regenerate`, {
-      instruction,
-      ...(tag ? { tag } : {}),
-    });
+    return this.forward(
+      'post',
+      `/v1/packages/${encodeURIComponent(packageId)}/regenerate`,
+      {
+        instruction,
+        ...(tag ? { tag } : {}),
+      },
+    );
   }
 
   /** POST /v1/runs/:runId/clarify — answer a stalled revise so it can continue. */
   async clarifyRun(runId: string, answer: string): Promise<unknown> {
-    return this.forward('post', `/v1/runs/${encodeURIComponent(runId)}/clarify`, { answer });
+    return this.forward(
+      'post',
+      `/v1/runs/${encodeURIComponent(runId)}/clarify`,
+      { answer },
+    );
   }
 
   /** GET /v1/options — the option contract the Custom-brief form renders from. */
@@ -335,7 +411,9 @@ export class PipelineBridgeService {
         throw new HttpException(message, status);
       }
       this.logger.error(`pipeline POST /v1/uploads failed: ${message}`);
-      throw new BadGatewayException(`Could not upload to the creative pipeline: ${message}`);
+      throw new BadGatewayException(
+        `Could not upload to the creative pipeline: ${message}`,
+      );
     }
   }
 

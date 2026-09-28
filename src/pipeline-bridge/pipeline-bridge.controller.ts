@@ -22,6 +22,7 @@ import {
   DiscardIdeaDto,
   LearnDecisionDto,
   LogoDto,
+  RetryDto,
   ResearchPdfDto,
   ResearchRerunDto,
   ResearchSourcesDto,
@@ -112,7 +113,8 @@ export class PipelineBridgeController {
   @UseInterceptors(FilesInterceptor('files', 5))
   async uploads(
     @Param('tenantId') _tenantId: string,
-    @UploadedFiles() files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
+    @UploadedFiles()
+    files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
   ): Promise<unknown> {
     if (!files?.length) {
       throw new BadRequestException('No files were uploaded.');
@@ -231,8 +233,11 @@ export class PipelineBridgeController {
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/retry */
   @Post(':tenantId/runs/:runId/retry')
-  async retryRun(@Param('runId') runId: string): Promise<unknown> {
-    return this.bridge.retryRun(runId);
+  async retryRun(
+    @Param('runId') runId: string,
+    @Body() dto: RetryDto,
+  ): Promise<unknown> {
+    return this.bridge.retryRun(runId, dto?.step);
   }
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/run-anyway — override a quality-check block. */
@@ -243,8 +248,11 @@ export class PipelineBridgeController {
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/model */
   @Post(':tenantId/runs/:runId/model')
-  async setModel(@Param('runId') runId: string, @Body() dto: SetModelDto): Promise<unknown> {
-    return this.bridge.setModel(runId, dto.model);
+  async setModel(
+    @Param('runId') runId: string,
+    @Body() dto: SetModelDto,
+  ): Promise<unknown> {
+    return this.bridge.setModel(runId, dto.model, dto.quality);
   }
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/approve — `preview` (Gate A) or `full` (Gate B). */
@@ -258,7 +266,9 @@ export class PipelineBridgeController {
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields — write the ad copy. */
   @Post(':tenantId/runs/:runId/campaign-fields')
-  async generateCampaignFields(@Param('runId') runId: string): Promise<unknown> {
+  async generateCampaignFields(
+    @Param('runId') runId: string,
+  ): Promise<unknown> {
     return this.bridge.generateCampaignFields(runId);
   }
 
@@ -272,7 +282,9 @@ export class PipelineBridgeController {
       Object.entries(dto).filter(([, v]) => v !== undefined),
     );
     if (Object.keys(fields).length === 0) {
-      throw new BadRequestException('Change at least one field of the ad copy before saving.');
+      throw new BadRequestException(
+        'Change at least one field of the ad copy before saving.',
+      );
     }
     return this.bridge.editCampaignFields(runId, fields);
   }
@@ -285,23 +297,29 @@ export class PipelineBridgeController {
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/badge — `upload_id` from the uploads route. */
   @Post(':tenantId/runs/:runId/badge')
-  async setBadge(@Param('runId') runId: string, @Body() dto: BadgeDto): Promise<unknown> {
+  async setBadge(
+    @Param('runId') runId: string,
+    @Body() dto: BadgeDto,
+  ): Promise<unknown> {
     return this.bridge.setBadge(runId, dto.upload_id);
   }
 
   /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/logo */
   @Post(':tenantId/runs/:runId/logo')
-  async setLogo(@Param('runId') runId: string, @Body() dto: LogoDto): Promise<unknown> {
-    return this.bridge.setLogo(runId, dto.include);
+  async setLogo(
+    @Param('runId') runId: string,
+    @Body() dto: LogoDto,
+  ): Promise<unknown> {
+    return this.bridge.setLogo(runId, dto.include, dto.disclaimer);
   }
 
-  /** POST /api/v1/pipeline-bridge/:tenantId/ideas/:ideaId/discard */
-  @Post(':tenantId/ideas/:ideaId/discard')
+  /** POST /api/v1/pipeline-bridge/:tenantId/ideas/:runId/discard — the RUN showing the idea, as Slack's button carried. */
+  @Post(':tenantId/ideas/:runId/discard')
   async discardIdea(
-    @Param('ideaId') ideaId: string,
+    @Param('runId') runId: string,
     @Body() dto: DiscardIdeaDto,
   ): Promise<unknown> {
-    return this.bridge.discardIdea(ideaId, dto.reason);
+    return this.bridge.discardIdea(runId, dto.reason);
   }
 
   // ─── Research ───
@@ -314,7 +332,9 @@ export class PipelineBridgeController {
 
   /** GET /api/v1/pipeline-bridge/:tenantId/research/:researchId/sources */
   @Get(':tenantId/research/:researchId/sources')
-  async getResearchSources(@Param('researchId') researchId: string): Promise<unknown> {
+  async getResearchSources(
+    @Param('researchId') researchId: string,
+  ): Promise<unknown> {
     return this.bridge.getResearchSources(researchId);
   }
 
@@ -324,7 +344,11 @@ export class PipelineBridgeController {
     @Param('researchId') researchId: string,
     @Body() dto: ResearchSourcesDto,
   ): Promise<unknown> {
-    return this.bridge.confirmResearchSources(researchId, dto.confirm, dto.urls);
+    return this.bridge.confirmResearchSources(
+      researchId,
+      dto.confirm,
+      dto.urls,
+    );
   }
 
   /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/rerun — `reuse` or `rerun`. */
@@ -338,7 +362,9 @@ export class PipelineBridgeController {
 
   /** GET /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions */
   @Get(':tenantId/research/:researchId/directions')
-  async getResearchDirections(@Param('researchId') researchId: string): Promise<unknown> {
+  async getResearchDirections(
+    @Param('researchId') researchId: string,
+  ): Promise<unknown> {
     return this.bridge.getResearchDirections(researchId);
   }
 
@@ -351,13 +377,21 @@ export class PipelineBridgeController {
     return this.bridge.buildDirection(researchId, direction);
   }
 
-  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions/:direction/expand */
-  @Post(':tenantId/research/:researchId/directions/:direction/expand')
-  async expandDirection(
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions/:conceptIndex/expand
+   *
+   * Takes a CONCEPT's `index` from GET directions, not a direction id — culled concepts have no
+   * database id. Building still uses the direction id.
+   */
+  @Post(':tenantId/research/:researchId/directions/:conceptIndex/expand')
+  expandConcept(
     @Param('researchId') researchId: string,
-    @Param('direction') direction: string,
+    @Param('conceptIndex') conceptIndex: string,
   ): Promise<unknown> {
-    return this.bridge.expandDirection(researchId, direction);
+    if (!/^\d+$/.test(conceptIndex)) {
+      throw new BadRequestException('Pick one of the ideas in the pool to develop.');
+    }
+    return this.bridge.expandConcept(researchId, conceptIndex);
   }
 
   // ─── Learnings proposals: BRAIN LOGIN ONLY ───
@@ -383,7 +417,9 @@ export class PipelineBridgeController {
   ): Promise<unknown> {
     const text = dto.text?.trim();
     if (dto.decision === 'edit' && !text) {
-      throw new BadRequestException('Write the corrected learning before saving the edit.');
+      throw new BadRequestException(
+        'Write the corrected learning before saving the edit.',
+      );
     }
     const user = req.user;
     if (!user) throw new BadRequestException('Sign in to the Brain first.');
