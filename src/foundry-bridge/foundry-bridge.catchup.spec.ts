@@ -205,10 +205,11 @@ describe('gate decisions with an amount', () => {
       },
     });
 
-    const out = await service.decideGate('approval:48', {
-      action: 'approve',
-      amountOverrideInr: 6000,
-    });
+    const out = await service.decideGate(
+      'approval:48',
+      { action: 'approve', amountOverrideInr: 6000 },
+      { principal: 'dash:brain:ops', displayName: 'ops' },
+    );
 
     expect(
       brain.calls.find((c) => c.tool === 'approval_record')?.args,

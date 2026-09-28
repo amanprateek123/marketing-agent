@@ -260,6 +260,7 @@ export function buildPlanView(input: PlanViewInput): BrainPlanView {
       });
     return {
       product: nameOf(slug) ?? 'A product',
+      productKey: slug,
       typeLabel:
         CAMPAIGN_TYPE_LABEL[str(run.campaign_type) ?? ''] ?? 'Campaign',
       dailyBudgetInr: runBudget(run, allocationBySlug, runsPerSlug),

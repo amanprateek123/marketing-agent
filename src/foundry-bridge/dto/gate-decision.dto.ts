@@ -40,4 +40,13 @@ export class GateDecisionDto {
   @IsNumber()
   @Min(0)
   amountOverrideInr?: number;
+
+  /**
+   * "Approve <product> only" — the offering slugs the approval covers. Declared for the same
+   * reason as `amountOverrideInr`: an undeclared field is stripped silently by the ValidationPipe.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  scopeSlugs?: string[];
 }

@@ -137,13 +137,9 @@ export default () => ({
       (process.env.BRAIN_MCP_BEARER_TOKEN ?? ''),
     timeoutMs: parseInt(process.env.BRAIN_MCP_TIMEOUT_MS ?? '30000', 10),
     /**
-     * The Slack id a console gate decision is recorded under.
-     *
-     * The brain enforces `APPROVAL_SLACK_IDS` inside `approval_record` — a check in SQL that
-     * nothing written in a Slack message can argue its way past. The dashboard has a real login,
-     * but the brain cannot see it, so a decision made here still has to arrive carrying an identity
-     * that allowlist knows. Held server-side; unset, gate decisions 503 with a message naming this
-     * variable rather than failing upstream and leaving a gate that will not close.
+     * TRANSITIONAL: a Slack id sent with gate decisions only while set, for a brain that predates
+     * migration 050. Decisions are recorded under the Brain login's principal either way; unset
+     * this once 050 (APPROVAL_PRINCIPALS) is deployed.
      */
     approvalActorSlackId: process.env.BRAIN_APPROVAL_ACTOR_SLACK_ID ?? '',
     /**

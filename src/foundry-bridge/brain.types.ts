@@ -419,6 +419,11 @@ export interface BrainGateDecisionBody {
    * console shows it rather than predicting it.
    */
   amountOverrideInr?: number;
+  /**
+   * "Approve <product> only" — offering slugs (a plan run's `productKey`). The brain approves the
+   * plan for these products and leaves the rest out. Approvals only.
+   */
+  scopeSlugs?: string[];
 }
 
 /** One contract the brain rescaled because an approval carried an amount. */
@@ -801,6 +806,8 @@ export interface BrainPlanAudience {
 
 export interface BrainPlanRun {
   product: string;
+  /** The offering slug, for "approve this product only". Sent back, never shown. */
+  productKey: string | null;
   /** The bets this campaign carries. */
   bets: BrainPlanClaim[];
   audiences: BrainPlanAudience[];

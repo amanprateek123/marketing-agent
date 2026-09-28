@@ -109,16 +109,10 @@ export class FoundryBridgeService {
   private readonly brain: McpClient;
   private readonly builder: McpClient;
   /**
-   * The Slack id the brain's approval allowlist recognises, held server-side.
-   *
-   * `approval_record` enforces `APPROVAL_SLACK_IDS` inside the brain, on purpose: approving in a
-   * Slack channel means anyone who can type in it can type "approve". The dashboard has a real
-   * login, but the brain has no way to see it, so a console decision still has to arrive carrying
-   * an identity the allowlist knows. This is that identity — one operator id, never sent to the
-   * browser, and useless without a JWT to reach this route at all.
-   *
-   * Unset, gate decisions 503 with a message naming the variable, rather than being sent upstream
-   * to fail as an authorization fault and leave the operator staring at a gate that will not close.
+   * TRANSITIONAL. A Slack id sent alongside the principal only while BRAIN_APPROVAL_ACTOR_SLACK_ID is
+   * set — for a brain that still checks APPROVAL_SLACK_IDS (pre-050). Unset, gate decisions carry
+   * the Brain login's principal alone (`dash:brain:<username>`, checked against
+   * APPROVAL_PRINCIPALS). Never sent to the browser.
    */
   private readonly approvalActorSlackId: string;
 
@@ -1102,11 +1096,17 @@ export class FoundryBridgeService {
           'saying what to change, and the run loops back.',
       );
     }
-    if (!this.approvalActorSlackId) {
-      throw new ServiceUnavailableException(
-        'Gate decisions are not configured: set BRAIN_APPROVAL_ACTOR_SLACK_ID to a Slack id that ' +
-          "is on the brain's APPROVAL_SLACK_IDS allowlist. Without it the brain refuses the " +
-          'decision and the gate stays open.',
+    if (!actor?.principal) {
+      // RolesGuard guarantees a brain principal on this route; reaching here without one is a
+      // wiring fault, and a decision recorded under nobody is worse than no decision.
+      throw new ForbiddenException('Sign in to the Brain to decide gates.');
+    }
+    const scopeSlugs = (body.scopeSlugs ?? [])
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (scopeSlugs.length && body.action !== 'approve') {
+      throw new BadRequestException(
+        'Only an approval can be limited to some products. Reject the plan to reject all of it.',
       );
     }
     try {
@@ -1115,14 +1115,17 @@ export class FoundryBridgeService {
         {
           id,
           decision: body.action === 'approve' ? 'approved' : 'rejected',
-          // Still required by the brain's APPROVAL_SLACK_IDS allowlist until migration 049 moves
-          // it to APPROVAL_PRINCIPALS; then this line is dropped and `decided_by_principal` is
-          // the identity (C2). An older brain strips the unknown field (non-strict zod object).
-          decided_by_slack_id: this.approvalActorSlackId,
-          decided_by_name: actor?.displayName || 'Marketing dashboard',
-          ...(actor?.principal
-            ? { decided_by_principal: actor.principal }
+          // The identity is the Brain login's principal, checked against APPROVAL_PRINCIPALS
+          // (migration 050). The Slack id is sent ONLY while BRAIN_APPROVAL_ACTOR_SLACK_ID is still
+          // set, for a brain that predates 050; unset it once 050 is deployed and nothing about
+          // Slack leaves this process.
+          decided_by_principal: actor.principal,
+          decided_by_name: actor.displayName || 'Marketing dashboard',
+          ...(this.approvalActorSlackId
+            ? { decided_by_slack_id: this.approvalActorSlackId }
             : {}),
+          // "approve <product> only": the plan goes ahead for these products and not the rest.
+          ...(scopeSlugs.length ? { scope_slugs: scopeSlugs } : {}),
           decision_text: body.note ?? '',
           // Slack's `approve at <amount>` — "yes, but this much". It is not just recorded: on an
           // approved BUILD gate the brain rescales the open run's audience_plan daily budgets to
