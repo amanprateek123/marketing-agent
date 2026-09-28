@@ -292,6 +292,28 @@ export function kindLabel(kind: string | null): string {
   return KIND_LABEL[kind] ?? capitalise(words(kind));
 }
 
+/**
+ * True when the brain proposed this from a competitor observation (`source_refs` carries a
+ * `competitor_observation`, or the row says `source: 'competitor'`). Such an idea is labelled
+ * "Idea from a competitor" — never "Proven idea": a competitor's ad says what they try, not whether
+ * it works.
+ */
+export function fromCompetitor(row: Row): boolean {
+  if (str(row.source) === 'competitor') return true;
+  const refs = Array.isArray(row.source_refs) ? row.source_refs : [];
+  return refs.some(
+    (r) =>
+      !!r &&
+      typeof r === 'object' &&
+      (r as Row).source_type === 'competitor_observation',
+  );
+}
+
+/** The kind label for a hypothesis row, with competitor-sourced ideas called what they are. */
+export function rowKindLabel(row: Row): string {
+  return fromCompetitor(row) ? 'Idea from a competitor' : kindLabel(str(row.kind));
+}
+
 const STATUS_META: Record<
   string,
   { label: string; meaning: string; tone: BrainExperimentTone }
@@ -749,7 +771,7 @@ export function mapExperiment(
     product: slug ? (ctx.names.get(slug) ?? capitalise(words(slug))) : null,
     levelLabel: levelLabel(str(row.level)),
     claim: renderClaim(row),
-    kindLabel: kindLabel(kind),
+    kindLabel: rowKindLabel(row),
     kind:
       kind === 'proven' || kind === 'variant' || kind === 'seed'
         ? kind
@@ -977,7 +999,7 @@ export function mapBet(
       kind === 'proven' || kind === 'variant' || kind === 'seed'
         ? kind
         : 'other',
-    kindLabel: kindLabel(kind),
+    kindLabel: rowKindLabel(row),
     levelLabel: levelLabel(str(row.level)),
     statusLabel: meta.label,
     statusMeaning: meta.meaning,

@@ -355,3 +355,12 @@ describe('FoundryBridgeService experiments', () => {
     expect(summary.partial).toBe(true);
   });
 });
+
+describe('competitor-sourced ideas', () => {
+  it('labels a hypothesis proposed from a competitor observation', () => {
+    const { rowKindLabel } = jest.requireActual('./experiments.mapper');
+    expect(rowKindLabel({ kind: 'variant', source_refs: [{ source_type: 'competitor_observation', source_id: 7 }] })).toBe('Idea from a competitor');
+    expect(rowKindLabel({ kind: 'variant', source: 'competitor' })).toBe('Idea from a competitor');
+    expect(rowKindLabel({ kind: 'variant', source_refs: [{ source_type: 'learning', source_id: 1 }] })).toBe('New twist on a proven idea');
+  });
+});
