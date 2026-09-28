@@ -663,7 +663,6 @@ products: [{
 
 // Delivery
 delivery: {
-  slackWebhook?: string
   whatsappNumber?: string
   email?: string
   notionDatabaseId?: string
