@@ -5,7 +5,9 @@ import {
   Get,
   Param,
   Post,
+  Put,
   Query,
+  Req,
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
@@ -13,7 +15,25 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import { AddOfferingDto } from './dto/add-offering.dto';
 import { StartRunDto } from './dto/start-run.dto';
 import { ClarifyDto, RegenerateDto, ReviseDto } from './dto/iterate.dto';
+import {
+  ApproveStageDto,
+  BadgeDto,
+  CampaignFieldsDto,
+  DiscardIdeaDto,
+  LearnDecisionDto,
+  LogoDto,
+  LanguageDto,
+  ImageKindDto,
+  OfferingDto,
+  DisclaimerDto,
+  RetryDto,
+  ResearchPdfDto,
+  ResearchRerunDto,
+  ResearchSourcesDto,
+  SetModelDto,
+} from './dto/parity.dto';
 import { PipelineBridgeService } from './pipeline-bridge.service';
+import { AuthedRequest, brainPrincipal, Roles } from '../auth/roles';
 
 /**
  * The dashboard's route to the external creative pipeline.
@@ -97,7 +117,8 @@ export class PipelineBridgeController {
   @UseInterceptors(FilesInterceptor('files', 5))
   async uploads(
     @Param('tenantId') _tenantId: string,
-    @UploadedFiles() files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
+    @UploadedFiles()
+    files: Array<{ originalname: string; buffer: Buffer; mimetype: string }>,
   ): Promise<unknown> {
     if (!files?.length) {
       throw new BadRequestException('No files were uploaded.');
@@ -204,5 +225,241 @@ export class PipelineBridgeController {
     @Query('after') after?: string,
   ): Promise<unknown> {
     return this.bridge.getEvents(runId, Number(after ?? 0));
+  }
+
+  // ─── Creative studio parity: every action a Slack button used to be the only door to ───
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/cancel */
+  @Post(':tenantId/runs/:runId/cancel')
+  async cancelRun(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.cancelRun(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/retry */
+  @Post(':tenantId/runs/:runId/retry')
+  async retryRun(
+    @Param('runId') runId: string,
+    @Body() dto: RetryDto,
+  ): Promise<unknown> {
+    return this.bridge.retryRun(runId, dto?.step);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/run-anyway — override a quality-check block. */
+  @Post(':tenantId/runs/:runId/run-anyway')
+  async runAnyway(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.runAnyway(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/model */
+  @Post(':tenantId/runs/:runId/model')
+  async setModel(
+    @Param('runId') runId: string,
+    @Body() dto: SetModelDto,
+  ): Promise<unknown> {
+    return this.bridge.setModel(runId, dto.model, dto.quality);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/approve — `preview` (Gate A) or `full` (Gate B). */
+  @Post(':tenantId/runs/:runId/approve')
+  async approveRun(
+    @Param('runId') runId: string,
+    @Body() dto: ApproveStageDto,
+  ): Promise<unknown> {
+    return this.bridge.approveRun(runId, dto.stage);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields — write the ad copy. */
+  @Post(':tenantId/runs/:runId/campaign-fields')
+  async generateCampaignFields(
+    @Param('runId') runId: string,
+  ): Promise<unknown> {
+    return this.bridge.generateCampaignFields(runId);
+  }
+
+  /** PUT /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields — save edits to the ad copy. */
+  @Put(':tenantId/runs/:runId/campaign-fields')
+  async editCampaignFields(
+    @Param('runId') runId: string,
+    @Body() dto: CampaignFieldsDto,
+  ): Promise<unknown> {
+    const fields = Object.fromEntries(
+      Object.entries(dto).filter(([, v]) => v !== undefined),
+    );
+    if (Object.keys(fields).length === 0) {
+      throw new BadRequestException(
+        'Change at least one field of the ad copy before saving.',
+      );
+    }
+    return this.bridge.editCampaignFields(runId, fields);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields/approve */
+  @Post(':tenantId/runs/:runId/campaign-fields/approve')
+  async approveCampaignFields(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.approveCampaignFields(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/badge — `upload_id` from the uploads route. */
+  @Post(':tenantId/runs/:runId/badge')
+  async setBadge(
+    @Param('runId') runId: string,
+    @Body() dto: BadgeDto,
+  ): Promise<unknown> {
+    return this.bridge.setBadge(runId, dto.upload_id);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/logo */
+  @Post(':tenantId/runs/:runId/logo')
+  async setLogo(
+    @Param('runId') runId: string,
+    @Body() dto: LogoDto,
+  ): Promise<unknown> {
+    return this.bridge.setLogo(runId, dto.include, dto.disclaimer);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/language — at `awaiting_language`. */
+  @Post(':tenantId/runs/:runId/language')
+  setLanguage(@Param('runId') runId: string, @Body() dto: LanguageDto): Promise<unknown> {
+    const languages = (dto.languages ?? []).map((l) => l.trim()).filter(Boolean);
+    const language = dto.language?.trim();
+    if (!language && languages.length === 0) {
+      throw new BadRequestException('Choose at least one language.');
+    }
+    return this.bridge.setLanguage(runId, languages.length ? { languages } : { language });
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/image-kind — at `awaiting_image_kind`. */
+  @Post(':tenantId/runs/:runId/image-kind')
+  setImageKind(@Param('runId') runId: string, @Body() dto: ImageKindDto): Promise<unknown> {
+    return this.bridge.setImageKind(runId, dto.kind, dto.text?.trim() || undefined);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/offering — at `awaiting_offering`. */
+  @Post(':tenantId/runs/:runId/offering')
+  setOffering(@Param('runId') runId: string, @Body() dto: OfferingDto): Promise<unknown> {
+    return this.bridge.setOffering(runId, dto.offering);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/disclaimer — astro or automotive small print. */
+  @Post(':tenantId/runs/:runId/disclaimer')
+  setDisclaimer(@Param('runId') runId: string, @Body() dto: DisclaimerDto): Promise<unknown> {
+    return this.bridge.setDisclaimer(runId, dto.choice);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/ideas/:runId/discard — the RUN showing the idea, as Slack's button carried. */
+  @Post(':tenantId/ideas/:runId/discard')
+  async discardIdea(
+    @Param('runId') runId: string,
+    @Body() dto: DiscardIdeaDto,
+  ): Promise<unknown> {
+    return this.bridge.discardIdea(runId, dto.reason);
+  }
+
+  // ─── Research ───
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/pdf — start research from an uploaded PDF. */
+  @Post(':tenantId/research/pdf')
+  async researchFromPdf(@Body() dto: ResearchPdfDto): Promise<unknown> {
+    return this.bridge.researchFromPdf(dto.upload_id, dto.product);
+  }
+
+  /** GET /api/v1/pipeline-bridge/:tenantId/research/:researchId/sources */
+  @Get(':tenantId/research/:researchId/sources')
+  async getResearchSources(
+    @Param('researchId') researchId: string,
+  ): Promise<unknown> {
+    return this.bridge.getResearchSources(researchId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/sources — confirm, or override with `urls`. */
+  @Post(':tenantId/research/:researchId/sources')
+  async confirmResearchSources(
+    @Param('researchId') researchId: string,
+    @Body() dto: ResearchSourcesDto,
+  ): Promise<unknown> {
+    return this.bridge.confirmResearchSources(
+      researchId,
+      dto.confirm,
+      dto.urls,
+    );
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/rerun — `reuse` or `rerun`. */
+  @Post(':tenantId/research/:researchId/rerun')
+  async rerunResearch(
+    @Param('researchId') researchId: string,
+    @Body() dto: ResearchRerunDto,
+  ): Promise<unknown> {
+    return this.bridge.rerunResearch(researchId, dto.choice);
+  }
+
+  /** GET /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions */
+  @Get(':tenantId/research/:researchId/directions')
+  async getResearchDirections(
+    @Param('researchId') researchId: string,
+  ): Promise<unknown> {
+    return this.bridge.getResearchDirections(researchId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions/:direction/build */
+  @Post(':tenantId/research/:researchId/directions/:direction/build')
+  async buildDirection(
+    @Param('researchId') researchId: string,
+    @Param('direction') direction: string,
+  ): Promise<unknown> {
+    return this.bridge.buildDirection(researchId, direction);
+  }
+
+  /**
+   * POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions/:conceptIndex/expand
+   *
+   * Takes a CONCEPT's `index` from GET directions, not a direction id — culled concepts have no
+   * database id. Building still uses the direction id.
+   */
+  @Post(':tenantId/research/:researchId/directions/:conceptIndex/expand')
+  expandConcept(
+    @Param('researchId') researchId: string,
+    @Param('conceptIndex') conceptIndex: string,
+  ): Promise<unknown> {
+    if (!/^\d+$/.test(conceptIndex)) {
+      throw new BadRequestException('Pick one of the ideas in the pool to develop.');
+    }
+    return this.bridge.expandConcept(researchId, conceptIndex);
+  }
+
+  // ─── Learnings proposals: BRAIN LOGIN ONLY ───
+  //
+  // The old /learnings Slack flow decided what the whole system believes, so it sits behind the
+  // same role as every /brain route even though it proxies creativebot. The decision is recorded
+  // under the Brain principal, never the workspace login.
+
+  /** GET /api/v1/pipeline-bridge/:tenantId/learn/proposals */
+  @Roles('brain')
+  @Get(':tenantId/learn/proposals')
+  async getLearnProposals(): Promise<unknown> {
+    return this.bridge.getLearnProposals();
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/learn/proposals/:proposalId — approve | reject | edit. */
+  @Roles('brain')
+  @Post(':tenantId/learn/proposals/:proposalId')
+  async decideLearnProposal(
+    @Param('proposalId') proposalId: string,
+    @Body() dto: LearnDecisionDto,
+    @Req() req: AuthedRequest,
+  ): Promise<unknown> {
+    const text = dto.text?.trim();
+    if (dto.decision === 'edit' && !text) {
+      throw new BadRequestException(
+        'Write the corrected learning before saving the edit.',
+      );
+    }
+    const user = req.user;
+    if (!user) throw new BadRequestException('Sign in to the Brain first.');
+    return this.bridge.decideLearnProposal(proposalId, {
+      decision: dto.decision,
+      ...(text ? { text } : {}),
+      decided_by: brainPrincipal(user),
+    });
   }
 }
