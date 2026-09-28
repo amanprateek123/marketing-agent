@@ -68,7 +68,7 @@ export class PipelineBridgeService {
    * flattened into a generic 502. Only transport failures become 502.
    */
   private async forward<T>(
-    method: 'get' | 'post',
+    method: 'get' | 'post' | 'put',
     path: string,
     body?: unknown,
   ): Promise<T> {
@@ -82,16 +82,142 @@ export class PipelineBridgeService {
       });
       return res.data;
     } catch (err) {
-      const axiosErr = err as AxiosError<{ error?: string }>;
+      const axiosErr = err as AxiosError<{ error?: string; message?: string }>;
       const status = axiosErr.response?.status;
-      const message =
-        axiosErr.response?.data?.error ?? axiosErr.message ?? 'pipeline error';
+      const pipelineSaid =
+        axiosErr.response?.data?.error ?? axiosErr.response?.data?.message;
       if (status && status >= 400 && status < 500) {
-        throw new HttpException(message, status);
+        throw new HttpException(pipelineSaid ?? plainPipelineRefusal(status), status);
       }
+      const message = pipelineSaid ?? axiosErr.message ?? 'pipeline error';
       this.logger.error(`pipeline ${method.toUpperCase()} ${path} failed: ${message}`);
       throw new BadGatewayException(`Could not reach the creative pipeline: ${message}`);
     }
+  }
+
+  // ─── Creative studio parity (the actions Slack buttons used to be the only door to) ───
+  //
+  // Each is a straight forward to the creativebot route of the same shape; creativebot reuses the
+  // intent/queue function its Slack handler calls. Answers are `{ ok, run_id?, status, message }`.
+
+  private run(runId: string, suffix: string): string {
+    return `/v1/runs/${encodeURIComponent(runId)}/${suffix}`;
+  }
+
+  /** POST /v1/runs/:id/cancel — stop a run that is queued or in progress. */
+  cancelRun(runId: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'cancel'));
+  }
+
+  /** POST /v1/runs/:id/retry — start a failed run again from where it stopped. */
+  retryRun(runId: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'retry'));
+  }
+
+  /** POST /v1/runs/:id/run-anyway — override a quality-check block. */
+  runAnyway(runId: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'run-anyway'));
+  }
+
+  /** POST /v1/runs/:id/model — pick the image model for this run. */
+  setModel(runId: string, model: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'model'), { model });
+  }
+
+  /** POST /v1/runs/:id/approve — Gate A (`preview`) or Gate B (`full`). */
+  approveRun(runId: string, stage: 'preview' | 'full'): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'approve'), { stage });
+  }
+
+  /** POST /v1/runs/:id/campaign-fields — write the ad copy. */
+  generateCampaignFields(runId: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'campaign-fields'));
+  }
+
+  /** PUT /v1/runs/:id/campaign-fields — save the operator's edits to the ad copy. */
+  editCampaignFields(runId: string, fields: Record<string, unknown>): Promise<unknown> {
+    return this.forward('put', this.run(runId, 'campaign-fields'), fields);
+  }
+
+  /** POST /v1/runs/:id/campaign-fields/approve — the ad copy is good to go. */
+  approveCampaignFields(runId: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'campaign-fields/approve'));
+  }
+
+  /** POST /v1/runs/:id/badge — use an uploaded image as the badge. */
+  setBadge(runId: string, uploadId: string): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'badge'), { upload_id: uploadId });
+  }
+
+  /** POST /v1/runs/:id/logo — include the logo or leave it off. */
+  setLogo(runId: string, include: boolean): Promise<unknown> {
+    return this.forward('post', this.run(runId, 'logo'), { include });
+  }
+
+  /** POST /v1/ideas/:id/discard — drop an idea with a reason. */
+  discardIdea(ideaId: string, reason: string): Promise<unknown> {
+    return this.forward('post', `/v1/ideas/${encodeURIComponent(ideaId)}/discard`, { reason });
+  }
+
+  private research(researchId: string, suffix: string): string {
+    return `/v1/research/${encodeURIComponent(researchId)}/${suffix}`;
+  }
+
+  /** GET /v1/research/:id/sources — the sources research proposes to read. */
+  getResearchSources(researchId: string): Promise<unknown> {
+    return this.forward('get', this.research(researchId, 'sources'));
+  }
+
+  /** POST /v1/research/:id/sources — confirm the sources, or override them with `urls`. */
+  confirmResearchSources(researchId: string, confirm: boolean, urls?: string[]): Promise<unknown> {
+    return this.forward('post', this.research(researchId, 'sources'), {
+      confirm,
+      ...(urls?.length ? { urls } : {}),
+    });
+  }
+
+  /** POST /v1/research/:id/rerun — reuse the earlier research, or run it fresh. */
+  rerunResearch(researchId: string, choice: 'reuse' | 'rerun'): Promise<unknown> {
+    return this.forward('post', this.research(researchId, 'rerun'), { choice });
+  }
+
+  /** GET /v1/research/:id/directions — the creative directions research came back with. */
+  getResearchDirections(researchId: string): Promise<unknown> {
+    return this.forward('get', this.research(researchId, 'directions'));
+  }
+
+  /** POST /v1/research/:id/directions/:d/build — make creatives from one direction. */
+  buildDirection(researchId: string, direction: string): Promise<unknown> {
+    return this.forward(
+      'post',
+      this.research(researchId, `directions/${encodeURIComponent(direction)}/build`),
+    );
+  }
+
+  /** POST /v1/research/:id/directions/:d/expand — develop one direction further. */
+  expandDirection(researchId: string, direction: string): Promise<unknown> {
+    return this.forward(
+      'post',
+      this.research(researchId, `directions/${encodeURIComponent(direction)}/expand`),
+    );
+  }
+
+  /** POST /v1/research/pdf — start research from an uploaded PDF. */
+  researchFromPdf(uploadId: string, product: string): Promise<unknown> {
+    return this.forward('post', '/v1/research/pdf', { upload_id: uploadId, product });
+  }
+
+  /** GET /v1/learn/proposals — learnings waiting for a Brain decision (the old /learnings flow). */
+  getLearnProposals(): Promise<unknown> {
+    return this.forward('get', '/v1/learn/proposals');
+  }
+
+  /** POST /v1/learn/proposals/:id — approve, reject, or edit-and-approve one proposal. */
+  decideLearnProposal(
+    proposalId: string,
+    body: { decision: 'approve' | 'reject' | 'edit'; text?: string; decided_by: string },
+  ): Promise<unknown> {
+    return this.forward('post', `/v1/learn/proposals/${encodeURIComponent(proposalId)}`, body);
   }
 
   /**
@@ -272,5 +398,31 @@ export class PipelineBridgeService {
   /** GET /health — surfaced so the UI can say "pipeline offline" instead of just failing. */
   async health(): Promise<unknown> {
     return this.forward('get', '/health');
+  }
+}
+
+/**
+ * The words shown when the pipeline refused without saying why.
+ *
+ * FastAPI's own 404 for a route it does not have is `{ detail: "Not Found" }` — no `error` — and
+ * axios would otherwise hand the operator "Request failed with status code 404". A 404 here almost
+ * always means creativebot has not shipped that action yet, and the dashboard shows it as such.
+ */
+export function plainPipelineRefusal(status: number): string {
+  switch (status) {
+    case 400:
+    case 422:
+      return 'The creative service could not use what was sent. Check the details and try again.';
+    case 401:
+    case 403:
+      return 'The creative service refused this request.';
+    case 404:
+      return 'This is not available yet.';
+    case 409:
+      return 'This cannot be done right now — the run has moved on. Refresh and try again.';
+    case 429:
+      return 'The creative service is busy. Try again in a minute.';
+    default:
+      return 'The creative service could not do this. Try again.';
   }
 }

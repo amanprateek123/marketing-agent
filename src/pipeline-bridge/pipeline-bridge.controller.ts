@@ -5,7 +5,9 @@ import {
   Get,
   Param,
   Post,
+  Put,
   Query,
+  Req,
   UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
@@ -13,7 +15,20 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import { AddOfferingDto } from './dto/add-offering.dto';
 import { StartRunDto } from './dto/start-run.dto';
 import { ClarifyDto, RegenerateDto, ReviseDto } from './dto/iterate.dto';
+import {
+  ApproveStageDto,
+  BadgeDto,
+  CampaignFieldsDto,
+  DiscardIdeaDto,
+  LearnDecisionDto,
+  LogoDto,
+  ResearchPdfDto,
+  ResearchRerunDto,
+  ResearchSourcesDto,
+  SetModelDto,
+} from './dto/parity.dto';
 import { PipelineBridgeService } from './pipeline-bridge.service';
+import { AuthedRequest, brainPrincipal, Roles } from '../auth/roles';
 
 /**
  * The dashboard's route to the external creative pipeline.
@@ -204,5 +219,178 @@ export class PipelineBridgeController {
     @Query('after') after?: string,
   ): Promise<unknown> {
     return this.bridge.getEvents(runId, Number(after ?? 0));
+  }
+
+  // ─── Creative studio parity: every action a Slack button used to be the only door to ───
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/cancel */
+  @Post(':tenantId/runs/:runId/cancel')
+  async cancelRun(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.cancelRun(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/retry */
+  @Post(':tenantId/runs/:runId/retry')
+  async retryRun(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.retryRun(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/run-anyway — override a quality-check block. */
+  @Post(':tenantId/runs/:runId/run-anyway')
+  async runAnyway(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.runAnyway(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/model */
+  @Post(':tenantId/runs/:runId/model')
+  async setModel(@Param('runId') runId: string, @Body() dto: SetModelDto): Promise<unknown> {
+    return this.bridge.setModel(runId, dto.model);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/approve — `preview` (Gate A) or `full` (Gate B). */
+  @Post(':tenantId/runs/:runId/approve')
+  async approveRun(
+    @Param('runId') runId: string,
+    @Body() dto: ApproveStageDto,
+  ): Promise<unknown> {
+    return this.bridge.approveRun(runId, dto.stage);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields — write the ad copy. */
+  @Post(':tenantId/runs/:runId/campaign-fields')
+  async generateCampaignFields(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.generateCampaignFields(runId);
+  }
+
+  /** PUT /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields — save edits to the ad copy. */
+  @Put(':tenantId/runs/:runId/campaign-fields')
+  async editCampaignFields(
+    @Param('runId') runId: string,
+    @Body() dto: CampaignFieldsDto,
+  ): Promise<unknown> {
+    const fields = Object.fromEntries(
+      Object.entries(dto).filter(([, v]) => v !== undefined),
+    );
+    if (Object.keys(fields).length === 0) {
+      throw new BadRequestException('Change at least one field of the ad copy before saving.');
+    }
+    return this.bridge.editCampaignFields(runId, fields);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/campaign-fields/approve */
+  @Post(':tenantId/runs/:runId/campaign-fields/approve')
+  async approveCampaignFields(@Param('runId') runId: string): Promise<unknown> {
+    return this.bridge.approveCampaignFields(runId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/badge — `upload_id` from the uploads route. */
+  @Post(':tenantId/runs/:runId/badge')
+  async setBadge(@Param('runId') runId: string, @Body() dto: BadgeDto): Promise<unknown> {
+    return this.bridge.setBadge(runId, dto.upload_id);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/runs/:runId/logo */
+  @Post(':tenantId/runs/:runId/logo')
+  async setLogo(@Param('runId') runId: string, @Body() dto: LogoDto): Promise<unknown> {
+    return this.bridge.setLogo(runId, dto.include);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/ideas/:ideaId/discard */
+  @Post(':tenantId/ideas/:ideaId/discard')
+  async discardIdea(
+    @Param('ideaId') ideaId: string,
+    @Body() dto: DiscardIdeaDto,
+  ): Promise<unknown> {
+    return this.bridge.discardIdea(ideaId, dto.reason);
+  }
+
+  // ─── Research ───
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/pdf — start research from an uploaded PDF. */
+  @Post(':tenantId/research/pdf')
+  async researchFromPdf(@Body() dto: ResearchPdfDto): Promise<unknown> {
+    return this.bridge.researchFromPdf(dto.upload_id, dto.product);
+  }
+
+  /** GET /api/v1/pipeline-bridge/:tenantId/research/:researchId/sources */
+  @Get(':tenantId/research/:researchId/sources')
+  async getResearchSources(@Param('researchId') researchId: string): Promise<unknown> {
+    return this.bridge.getResearchSources(researchId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/sources — confirm, or override with `urls`. */
+  @Post(':tenantId/research/:researchId/sources')
+  async confirmResearchSources(
+    @Param('researchId') researchId: string,
+    @Body() dto: ResearchSourcesDto,
+  ): Promise<unknown> {
+    return this.bridge.confirmResearchSources(researchId, dto.confirm, dto.urls);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/rerun — `reuse` or `rerun`. */
+  @Post(':tenantId/research/:researchId/rerun')
+  async rerunResearch(
+    @Param('researchId') researchId: string,
+    @Body() dto: ResearchRerunDto,
+  ): Promise<unknown> {
+    return this.bridge.rerunResearch(researchId, dto.choice);
+  }
+
+  /** GET /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions */
+  @Get(':tenantId/research/:researchId/directions')
+  async getResearchDirections(@Param('researchId') researchId: string): Promise<unknown> {
+    return this.bridge.getResearchDirections(researchId);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions/:direction/build */
+  @Post(':tenantId/research/:researchId/directions/:direction/build')
+  async buildDirection(
+    @Param('researchId') researchId: string,
+    @Param('direction') direction: string,
+  ): Promise<unknown> {
+    return this.bridge.buildDirection(researchId, direction);
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/research/:researchId/directions/:direction/expand */
+  @Post(':tenantId/research/:researchId/directions/:direction/expand')
+  async expandDirection(
+    @Param('researchId') researchId: string,
+    @Param('direction') direction: string,
+  ): Promise<unknown> {
+    return this.bridge.expandDirection(researchId, direction);
+  }
+
+  // ─── Learnings proposals: BRAIN LOGIN ONLY ───
+  //
+  // The old /learnings Slack flow decided what the whole system believes, so it sits behind the
+  // same role as every /brain route even though it proxies creativebot. The decision is recorded
+  // under the Brain principal, never the workspace login.
+
+  /** GET /api/v1/pipeline-bridge/:tenantId/learn/proposals */
+  @Roles('brain')
+  @Get(':tenantId/learn/proposals')
+  async getLearnProposals(): Promise<unknown> {
+    return this.bridge.getLearnProposals();
+  }
+
+  /** POST /api/v1/pipeline-bridge/:tenantId/learn/proposals/:proposalId — approve | reject | edit. */
+  @Roles('brain')
+  @Post(':tenantId/learn/proposals/:proposalId')
+  async decideLearnProposal(
+    @Param('proposalId') proposalId: string,
+    @Body() dto: LearnDecisionDto,
+    @Req() req: AuthedRequest,
+  ): Promise<unknown> {
+    const text = dto.text?.trim();
+    if (dto.decision === 'edit' && !text) {
+      throw new BadRequestException('Write the corrected learning before saving the edit.');
+    }
+    const user = req.user;
+    if (!user) throw new BadRequestException('Sign in to the Brain first.');
+    return this.bridge.decideLearnProposal(proposalId, {
+      decision: dto.decision,
+      ...(text ? { text } : {}),
+      decided_by: brainPrincipal(user),
+    });
   }
 }
