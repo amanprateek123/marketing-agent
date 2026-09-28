@@ -1,8 +1,9 @@
 import { Module } from '@nestjs/common';
-import { SlackService } from './slack.service';
+import { AlertsService } from './alerts.service';
 
+/** Notifications: Brain alerts shown in the dashboard. No Slack. */
 @Module({
-  providers: [SlackService],
-  exports: [SlackService],
+  providers: [AlertsService],
+  exports: [AlertsService],
 })
 export class DeliveryModule {}

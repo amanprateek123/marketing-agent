@@ -76,7 +76,6 @@ class PipelineConfigDto {
 }
 
 class DeliveryDto {
-  @IsOptional() @IsString() slackWebhook?: string;
   @IsOptional() @IsString() whatsappNumber?: string;
   @IsOptional() @IsString() email?: string;
   @IsOptional() @IsString() notionDatabaseId?: string;

@@ -10,7 +10,7 @@ import { tryResolveCampaignProduct } from '../campaigns/campaign-creator/resolve
 import { CompaniesService } from '../companies/companies.service';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { IntelligenceBrief, IntelligenceBriefDocument } from '../pipeline/schemas/intelligence-brief.schema';
-import { SlackService } from '../delivery/slack.service';
+import { AlertsService } from '../delivery/alerts.service';
 import { QUEUES } from './queue.constants';
 
 interface ReplacementJobData {
@@ -47,7 +47,7 @@ export class CreativeReplacementProcessor extends WorkerHost {
     private readonly creativeProducer: CreativeProducerService,
     private readonly metaAds: MetaAdsService,
     private readonly companiesService: CompaniesService,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(IntelligenceBrief.name)
@@ -264,14 +264,22 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
     await updateReplacementStatus('complete');
 
-    // Notify Slack
-    const slackWebhook = company.delivery?.slackWebhook;
-    if (slackWebhook) {
-      const msg = isAddMode
-        ? `✅ *New Creative Added*\n\n*Campaign:* ${campaign?.name || campaignId}\n*Ad Set:* ${adSetId}\n*Hook:* ${replacementHook}\n*Variant:* ${selectedIndex}\n\nNew ad is live alongside existing ads.`
-        : `✅ *Creative Replacement Complete*\n\n*Campaign:* ${campaign?.name || campaignId}\n*Ad:* ${fatiguedAdId}\n*Old Hook:* ${fatiguedHook || 'unknown'} → *New Hook:* ${replacementHook}\n*Variant:* ${selectedIndex}`;
-      await this.slackService.sendMessage(slackWebhook, tenantId, msg);
-    }
+    // Tell the dashboard (Brain alert, shown in "Waiting on you").
+    await this.alerts.raise(
+      isAddMode
+        ? {
+            kind: 'creative_added',
+            severity: 'info',
+            title: `New ad added to ${campaign?.name || 'a campaign'}`,
+            body: `Opening hook: ${replacementHook}. The new ad is live alongside the existing ones.`,
+          }
+        : {
+            kind: 'creative_replaced',
+            severity: 'info',
+            title: `Tired ad replaced in ${campaign?.name || 'a campaign'}`,
+            body: `Old hook: ${fatiguedHook || 'not recorded'}. New hook: ${replacementHook}.`,
+          },
+    );
 
     this.logger.log(`Creative ${isAddMode ? 'addition' : 'replacement'} done: hook=${replacementHook}`);
   }

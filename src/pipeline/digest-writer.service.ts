@@ -8,7 +8,7 @@ import { CompanyDocument } from '../companies/schemas/company.schema';
 import { Digest, DigestDocument } from './schemas/digest.schema';
 import { IdeaPoolResult } from './idea-pool.service';
 import { CoordinatorResult } from './coordinator.service';
-import { SlackService } from '../delivery/slack.service';
+import { AlertsService } from '../delivery/alerts.service';
 
 @Injectable()
 export class DigestWriterService {
@@ -17,7 +17,7 @@ export class DigestWriterService {
   constructor(
     private readonly claudeService: ClaudeService,
     private readonly liveContextBuilder: LiveContextBuilder,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
     @InjectModel(Digest.name)
     private readonly digestModel: Model<DigestDocument>,
   ) {}
@@ -29,7 +29,6 @@ export class DigestWriterService {
     ideaPoolResult: IdeaPoolResult,
   ): Promise<void> {
     const tenantId = company.tenantId;
-    const slackWebhook = company.delivery?.slackWebhook;
 
     // ── 1. Signals summary ────────────────────────────────────────────────────
     const signalsContent = await this.writeSignalsSummary(
@@ -38,10 +37,6 @@ export class DigestWriterService {
     await this.digestModel.create({
       tenantId, runId, type: 'signals', content: signalsContent, delivered: false,
     });
-
-    if (slackWebhook) {
-      await this.safeSend(slackWebhook, tenantId, signalsContent);
-    }
 
     // ── 2. One digest entry + Slack message per idea (template — no LLM needed) ──
     for (let i = 0; i < ideaPoolResult.briefs.length; i++) {
@@ -62,11 +57,6 @@ export class DigestWriterService {
         content: ideaContent,
         delivered: false,
       });
-
-      if (slackWebhook) {
-        await this.safeDivider(slackWebhook, tenantId);
-        await this.safeSend(slackWebhook, tenantId, ideaContent);
-      }
     }
 
     // ── 3. CTA ────────────────────────────────────────────────────────────────
@@ -75,21 +65,21 @@ export class DigestWriterService {
       tenantId, runId, type: 'cta', content: ctaContent, delivered: false,
     });
 
-    if (slackWebhook) {
-      await this.safeDivider(slackWebhook, tenantId);
-      await this.safeSend(slackWebhook, tenantId, ctaContent);
-    }
-
-    // Mark all delivered
-    if (slackWebhook) {
-      await this.digestModel.updateMany(
-        { tenantId, runId },
-        { delivered: true, deliveredAt: new Date() },
-      );
-    }
+    // The digest is read in the dashboard; one alert says it is there.
+    await this.alerts.raise({
+      kind: 'digest_ready',
+      severity: 'info',
+      title: `${ideaPoolResult.briefs.length} new campaign ideas are ready`,
+      body: 'This week\'s signals and ideas are ready to review in the dashboard.',
+      dedupeKey: `digest:${tenantId}:${runId}`,
+    });
+    await this.digestModel.updateMany(
+      { tenantId, runId },
+      { delivered: true, deliveredAt: new Date() },
+    );
 
     this.logger.log(
-      `Digest done: tenantId=${tenantId} runId=${runId} ideas=${ideaPoolResult.briefs.length} slack=${!!slackWebhook}`,
+      `Digest done: tenantId=${tenantId} runId=${runId} ideas=${ideaPoolResult.briefs.length}`,
     );
   }
 
@@ -156,23 +146,6 @@ Format as Slack markdown. No headers. 80-100 words max. Tone: performance market
     ].filter(Boolean).join('\n');
 
     return lines;
-  }
-
-  // ── Safe Slack send — digest is already persisted, delivery failure shouldn't block pipeline
-  private async safeSend(webhookUrl: string, tenantId: string, content: string): Promise<void> {
-    try {
-      await this.slackService.sendMessage(webhookUrl, tenantId, content);
-    } catch (err: any) {
-      this.logger.error(`Slack delivery failed for ${tenantId} — digest saved to DB but not delivered: ${err.message}`);
-    }
-  }
-
-  private async safeDivider(webhookUrl: string, tenantId: string): Promise<void> {
-    try {
-      await this.slackService.sendDivider(webhookUrl, tenantId);
-    } catch {
-      // divider failure is non-critical
-    }
   }
 
   // ── CTA — no LLM needed ────────────────────────────────────────────────────

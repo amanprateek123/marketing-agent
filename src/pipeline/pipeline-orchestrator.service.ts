@@ -24,7 +24,7 @@ import { CampaignsService } from '../campaigns/campaigns.service';
 import { StrategyTeamService } from '../teams/strategy-team.service';
 import { MetaAdsLibraryService } from './meta-ads-library.service';
 import { MetaAdsLibraryInsights } from './schemas/meta-ads-library-output.schema';
-import { SlackService } from '../delivery/slack.service';
+import { AlertsService } from '../delivery/alerts.service';
 
 export interface TriggerPipelineResult {
   runId: string;
@@ -50,7 +50,7 @@ export class PipelineOrchestratorService implements OnModuleInit {
     private readonly strategyTeam: StrategyTeamService,
     private readonly metaAdsLibrary: MetaAdsLibraryService,
     private readonly ideaPoolService: IdeaPoolService,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
     @InjectModel(PipelineRun.name)
     private readonly pipelineRunModel: Model<PipelineRunDocument>,
     @InjectModel(ScoutOutput.name)
@@ -673,9 +673,10 @@ export class PipelineOrchestratorService implements OnModuleInit {
       this.logger.error(`[${runId}] Pipeline FAILED: ${err.message}`);
       // A dead pipeline run was previously invisible until someone checked the
       // DB — the weekly run silently not happening is the worst failure mode.
-      void this.slackService.sendOpsAlert(
-        `Pipeline run FAILED (tenant=${tenantId}, run=${runId}): ${err.message}`,
-        { runId, tenantId },
+      void this.alerts.opsAlert(
+        'pipeline_failed',
+        `The weekly pipeline run failed: ${err.message}`,
+        { tenant: tenantId, run: runId },
       );
     }
   }

@@ -40,7 +40,7 @@ import {
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
 import { withUtmParams } from '../meta-ads/meta-utm.util';
 import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
-import { SlackService } from '../../delivery/slack.service';
+import { AlertsService } from '../../delivery/alerts.service';
 import {
   IntelligenceBrief,
   IntelligenceBriefDocument,
@@ -143,7 +143,7 @@ export class CampaignAuditorService {
     private readonly actionOutcomes: ActionOutcomeService,
     private readonly metaMetrics: MetaMetricsService,
     private readonly metaAds: MetaAdsService,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
     @InjectModel(IntelligenceBrief.name)
     private readonly briefModel: Model<IntelligenceBriefDocument>,
     @InjectModel(Campaign.name)
@@ -572,9 +572,11 @@ export class CampaignAuditorService {
           metaCampaignId: campaign.metaCampaignId,
         },
       });
-      void this.slackService.sendOpsAlert(
-        `Audit skipped on stale/suspect Meta data (tenant=${company.tenantId}, campaign=${campaign.metaCampaignId}): ${why}`,
-        { campaignId: campaign._id.toString() },
+      void this.alerts.opsAlert(
+        'audit_skipped',
+        `A campaign check was skipped because Meta's numbers looked wrong: ${why}`,
+        { campaign: campaign.name || campaign.metaCampaignId },
+        'warn',
       );
       return;
     }
@@ -1432,9 +1434,11 @@ export class CampaignAuditorService {
       this.logger.log(
         `Landing-page test DECIDED for ${product.name}: winner=${leaderUrl} (CPA ${evaluation.marginPct}% better) — REPORT-ONLY, operator must promote.`,
       );
-      void this.slackService.sendOpsAlert(
-        `🧪 Landing-page test result — ${company.tenantId} / ${product.name}\nWinner: ${leaderUrl}\nControl: ₹${evaluation.control.cpa} CPA (${evaluation.control.conversions} conv) · Variant: ₹${evaluation.variant.cpa} CPA (${evaluation.variant.conversions} conv) · ${evaluation.marginPct}% better.\nReport-only — promote it by setting product.landingUrl if you agree.`,
-        { campaignId: campaign._id.toString() },
+      void this.alerts.opsAlert(
+        'landing_page_test',
+        `Landing-page test result — ${company.tenantId} / ${product.name}\nWinner: ${leaderUrl}\nControl: ₹${evaluation.control.cpa} CPA (${evaluation.control.conversions} conv) · Variant: ₹${evaluation.variant.cpa} CPA (${evaluation.variant.conversions} conv) · ${evaluation.marginPct}% better.\nReport-only — promote it by setting product.landingUrl if you agree.`,
+        { campaign: campaign.name || campaign.metaCampaignId },
+        'info',
       );
     } else {
       this.logger.log(
@@ -1996,15 +2000,12 @@ export class CampaignAuditorService {
             `Ad ${action.targetId} paused — creative replacement queued with hook "${replacementHook}"`,
           );
 
-          // Notify Slack
-          const slackWebhook = company.delivery?.slackWebhook;
-          if (slackWebhook) {
-            await this.slackService.sendMessage(
-              slackWebhook,
-              company.tenantId,
-              `🔄 *Creative Replacement Queued*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Fatigued Ad:* ${action.targetName} (hook: ${action.metrics?.fatiguedHook || 'unknown'})\n*Replacement Hook:* ${replacementHook}\n\nFatigued ad paused. New creative is being produced automatically.`,
-            );
-          }
+          await this.alerts.raise({
+            kind: 'creative_replacement_queued',
+            severity: 'info',
+            title: `Tired ad paused in ${campaign.name || 'a campaign'}`,
+            body: `${action.targetName} (hook: ${action.metrics?.fatiguedHook || 'not recorded'}) was paused. A replacement with the hook "${replacementHook}" is being made automatically.`,
+          });
         } else if (action.type === 'add_creative') {
           // Add fresh creative to winning ad set — requires approval
           if (!manuallyApproved) continue;
@@ -2401,39 +2402,29 @@ ${lines}
     company: CompanyDocument,
     verdict: AuditVerdict,
   ): Promise<void> {
-    const slackWebhook = company.delivery?.slackWebhook;
-    if (!slackWebhook) return;
-
     const actionsText =
       verdict.recommendedActions.length > 0
         ? verdict.recommendedActions
             .map((a) => {
-              const approvalHint =
+              const approval =
                 a.type === 'scale_adset' || a.type === 'replace_creative'
-                  ? `\n    _Requires approval:_ \`POST /api/v1/campaigns/${company.tenantId}/${campaign._id}/actions/{actionId}/approve\``
+                  ? ' (needs your approval on the campaign page)'
                   : '';
-              return `  • [${a.priority.toUpperCase()}] ${a.type.replace(/_/g, ' ')}: ${a.targetName}\n    _${a.reason}_${approvalHint}`;
+              return `• ${a.type.replace(/_/g, ' ')}: ${a.targetName} — ${a.reason}${approval}`;
             })
             .join('\n')
-        : '  No specific actions recommended';
-
-    const watchText =
-      verdict.watchSignals.length > 0
-        ? verdict.watchSignals.map((s) => `  • ${s}`).join('\n')
-        : '';
-
-    const urgencyEmoji =
-      verdict.urgency === 'immediate'
-        ? '🚨'
-        : verdict.urgency === '48h'
-          ? '⚠️'
-          : '📊';
-
-    await this.slackService.sendMessage(
-      slackWebhook,
-      company.tenantId,
-      `${urgencyEmoji} *Campaign Audit: Action Required*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Urgency:* ${verdict.urgency ?? 'none'}\n\n*Analysis:*\n${verdict.contextInsight}\n\n*Recommended Actions:*\n${actionsText}${watchText ? `\n\n*Watch Next Audit:*\n${watchText}` : ''}\n\nReview: \`GET /api/v1/campaigns/${company.tenantId}/${campaign._id}\``,
-    );
+        : 'No specific actions recommended.';
+    const watchText = verdict.watchSignals.length
+      ? `\n\nWatch at the next check:\n${verdict.watchSignals.map((s) => `• ${s}`).join('\n')}`
+      : '';
+    await this.alerts.raise({
+      kind: 'campaign_audit',
+      severity:
+        verdict.urgency === 'immediate' ? 'critical' : verdict.urgency === '48h' ? 'warn' : 'info',
+      title: `${campaign.name || 'A campaign'} needs action`,
+      body: `${verdict.contextInsight}\n\nRecommended:\n${actionsText}${watchText}`,
+      dedupeKey: `audit:${company.tenantId}:${campaign._id.toString()}:${new Date().toISOString().slice(0, 10)}`,
+    });
   }
 
   private async sendWatchNotification(
@@ -2441,14 +2432,13 @@ ${lines}
     company: CompanyDocument,
     verdict: AuditVerdict,
   ): Promise<void> {
-    const slackWebhook = company.delivery?.slackWebhook;
-    if (!slackWebhook) return;
-
-    await this.slackService.sendMessage(
-      slackWebhook,
-      company.tenantId,
-      `👀 *Campaign Watch Signal*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n\n${verdict.contextInsight}\n\n*Signals to monitor:*\n${verdict.watchSignals.map((s) => `  • ${s}`).join('\n')}`,
-    );
+    await this.alerts.raise({
+      kind: 'campaign_watch',
+      severity: 'info',
+      title: `Keep an eye on ${campaign.name || 'a campaign'}`,
+      body: `${verdict.contextInsight}\n\nSignals to watch:\n${verdict.watchSignals.map((s) => `• ${s}`).join('\n')}`,
+      dedupeKey: `watch:${company.tenantId}:${campaign._id.toString()}:${new Date().toISOString().slice(0, 10)}`,
+    });
   }
 
   private async pauseCampaign(
@@ -2471,20 +2461,13 @@ ${lines}
       metadata: { metaCampaignId: campaign.metaCampaignId },
     });
 
-    const slackWebhook = company.delivery?.slackWebhook;
-    if (slackWebhook) {
-      try {
-        await this.slackService.sendMessage(
-          slackWebhook,
-          company.tenantId,
-          `🛑 *Campaign Auto-Paused (Safety Rail)*\n\n*Campaign:* ${campaign.name || campaign.metaCampaignId}\n*Reason:* ${reason}`,
-        );
-      } catch (slackErr: any) {
-        this.logger.error(
-          `Slack pause notification failed — campaign still paused: ${slackErr.message}`,
-        );
-      }
-    }
+    await this.alerts.raise({
+      kind: 'campaign_paused',
+      severity: 'critical',
+      title: `${campaign.name || 'A campaign'} was paused automatically`,
+      body: `A safety limit paused it: ${reason}`,
+      dedupeKey: `paused:${company.tenantId}:${campaign._id.toString()}`,
+    });
 
     this.campaignLearning
       .runRootCauseAnalysis(company.tenantId, campaign._id.toString())

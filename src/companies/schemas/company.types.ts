@@ -158,7 +158,6 @@ export interface Promotion {
 }
 
 export interface DeliveryConfig {
-  slackWebhook?: string;
   whatsappNumber?: string;
   email?: string;
   notionDatabaseId?: string;

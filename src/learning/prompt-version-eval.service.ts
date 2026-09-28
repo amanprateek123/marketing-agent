@@ -3,7 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
 import { PromptVersionEval, PromptVersionEvalDocument } from './schemas/prompt-version-eval.schema';
-import { SlackService } from '../delivery/slack.service';
+import { AlertsService } from '../delivery/alerts.service';
 
 /**
  * Evals the learning loop itself: compares campaign outcomes across prompt
@@ -29,7 +29,7 @@ export class PromptVersionEvalService {
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(PromptVersionEval.name)
     private readonly evalModel: Model<PromptVersionEvalDocument>,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
   ) {}
 
   /** Eval history for dashboard display — newest first. */
@@ -116,7 +116,8 @@ export class PromptVersionEvalService {
       this.logger.log(`Prompt-version eval for ${tenantId}: ${verdict} — ${detail}`);
 
       if (verdict === 'regressed') {
-        void this.slackService.sendOpsAlert(
+        void this.alerts.opsAlert(
+          'prompt_regressed',
           `Prompt version v${newerV} REGRESSED vs v${olderV} (tenant=${tenantId}): ${detail} The last learning cycle may have poisoned the prompts — inspect promptsHistory and consider reverting before the next regeneration compounds it.`,
           { tenantId, newerVersion: newerV, olderVersion: olderV },
         );

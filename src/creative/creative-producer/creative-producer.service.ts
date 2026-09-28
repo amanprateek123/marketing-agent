@@ -12,7 +12,7 @@ import { HiggsfieldService } from '../video-generator/higgsfield.service';
 import { CreativeTeamService } from '../../teams/creative-team.service';
 import { CreativePackage, CreativePackageDocument, ImageCreative, VideoCreative } from '../schemas/creative-package.schema';
 import { CreativeQaFailure, CreativeQaFailureDocument } from '../schemas/creative-qa-failure.schema';
-import { SlackService } from '../../delivery/slack.service';
+import { AlertsService } from '../../delivery/alerts.service';
 import { CreativeQaService } from '../creative-qa/creative-qa.service';
 import { resolveTargetLanguage, CanonicalLanguage } from '../../common/creative/language-utils';
 import { getFormatSpec, AspectRatio, ImageResolution, VideoAspectRatio, VideoResolution } from '../../common/creative/format-specs';
@@ -87,7 +87,7 @@ export class CreativeProducerService {
     private readonly higgsfieldService: HiggsfieldService,
     private readonly creativeTeam: CreativeTeamService,
     private readonly creativeQa: CreativeQaService,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
     private readonly galleryService: GalleryService,
     @InjectModel(CreativePackage.name)
     private readonly creativePackageModel: Model<CreativePackageDocument>,
@@ -566,32 +566,23 @@ export class CreativeProducerService {
           this.logger.error(`Gallery auto-populate failed for package ${pkg._id} — package saved: ${galleryErr.message}`);
         }
 
-        const slackWebhook = company.delivery?.slackWebhook;
-        if (slackWebhook) {
-          try {
-            const selectedCopy = copyPackage?.variants?.[copyPackage?.selectedIndex ?? 0];
-            const copyLine = selectedCopy
-              ? `\n\n*Headline:* ${selectedCopy.headline}\n*Copy:* ${selectedCopy.primaryText}\n*CTA:* ${selectedCopy.cta}`
-              : '';
-            const imagesLine = imageCount > 0
-              ? `\n✅ ${imageCount}/${images.length} images generated`
-              : '\n⚠️ Image generation failed — retry needed';
-            const videoLine = video?.videoUrl
-              ? '\n✅ Video generated'
-              : video?.videoPrompt
-                ? '\n⚠️ Video generation failed — prompt saved, will retry'
-                : '\n⚠️ No video';
-            await this.slackService.sendMessage(
-              slackWebhook,
-              tenantId,
-              `🎨 *Creative ready — ${brief.topic}*${copyLine}${imagesLine}${videoLine}`,
-            );
-          } catch (slackErr: any) {
-            this.logger.error(`Slack notification failed for creative ${briefId} — package saved: ${slackErr.message}`);
-          }
-        }
+        const videoNote = video?.videoUrl
+          ? ' A video was made too.'
+          : video?.videoPrompt
+            ? ' The video failed and will be retried.'
+            : '';
+        await this.alerts.raise({
+          kind: 'creative_ready',
+          severity: imageCount > 0 ? 'info' : 'warn',
+          title: `Creative ready: ${brief.topic}`,
+          body:
+            imageCount > 0
+              ? `${imageCount} of ${images.length} images were made.${videoNote}`
+              : `The images failed and need a retry.${videoNote}`,
+        });
       } else {
-        void this.slackService.sendOpsAlert(
+        void this.alerts.opsAlert(
+          'creative_failed',
           `Creative production FAILED (tenant=${tenantId}, brief=${briefId}): copy=${!!copyPackage} usableImages=${imageCount}/${images.length} carouselCards=${carouselCards.length} video=${!!video?.videoUrl}. Package marked failed — needs retry.`,
           { tenantId, briefId, packageId: pkg._id.toString() },
         );

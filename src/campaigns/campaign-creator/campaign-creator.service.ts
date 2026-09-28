@@ -16,7 +16,7 @@ import {
   VALID_OPTIMIZATION_GOALS,
   resolveOptimizationGoalForLaunch,
 } from '../meta-ads/optimization-goals';
-import { SlackService } from '../../delivery/slack.service';
+import { AlertsService } from '../../delivery/alerts.service';
 import { CompaniesService } from '../../companies/companies.service';
 import { applyAudienceTargeting } from './audience-targeting-resolver';
 import {
@@ -44,7 +44,7 @@ export class CampaignCreatorService {
     private readonly actionLogger: ActionLoggerService,
     private readonly campaignReviewTeam: CampaignReviewTeamService,
     private readonly metaAdsService: MetaAdsService,
-    private readonly slackService: SlackService,
+    private readonly alerts: AlertsService,
     @InjectModel(Campaign.name)
     private readonly campaignModel: Model<CampaignDocument>,
     @InjectModel(CreativeBrief.name)
@@ -146,18 +146,12 @@ export class CampaignCreatorService {
       if (!review.approved) {
         this.logger.warn(`Campaign Review Team rejected campaign: ${review.debateRationale}`);
 
-        const slackWebhook = company.delivery?.slackWebhook;
-        if (slackWebhook) {
-          try {
-            await this.slackService.sendMessage(
-              slackWebhook,
-              company.tenantId,
-              `❌ *Campaign Rejected by Review Team*\n\n*Topic:* ${brief.topic}\n*Budget:* ₹${brief.suggestedBudget}\n\n*Reason:* ${review.debateRationale}\n\n*Debate Log:*\n${review.debateLog?.map(d => `• R${d.round} [${d.from}]: ${d.summary}`).join('\n') ?? 'No debate log'}`,
-            );
-          } catch (slackErr: any) {
-            this.logger.error(`Slack rejection notification failed: ${slackErr.message}`);
-          }
-        }
+        await this.alerts.raise({
+          kind: 'campaign_rejected_by_review',
+          severity: 'warn',
+          title: `The review team turned down "${brief.topic}"`,
+          body: `Budget asked: ₹${Number(brief.suggestedBudget).toLocaleString('en-IN')}. Why: ${review.debateRationale}`,
+        });
 
         throw new Error(`Campaign rejected by review team: ${review.debateRationale}`);
       }
@@ -332,22 +326,17 @@ export class CampaignCreatorService {
       metadata: { briefId: brief.briefId, campaignName },
     });
 
-    // ── Send approval request to Slack ───────────────────────────────────────
-    const slackWebhook = company.delivery?.slackWebhook;
-    if (slackWebhook) {
-      try {
-        await this.slackService.sendMessage(
-          slackWebhook,
-          company.tenantId,
-          this.buildApprovalMessage(brief, finalBudget, review, (campaign as any)._id.toString(), company.tenantId),
-        );
-      } catch (slackErr: any) {
-        this.logger.error(`Slack approval notification failed — campaign saved as pending_approval: ${slackErr.message}`);
-      }
-    }
+    // ── Tell the dashboard a campaign is waiting for approval ───────────────
+    await this.alerts.raise({
+      kind: 'campaign_awaiting_approval',
+      severity: 'warn',
+      title: `"${brief.topic}" is waiting for your approval`,
+      body: `Daily budget ₹${Number(finalBudget).toLocaleString('en-IN')}. Approve or reject it on the Campaigns page.${review?.debateRationale ? ` Review team: ${review.debateRationale}` : ''}`,
+      dedupeKey: `approve:${company.tenantId}:${(campaign as any)._id.toString()}`,
+    });
 
     this.logger.log(
-      `Campaign pending approval: tenantId=${company.tenantId} budget=₹${finalBudget} | Slack notification sent`,
+      `Campaign pending approval: tenantId=${company.tenantId} budget=₹${finalBudget} | dashboard alert raised`,
     );
 
     return campaign;
@@ -1798,47 +1787,6 @@ export class CampaignCreatorService {
     } else {
       this.logger.log('All pixel audiences already exist on Meta');
     }
-  }
-
-  private buildApprovalMessage(
-    brief: CreativeBriefDocument,
-    finalBudget: number,
-    review: CampaignReviewOutput | null,
-    campaignId: string,
-    tenantId: string,
-  ): string {
-    const budgetLine = review?.adjustments?.budgetAdjusted
-      ? `*Budget:* ₹${finalBudget} (adjusted from ₹${review.adjustments.originalBudget} by Campaign Review Team)`
-      : `*Budget:* ₹${finalBudget}`;
-
-    const adSetSummary = review?.campaign?.adSets?.map(
-      a => `  • ${a.name} (${a.budgetPercent}% — ${a.audienceType})`
-    ).join('\n') ?? '';
-
-    const reviewBlock = review
-      ? `
-*Campaign Review Team (${review.debateRounds} rounds):*
-${review.debateRationale}
-
-*Ad Sets:*
-${adSetSummary || '  No ad sets configured'}
-*Scale Rules:* ${review.campaign?.scaleRules ?? 'not set'}
-*Pause Rules:* ${review.campaign?.pauseRules ?? 'not set'}`
-      : '_No review team data — using original config._';
-
-    return `🚀 *Campaign Ready for Approval*
-
-*Topic:* ${brief.topic}
-*Platform:* ${brief.platform} | *Format:* ${brief.format}
-*Audience:* ${brief.audience}
-${budgetLine}
-
-${reviewBlock}
-
-To launch this campaign, call:
-\`POST /api/v1/campaigns/${tenantId}/${campaignId}/approve\`
-
-Or reply here to discuss changes.`;
   }
 
   /**
