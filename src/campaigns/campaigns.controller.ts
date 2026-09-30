@@ -414,16 +414,23 @@ export class CampaignsController {
 
   /**
    * POST /api/v1/campaigns/:tenantId/:campaignId/approve
-   * Body: { accountId: "act_123456" } — must be one of company.meta.accountIds
-   * Human approves a pending campaign → launches on Meta Ads.
+   * Body: { accountId: "act_123456", launchPaused?: boolean }
+   * accountId must be one of company.meta.accountIds. launchPaused=true
+   * creates the campaign, ad sets and ads paused for manual placement review.
+   * Omitting launchPaused preserves normal activation after creation.
    */
   @Post(':tenantId/:campaignId/approve')
   async approve(
     @Param('tenantId') tenantId: string,
     @Param('campaignId') campaignId: string,
     @Body('accountId') accountId: string,
+    @Body('launchPaused') launchPaused?: boolean,
   ) {
     try {
+      if (launchPaused !== undefined && typeof launchPaused !== 'boolean') {
+        throw new BadRequestException('launchPaused must be a boolean');
+      }
+
       const company = await this.companiesService.findByTenantId(tenantId);
 
       // Validate accountId is in the tenant's allowed list
@@ -457,6 +464,7 @@ export class CampaignsController {
         campaignId,
         company,
         accountId,
+        { launchPaused: launchPaused === true },
       );
       return {
         success: true,

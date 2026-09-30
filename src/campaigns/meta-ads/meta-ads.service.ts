@@ -1,3 +1,5 @@
+import { expectedLaunchAdCount } from '../campaign-creator/complete-campaign-launch';
+import { validateLaunchAssets } from './validate-launch-assets';
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
 import {
@@ -392,6 +394,7 @@ export class MetaAdsService {
    * On partial failure, rolls back all created objects.
    */
   async launchCampaign(config: MetaCampaignConfig): Promise<MetaLaunchResult> {
+    validateLaunchAssets(config);
     this.logger.log(
       `Launching campaign: ${config.campaignName} | budget: ₹${config.budget} | adSets: ${config.adSets.length}`,
     );
@@ -464,10 +467,7 @@ export class MetaAdsService {
       adIds: [],
     };
 
-    const expectedAdCount = config.adSets.reduce(
-      (sum, as) => sum + as.ads.length,
-      0,
-    );
+    const expectedAdCount = expectedLaunchAdCount(config.adSets);
 
     try {
       // Step 1: Create campaign (PAUSED) — ABO (budget at ad set level for testing)
@@ -1289,10 +1289,8 @@ export class MetaAdsService {
       name: `Creative — ${adName}`,
       object_story_spec: {
         page_id: pageId,
-        // link_data stays populated even in the multi-size branch below — it's
-        // what Meta uses for the creative preview / any placement not covered
-        // by asset_customization_rules, so it must carry the same copy/CTA
-        // asset_feed_spec does, not be left as a bare fallback.
+        // Single-size creatives carry their copy here. Placement creatives
+        // below carry media, copy and destination in asset_feed_spec instead.
         link_data: {
           link: landingUrl,
           message: copy.primaryText,
@@ -1306,24 +1304,23 @@ export class MetaAdsService {
       access_token: accessToken,
     };
 
-    // asset_customization_rules (Placement Asset Customization) is DISABLED
-    // as of 2026-07-16 — Meta rejected it outright with subcode 1885896
-    // ("The asset customisation rules field is not supported in asset
-    // feed"), a feature-availability error, not a payload-shape bug. Most
-    // likely requires is_dynamic_creative=true on the ad set, which is a
-    // bigger, untested change with its own behavioral implications (Meta
-    // then auto-mixes creative elements per user rather than deterministic
-    // placement routing). After 4 failed real launch attempts chasing this,
-    // reliability wins: fall back to the single best size — the same
-    // plain image_hash path proven working all session — rather than keep
-    // iterating on an unverified feature. buildImageAssetFeedSpec is kept
-    // for when Dynamic Creative support is added properly.
-    const primaryImage = this.pickPrimaryImageSize(
+    // Vertical-only ad sets need only the 9:16 image, not placement rules.
+    const placementAssets = verticalPlacements ? undefined : this.buildImageAssetFeedSpec(
       distinctImages,
-      verticalPlacements,
+      copy,
+      landingUrl,
     );
-    if (primaryImage?.hash) {
-      creativeData.object_story_spec.link_data.image_hash = primaryImage.hash;
+    if (placementAssets) {
+      creativeData.object_story_spec = { page_id: pageId };
+      creativeData.asset_feed_spec = placementAssets;
+    } else {
+      const primaryImage = this.pickPrimaryImageSize(
+        distinctImages,
+        verticalPlacements,
+      );
+      if (primaryImage?.hash) {
+        creativeData.object_story_spec.link_data.image_hash = primaryImage.hash;
+      }
     }
 
     const creativeResponse = await this.metaApiCall(
@@ -1362,8 +1359,7 @@ export class MetaAdsService {
 
   /**
    * Picks the single best size when placement customization isn't in play
-   * (currently always — see buildImageAssetFeedSpec). Exactly ONE image ships
-   * per ad, so this choice decides what every impression looks like.
+   * (only one usable size). Multi-size creatives use placement rules.
    *
    * `verticalPlacements` matters more than it looks. createAdSet defaults every
    * ad set to Stories + Reels ONLY (facebook_positions ['facebook_reels','story'],
@@ -1393,82 +1389,78 @@ export class MetaAdsService {
   }
 
   /**
-   * Meta Placement Asset Customization (asset_feed_spec) — DISABLED as of
-   * 2026-07-16 (see createAd/createVideoAd, which call pickPrimaryImageSize
-   * instead). Meta rejected asset_customization_rules outright with subcode
-   * 1885896 ("The asset customisation rules field is not supported in
-   * asset feed") — a feature-availability error, not a payload-shape bug;
-   * most likely requires is_dynamic_creative=true on the ad set, untested.
-   * Kept here, unused, so re-enabling later (once Dynamic Creative support
-   * is added and verified) doesn't mean rebuilding this from scratch.
-   *
-   * Routes a vertical (9:16) image to Instagram Stories/Reels; every other
-   * placement falls back to the non-vertical (4:5 preferred, else
-   * 1:1/16:9/whatever else was given) image automatically, since it's
-   * listed FIRST in `images[]` — Meta uses the first asset in the array as
-   * the default for any placement not matched by a rule. Deliberately no
-   * explicit catch-all rule (an `asset_customization_rules` entry with no
-   * `customization_spec`, meant to mean "match anything else") —
-   * undocumented whether Meta's API actually accepts that shape.
-   *
-   * Deliberately just two buckets, not a full per-placement mapping — Meta's
-   * exact position enums for Audience Network / Facebook Reels / Messenger
-   * drift across API versions, and a wrong guess fails the WHOLE ad creative
-   * at launch time (this call is inside the sequential ad-set build loop, so
-   * one bad request can abort the rest of the campaign launch). Instagram
-   * Stories + Reels position values ('story', 'reels') are long-stable,
-   * heavily-documented Meta constants — the highest-value, lowest-risk split.
-   *
-   * bodies/titles/link_urls are single-entry (no adlabels needed — Meta uses
-   * the sole entry as the default when there's only one) since only the
-   * IMAGE is being customized per placement here, not copy. call_to_actions
-   * omits `value.link` — link_urls already supplies the destination, and
-   * duplicating it there is unverified and unnecessary.
+   * Map sizes of one creative to placements, preserving one copy and URL.
+   * Set explicit PLACEMENT mode and a labelled default instead of relying on
+   * image array order. The old builder omitted both and was disabled after
+   * Meta rejected its payload with subcode 1885896.
+   * Never silently retry a rejected placement creative with a single size.
    */
   private buildImageAssetFeedSpec(
     images: MetaImageAsset[],
     copy: { primaryText: string; headline: string; cta: string },
     landingUrl: string,
-  ): any {
+  ): any | undefined {
+    const feed = this.pickPrimaryImageSize(images);
+    if (!feed) return undefined;
+    const square = images.find((img) => img.aspectRatio === '1:1');
     const vertical = images.find((img) => img.aspectRatio === '9:16');
-    const nonVertical =
-      images.find((img) => img.aspectRatio === '4:5') ??
-      images.find((img) => img.aspectRatio === '1:1') ??
-      images.find((img) => img.aspectRatio === '16:9') ??
-      images.find((img) => img.hash !== vertical?.hash) ??
-      images[0];
-
+    const landscape = images.find((img) => img.aspectRatio === '16:9');
+    const fallback = square ?? feed;
     const assetImages: Array<{ hash: string; adlabels: { name: string }[] }> = [];
+    const labelFor = (asset: MetaImageAsset) => {
+      let entry = assetImages.find((image) => image.hash === asset.hash);
+      if (!entry) {
+        entry = {
+          hash: asset.hash,
+          adlabels: [{ name: `placement_image_${assetImages.length}` }],
+        };
+        assetImages.push(entry);
+      }
+      return entry.adlabels[0];
+    };
+    const defaultLabel = labelFor(fallback);
     const rules: any[] = [];
-
-    if (vertical && nonVertical && vertical.hash !== nonVertical.hash) {
-      // Default/fallback asset listed FIRST.
-      assetImages.push({ hash: nonVertical.hash, adlabels: [{ name: 'default' }] });
-      assetImages.push({ hash: vertical.hash, adlabels: [{ name: 'vertical' }] });
+    const addRule = (
+      asset: MetaImageAsset | undefined,
+      facebookPositions: string[],
+      instagramPositions: string[],
+    ) => {
+      if (!asset || asset.hash === fallback.hash) return;
       rules.push({
         customization_spec: {
-          publisher_platforms: ['instagram'],
-          instagram_positions: ['story', 'reels'],
+          publisher_platforms: instagramPositions.length
+            ? ['facebook', 'instagram']
+            : ['facebook'],
+          facebook_positions: facebookPositions,
+          ...(instagramPositions.length
+            ? { instagram_positions: instagramPositions }
+            : {}),
         },
-        image_label: { name: 'vertical' },
-        priority: 1,
+        image_label: labelFor(asset),
+        priority: rules.length + 1,
       });
-    } else {
-      // Callers only reach this method with >1 distinct hash, but if they
-      // somehow all resolve to the same bucket, still emit a valid
-      // single-image spec rather than an empty/malformed one.
-      const only = nonVertical ?? vertical ?? images[0];
-      assetImages.push({ hash: only.hash, adlabels: [{ name: 'default' }] });
-    }
+    };
+    addRule(vertical, ['story', 'facebook_reels'], ['story', 'reels']);
+    addRule(feed, ['feed'], ['stream', 'profile_feed']);
+    addRule(landscape, ['right_hand_column', 'search', 'instream_video'], []);
+    // Multiple uploads of the same size are not separate placement choices.
+    if (assetImages.length < 2) return undefined;
+    rules.push({
+      customization_spec: {},
+      image_label: defaultLabel,
+      is_default: true,
+      priority: rules.length + 1,
+    });
 
     return {
+      optimization_type: 'PLACEMENT',
       images: assetImages,
       bodies: [{ text: copy.primaryText }],
       titles: [{ text: copy.headline }],
       link_urls: [{ website_url: landingUrl }],
-      call_to_actions: [{ type: this.mapCta(copy.cta) }],
+      call_to_action_types: [this.mapCta(copy.cta)],
       ad_formats: ['SINGLE_IMAGE'],
-      ...(rules.length > 0 ? { asset_customization_rules: rules } : {}),
+      asset_customization_rules: rules,
     };
   }
 
@@ -1487,8 +1479,8 @@ export class MetaAdsService {
     const distinctVideos = videos.filter(
       (v, i) => v.videoId && videos.findIndex((o) => o.videoId === v.videoId) === i,
     );
-    // asset_customization_rules disabled as of 2026-07-16 — see
-    // buildImageAssetFeedSpec for why. Pick the single best size instead of
+    // Video placement customization remains disabled following prior Meta
+    // rejections. Pick the single best size instead of
     // routing per-placement, same as createAd().
     const primary =
       distinctVideos.find((v) => v.aspectRatio === '4:5') ??
@@ -1567,17 +1559,7 @@ export class MetaAdsService {
     return { adId, creativeId };
   }
 
-  /**
-   * Video counterpart of buildImageAssetFeedSpec — same vertical-vs-default
-   * two-bucket placement split (Instagram Stories/Reels get the 9:16 cut,
-   * everything else falls back to the non-vertical size by being listed
-   * FIRST in `videos[]`, no explicit catch-all rule), just videos[] with a
-   * required thumbnail per entry instead of images[]. See
-   * buildImageAssetFeedSpec for why only two buckets and why no catch-all
-   * rule (that shape — a rule with no customization_spec — is unconfirmed
-   * against live Meta and is the leading suspect for a 2026-07-16 opaque
-   * ad-creative-creation failure, subcode 1487390).
-   */
+  /** Legacy video placement builder; currently unused by createVideoAd. */
   private buildVideoAssetFeedSpec(
     videos: MetaVideoAsset[],
     copy: { primaryText: string; headline: string; cta: string },

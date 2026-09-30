@@ -1,3 +1,5 @@
+import { completeCampaignLaunch, expectedLaunchAdCount } from './complete-campaign-launch';
+import { validateLaunchAssets } from '../meta-ads/validate-launch-assets';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -54,19 +56,8 @@ export class CampaignCreatorService {
     private readonly imageResizer: ImageResizerService,
   ) {}
 
-  /**
-   * Placement sizes guaranteed to exist before a launch uploads to Meta.
-   *
-   * Only 4:5 today, deliberately: asset_customization_rules is disabled (see
-   * MetaAdsService.buildImageAssetFeedSpec), so exactly ONE image per variant
-   * actually ships, and pickPrimaryImageSize prefers 4:5. Guaranteeing that
-   * one size is the entire win available right now — generating the other
-   * three would burn S3 on assets Meta will never request.
-   *
-   * When placement asset customization is re-enabled, widen this to
-   * ['4:5', '9:16'] so Stories/Reels get a real vertical instead of a crop.
-   */
-  private static readonly LAUNCH_RATIOS: readonly ExtendRatio[] = ['4:5'];
+  /** Feed and Stories/Reels sizes prepared before uploading to Meta. */
+  private static readonly LAUNCH_RATIOS: readonly ExtendRatio[] = ['4:5', '9:16'];
 
   /**
    * Phase G Step 1: Safety checks → Campaign Review Team → save as pending_approval → Slack notification.
@@ -519,6 +510,7 @@ export class CampaignCreatorService {
     campaignId: string,
     company: CompanyDocument,
     accountId: string,
+    options: { launchPaused?: boolean } = {},
   ): Promise<CampaignDocument> {
     // ── Pre-flight: WHICH PRODUCT is this campaign selling? ──────────────────
     // Runs BEFORE the atomic claim below, deliberately. Everything here is a
@@ -1300,17 +1292,25 @@ export class CampaignCreatorService {
     // headline-top/CTA-bottom creative removes the hook AND the call to
     // action, so the ad serves stripped of both and reads as weak creative.
     // Canvas-extend is local CPU with no model call, so this costs a few
-    // hundred ms and zero API spend. Non-fatal: a failure here launches with
-    // whatever sizes the package already had, exactly as before.
-    let launchImages = images;
+    // hundred ms and zero model API spend. Missing required sizes and failed
+    // uploads stop launch before any Meta campaign objects are created.
+    const selectedVariants = new Set<number>(config.adSets
+      .filter((adSet: any) => adSet.creativeFormat !== 'carousel')
+      .flatMap((adSet: any) => adSet.ads ?? []));
+    const selectedImages = images.filter((image: any) => selectedVariants.has(image.variantIndex));
+    const launchRatios: readonly ExtendRatio[] = config.adSets.some(
+      (adSet: any) => adSet.placementPreset === 'everywhere' &&
+        ['image', 'both', 'mixed'].includes(adSet.creativeFormat ?? 'image'),
+    ) ? ['4:5', '9:16', '1:1', '16:9'] : CampaignCreatorService.LAUNCH_RATIOS;
+    let launchImages = selectedImages;
     // Which asset satisfies which ratio, per variant, decided by measurement.
     // Empty when resizing was skipped or failed — every read below tolerates that.
     let sizesByVariant: RatioMap = {};
-    if (creativePackage && images.some((img: any) => img.imageUrl)) {
+    if (creativePackage && selectedImages.some((img: any) => img.imageUrl)) {
       try {
         const ensured = await this.imageResizer.ensureSizes(
-          images,
-          CampaignCreatorService.LAUNCH_RATIOS,
+          selectedImages,
+          launchRatios,
           company.tenantId,
           (creativePackage as any).runId ?? 'launch',
           // Launch ignores `rejected` on purpose (see the schema comment on
@@ -1326,12 +1326,15 @@ export class CampaignCreatorService {
           // Persist so re-launching this package doesn't rebuild them.
           await this.creativePackageModel.updateOne(
             { _id: (creativePackage as any)._id, tenantId: company.tenantId },
-            { $set: { images: ensured.images } },
+            { $set: { images: [
+              ...images.filter((image: any) => !selectedVariants.has(image.variantIndex)),
+              ...ensured.images,
+            ] } },
           );
-          this.logger.log(`Added ${ensured.added} placement size(s) before launch — Meta has nothing left to crop`);
+          this.logger.log(`Added ${ensured.added} placement size(s) before launch`);
         }
       } catch (err: any) {
-        this.logger.warn(`Placement size generation failed, launching with existing sizes: ${err.message}`);
+        throw new Error(`Placement size preparation failed: ${err.message}`);
       }
     }
 
@@ -1339,9 +1342,8 @@ export class CampaignCreatorService {
     //
     // Both matter downstream and neither used to be decided anywhere:
     // MetaAdsService.pickPrimaryImageSize selects with `images.find(i =>
-    // i.aspectRatio === '4:5')`, and buildImageAssetFeedSpec (when Dynamic
-    // Creative is enabled) treats the FIRST entry as the default for any
-    // unmatched placement. So position and tag together decide what actually
+    // i.aspectRatio === '4:5')`, and buildImageAssetFeedSpec uses ratio tags
+    // to choose the image assigned to each placement. So position and tag together decide what actually
     // serves — while `aspectRatio` on an images[] entry is only what was
     // REQUESTED at generation time, and two entries on one variant can carry
     // the same tag (a 1200x628 original tagged '16:9' plus a derived true
@@ -1362,7 +1364,7 @@ export class CampaignCreatorService {
     for (const [variantKey, list] of Object.entries(orderedForUpload)) {
       const guaranteed = sizesByVariant[Number(variantKey)] ?? {};
       const preferred: Array<{ imageUrl: string; aspectRatio?: string }> = [];
-      for (const ratio of CampaignCreatorService.LAUNCH_RATIOS) {
+      for (const ratio of launchRatios) {
         const url = guaranteed[ratio];
         if (!url || preferred.some((e) => e.imageUrl === url)) continue;
         preferred.push({ imageUrl: url, aspectRatio: ratio });
@@ -1382,7 +1384,7 @@ export class CampaignCreatorService {
           (imageHashes[variant] ??= []).push({ hash, aspectRatio: img.aspectRatio });
           this.logger.log(`Image uploaded for variant ${variant} (${img.aspectRatio ?? 'default'}): hash=${hash}`);
         } catch (err: any) {
-          this.logger.warn(`Image upload failed for variant ${variant} (${img.aspectRatio ?? 'default'}): ${err.message}`);
+          throw new Error(`Image upload failed for variant ${variant + 1} (${img.aspectRatio ?? 'unknown size'}): ${err.message}`);
         }
       }
     }
@@ -1397,17 +1399,11 @@ export class CampaignCreatorService {
     let resolvedCarouselCards: any[] = [];
     if (needsCarousel) {
       if (carouselCardsFromPackage.length < 2) {
-        // Carousel was requested but package didn't produce cards — degrade
-        // to image format using the existing variants. Fail loud in logs so the
-        // operator sees the missing creative orchestration.
-        this.logger.warn(`Carousel format requested but creativePackage.carouselCards has ${carouselCardsFromPackage.length} cards (need ≥2). Degrading all carousel ad sets to image-format.`);
-        for (const adSet of config.adSets as any[]) {
-          if (adSet.creativeFormat === 'carousel') adSet.creativeFormat = 'image';
-        }
+        throw new Error('Carousel launch requires at least two cards; supply the missing cards before launching.');
       } else {
         resolvedCarouselCards = [];
         for (const card of carouselCardsFromPackage) {
-          if (!card.imageUrl) continue;
+          if (!card.imageUrl) throw new Error(`Carousel card ${card.slotIndex} has no image URL.`);
           try {
             const hash = await this.metaAdsService.uploadImage(card.imageUrl, accountId, company.meta.accessToken);
             resolvedCarouselCards.push({
@@ -1418,23 +1414,14 @@ export class CampaignCreatorService {
             });
             this.logger.log(`Carousel card ${card.slotIndex} image uploaded: hash=${hash}`);
           } catch (err: any) {
-            this.logger.warn(`Carousel card ${card.slotIndex} image upload failed: ${err.message}`);
+            throw new Error(`Carousel card ${card.slotIndex} image upload failed: ${err.message}`);
           }
-        }
-        if (resolvedCarouselCards.length < 2) {
-          this.logger.warn(`Only ${resolvedCarouselCards.length}/${carouselCardsFromPackage.length} carousel cards uploaded successfully. Need ≥2 — degrading carousel ad sets to image.`);
-          for (const adSet of config.adSets as any[]) {
-            if (adSet.creativeFormat === 'carousel') adSet.creativeFormat = 'image';
-          }
-          resolvedCarouselCards = [];
         }
       }
     }
 
-    // Upload every video (every size of every distinct video) to Meta if any
-    // ad set needs video — grouped by variantIndex so a variant with 2+
-    // distinct videoIds gets placement asset customization (same as images),
-    // while DIFFERENT variantIndexes stay entirely separate ads.
+    // Upload the selected videos, retaining their variant grouping.
+    // An upload failure must not silently remove an ad or change its format.
     const needsVideo = (config.adSets ?? []).some(
       (as: any) => as.creativeFormat === 'video' || as.creativeFormat === 'both' || as.creativeFormat === 'mixed',
     );
@@ -1442,6 +1429,9 @@ export class CampaignCreatorService {
     if (needsVideo) {
       for (const [variantIndexStr, sources] of Object.entries(videoSourcesByVariant)) {
         const variantIndex = Number(variantIndexStr);
+        const selectedForVideo = config.adSets.some((adSet: any) =>
+          ['video', 'both', 'mixed'].includes(adSet.creativeFormat) && adSet.ads.includes(variantIndex));
+        if (!selectedForVideo) continue;
         for (const src of sources) {
           try {
             const videoId = await this.metaAdsService.uploadVideo(
@@ -1455,11 +1445,19 @@ export class CampaignCreatorService {
             this.logger.log(`Video thumbnail hash for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): ${thumbnailHash ?? 'NONE — will use imageHash'}`);
             (videoAssets[variantIndex] ??= []).push({ videoId, thumbnailHash, aspectRatio: src.aspectRatio });
           } catch (err: any) {
-            this.logger.warn(`Video upload failed for variant ${variantIndex} (${src.aspectRatio ?? 'default'}, proceeding without it): ${err.message}`);
+            throw new Error(`Video upload failed for variant ${variantIndex + 1} (${src.aspectRatio ?? 'unknown size'}): ${err.message}`);
           }
         }
       }
     }
+
+    validateLaunchAssets({
+      adSets: config.adSets,
+      copyVariants,
+      imageHashes,
+      videoAssets,
+      carouselCards: resolvedCarouselCards,
+    });
 
     // Pre-launch: validate product.customConversionId against the ACCOUNT
     // actually being launched to — it's saved once on the product (tenant-
@@ -1537,8 +1535,7 @@ export class CampaignCreatorService {
     // Persist the returned Meta identity while the real campaign is still
     // PAUSED. If activation fails, the object remains linked and reconcilable.
     const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
-    const expectedAds = config.adSets.reduce((s: number, a: any) => s + (a.ads?.length ?? 0), 0);
-    const fullyLaunched = totalAdsCreated >= expectedAds && totalAdsCreated > 0;
+    const expectedAds = expectedLaunchAdCount(config.adSets);
     const launchedAt = new Date();
     const buildPersistedAdSets = (status: 'active' | 'paused') => launchResult.adSets.map(as => ({
       metaAdSetId: as.adSetId,
@@ -1572,18 +1569,17 @@ export class CampaignCreatorService {
       throw new Error(`Could not persist Meta campaign ${launchResult.campaignId} on claimed campaign ${campaignId}`);
     }
 
-    if (fullyLaunched) {
-      await this.metaAdsService.activateCampaign(
-        launchResult.campaignId, company.meta.accessToken, launchResult,
-      );
-      this.logger.log(`Campaign activated: ${totalAdsCreated}/${expectedAds} ads created`);
-    } else {
-      this.logger.warn(
-        `Campaign NOT activated: only ${totalAdsCreated}/${expectedAds} ads created — saved as draft`,
-      );
-    }
+    const launchAccessToken = company.meta.accessToken;
+    const finalStatus = await completeCampaignLaunch(
+      launchResult,
+      config.adSets,
+      options.launchPaused === true,
+      () => this.metaAdsService.activateCampaign(
+        launchResult.campaignId, launchAccessToken, launchResult,
+      ),
+    );
+    this.logger.log(`Campaign ${finalStatus}: ${totalAdsCreated}/${expectedAds} ads created`);
 
-    const finalStatus = fullyLaunched ? 'active' : 'paused';
     const finalWrite = await this.campaignModel.updateOne(
       {
         _id: campaignId,
@@ -1595,6 +1591,10 @@ export class CampaignCreatorService {
         $set: {
           status: finalStatus,
           adSets: buildPersistedAdSets(finalStatus),
+          ...(options.launchPaused === true ? {
+            pauseReason: 'Manual placement preview — awaiting human review and activation',
+            pausedAt: new Date(),
+          } : {}),
         },
       },
     );
@@ -1608,7 +1608,7 @@ export class CampaignCreatorService {
       runId: campaign.runId,
       agent: AgentType.CAMPAIGN_CREATOR,
       action: 'campaign_launched',
-      reason: `Human approved → launched on Meta with budget ₹${campaign.budget}`,
+      reason: `Human approved → created ${finalStatus} on Meta with budget ₹${campaign.budget}`,
       outcome: `Meta campaign ID: ${launchResult.campaignId} | adSets: ${launchResult.adSets.length} | ads: ${launchResult.adSets.reduce((s, a) => s + a.ads.length, 0)}`,
       metadata: { campaignId, briefId: campaign.briefId },
     });
