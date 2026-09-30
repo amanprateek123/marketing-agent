@@ -26,17 +26,21 @@ export function validateLaunchAssets(
         throw new Error(`${context}: missing ad copy.`);
       const videos = config.videoAssets?.[variant] ?? [];
       const hasVideo = videos.some((video) => !!video.videoId);
-      if ((format === 'video' || format === 'both') && !hasVideo) {
+      const images = (config.imageHashes?.[variant] ?? []).filter(
+        (image) => !!image.hash,
+      );
+      const hasImage = images.length > 0;
+      if (format === 'both' && !hasVideo && !hasImage) {
+        throw new Error(`${context}: missing uploaded image or video.`);
+      }
+      if (format === 'video' && !hasVideo) {
         throw new Error(`${context}: missing uploaded video.`);
       }
       const needsImage =
         format === 'image' ||
-        format === 'both' ||
+        (format === 'both' && hasImage) ||
         (format === 'mixed' && !hasVideo);
       if (!needsImage) continue;
-      const images = (config.imageHashes?.[variant] ?? []).filter(
-        (image) => !!image.hash,
-      );
       const vertical = images.find((image) => image.aspectRatio === '9:16');
       if (!vertical)
         throw new Error(

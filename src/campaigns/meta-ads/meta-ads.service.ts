@@ -467,7 +467,7 @@ export class MetaAdsService {
       adIds: [],
     };
 
-    const expectedAdCount = expectedLaunchAdCount(config.adSets);
+    const expectedAdCount = expectedLaunchAdCount(config.adSets, config);
 
     try {
       // Step 1: Create campaign (PAUSED) — ABO (budget at ad set level for testing)

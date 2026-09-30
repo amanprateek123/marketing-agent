@@ -11,6 +11,7 @@ describe('campaign approval preview option', () => {
       .fn()
       .mockResolvedValue({ metaCampaignId: 'meta', status: 'paused' });
     Object.assign(controller, {
+      logger: { error: jest.fn() },
       companiesService: {
         findByTenantId: jest.fn().mockResolvedValue(company),
       },
@@ -45,5 +46,14 @@ describe('campaign approval preview option', () => {
       controller.approve('tenant', 'campaign', 'act_other', true),
     ).rejects.toThrow('not in your Meta account list');
     expect(launch).not.toHaveBeenCalled();
+  });
+  it('logs and returns the launch rejection reason', async () => {
+    launch.mockRejectedValue(new Error('Variant 1: missing uploaded video'));
+    await expect(
+      controller.approve('tenant', 'campaign', 'act_123'),
+    ).rejects.toThrow('missing uploaded video');
+    expect((controller as any).logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('missing uploaded video'),
+    );
   });
 });

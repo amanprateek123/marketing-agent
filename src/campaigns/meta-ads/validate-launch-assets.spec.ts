@@ -78,7 +78,7 @@ describe('launch asset validation', () => {
         imageHashes: { 0: images },
       }),
     ).toThrow('missing ad copy'));
-  it.each(['video', 'both'] as const)(
+  it.each(['video'] as const)(
     'rejects missing %s video instead of silently skipping it',
     (creativeFormat) => {
       expect(() => validate({ creativeFormat })).toThrow(
@@ -113,4 +113,30 @@ describe('launch asset validation', () => {
         ],
       }),
     ).not.toThrow());
+  it('accepts the logged five image variants and four separate video variants in Both format', () => {
+    expect(() =>
+      validateLaunchAssets({
+        adSets: [
+          { ...base, creativeFormat: 'both', ads: [0, 1, 2, 3, 4, 5, 6, 7, 8] },
+        ],
+        copyVariants: Array.from({ length: 9 }, () => copyVariants[0]),
+        imageHashes: Object.fromEntries(
+          [0, 1, 2, 3, 4].map((index) => [index, images]),
+        ),
+        videoAssets: Object.fromEntries(
+          [5, 6, 7, 8].map((index) => [index, [{ videoId: `video-${index}` }]]),
+        ),
+      }),
+    ).not.toThrow();
+  });
+  it('still requires placement sizes for Both image variants', () => {
+    expect(() => validate({ creativeFormat: 'both' }, [images[0]])).toThrow(
+      '9:16',
+    );
+  });
+  it('rejects a Both variant with no media', () => {
+    expect(() => validate({ creativeFormat: 'both' }, [])).toThrow(
+      'missing uploaded image or video',
+    );
+  });
 });

@@ -52,6 +52,10 @@ describe('campaign activation gate', () => {
         [{ ...adSet, creativeFormat: 'both' }],
         false,
         activate,
+        {
+          imageHashes: { 0: [{ hash: 'image' }] },
+          videoAssets: { 0: [{ videoId: 'video' }] },
+        },
       ),
     ).toBe('paused');
     expect(activate).not.toHaveBeenCalled();
@@ -64,6 +68,10 @@ describe('campaign activation gate', () => {
         [{ ...adSet, creativeFormat: 'both' }],
         false,
         activate,
+        {
+          imageHashes: { 0: [{ hash: 'image' }] },
+          videoAssets: { 0: [{ videoId: 'video' }] },
+        },
       ),
     ).toBe('active');
   });
@@ -101,5 +109,49 @@ describe('campaign activation gate', () => {
         jest.fn().mockRejectedValue(new Error('Meta timeout')),
       ),
     ).rejects.toThrow('Meta timeout');
+  });
+  it('counts separate image and video variants in Both as nine ads, not eighteen', async () => {
+    const activate = jest.fn().mockResolvedValue(undefined);
+    const assets = {
+      imageHashes: Object.fromEntries(
+        [0, 1, 2, 3, 4].map((index) => [index, [{ hash: `image-${index}` }]]),
+      ),
+      videoAssets: Object.fromEntries(
+        [5, 6, 7, 8].map((index) => [index, [{ videoId: `video-${index}` }]]),
+      ),
+    };
+    expect(
+      await completeCampaignLaunch(
+        result(9),
+        [
+          {
+            ...adSet,
+            creativeFormat: 'both',
+            ads: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+          },
+        ],
+        false,
+        activate,
+        assets,
+      ),
+    ).toBe('active');
+    expect(activate).toHaveBeenCalledTimes(1);
+    activate.mockClear();
+    expect(
+      await completeCampaignLaunch(
+        result(8),
+        [
+          {
+            ...adSet,
+            creativeFormat: 'both',
+            ads: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+          },
+        ],
+        false,
+        activate,
+        assets,
+      ),
+    ).toBe('paused');
+    expect(activate).not.toHaveBeenCalled();
   });
 });

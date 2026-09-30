@@ -472,6 +472,7 @@ export class CampaignsController {
         status: campaign.status,
       };
     } catch (err: any) {
+      this.logger.error(`Campaign approval failed: tenant=${tenantId} campaign=${campaignId}: ${err.message}`);
       throw new BadRequestException(err.message);
     }
   }

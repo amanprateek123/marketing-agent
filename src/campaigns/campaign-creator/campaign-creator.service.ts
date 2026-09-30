@@ -1451,6 +1451,7 @@ export class CampaignCreatorService {
       }
     }
 
+    this.logger.log(`Validating launch assets: campaign=${campaignId} adSets=${JSON.stringify(config.adSets.map((adSet: any) => ({ name: adSet.name, creativeFormat: adSet.creativeFormat ?? 'image', ads: adSet.ads, placementPreset: adSet.placementPreset ?? 'vertical' })))}`);
     validateLaunchAssets({
       adSets: config.adSets,
       copyVariants,
@@ -1458,6 +1459,8 @@ export class CampaignCreatorService {
       videoAssets,
       carouselCards: resolvedCarouselCards,
     });
+
+    this.logger.log(`Launch asset validation passed: campaign=${campaignId}; checking conversion configuration`);
 
     // Pre-launch: validate product.customConversionId against the ACCOUNT
     // actually being launched to — it's saved once on the product (tenant-
@@ -1535,7 +1538,7 @@ export class CampaignCreatorService {
     // Persist the returned Meta identity while the real campaign is still
     // PAUSED. If activation fails, the object remains linked and reconcilable.
     const totalAdsCreated = launchResult.adSets.reduce((s, a) => s + a.ads.length, 0);
-    const expectedAds = expectedLaunchAdCount(config.adSets);
+    const expectedAds = expectedLaunchAdCount(config.adSets, { imageHashes, videoAssets });
     const launchedAt = new Date();
     const buildPersistedAdSets = (status: 'active' | 'paused') => launchResult.adSets.map(as => ({
       metaAdSetId: as.adSetId,
@@ -1577,6 +1580,7 @@ export class CampaignCreatorService {
       () => this.metaAdsService.activateCampaign(
         launchResult.campaignId, launchAccessToken, launchResult,
       ),
+      { imageHashes, videoAssets },
     );
     this.logger.log(`Campaign ${finalStatus}: ${totalAdsCreated}/${expectedAds} ads created`);
 
@@ -1619,6 +1623,7 @@ export class CampaignCreatorService {
 
     return (await this.campaignModel.findOne({ _id: campaignId, tenantId: company.tenantId }).lean().exec()) as any;
     } catch (err: any) {
+      this.logger.error(`Campaign launch failed: campaign=${campaignId} phase=${metaCampaignCreationStarted ? 'meta_creation_or_activation' : 'pre_meta'}: ${err.message}`);
       if (!metaCampaignCreationStarted) {
         try {
           await this.campaignModel.updateOne(
