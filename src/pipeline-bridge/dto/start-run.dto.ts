@@ -1,10 +1,76 @@
+import { Type } from 'class-transformer';
 import {
   IsArray,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
+  MaxLength,
+  Min,
+  ValidateNested,
 } from 'class-validator';
+
+/**
+ * One creative's place in a batch — the per-creative slot plan (SLOT-CONTRACT.md, 2026-09-30).
+ *
+ * The pipeline treats every field here as the source of truth for THAT creative ("explicit fields
+ * win verbatim"); anything left unset is filled by the pipeline's own rules (angles cycle, raw looks
+ * spread). Every key the contract names is declared, because this is a nested class under
+ * `whitelist: true`: an undeclared key inside a slot is stripped exactly like an undeclared
+ * top-level field, and the creative would quietly be authored without it.
+ *
+ * `angle` / `hook_type` / `visual_direction` are plain strings, not `@IsIn`: their legal values are
+ * owned by the pipeline (api_options.ANGLES, the raw / polished visual-direction guides), which
+ * refuses an unknown one in plain words. A second list here would be the drift the `count` note on
+ * StartRunDto warns about.
+ */
+export class CreativeSlotDto {
+  /** 1-based position in the batch. */
+  @IsInt()
+  @Min(1)
+  slot: number;
+
+  @IsOptional()
+  @IsIn(['polished', 'raw'])
+  track?: 'polished' | 'raw';
+
+  @IsOptional()
+  @IsString()
+  language?: string;
+
+  @IsOptional()
+  @IsString()
+  angle?: string;
+
+  @IsOptional()
+  @IsString()
+  hook_type?: string;
+
+  @IsOptional()
+  @IsString()
+  visual_direction?: string;
+
+  /** The brain hypothesis this creative tests, when it tests one. */
+  @IsOptional()
+  @IsInt()
+  hypothesis_id?: number;
+
+  @IsOptional()
+  @IsIn(['proven', 'variant', 'seed'])
+  hypothesis_kind?: 'proven' | 'variant' | 'seed';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  hypothesis_statement?: string;
+
+  /** Free text for the author. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
+}
 
 /**
  * The Custom-brief submission from the creative page.
@@ -45,6 +111,15 @@ export class StartRunDto {
   @IsOptional()
   @IsIn(['polished', 'raw'])
   track?: 'polished' | 'raw';
+
+  /**
+   * A weighted per-creative style mix, e.g. ['polished', 'polished', 'raw'] — the pipeline's
+   * `tracks`. Declared so whitelist:true does not delete it; values are the pipeline's to police.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsIn(['polished', 'raw'], { each: true })
+  tracks?: Array<'polished' | 'raw'>;
 
   @IsOptional()
   @IsIn(['astro', 'automotive'])
@@ -136,8 +211,32 @@ export class StartRunDto {
    * follow-up turn, so it is answered up front.
    */
   @IsOptional()
-  @IsIn(['located_overlay', 'product_reference', 'shape_reference'])
-  image_direction?: 'located_overlay' | 'product_reference' | 'shape_reference';
+  @IsIn([
+    'located_overlay',
+    'product_reference',
+    'shape_reference',
+    'shape_reference_with_text',
+  ])
+  image_direction?:
+    | 'located_overlay'
+    | 'product_reference'
+    | 'shape_reference'
+    | 'shape_reference_with_text';
+
+  /**
+   * The explicit per-creative plan: one entry per creative, in batch order. When present the
+   * pipeline authors creative N as `slots[N-1]` says (its angle, look, hook, hypothesis) instead of
+   * choosing. The legacy unordered `angles` list still works when this is absent.
+   *
+   * A nested DTO rather than `@IsArray()` alone (the opposite call to `image_refs` above) on
+   * purpose: these fields are the operator's own choices, typed on this form, so a malformed one
+   * should be a 400 here in plain terms, not a creative quietly authored without it.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreativeSlotDto)
+  slots?: CreativeSlotDto[];
 
   @IsOptional()
   @IsString()
