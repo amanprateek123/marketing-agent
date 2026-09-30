@@ -1,3 +1,4 @@
+import { ImagePlacementOverrides, validateImagePlacementOverrides } from './image-placement-overrides';
 import { expectedLaunchAdCount } from '../campaign-creator/complete-campaign-launch';
 import { validateLaunchAssets } from './validate-launch-assets';
 import { Injectable, Logger } from '@nestjs/common';
@@ -155,6 +156,7 @@ export interface MetaAdSetConfig {
   // the long-standing unconditional default (see createAdSet below), so every
   // existing caller that doesn't set this keeps its current behavior.
   placementPreset?: PlacementPreset;
+  imagePlacementOverrides?: ImagePlacementOverrides;
 }
 
 export interface MetaCampaignConfig {
@@ -605,6 +607,7 @@ export class MetaAdsService {
                 config.pageId!,
                 buildLandingUrl(videoAdName),
                 variantImageHash, // fallback thumbnail for any video asset missing its own
+                verticalOnlyPlacements,
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
@@ -625,6 +628,7 @@ export class MetaAdsService {
                 config.pageId ?? '',
                 buildLandingUrl(adName),
                 verticalOnlyPlacements,
+                adSetConfig.imagePlacementOverrides,
               );
               created.creativeIds.push(creativeId);
               created.adIds.push(adId);
@@ -654,6 +658,7 @@ export class MetaAdsService {
               config.pageId!,
               buildLandingUrl(videoAdName),
               variantImageHash, // fallback thumbnail for any video asset missing its own
+              verticalOnlyPlacements,
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
@@ -682,6 +687,7 @@ export class MetaAdsService {
               config.pageId ?? '',
               buildLandingUrl(adName2),
               verticalOnlyPlacements,
+              adSetConfig.imagePlacementOverrides,
             );
             created.creativeIds.push(creativeId);
             created.adIds.push(adId);
@@ -1276,7 +1282,9 @@ export class MetaAdsService {
      * image that ships matches the placement instead of being cropped into it.
      */
     verticalPlacements = false,
+    overrides: ImagePlacementOverrides = {},
   ): Promise<{ adId: string; creativeId: string }> {
+    validateImagePlacementOverrides(overrides);
     // Dedup by hash — a variant tagged with the same hash under two aspect
     // ratios (shouldn't normally happen, but campaign-creator.service.ts
     // doesn't guarantee it) must not turn into a pointless 1-rule asset_feed_spec.
@@ -1309,15 +1317,16 @@ export class MetaAdsService {
       distinctImages,
       copy,
       landingUrl,
+      overrides,
     );
     if (placementAssets) {
       creativeData.object_story_spec = { page_id: pageId };
       creativeData.asset_feed_spec = placementAssets;
     } else {
-      const primaryImage = this.pickPrimaryImageSize(
-        distinctImages,
-        verticalPlacements,
-      );
+      const selectedRatio = verticalPlacements ? overrides.vertical : overrides.feed;
+      const primaryImage = selectedRatio
+        ? distinctImages.find(image => image.aspectRatio === selectedRatio)
+        : this.pickPrimaryImageSize(distinctImages, verticalPlacements);
       if (primaryImage?.hash) {
         creativeData.object_story_spec.link_data.image_hash = primaryImage.hash;
       }
@@ -1399,12 +1408,14 @@ export class MetaAdsService {
     images: MetaImageAsset[],
     copy: { primaryText: string; headline: string; cta: string },
     landingUrl: string,
+    overrides: ImagePlacementOverrides = {},
   ): any | undefined {
-    const feed = this.pickPrimaryImageSize(images);
+    validateImagePlacementOverrides(overrides);
+    const feed = overrides.feed ? images.find(image => image.aspectRatio === overrides.feed) : this.pickPrimaryImageSize(images);
     if (!feed) return undefined;
-    const square = images.find((img) => img.aspectRatio === '1:1');
-    const vertical = images.find((img) => img.aspectRatio === '9:16');
-    const landscape = images.find((img) => img.aspectRatio === '16:9');
+    const square = images.find((img) => img.aspectRatio === (overrides.other ?? '1:1'));
+    const vertical = images.find((img) => img.aspectRatio === (overrides.vertical ?? '9:16'));
+    const landscape = images.find((img) => img.aspectRatio === (overrides.landscape ?? '16:9'));
     const fallback = square ?? feed;
     const assetImages: Array<{ hash: string; adlabels: { name: string }[] }> = [];
     const labelFor = (asset: MetaImageAsset) => {
@@ -1474,6 +1485,7 @@ export class MetaAdsService {
     pageId: string,
     landingUrl: string,
     fallbackThumbnailHash?: string,
+    verticalPlacements = false,
   ): Promise<{ adId: string; creativeId: string }> {
     // Dedup by videoId — see createAd()'s identical guard for why.
     const distinctVideos = videos.filter(
@@ -1481,8 +1493,9 @@ export class MetaAdsService {
     );
     // Video placement customization remains disabled following prior Meta
     // rejections. Pick the single best size instead of
-    // routing per-placement, same as createAd().
+    // routing per-placement. Prefer 9:16 for Stories/Reels-only ad sets.
     const primary =
+      (verticalPlacements ? distinctVideos.find((v) => v.aspectRatio === '9:16') : undefined) ??
       distinctVideos.find((v) => v.aspectRatio === '4:5') ??
       distinctVideos.find((v) => v.aspectRatio === '1:1') ??
       distinctVideos.find((v) => v.aspectRatio === '16:9') ??

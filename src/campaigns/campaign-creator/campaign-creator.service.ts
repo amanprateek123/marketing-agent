@@ -1,3 +1,4 @@
+import { validateImagePlacementOverrides } from '../meta-ads/image-placement-overrides';
 import { completeCampaignLaunch, expectedLaunchAdCount } from './complete-campaign-launch';
 import { validateLaunchAssets } from '../meta-ads/validate-launch-assets';
 import { Injectable, Logger } from '@nestjs/common';
@@ -862,6 +863,8 @@ export class CampaignCreatorService {
         l: [...(as.locales ?? [])].sort(),
         a: as.metaAudienceId ?? null,
         x: [...(as.excludeAudienceIds ?? [])].sort(),
+        placementPreset: as.placementPreset ?? 'vertical',
+        imagePlacementOverrides: Object.entries(as.imagePlacementOverrides ?? {}).sort(([a], [b]) => a.localeCompare(b)),
       });
 
     const otherAdSets = (config.adSets as any[]).filter((as: any) => as.audienceType !== 'advantage_plus');
@@ -1298,10 +1301,15 @@ export class CampaignCreatorService {
       .filter((adSet: any) => adSet.creativeFormat !== 'carousel')
       .flatMap((adSet: any) => adSet.ads ?? []));
     const selectedImages = images.filter((image: any) => selectedVariants.has(image.variantIndex));
-    const launchRatios: readonly ExtendRatio[] = config.adSets.some(
+    for (const adSet of config.adSets) validateImagePlacementOverrides(adSet.imagePlacementOverrides);
+    const automaticRatios: readonly ExtendRatio[] = config.adSets.some(
       (adSet: any) => adSet.placementPreset === 'everywhere' &&
         ['image', 'both', 'mixed'].includes(adSet.creativeFormat ?? 'image'),
     ) ? ['4:5', '9:16', '1:1', '16:9'] : CampaignCreatorService.LAUNCH_RATIOS;
+    const launchRatios: readonly ExtendRatio[] = [...new Set<ExtendRatio>([
+      ...automaticRatios,
+      ...config.adSets.flatMap((adSet: any) => Object.values(adSet.imagePlacementOverrides ?? {})) as ExtendRatio[],
+    ])];
     let launchImages = selectedImages;
     // Which asset satisfies which ratio, per variant, decided by measurement.
     // Empty when resizing was skipped or failed — every read below tolerates that.

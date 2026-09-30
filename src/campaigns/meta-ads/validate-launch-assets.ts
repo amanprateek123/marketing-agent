@@ -1,3 +1,4 @@
+import { validateImagePlacementOverrides } from './image-placement-overrides';
 import type { MetaCampaignConfig } from './meta-ads.service';
 
 /** Validate uploaded assets before creating any campaign objects on Meta. */
@@ -8,6 +9,7 @@ export function validateLaunchAssets(
   >,
 ): void {
   for (const adSet of config.adSets) {
+    validateImagePlacementOverrides(adSet.imagePlacementOverrides);
     const format = adSet.creativeFormat ?? 'image';
     if (format === 'carousel') {
       if (
@@ -41,6 +43,41 @@ export function validateLaunchAssets(
         (format === 'both' && hasImage) ||
         (format === 'mixed' && !hasVideo);
       if (!needsImage) continue;
+      const overrides = adSet.imagePlacementOverrides;
+      if (overrides && Object.keys(overrides).length) {
+        const required = [overrides.vertical ?? '9:16'];
+        if ((adSet.placementPreset ?? 'vertical') !== 'vertical') {
+          required.push(
+            overrides.feed ??
+              (images.some((image) => image.aspectRatio === '4:5')
+                ? '4:5'
+                : '1:1'),
+          );
+        }
+        if (adSet.placementPreset === 'everywhere') {
+          required.push(
+            overrides.other ?? '1:1',
+            overrides.landscape ?? '16:9',
+          );
+        }
+        const hashesByRatio = new Map<string, string>();
+        for (const ratio of new Set(required)) {
+          const image = images.find((image) => image.aspectRatio === ratio);
+          if (!image) {
+            throw new Error(
+              `${context}: missing uploaded ${ratio} image required by the placement mapping.`,
+            );
+          }
+          const previousRatio = hashesByRatio.get(image.hash);
+          if (previousRatio && previousRatio !== ratio) {
+            throw new Error(
+              `${context}: ${previousRatio} and ${ratio} require distinct uploaded images.`,
+            );
+          }
+          hashesByRatio.set(image.hash, ratio);
+        }
+        continue;
+      }
       const vertical = images.find((image) => image.aspectRatio === '9:16');
       if (!vertical)
         throw new Error(

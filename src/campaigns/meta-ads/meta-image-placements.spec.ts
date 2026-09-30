@@ -16,7 +16,11 @@ describe('image placement creative requests', () => {
     post.mockResolvedValueOnce({ data: { id: 'ad' } });
   });
 
-  async function create(images: MetaImageAsset[], vertical = false) {
+  async function create(
+    images: MetaImageAsset[],
+    vertical = false,
+    overrides = {},
+  ) {
     const result = await (service as any).createAd(
       'act_123',
       'token',
@@ -27,6 +31,7 @@ describe('image placement creative requests', () => {
       'page',
       url,
       vertical,
+      overrides,
     );
     expect(result).toEqual({ creativeId: 'creative', adId: 'ad' });
     expect(post.mock.calls[1][1]).toMatchObject({
@@ -188,4 +193,73 @@ describe('image placement creative requests', () => {
     ).rejects.toThrow('1885896');
     expect(post).toHaveBeenCalledTimes(1);
   });
+  it('uses team overrides in the outgoing placement rules', async () => {
+    const payload = await create(
+      [
+        { hash: 'portrait', aspectRatio: '4:5' },
+        { hash: 'square', aspectRatio: '1:1' },
+        { hash: 'vertical', aspectRatio: '9:16' },
+        { hash: 'wide', aspectRatio: '16:9' },
+      ],
+      false,
+      { feed: '1:1', landscape: '4:5', other: '16:9' },
+    );
+    expect(servedHash(payload.asset_feed_spec, 'instagram', 'stream')).toBe(
+      'square',
+    );
+    expect(
+      servedHash(payload.asset_feed_spec, 'facebook', 'right_hand_column'),
+    ).toBe('portrait');
+    expect(servedHash(payload.asset_feed_spec, 'facebook', 'story')).toBe(
+      'vertical',
+    );
+    expect(servedHash(payload.asset_feed_spec, 'instagram', 'explore')).toBe(
+      'wide',
+    );
+  });
+  it('honors the override for vertical-only ad sets', async () => {
+    const payload = await create(
+      [
+        { hash: 'square', aspectRatio: '1:1' },
+        { hash: 'vertical', aspectRatio: '9:16' },
+      ],
+      true,
+      { vertical: '1:1' },
+    );
+    expect(payload.object_story_spec.link_data.image_hash).toBe('square');
+  });
+  it.each([true, false])(
+    'selects the video size for vertical-only=%s',
+    async (verticalOnly) => {
+      await (service as any).createVideoAd(
+        'act_123',
+        'token',
+        'adset',
+        'Video',
+        copy,
+        [
+          {
+            videoId: 'portrait',
+            aspectRatio: '4:5',
+            thumbnailHash: 'portrait-thumb',
+          },
+          {
+            videoId: 'vertical',
+            aspectRatio: '9:16',
+            thumbnailHash: 'vertical-thumb',
+          },
+        ],
+        'page',
+        url,
+        undefined,
+        verticalOnly,
+      );
+      expect(
+        (post.mock.calls[0][1] as any).object_story_spec.video_data,
+      ).toMatchObject({
+        video_id: verticalOnly ? 'vertical' : 'portrait',
+        image_hash: verticalOnly ? 'vertical-thumb' : 'portrait-thumb',
+      });
+    },
+  );
 });

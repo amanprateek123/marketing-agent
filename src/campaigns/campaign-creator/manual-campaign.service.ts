@@ -1,3 +1,4 @@
+import { validateImagePlacementOverrides } from '../meta-ads/image-placement-overrides';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -299,6 +300,7 @@ export class ManualCampaignService {
         placementPreset: (
           a as { placementPreset?: ManualAdSetInput['placementPreset'] }
         ).placementPreset,
+        imagePlacementOverrides: (a as ManualAdSetInput).imagePlacementOverrides,
         ads: a.ads,
       }));
 
@@ -495,6 +497,7 @@ export class ManualCampaignService {
     // fetched pre-existing from the creative library.
     const adIndices = creativePackage.copyVariants.map((_, i) => i);
     const hasVideo = !!creativePackage.video || ((creativePackage as any).videos?.length ?? 0) > 0;
+    for (const adSet of dto.adSets) validateImagePlacementOverrides(adSet.imagePlacementOverrides);
     const defaultFormat = hasVideo ? 'video' : 'image';
 
     let adSets: any[];
@@ -534,6 +537,7 @@ export class ManualCampaignService {
           : adIndices,
         creativeFormat: a.creativeFormat || defaultFormat,
         placementPreset: a.placementPreset,
+        imagePlacementOverrides: a.imagePlacementOverrides,
 
         // ── Advantage+ audience SUGGESTIONS ────────────────────────────
         // These used to be dropped on the floor here, on the belief that
@@ -708,6 +712,7 @@ export class ManualCampaignService {
       ads,
       creativeFormat: a.creativeFormat || defaultFormat,
       placementPreset: a.placementPreset,
+      imagePlacementOverrides: a.imagePlacementOverrides,
     };
   }
 }

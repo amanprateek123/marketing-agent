@@ -139,4 +139,29 @@ describe('launch asset validation', () => {
       'missing uploaded image or video',
     );
   });
+  it('accepts a team-selected square for both feed and vertical placements', () => {
+    expect(() =>
+      validate({ imagePlacementOverrides: { vertical: '1:1', feed: '1:1' } }, [
+        { hash: 'square', aspectRatio: '1:1' },
+      ]),
+    ).not.toThrow();
+  });
+  it('rejects a missing overridden size', () => {
+    expect(() =>
+      validate({ imagePlacementOverrides: { feed: '16:9' } }),
+    ).toThrow('missing uploaded 16:9');
+  });
+  it('rejects malformed override values', () => {
+    expect(() =>
+      validate({ imagePlacementOverrides: { feed: 'bad' } as any }),
+    ).toThrow('Invalid image placement override');
+  });
+  it('rejects duplicate hashes across distinct ratios even with an unrelated override', () => {
+    expect(() =>
+      validate({ imagePlacementOverrides: { other: '1:1' } }, [
+        { hash: 'same', aspectRatio: '4:5' },
+        { hash: 'same', aspectRatio: '9:16' },
+      ]),
+    ).toThrow('distinct uploaded images');
+  });
 });

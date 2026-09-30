@@ -1,3 +1,4 @@
+import { ImagePlacementOverrides } from '../meta-ads/image-placement-overrides';
 /** Request shape for the dashboard's manual Create Campaign form. */
 
 import { PlacementPreset } from '../meta-ads/placement-presets';
@@ -46,6 +47,7 @@ export interface ManualAdSetInput {
   creativeFormat?: 'video' | 'image' | 'both' | 'mixed' | 'carousel';
   /** Which Meta surfaces this ad set can serve on. Undefined -> 'vertical' (the long-standing default) — see placement-presets.ts. */
   placementPreset?: PlacementPreset;
+  imagePlacementOverrides?: ImagePlacementOverrides;
   /**
    * Which copy-variant indices this ad set should ship as ads — lets a
    * human distribute specific creatives to specific ad sets instead of
