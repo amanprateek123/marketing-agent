@@ -1,6 +1,8 @@
-import { ImagePlacementOverrides, validateImagePlacementOverrides } from './image-placement-overrides';
+import { ImagePlacementOverrides, rightColumnSearchRatio, validateImagePlacementOverrides } from './image-placement-overrides';
 import { expectedLaunchAdCount } from '../campaign-creator/complete-campaign-launch';
 import { validateLaunchAssets } from './validate-launch-assets';
+import { VideoPlacementPlan, planVideoPlacements } from './video-placement-plan';
+import { probeVideoRatio } from '../../common/media/video-probe';
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosError } from 'axios';
 import {
@@ -19,6 +21,12 @@ export class MetaLaunchRollbackError extends Error {
 
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
+
+/** Ads Manager's vertical placement group — the placements that get the 9:16 asset. */
+const VERTICAL_GROUP = {
+  facebook: ['story', 'facebook_reels', 'instream_video'],
+  instagram: ['story', 'reels', 'ig_search'],
+};
 
 // Meta error codes that are safe to retry. 4/17/32/613/80004 are rate-limit
 // codes (app/user/page/custom/ad-account level) — 80004 ("too many calls to
@@ -96,6 +104,17 @@ export interface MetaVideoAsset {
   aspectRatio?: string; // '9:16' | '1:1' | '4:5' | '16:9'
 }
 
+/** One uploaded size of a creative, for the add-to-live-ad-set paths. */
+export interface AdMediaSize {
+  url: string;
+  aspectRatio?: string;
+}
+
+function normalizeMediaSizes(media: string | AdMediaSize[]): AdMediaSize[] {
+  const sizes = typeof media === 'string' ? [{ url: media }] : media;
+  return sizes.filter((size, i) => !!size.url && sizes.findIndex((o) => o.url === size.url) === i);
+}
+
 export interface MetaLaunchResult {
   campaignId: string;
   adSets: {
@@ -123,6 +142,10 @@ export interface MetaAdSetConfig {
   // adSet.ads variant list — carousel ships as a single ad regardless of variant count.
   metaAudienceId?: string;
   excludeAudienceIds?: string[];
+  /** Subset of excludeAudienceIds added by code (not chosen by a human/LLM) —
+   *  e.g. the Purchasers exclusion. Dropped on an audience-unavailable error
+   *  instead of failing the launch. */
+  autoExcludeAudienceIds?: string[];
   ageMin?: number;
   ageMax?: number;
   gender?: string;
@@ -1203,74 +1226,32 @@ export class MetaAdsService {
       this.logger.log(`Ad set created: ${adSetId}`);
       return adSetId;
     } catch (err: any) {
-      // Custom audience expired/deleted/wrong-account — Meta returns
-      // "Invalid parameter" with error_subcode 1359207 for expired
-      // audiences, 3858504 for some deletions, or a bare code:100 "Invalid
-      // parameter" for others (e.g. an audience saved against a DIFFERENT
-      // ad account than the one being launched to — hit in production
-      // 2026-07-16, an auto-added Purchasers-exclusion audience that only
-      // existed on the tenant's default account).
       const isAudienceError = (e: any) =>
-        e.message?.includes('subcode: 1359207') ||
-        e.message?.includes('subcode: 3858504') ||
-        (e.message?.includes('code: 100') &&
-          e.message?.includes('Invalid parameter'));
-      const hasIncludes = !!targeting.custom_audiences;
-      const hasExcludes = !!targeting.excluded_custom_audiences;
-      if (!isAudienceError(err) || (!hasIncludes && !hasExcludes)) throw err;
+        e.message?.includes('subcode: 1359207') || e.message?.includes('subcode: 3858504');
+      if (!isAudienceError(err)) throw err;
+      const unavailableError = (e: any, note: string) => new Error(`Ad set "${config.name}": an audience is unavailable for ${accountId}. Included: ${config.metaAudienceId ?? 'none'}; excluded: ${config.excludeAudienceIds?.join(', ') || 'none'}. Replace or explicitly remove unavailable audiences before launching. ${note} ${e.message}`);
 
-      // Stage 1: drop ONLY the exclusion list first, keeping the
-      // deliberately-chosen include audience and age/gender targeting
-      // intact. An exclude-audience problem (the common case — a saved
-      // Purchasers audience invalid on this account) shouldn't cost the
-      // whole ad set's precise targeting; only fall back further if the
-      // chosen audience itself also turns out to be bad.
-      if (hasExcludes) {
-        this.logger.warn(
-          `Excluded audience unavailable for "${config.name}" (excludes: ${config.excludeAudienceIds?.join(',') ?? 'none'}) — retrying without exclusions, keeping chosen audience/age/gender intact.`,
-        );
-        delete targeting.excluded_custom_audiences;
-        adSetData.targeting = targeting;
-        try {
-          const retryResponse = await this.metaApiCall(
-            'POST',
-            `${META_API_BASE}/${accountId}/adsets`,
-            adSetData,
-          );
-          const adSetId = retryResponse.data?.id;
-          if (!adSetId)
-            throw new Error(`No ad set ID in retry response for ${config.name}`);
-          this.logger.log(`Ad set created (exclusion dropped): ${adSetId}`);
-          return adSetId;
-        } catch (err2: any) {
-          if (!isAudienceError(err2)) throw err2;
-          // Falls through to Stage 2 — the chosen audience is bad too.
-        }
-      }
+      // Only exclusions code added on its own (e.g. Purchasers) may be dropped.
+      // Audiences a human/LLM chose are never changed silently.
+      const auto = new Set(config.autoExcludeAudienceIds ?? []);
+      const excluded: { id: string }[] = targeting.excluded_custom_audiences ?? [];
+      const kept = excluded.filter(a => !auto.has(a.id));
+      if (kept.length === excluded.length) throw unavailableError(err, 'Targeting was not changed.');
 
-      // Stage 2: chosen audience itself unavailable — last resort, fall
-      // back to Advantage+ broad targeting (loses precise targeting).
-      this.logger.warn(
-        `Audience unavailable for "${config.name}" (custom: ${config.metaAudienceId ?? 'none'}) — retrying as Advantage+ broad targeting.`,
-      );
-      delete targeting.custom_audiences;
-      delete targeting.excluded_custom_audiences;
-      targeting.targeting_automation = { advantage_audience: 1 };
-      delete targeting.age_min;
-      delete targeting.age_max;
-      delete targeting.genders;
+      this.logger.warn(`Ad set "${config.name}": audience unavailable — retrying once without auto-added exclusion(s) ${[...auto].join(', ')}; chosen audiences unchanged.`);
+      if (kept.length) targeting.excluded_custom_audiences = kept;
+      else delete targeting.excluded_custom_audiences;
       adSetData.targeting = targeting;
-
-      const retryResponse = await this.metaApiCall(
-        'POST',
-        `${META_API_BASE}/${accountId}/adsets`,
-        adSetData,
-      );
-      const adSetId = retryResponse.data?.id;
-      if (!adSetId)
-        throw new Error(`No ad set ID in retry response for ${config.name}`);
-      this.logger.log(`Ad set created (advantage_plus fallback): ${adSetId}`);
-      return adSetId;
+      try {
+        const retry = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/adsets`, adSetData);
+        const adSetId = retry.data?.id;
+        if (!adSetId) throw new Error(`No ad set ID in retry response for ${config.name}`);
+        this.logger.log(`Ad set created (auto-exclusion dropped): ${adSetId}`);
+        return adSetId;
+      } catch (err2: any) {
+        if (!isAudienceError(err2)) throw err2;
+        throw unavailableError(err2, 'Auto-added exclusions were dropped and Meta still rejected it, so a chosen audience is unavailable.');
+      }
     }
   }
 
@@ -1401,11 +1382,15 @@ export class MetaAdsService {
   }
 
   /**
-   * Map sizes of one creative to placements, preserving one copy and URL.
-   * Set explicit PLACEMENT mode and a labelled default instead of relying on
-   * image array order. The old builder omitted both and was disabled after
-   * Meta rejected its payload with subcode 1885896.
-   * Never silently retry a rejected placement creative with a single size.
+   * Map sizes of one image creative to placements the way Ads Manager's
+   * placement asset customization does (mirrors creative 1126365380336836,
+   * built in Ads Manager on the 91astrology account):
+   *   9:16 → Stories, Reels, Facebook in-stream, Instagram search
+   *   1:1  → Facebook right column + Facebook search
+   *   4:5 (else 1:1) → DEFAULT: Feeds and every other placement
+   * Explicit PLACEMENT mode and a labelled default (the payload Meta rejected
+   * with subcode 1885896 omitted both). Never silently retry a rejected
+   * placement creative with a single size.
    */
   private buildImageAssetFeedSpec(
     images: MetaImageAsset[],
@@ -1416,10 +1401,8 @@ export class MetaAdsService {
     validateImagePlacementOverrides(overrides);
     const feed = overrides.feed ? images.find(image => image.aspectRatio === overrides.feed) : this.pickPrimaryImageSize(images);
     if (!feed) return undefined;
-    const square = images.find((img) => img.aspectRatio === (overrides.other ?? '1:1'));
     const vertical = images.find((img) => img.aspectRatio === (overrides.vertical ?? '9:16'));
-    const landscape = images.find((img) => img.aspectRatio === (overrides.landscape ?? '16:9'));
-    const fallback = square ?? feed;
+    const rightColumnSearch = images.find((img) => img.aspectRatio === rightColumnSearchRatio(overrides));
     const assetImages: Array<{ hash: string; adlabels: { name: string }[] }> = [];
     const labelFor = (asset: MetaImageAsset) => {
       let entry = assetImages.find((image) => image.hash === asset.hash);
@@ -1432,14 +1415,14 @@ export class MetaAdsService {
       }
       return entry.adlabels[0];
     };
-    const defaultLabel = labelFor(fallback);
+    const defaultLabel = labelFor(feed);
     const rules: any[] = [];
     const addRule = (
       asset: MetaImageAsset | undefined,
       facebookPositions: string[],
       instagramPositions: string[],
     ) => {
-      if (!asset || asset.hash === fallback.hash) return;
+      if (!asset || asset.hash === feed.hash) return;
       rules.push({
         customization_spec: {
           publisher_platforms: instagramPositions.length
@@ -1454,9 +1437,8 @@ export class MetaAdsService {
         priority: rules.length + 1,
       });
     };
-    addRule(vertical, ['story', 'facebook_reels'], ['story', 'reels']);
-    addRule(feed, ['feed'], ['stream', 'profile_feed']);
-    addRule(landscape, ['right_hand_column', 'search', 'instream_video'], []);
+    addRule(vertical, VERTICAL_GROUP.facebook, VERTICAL_GROUP.instagram);
+    addRule(rightColumnSearch, ['right_hand_column', 'search'], []);
     // Multiple uploads of the same size are not separate placement choices.
     if (assetImages.length < 2) return undefined;
     rules.push({
@@ -1490,55 +1472,59 @@ export class MetaAdsService {
     fallbackThumbnailHash?: string,
     verticalPlacements = false,
   ): Promise<{ adId: string; creativeId: string }> {
-    // Dedup by videoId — see createAd()'s identical guard for why.
-    const distinctVideos = videos.filter(
-      (v, i) => v.videoId && videos.findIndex((o) => o.videoId === v.videoId) === i,
+    // Map whatever sizes were supplied — all four, a subset, or one (possibly
+    // untagged) video. Never blocks; substitutions are logged.
+    const plan = planVideoPlacements(videos);
+    if (!plan) throw new Error(`No uploaded video for ad "${adName}"`);
+    const single = verticalPlacements
+      ? plan.vertical
+      : plan.distinct.length === 1 ? plan.distinct[0] : undefined;
+    const used = single ? [single] : plan.distinct;
+    const notes = verticalPlacements
+      ? plan.notes.filter((note) => note.startsWith('Stories/Reels') || note.startsWith('All placements'))
+      : plan.notes;
+    this.logger.log(
+      `Video placement plan for "${adName}": ${single ? `single video ${single.videoId} (${single.aspectRatio ?? 'size unknown'})` : used.map((v) => v.aspectRatio).join(' + ')}` +
+        (notes.length ? ` — non-native: ${notes.join('; ')}` : ' — every placement gets its native size'),
     );
-    // Video placement customization remains disabled following prior Meta
-    // rejections. Pick the single best size instead of
-    // routing per-placement. Prefer 9:16 for Stories/Reels-only ad sets.
-    const primary =
-      (verticalPlacements ? distinctVideos.find((v) => v.aspectRatio === '9:16') : undefined) ??
-      distinctVideos.find((v) => v.aspectRatio === '4:5') ??
-      distinctVideos.find((v) => v.aspectRatio === '1:1') ??
-      distinctVideos.find((v) => v.aspectRatio === '16:9') ??
-      distinctVideos.find((v) => v.aspectRatio === '9:16') ??
-      distinctVideos[0];
 
-    const videoData: any = {
-      video_id: primary?.videoId,
-      message: copy.primaryText,
-      call_to_action: {
-        type: this.mapCta(copy.cta),
-        value: { link: landingUrl },
-      },
-      title: copy.headline,
-    };
-
-    // Thumbnail is required by Meta for video ads. thumbnailHash/fallback were
-    // both resolved earlier in the launch (often minutes ago, under whatever
-    // rate-limit conditions applied then) — retry once more right here, right
-    // before submission, rather than shipping a payload Meta is guaranteed to
-    // reject with subcode 1443226 (missing image_hash/image_url).
-    let thumbnailHash = primary?.thumbnailHash ?? fallbackThumbnailHash;
-    if (!thumbnailHash && primary?.videoId) {
-      thumbnailHash = await this.getVideoThumbnailHash(primary.videoId, accountId, accessToken);
+    // Meta requires a thumbnail per video (subcode 1443226).
+    const thumbnails = new Map<string, string>();
+    for (const video of used) {
+      const hash = video.thumbnailHash ?? fallbackThumbnailHash ??
+        (await this.getVideoThumbnailHash(video.videoId, accountId, accessToken));
+      if (!hash) {
+        throw new Error(
+          `No thumbnail available for video ${video.videoId} (ad "${adName}") — Meta requires one per video`,
+        );
+      }
+      thumbnails.set(video.videoId, hash);
     }
-    if (!thumbnailHash) {
-      throw new Error(
-        `No thumbnail available for video ${primary?.videoId} (ad "${adName}") — Meta requires image_hash or image_url on video_data`,
-      );
-    }
-    videoData.image_hash = thumbnailHash;
 
-    const creativeData: any = {
-      name: `Creative — ${adName}`,
-      object_story_spec: {
-        page_id: pageId,
-        video_data: videoData,
-      },
-      access_token: accessToken,
-    };
+    const creativeData: any = single
+      ? {
+          name: `Creative — ${adName}`,
+          object_story_spec: {
+            page_id: pageId,
+            video_data: {
+              video_id: single.videoId,
+              message: copy.primaryText,
+              call_to_action: {
+                type: this.mapCta(copy.cta),
+                value: { link: landingUrl },
+              },
+              title: copy.headline,
+              image_hash: thumbnails.get(single.videoId),
+            },
+          },
+          access_token: accessToken,
+        }
+      : {
+          name: `Creative — ${adName}`,
+          object_story_spec: { page_id: pageId },
+          asset_feed_spec: this.buildVideoAssetFeedSpec(plan, thumbnails, copy, landingUrl),
+          access_token: accessToken,
+        };
 
     this.logger.log(
       `Creating video creative: ${JSON.stringify({ ...creativeData, access_token: '[REDACTED]' })}`,
@@ -1571,55 +1557,51 @@ export class MetaAdsService {
     return { adId, creativeId };
   }
 
-  /** Legacy video placement builder; currently unused by createVideoAd. */
+  /**
+   * Video counterpart of buildImageAssetFeedSpec, built from a placement plan
+   * (video-placement-plan.ts): the vertical video on Ads Manager's vertical
+   * group, the feed video as the labelled default for everything else. No
+   * right column/search rule for video — Ads Manager only splits that group
+   * out for images, and the default already covers it.
+   */
   private buildVideoAssetFeedSpec(
-    videos: MetaVideoAsset[],
+    plan: VideoPlacementPlan,
+    thumbnails: Map<string, string>,
     copy: { primaryText: string; headline: string; cta: string },
     landingUrl: string,
-    fallbackThumbnailHash?: string,
   ): any {
-    const vertical = videos.find((v) => v.aspectRatio === '9:16');
-    const nonVertical =
-      videos.find((v) => v.aspectRatio === '4:5') ??
-      videos.find((v) => v.aspectRatio === '1:1') ??
-      videos.find((v) => v.aspectRatio === '16:9') ??
-      videos.find((v) => v.videoId !== vertical?.videoId) ??
-      videos[0];
-
-    const assetVideos: Array<{ video_id: string; thumbnail_hash?: string; adlabels: { name: string }[] }> = [];
-    const rules: any[] = [];
-
-    const toAsset = (v: MetaVideoAsset, label: string) => ({
-      video_id: v.videoId,
-      thumbnail_hash: v.thumbnailHash ?? fallbackThumbnailHash,
-      adlabels: [{ name: label }],
-    });
-
-    if (vertical && nonVertical && vertical.videoId !== nonVertical.videoId) {
-      // Default/fallback asset listed FIRST.
-      assetVideos.push(toAsset(nonVertical, 'default'));
-      assetVideos.push(toAsset(vertical, 'vertical'));
-      rules.push({
-        customization_spec: {
-          publisher_platforms: ['instagram'],
-          instagram_positions: ['story', 'reels'],
-        },
-        video_label: { name: 'vertical' },
-        priority: 1,
-      });
-    } else {
-      const only = nonVertical ?? vertical ?? videos[0];
-      assetVideos.push(toAsset(only, 'default'));
-    }
-
+    const assetVideos = plan.distinct.map((video, index) => ({
+      video_id: video.videoId,
+      thumbnail_hash: thumbnails.get(video.videoId),
+      adlabels: [{ name: `placement_video_${index}` }],
+    }));
+    const labelFor = (video: MetaVideoAsset) =>
+      assetVideos.find((asset) => asset.video_id === video.videoId)!.adlabels[0];
     return {
+      optimization_type: 'PLACEMENT',
       videos: assetVideos,
       bodies: [{ text: copy.primaryText }],
       titles: [{ text: copy.headline }],
       link_urls: [{ website_url: landingUrl }],
-      call_to_actions: [{ type: this.mapCta(copy.cta) }],
+      call_to_action_types: [this.mapCta(copy.cta)],
       ad_formats: ['SINGLE_VIDEO'],
-      ...(rules.length > 0 ? { asset_customization_rules: rules } : {}),
+      asset_customization_rules: [
+        {
+          customization_spec: {
+            publisher_platforms: ['facebook', 'instagram'],
+            facebook_positions: VERTICAL_GROUP.facebook,
+            instagram_positions: VERTICAL_GROUP.instagram,
+          },
+          video_label: labelFor(plan.vertical),
+          priority: 1,
+        },
+        {
+          customization_spec: {},
+          video_label: labelFor(plan.feed),
+          is_default: true,
+          priority: 2,
+        },
+      ],
     };
   }
 
@@ -2087,6 +2069,35 @@ export class MetaAdsService {
   }
 
   /**
+   * Account and placement shape of an existing ad set, read from Meta so ads
+   * added later are mapped for the placements the ad set really serves —
+   * including ad sets edited or built in Ads Manager. Stories/Reels-only
+   * means every platform's positions are explicitly vertical; automatic
+   * placements (no positions listed) count as everywhere.
+   */
+  private async getAdSetPlacementContext(
+    adSetId: string,
+    accessToken: string,
+  ): Promise<{ accountId: string; verticalOnly: boolean }> {
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/${adSetId}`, {
+      fields: 'account_id,targeting',
+      access_token: accessToken,
+    });
+    const targeting = res.data?.targeting ?? {};
+    const VERTICAL: Record<string, string[]> = {
+      facebook: ['story', 'facebook_reels'],
+      instagram: ['story', 'reels'],
+    };
+    const platforms: string[] = targeting.publisher_platforms ?? [];
+    const verticalOnly = platforms.length > 0 && platforms.every((platform) => {
+      const positions: string[] | undefined = targeting[`${platform}_positions`];
+      return !!VERTICAL[platform] && !!positions?.length &&
+        positions.every((position) => VERTICAL[platform].includes(position));
+    });
+    return { accountId: `act_${res.data?.account_id}`, verticalOnly };
+  }
+
+  /**
    * Create a single ad in an existing ad set (used by auditor for add_creative).
    * Uploads image, creates creative, creates ad — all in one call.
    */
@@ -2095,7 +2106,8 @@ export class MetaAdsService {
     accessToken: string,
     adName: string,
     copy: { primaryText: string; headline: string; cta: string },
-    imageUrl: string,
+    /** One image URL, or every uploaded size of one creative (mapped per placement). */
+    media: string | AdMediaSize[],
     pageId: string,
     landingUrl: string,
     declaredSpecialAdCategories?: string[],
@@ -2115,30 +2127,25 @@ export class MetaAdsService {
       throw new Error(errorMsg);
     }
 
-    // Get accountId from ad set
-    const adSetRes = await this.metaApiCall(
-      'GET',
-      `${META_API_BASE}/${adSetId}`,
-      {
-        fields: 'account_id',
-        access_token: accessToken,
-      },
-    );
-    const accountId = `act_${adSetRes.data?.account_id}`;
+    const { accountId, verticalOnly } = await this.getAdSetPlacementContext(adSetId, accessToken);
 
-    // Upload image
-    const imageHash = await this.uploadImage(imageUrl, accountId, accessToken);
+    // Upload every size; createAd maps them to placements the same way launch does.
+    const images: MetaImageAsset[] = [];
+    for (const size of normalizeMediaSizes(media)) {
+      const hash = await this.uploadImage(size.url, accountId, accessToken);
+      images.push({ hash, aspectRatio: size.aspectRatio });
+    }
 
-    // Create ad + creative
     const result = await this.createAd(
       accountId,
       accessToken,
       adSetId,
       adName,
       copy,
-      [{ hash: imageHash }],
+      images,
       pageId,
       landingUrl,
+      verticalOnly,
     );
 
     // Activate the ad
@@ -2159,7 +2166,8 @@ export class MetaAdsService {
     accessToken: string,
     adName: string,
     copy: { primaryText: string; headline: string; cta: string },
-    videoUrl: string,
+    /** One video URL, or every uploaded size of one video (mapped per placement). */
+    media: string | AdMediaSize[],
     pageId: string,
     landingUrl: string,
     declaredSpecialAdCategories?: string[],
@@ -2178,15 +2186,17 @@ export class MetaAdsService {
       throw new Error(errorMsg);
     }
 
-    const adSetRes = await this.metaApiCall(
-      'GET',
-      `${META_API_BASE}/${adSetId}`,
-      { fields: 'account_id', access_token: accessToken },
-    );
-    const accountId = `act_${adSetRes.data?.account_id}`;
+    const { accountId, verticalOnly } = await this.getAdSetPlacementContext(adSetId, accessToken);
 
-    const videoId = await this.uploadVideo(videoUrl, accountId, accessToken);
-    const thumbnailHash = await this.getVideoThumbnailHash(videoId, accountId, accessToken);
+    // Upload every size, measuring each (tags may be missing or wrong) the
+    // same way launch does; createVideoAd maps them to placements.
+    const videos: MetaVideoAsset[] = [];
+    for (const size of normalizeMediaSizes(media)) {
+      const measured = await probeVideoRatio(size.url).catch(() => undefined);
+      const videoId = await this.uploadVideo(size.url, accountId, accessToken);
+      const thumbnailHash = await this.getVideoThumbnailHash(videoId, accountId, accessToken);
+      videos.push({ videoId, thumbnailHash: thumbnailHash ?? undefined, aspectRatio: measured ?? size.aspectRatio });
+    }
 
     const result = await this.createVideoAd(
       accountId,
@@ -2194,10 +2204,11 @@ export class MetaAdsService {
       adSetId,
       adName,
       copy,
-      [{ videoId, thumbnailHash }],
+      videos,
       pageId,
       landingUrl,
-      thumbnailHash,
+      undefined,
+      verticalOnly,
     );
 
     await this.updateAdStatus(result.adId, 'ACTIVE', accessToken);
@@ -2340,9 +2351,14 @@ export class MetaAdsService {
     }
     const accountId = `act_${adRes.data.account_id}`;
 
-    const createRes = await this.metaApiCall('POST', `${META_API_BASE}/${accountId}/adcreatives`, {
+    // The old spec carries the OLD Page's Instagram identity — drop it so
+    // createAdCreative resolves the one linked to the new Page.
+    const specWithoutIdentity = { ...objectStorySpec };
+    delete specWithoutIdentity.instagram_user_id;
+    delete specWithoutIdentity.instagram_actor_id;
+    const createRes = await this.createAdCreative(accountId, {
       name: `${creative.name ?? 'Creative'} (page swap → ${newPageId})`,
-      object_story_spec: { ...objectStorySpec, page_id: newPageId },
+      object_story_spec: { ...specWithoutIdentity, page_id: newPageId },
       access_token: accessToken,
     });
     const newCreativeId = createRes.data?.id;
@@ -3055,30 +3071,33 @@ export class MetaAdsService {
 
   // ─── Retry wrapper for transient Meta API errors ────────────────────────────
 
-  /** Retry an explicitly rejected creative with the identity linked to its Page. */
-  private async createAdCreative(accountId: string, data: any): Promise<any> {
-    const url = `${META_API_BASE}/${accountId}/adcreatives`;
-    try {
-      return await this.metaApiCall('POST', url, data);
-    } catch (error: any) {
-      const pageId = data.object_story_spec?.page_id;
-      if (!error.message?.includes('subcode: 1772103') || !pageId ||
-          data.object_story_spec?.instagram_user_id) throw error;
-      const page = await this.metaApiCall('GET', `${META_API_BASE}/${pageId}`, {
-        fields: 'instagram_business_account,connected_instagram_account,connected_page_backed_instagram_account',
-        access_token: data.access_token,
-      });
-      const identity = page.data?.instagram_business_account?.id ??
-        page.data?.connected_instagram_account?.id ??
-        page.data?.connected_page_backed_instagram_account?.id;
-      if (!identity) {
-        throw new Error(`Instagram identity is missing for Facebook Page ${pageId}. Connect the intended Instagram account to this Page and grant the ad account access before retrying. (subcode: 1772103)`);
-      }
-      return this.metaApiCall('POST', url, {
-        ...data,
-        object_story_spec: { ...data.object_story_spec, instagram_user_id: identity },
-      });
+  async resolveInstagramIdentity(pageId: string, accessToken: string): Promise<string> {
+    if (!pageId) throw new Error('A Facebook Page is required for ad identity.');
+    // Not connected_page_backed_instagram_account: it needs a Page access
+    // token, and requesting it fails the whole lookup (#190) with our user token.
+    const page = await this.metaApiCall('GET', `${META_API_BASE}/${pageId}`, {
+      fields: 'instagram_business_account,connected_instagram_account',
+      access_token: accessToken,
+    });
+    const identity = page.data?.instagram_business_account?.id ??
+      page.data?.connected_instagram_account?.id;
+    if (!identity) {
+      throw new Error(`Instagram identity is missing for Facebook Page ${pageId}. Connect the intended Instagram account to this Page and grant the ad account access before retrying. (subcode: 1772103)`);
     }
+    return identity;
+  }
+
+  /** Attach identity up front: Meta may defer identity validation until /ads. */
+  private async createAdCreative(accountId: string, data: any): Promise<any> {
+    const pageId = data.object_story_spec?.page_id;
+    if (!pageId) throw new Error('A Facebook Page is required for ad identity.');
+    const identity = data.object_story_spec.instagram_user_id ??
+      await this.resolveInstagramIdentity(pageId, data.access_token);
+    this.logger.log(`Creating creative with Page ${pageId} and Instagram identity ${identity}`);
+    return this.metaApiCall('POST', `${META_API_BASE}/${accountId}/adcreatives`, {
+      ...data,
+      object_story_spec: { ...data.object_story_spec, instagram_user_id: identity },
+    });
   }
 
   private async metaApiCall(
@@ -3147,7 +3166,7 @@ export class MetaAdsService {
         const errorDetail = fullError
           ? JSON.stringify(fullError)
           : `${method} ${url.replace(/access_token=[^&]+/, 'access_token=***')} failed with no response (${errCode || 'no code'}: ${err.message})`;
-        this.logger.error(`Meta API full error: ${errorDetail}`);
+        this.logger.error(`Meta API full error (${method} ${url.split('?')[0]}): ${errorDetail}`);
         throw new Error(
           `Meta API error: ${fullError?.error_user_msg || errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`,
         );

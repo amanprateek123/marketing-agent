@@ -44,20 +44,21 @@ describe('launch asset validation', () => {
     expect(() =>
       validate({ placementPreset: 'vertical' }, [images[1]]),
     ).not.toThrow());
-  it('requires square and landscape for everywhere', () => {
+  it('requires the 1:1 right column + search image for everywhere, not 16:9', () => {
     expect(() => validate({ placementPreset: 'everywhere' })).toThrow('1:1');
     const square = { hash: 'square', aspectRatio: '1:1' };
     expect(() =>
       validate({ placementPreset: 'everywhere' }, [...images, square]),
-    ).toThrow('16:9');
-    expect(() =>
-      validate({ placementPreset: 'everywhere' }, [
-        ...images,
-        square,
-        { hash: 'wide', aspectRatio: '16:9' },
-      ]),
     ).not.toThrow();
   });
+  it('accepts a single untagged video without blocking', () =>
+    expect(() =>
+      validateLaunchAssets({
+        adSets: [{ ...base, creativeFormat: 'video', placementPreset: 'everywhere' }],
+        copyVariants,
+        videoAssets: { 0: [{ videoId: 'only' }] },
+      }),
+    ).not.toThrow());
   it('does not inspect unused variants', () =>
     expect(() =>
       validateLaunchAssets({

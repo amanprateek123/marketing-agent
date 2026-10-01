@@ -4,7 +4,7 @@ import { Model } from 'mongoose';
 import { AgentType } from '../../claude/claude.types';
 import { ActionLoggerService } from '../../common/action-logger/action-logger.service';
 import { CampaignsService } from '../campaigns.service';
-import { MetaAdsService } from '../meta-ads/meta-ads.service';
+import { AdMediaSize, MetaAdsService } from '../meta-ads/meta-ads.service';
 import { CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { SafetyChecks } from '../campaign-creator/safety-checks';
@@ -30,6 +30,8 @@ export interface CampaignMetrics {
 interface AdEntry {
   assetType: 'image' | 'video';
   mediaUrl: string;
+  /** Every uploaded size of this creative, primary first — mapped per placement. */
+  sizes?: AdMediaSize[];
   copy: { primaryText: string; headline: string; cta: string };
 }
 
@@ -595,6 +597,12 @@ export class CampaignOptimizerService {
       return {
         assetType: a.assetType as 'image' | 'video',
         mediaUrl: a.assetUrl,
+        // The gallery row's other sizes (uploaded alongside it) ride along so
+        // each placement gets its own cut instead of one size everywhere.
+        sizes: [
+          { url: a.assetUrl, aspectRatio: a.aspectRatio },
+          ...(a.sizes ?? []).map((size) => ({ url: size.imageUrl, aspectRatio: size.aspectRatio })),
+        ],
         copy: {
           primaryText: variant?.primaryText ?? '',
           headline: variant?.headline ?? '',
@@ -641,7 +649,7 @@ export class CampaignOptimizerService {
                 accessToken,
                 adName,
                 entry.copy,
-                entry.mediaUrl,
+                entry.sizes ?? entry.mediaUrl,
                 pageId,
                 landingUrl,
                 specialAdCategories,
@@ -651,7 +659,7 @@ export class CampaignOptimizerService {
                 accessToken,
                 adName,
                 entry.copy,
-                entry.mediaUrl,
+                entry.sizes ?? entry.mediaUrl,
                 pageId,
                 landingUrl,
                 specialAdCategories,

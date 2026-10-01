@@ -31,6 +31,8 @@ import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
 import { getEffectiveConversionValue, getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
+import { checkLaunchAudiences } from './launch-audience-check';
+import { probeVideoRatio } from '../../common/media/video-probe';
 import {
   CampaignBudgetGuardService,
   CampaignBudgetReservation,
@@ -703,6 +705,11 @@ export class CampaignCreatorService {
     }
     const videoUrl = Object.values(videoSourcesByVariant)[0]?.[0]?.videoUrl ?? '';
 
+    // Resolve the Page's Instagram identity before uploads and any campaign creation on Meta.
+    await this.metaAdsService.resolveInstagramIdentity(
+      product?.pageId ?? company.meta.pageId ?? '', company.meta.accessToken,
+    );
+
     // Pre-launch: validate the audience IDs we actually use, one by one.
     // Previous approach (GET /customaudiences?limit=200) silently truncated
     // when accounts had >200 audiences — valid IDs beyond the cutoff got
@@ -711,51 +718,21 @@ export class CampaignCreatorService {
     // (or 100/2604) if deleted/missing, and the response's delivery_status
     // surfaces "below-min-size" / "policy-suspended" / etc. Bounded to the few
     // IDs we actually care about (typically 2-6 per launch).
-    const validAudienceIds = new Set<string>();
+    const purchasersAudId = (product?.metaAudiences ?? [])
+      .find((a: any) => /Purchasers?_/i.test(a?.name ?? ''))?.id;
     const audienceIdsToCheck = new Set<string>();
     for (const adSet of (config.adSets ?? []) as any[]) {
       if (adSet.metaAudienceId) audienceIdsToCheck.add(adSet.metaAudienceId);
       for (const id of (adSet.excludeAudienceIds ?? [])) audienceIdsToCheck.add(id);
     }
+    if (purchasersAudId) audienceIdsToCheck.add(purchasersAudId);
+    const audienceCheck = await checkLaunchAudiences(audienceIdsToCheck, company.meta.accessToken);
+    const validAudienceIds = audienceCheck.valid;
+    for (const [id, reason] of audienceCheck.invalid) {
+      this.logger.warn(`Audience ${id} unusable: ${reason}`);
+    }
     if (audienceIdsToCheck.size > 0) {
-      try {
-        const results = await Promise.allSettled(
-          [...audienceIdsToCheck].map(async (id) => {
-            const res = await axios.get(`https://graph.facebook.com/v21.0/${id}`, {
-              params: {
-                fields: 'id,delivery_status,operation_status,approximate_count_lower_bound',
-                access_token: company.meta!.accessToken,
-              },
-              timeout: 10000,
-            });
-            const data = res.data ?? {};
-            // delivery_status.code 200 = ready; 300 = warning; 400 = error/below-min-size.
-            // operation_status.code 200 = no issues; 300 = audience being computed; 400 = error.
-            const deliveryCode = data.delivery_status?.code;
-            const operationCode = data.operation_status?.code;
-            const isUsable =
-              data.id === id
-              && (deliveryCode === undefined || deliveryCode < 400)
-              && (operationCode === undefined || operationCode < 400);
-            if (!isUsable) {
-              this.logger.warn(`Audience ${id} unusable: delivery_status=${JSON.stringify(data.delivery_status)} operation_status=${JSON.stringify(data.operation_status)}`);
-            }
-            return { id, isUsable };
-          }),
-        );
-        for (const r of results) {
-          if (r.status === 'fulfilled' && r.value.isUsable) {
-            validAudienceIds.add(r.value.id);
-          } else if (r.status === 'rejected') {
-            const errMsg = (r.reason as any)?.response?.data?.error?.message ?? (r.reason as any)?.message ?? 'unknown';
-            this.logger.warn(`Audience validation failed for one ID: ${errMsg}`);
-          }
-        }
-        this.logger.log(`Pre-launch audience check (per-ID): ${validAudienceIds.size}/${audienceIdsToCheck.size} usable`);
-      } catch (err: any) {
-        // Total failure (network etc.) — proceed without check rather than block launch.
-        this.logger.warn(`Audience validation failed (proceeding without check): ${err.message}`);
-      }
+      this.logger.log(`Pre-launch audience check (per-ID): ${validAudienceIds.size}/${audienceIdsToCheck.size} usable, ${audienceCheck.unchecked.size} unchecked (transient lookup error)`);
     }
 
     // For warm/hot briefs, expired-audience fallback must NOT degrade to
@@ -811,34 +788,15 @@ export class CampaignCreatorService {
         { $set: { 'campaignConfig.adSets': config.adSets } },
       );
     }
-    const liveLookalikes = (launchProduct?.metaAudiences ?? [])
-      .filter((a: any) => a.type === 'lookalike' && validAudienceIds.has(a.id));
-    const briefStageForLaunch = (creativeBrief as any)?.audienceStage as 'cold' | 'warm' | 'hot' | undefined;
-
-    if (validAudienceIds.size > 0) {
-      for (const adSet of config.adSets as any[]) {
-        if (adSet.metaAudienceId && !validAudienceIds.has(adSet.metaAudienceId)) {
-          // Warm/hot stages require custom-audience retargeting. Lookalike is
-          // cold-prospecting under the new taxonomy — falling back from an
-          // expired retargeting audience to a lookalike would change funnel
-          // stage entirely. Fail loudly instead so a human can swap the audience.
-          if (briefStageForLaunch === 'warm' || briefStageForLaunch === 'hot') {
-            throw new Error(
-              `Ad set "${adSet.name}": custom audience ${adSet.metaAudienceId} expired and no replacement custom/retarget audience available for ${briefStageForLaunch} brief. Cannot fall back to lookalike (that's cold prospecting). Refresh the custom audience and re-run.`,
-            );
-          }
-          this.logger.warn(`Ad set "${adSet.name}": audience ${adSet.metaAudienceId} expired — converting to advantage_plus`);
-          delete adSet.metaAudienceId;
-          adSet.audienceType = 'advantage_plus';
-        }
-        if (adSet.excludeAudienceIds?.length) {
-          const before = adSet.excludeAudienceIds.length;
-          adSet.excludeAudienceIds = adSet.excludeAudienceIds.filter((id: string) => validAudienceIds.has(id));
-          const removed = before - adSet.excludeAudienceIds.length;
-          if (removed > 0) {
-            this.logger.warn(`Ad set "${adSet.name}": removed ${removed} expired exclude audience(s)`);
-          }
-        }
+    for (const adSet of config.adSets as any[]) {
+      const selectedAudienceIds = [adSet.metaAudienceId, ...(adSet.excludeAudienceIds ?? [])].filter(Boolean);
+      const unavailable = selectedAudienceIds.filter(id => audienceCheck.invalid.has(id));
+      if (unavailable.length) {
+        throw new Error(`Ad set "${adSet.name}": audience(s) unavailable — ${unavailable.map(id => `${id} (${audienceCheck.invalid.get(id)})`).join('; ')}. Replace or explicitly remove them before launching. Targeting was not changed.`);
+      }
+      const unchecked = selectedAudienceIds.filter(id => audienceCheck.unchecked.has(id));
+      if (unchecked.length) {
+        this.logger.warn(`Ad set "${adSet.name}": could not check audience(s) ${unchecked.join(', ')} (transient lookup error) — proceeding; Meta will reject at ad set creation if they are actually unavailable.`);
       }
     }
 
@@ -863,6 +821,8 @@ export class CampaignCreatorService {
         l: [...(as.locales ?? [])].sort(),
         a: as.metaAudienceId ?? null,
         x: [...(as.excludeAudienceIds ?? [])].sort(),
+        creativeFormat: as.creativeFormat ?? 'image',
+        optimizationGoal: as.optimizationGoal,
         placementPreset: as.placementPreset ?? 'vertical',
         imagePlacementOverrides: Object.entries(as.imagePlacementOverrides ?? {}).sort(([a], [b]) => a.localeCompare(b)),
       });
@@ -977,10 +937,7 @@ export class CampaignCreatorService {
     // this, but relying on the LLM is unreliable — enforce in TS so it can't be
     // forgotten. Skip for retargeting/custom ad sets which DO want to reach
     // existing audiences.
-    const purchasersAudId = (company.products ?? [])
-      .flatMap((p: any) => p.metaAudiences ?? [])
-      .find((a: any) => /Purchasers?_/i.test(a?.name ?? ''))?.id;
-    if (purchasersAudId) {
+    if (purchasersAudId && validAudienceIds.has(purchasersAudId)) {
       const PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
       let injected = 0;
       for (const adSet of config.adSets as any[]) {
@@ -989,6 +946,9 @@ export class CampaignCreatorService {
         if (!existing.has(purchasersAudId)) {
           existing.add(purchasersAudId);
           adSet.excludeAudienceIds = Array.from(existing);
+          // Marked so MetaAdsService can drop it (and only it) if Meta still
+          // rejects it — an optional exclusion must not kill the launch.
+          adSet.autoExcludeAudienceIds = [purchasersAudId];
           injected++;
         }
       }
@@ -996,7 +956,7 @@ export class CampaignCreatorService {
         this.logger.log(`Auto-excluded purchasers audience ${purchasersAudId} from ${injected} prospecting ad set(s)`);
       }
     } else {
-      this.logger.warn(`No Purchasers audience found in product.metaAudiences — prospecting ad sets will reach past buyers (5-15% wasted spend baseline)`);
+      this.logger.warn(`No verified purchasers audience for the selected product; no automatic exclusion added`);
     }
 
     // Enforce per-format variant rules:
@@ -1305,7 +1265,7 @@ export class CampaignCreatorService {
     const automaticRatios: readonly ExtendRatio[] = config.adSets.some(
       (adSet: any) => adSet.placementPreset === 'everywhere' &&
         ['image', 'both', 'mixed'].includes(adSet.creativeFormat ?? 'image'),
-    ) ? ['4:5', '9:16', '1:1', '16:9'] : CampaignCreatorService.LAUNCH_RATIOS;
+    ) ? ['4:5', '9:16', '1:1'] : CampaignCreatorService.LAUNCH_RATIOS; // no 16:9 — Ads Manager grouping has no 16:9 group
     const launchRatios: readonly ExtendRatio[] = [...new Set<ExtendRatio>([
       ...automaticRatios,
       ...config.adSets.flatMap((adSet: any) => Object.values(adSet.imagePlacementOverrides ?? {})) as ExtendRatio[],
@@ -1441,19 +1401,30 @@ export class CampaignCreatorService {
           ['video', 'both', 'mixed'].includes(adSet.creativeFormat) && adSet.ads.includes(variantIndex));
         if (!selectedForVideo) continue;
         for (const src of sources) {
+          // Placement mapping keys off the real frame shape, not the tag —
+          // uploads may be untagged or tagged with what was requested rather
+          // than what was delivered. Probe failure falls back to the tag.
+          const measured = await probeVideoRatio(src.videoUrl).catch((err: any) => {
+            this.logger.warn(`Could not measure video for variant ${variantIndex} (${src.videoUrl}): ${err.message} — using tag ${src.aspectRatio ?? 'none'}`);
+            return undefined;
+          });
+          if (measured && measured !== src.aspectRatio) {
+            this.logger.warn(`Video for variant ${variantIndex} is tagged ${src.aspectRatio ?? 'none'} but measures ${measured} — mapping it as ${measured}`);
+          }
+          const aspectRatio = measured ?? src.aspectRatio;
           try {
             const videoId = await this.metaAdsService.uploadVideo(
               src.videoUrl, accountId, company.meta.accessToken,
             );
-            this.logger.log(`Video uploaded for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): videoId=${videoId}`);
+            this.logger.log(`Video uploaded for variant ${variantIndex} (${aspectRatio ?? 'size unknown'}): videoId=${videoId}`);
             // Get thumbnail from video — required for video ad creatives
             const thumbnailHash = await this.metaAdsService.getVideoThumbnailHash(
               videoId, accountId, company.meta.accessToken,
             );
-            this.logger.log(`Video thumbnail hash for variant ${variantIndex} (${src.aspectRatio ?? 'default'}): ${thumbnailHash ?? 'NONE — will use imageHash'}`);
-            (videoAssets[variantIndex] ??= []).push({ videoId, thumbnailHash, aspectRatio: src.aspectRatio });
+            this.logger.log(`Video thumbnail hash for variant ${variantIndex} (${aspectRatio ?? 'size unknown'}): ${thumbnailHash ?? 'NONE — will use imageHash'}`);
+            (videoAssets[variantIndex] ??= []).push({ videoId, thumbnailHash, aspectRatio });
           } catch (err: any) {
-            throw new Error(`Video upload failed for variant ${variantIndex + 1} (${src.aspectRatio ?? 'unknown size'}): ${err.message}`);
+            throw new Error(`Video upload failed for variant ${variantIndex + 1} (${aspectRatio ?? 'unknown size'}): ${err.message}`);
           }
         }
       }

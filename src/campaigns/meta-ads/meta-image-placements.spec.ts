@@ -12,6 +12,7 @@ describe('image placement creative requests', () => {
   beforeEach(() => {
     jest.resetAllMocks();
     service = new MetaAdsService();
+    (axios.get as jest.Mock).mockResolvedValue({ data: { instagram_business_account: { id: 'instagram' } } });
     post.mockResolvedValueOnce({ data: { id: 'creative' } });
     post.mockResolvedValueOnce({ data: { id: 'ad' } });
   });
@@ -73,14 +74,14 @@ describe('image placement creative requests', () => {
     expect(axios.get).not.toHaveBeenCalled();
   });
 
-  it('sends all four sizes and routes feeds, vertical and other placements', async () => {
+  it('routes sizes the way Ads Manager groups placements', async () => {
     const payload = await create([
       { hash: 'square', aspectRatio: '1:1' },
       { hash: 'portrait', aspectRatio: '4:5' },
       { hash: 'vertical', aspectRatio: '9:16' },
       { hash: 'landscape', aspectRatio: '16:9' },
     ]);
-    expect(payload.object_story_spec).toEqual({ page_id: 'page' });
+    expect(payload.object_story_spec).toEqual({ page_id: 'page', instagram_user_id: 'instagram' });
     const spec = payload.asset_feed_spec;
     expect(spec).toMatchObject({
       optimization_type: 'PLACEMENT',
@@ -90,20 +91,21 @@ describe('image placement creative requests', () => {
       link_urls: [{ website_url: url }],
       call_to_action_types: ['SHOP_NOW'],
     });
-    expect(spec.images).toHaveLength(4);
-    expect(servedHash(spec, 'facebook', 'feed')).toBe('portrait');
-    expect(servedHash(spec, 'instagram', 'stream')).toBe('portrait');
-    expect(servedHash(spec, 'instagram', 'profile_feed')).toBe('portrait');
-    expect(servedHash(spec, 'facebook', 'story')).toBe('vertical');
-    expect(servedHash(spec, 'facebook', 'facebook_reels')).toBe('vertical');
-    expect(servedHash(spec, 'instagram', 'story')).toBe('vertical');
-    expect(servedHash(spec, 'instagram', 'reels')).toBe('vertical');
-    expect(servedHash(spec, 'facebook', 'right_hand_column')).toBe('landscape');
-    expect(servedHash(spec, 'instagram', 'explore')).toBe('square');
-    expect(servedHash(spec, 'facebook', 'marketplace')).toBe('square');
-    expect(
-      spec.asset_customization_rules.filter((rule: any) => rule.is_default),
-    ).toHaveLength(1);
+    // Ads Manager uses three groups; 16:9 has no group of its own.
+    expect(spec.images.map((image: any) => image.hash).sort()).toEqual(['portrait', 'square', 'vertical']);
+    for (const [platform, position] of [
+      ['facebook', 'story'], ['facebook', 'facebook_reels'], ['facebook', 'instream_video'],
+      ['instagram', 'story'], ['instagram', 'reels'], ['instagram', 'ig_search'],
+    ]) expect(servedHash(spec, platform, position)).toBe('vertical');
+    expect(servedHash(spec, 'facebook', 'right_hand_column')).toBe('square');
+    expect(servedHash(spec, 'facebook', 'search')).toBe('square');
+    for (const [platform, position] of [
+      ['facebook', 'feed'], ['facebook', 'marketplace'], ['instagram', 'stream'],
+      ['instagram', 'profile_feed'], ['instagram', 'explore'],
+    ]) expect(servedHash(spec, platform, position)).toBe('portrait');
+    const defaults = spec.asset_customization_rules.filter((rule: any) => rule.is_default);
+    expect(defaults).toHaveLength(1);
+    expect(defaults[0].customization_spec).toEqual({});
   });
 
   it('retains both feed and vertical assets for mixed placements', async () => {
@@ -204,18 +206,24 @@ describe('image placement creative requests', () => {
       false,
       { feed: '1:1', landscape: '4:5', other: '16:9' },
     );
-    expect(servedHash(payload.asset_feed_spec, 'instagram', 'stream')).toBe(
-      'square',
+    const spec = payload.asset_feed_spec;
+    expect(servedHash(spec, 'instagram', 'stream')).toBe('square');
+    expect(servedHash(spec, 'instagram', 'explore')).toBe('square');
+    expect(servedHash(spec, 'facebook', 'story')).toBe('vertical');
+    // `other` (right column + search) wins over the legacy `landscape` key.
+    expect(servedHash(spec, 'facebook', 'right_hand_column')).toBe('wide');
+  });
+  it('reads a saved legacy landscape override as the right column + search size', async () => {
+    const payload = await create(
+      [
+        { hash: 'portrait', aspectRatio: '4:5' },
+        { hash: 'vertical', aspectRatio: '9:16' },
+        { hash: 'wide', aspectRatio: '16:9' },
+      ],
+      false,
+      { landscape: '16:9' },
     );
-    expect(
-      servedHash(payload.asset_feed_spec, 'facebook', 'right_hand_column'),
-    ).toBe('portrait');
-    expect(servedHash(payload.asset_feed_spec, 'facebook', 'story')).toBe(
-      'vertical',
-    );
-    expect(servedHash(payload.asset_feed_spec, 'instagram', 'explore')).toBe(
-      'wide',
-    );
+    expect(servedHash(payload.asset_feed_spec, 'facebook', 'search')).toBe('wide');
   });
   it('honors the override for vertical-only ad sets', async () => {
     const payload = await create(
@@ -254,12 +262,77 @@ describe('image placement creative requests', () => {
         undefined,
         verticalOnly,
       );
-      expect(
-        (post.mock.calls[0][1] as any).object_story_spec.video_data,
-      ).toMatchObject({
-        video_id: verticalOnly ? 'vertical' : 'portrait',
-        image_hash: verticalOnly ? 'vertical-thumb' : 'portrait-thumb',
-      });
+      const payload = post.mock.calls[0][1] as any;
+      if (verticalOnly) {
+        expect(payload.object_story_spec.video_data).toMatchObject({
+          video_id: 'vertical',
+          image_hash: 'vertical-thumb',
+        });
+        expect(payload.asset_feed_spec).toBeUndefined();
+      } else {
+        expect(payload.object_story_spec).toEqual({ page_id: 'page', instagram_user_id: 'instagram' });
+        expect(payload.asset_feed_spec.videos.map((v: any) => v.video_id)).toEqual(['vertical', 'portrait']);
+      }
     },
   );
+  const videoPayload = async (videos: any[], verticalOnly = false) => {
+    await (service as any).createVideoAd(
+      'act_123', 'token', 'adset', 'Video', copy, videos, 'page', url, undefined, verticalOnly,
+    );
+    return post.mock.calls[0][1] as any;
+  };
+  const sizes = {
+    square: { videoId: 'square', aspectRatio: '1:1', thumbnailHash: 'square-thumb' },
+    portrait: { videoId: 'portrait', aspectRatio: '4:5', thumbnailHash: 'portrait-thumb' },
+    vertical: { videoId: 'vertical', aspectRatio: '9:16', thumbnailHash: 'vertical-thumb' },
+    landscape: { videoId: 'landscape', aspectRatio: '16:9', thumbnailHash: 'landscape-thumb' },
+  };
+
+  it('maps videos to Ads Manager groups: 9:16 vertical group, 4:5 feeds default', async () => {
+    const { asset_feed_spec: spec } = await videoPayload(Object.values(sizes));
+    expect(spec).toMatchObject({
+      optimization_type: 'PLACEMENT',
+      ad_formats: ['SINGLE_VIDEO'],
+      bodies: [{ text: copy.primaryText }],
+      titles: [{ text: copy.headline }],
+      link_urls: [{ website_url: url }],
+    });
+    expect(spec.videos).toEqual([
+      { video_id: 'vertical', thumbnail_hash: 'vertical-thumb', adlabels: [{ name: 'placement_video_0' }] },
+      { video_id: 'portrait', thumbnail_hash: 'portrait-thumb', adlabels: [{ name: 'placement_video_1' }] },
+    ]);
+    expect(spec.asset_customization_rules).toEqual([
+      {
+        customization_spec: {
+          publisher_platforms: ['facebook', 'instagram'],
+          facebook_positions: ['story', 'facebook_reels', 'instream_video'],
+          instagram_positions: ['story', 'reels', 'ig_search'],
+        },
+        video_label: { name: 'placement_video_0' },
+        priority: 1,
+      },
+      { customization_spec: {}, video_label: { name: 'placement_video_1' }, is_default: true, priority: 2 },
+    ]);
+  });
+
+  it('uses a square video for feeds when there is no 4:5', async () => {
+    const { asset_feed_spec: spec } = await videoPayload([sizes.vertical, sizes.square]);
+    expect(spec.videos.map((v: any) => v.video_id)).toEqual(['vertical', 'square']);
+  });
+
+  it.each([
+    ['only a 9:16 video', [sizes.vertical], 'vertical'],
+    ['only a 16:9 video', [sizes.landscape], 'landscape'],
+    ['an untagged video', [{ videoId: 'untagged', thumbnailHash: 'untagged-thumb' }], 'untagged'],
+    ['9:16 + 16:9 (9:16 is the closer fit for feeds)', [sizes.vertical, sizes.landscape], 'vertical'],
+  ])('ships %s to every placement without blocking', async (_label, videos, expected) => {
+    const payload = await videoPayload(videos);
+    expect(payload.asset_feed_spec).toBeUndefined();
+    expect(payload.object_story_spec.video_data.video_id).toBe(expected);
+  });
+
+  it('uses the closest size on vertical-only ad sets when there is no 9:16', async () => {
+    const payload = await videoPayload([sizes.landscape, sizes.portrait], true);
+    expect(payload.object_story_spec.video_data).toMatchObject({ video_id: 'portrait', image_hash: 'portrait-thumb' });
+  });
 });

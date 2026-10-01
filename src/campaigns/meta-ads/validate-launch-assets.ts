@@ -1,4 +1,4 @@
-import { validateImagePlacementOverrides } from './image-placement-overrides';
+import { rightColumnSearchRatio, validateImagePlacementOverrides } from './image-placement-overrides';
 import type { MetaCampaignConfig } from './meta-ads.service';
 
 /** Validate uploaded assets before creating any campaign objects on Meta. */
@@ -55,10 +55,8 @@ export function validateLaunchAssets(
           );
         }
         if (adSet.placementPreset === 'everywhere') {
-          required.push(
-            overrides.other ?? '1:1',
-            overrides.landscape ?? '16:9',
-          );
+          // Ads Manager's right column + search group.
+          required.push(rightColumnSearchRatio(overrides));
         }
         const hashesByRatio = new Map<string, string>();
         for (const ratio of new Set(required)) {
@@ -94,17 +92,16 @@ export function validateLaunchAssets(
         }
       }
       if (adSet.placementPreset === 'everywhere') {
-        for (const ratio of ['1:1', '16:9']) {
-          if (
-            !images.some(
-              (image) =>
-                image.aspectRatio === ratio && image.hash !== vertical.hash,
-            )
-          ) {
-            throw new Error(
-              `${context}: Everywhere placements require an uploaded ${ratio} image. Supply that size or narrow the placement selection.`,
-            );
-          }
+        // Ads Manager's right column + search group takes the 1:1 image.
+        if (
+          !images.some(
+            (image) =>
+              image.aspectRatio === '1:1' && image.hash !== vertical.hash,
+          )
+        ) {
+          throw new Error(
+            `${context}: Everywhere placements require an uploaded 1:1 image for the right column and search. Supply that size or narrow the placement selection.`,
+          );
         }
       }
     }
