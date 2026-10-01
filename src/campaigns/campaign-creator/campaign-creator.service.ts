@@ -14,7 +14,7 @@ import { CreativePackage, CreativePackageDocument } from '../../creative/schemas
 import { ImageResizerService, ExtendRatio, RatioMap, classifyRatio } from '../../common/media/image-resizer.service';
 import { SafetyChecks } from './safety-checks';
 import { CampaignReviewTeamService, CampaignReviewOutput } from '../../teams/campaign-review-team.service';
-import { MetaAdsService } from '../meta-ads/meta-ads.service';
+import { MetaAdsService, MetaLaunchRollbackError } from '../meta-ads/meta-ads.service';
 import {
   VALID_OPTIMIZATION_GOALS,
   resolveOptimizationGoalForLaunch,
@@ -1539,6 +1539,11 @@ export class CampaignCreatorService {
       });
       knownMetaCampaignId = launchResult.campaignId;
     } catch (err: any) {
+      if (err instanceof MetaLaunchRollbackError && err.campaignDeleted) {
+        metaCampaignCreationStarted = false;
+        this.logger.warn(`Meta campaign deletion confirmed for ${campaignId}; returning to pending approval.`);
+        throw err;
+      }
       this.logger.error(`Meta launch failed for campaign ${campaignId}; status remains launching because a Meta campaign may exist and must be reconciled before retry: ${err.message}`);
       throw err;
     }

@@ -10,6 +10,13 @@ import {
 import { resolveAdLandingUrl } from './meta-utm.util';
 import { PlacementPreset, resolvePlacementPreset } from './placement-presets';
 
+export class MetaLaunchRollbackError extends Error {
+  constructor(message: string, readonly campaignDeleted: boolean) {
+    super(message);
+    this.name = 'MetaLaunchRollbackError';
+  }
+}
+
 const META_API_VERSION = 'v21.0';
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`;
 
@@ -725,8 +732,8 @@ export class MetaAdsService {
       this.logger.error(
         `Campaign launch failed — rolling back: ${err.message}`,
       );
-      await this.rollback(created, config.accessToken);
-      throw err;
+      const campaignDeleted = await this.rollback(created, config.accessToken);
+      throw new MetaLaunchRollbackError(err.message, campaignDeleted);
     }
   }
 
@@ -1332,11 +1339,7 @@ export class MetaAdsService {
       }
     }
 
-    const creativeResponse = await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${accountId}/adcreatives`,
-      creativeData,
-    );
+    const creativeResponse = await this.createAdCreative(accountId, creativeData);
 
     const creativeId = creativeResponse.data?.id;
     if (!creativeId) throw new Error(`No creative ID for ${adName}`);
@@ -1541,11 +1544,7 @@ export class MetaAdsService {
       `Creating video creative: ${JSON.stringify({ ...creativeData, access_token: '[REDACTED]' })}`,
     );
 
-    const creativeResponse = await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${accountId}/adcreatives`,
-      creativeData,
-    );
+    const creativeResponse = await this.createAdCreative(accountId, creativeData);
 
     const creativeId = creativeResponse.data?.id;
     if (!creativeId) throw new Error(`No creative ID for video ad ${adName}`);
@@ -1708,11 +1707,7 @@ export class MetaAdsService {
       `Creating carousel creative: ${adName} (${cards.length} cards)`,
     );
 
-    const creativeResponse = await this.metaApiCall(
-      'POST',
-      `${META_API_BASE}/${accountId}/adcreatives`,
-      creativeData,
-    );
+    const creativeResponse = await this.createAdCreative(accountId, creativeData);
 
     const creativeId = creativeResponse.data?.id;
     if (!creativeId)
@@ -1747,14 +1742,17 @@ export class MetaAdsService {
   private async rollback(
     created: CreatedObjects,
     accessToken: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let campaignDeleted = false;
     // Deleting the campaign cascades to all child ad sets and ads
     if (created.campaignId) {
       try {
-        await axios.delete(`${META_API_BASE}/${created.campaignId}`, {
+        const deletion = await axios.delete(`${META_API_BASE}/${created.campaignId}`, {
           params: { access_token: accessToken },
           timeout: 15000,
         });
+        if (deletion.data?.success !== true) throw new Error('Campaign deletion was not confirmed');
+        campaignDeleted = true;
         this.logger.log(
           `Rollback: deleted campaign ${created.campaignId} (cascades to ad sets + ads)`,
         );
@@ -1777,6 +1775,7 @@ export class MetaAdsService {
         // Ignore — creative may have been cascade-deleted with campaign
       }
     }
+    return campaignDeleted;
   }
 
   // ─── Optimization actions (used by auditor) ─────────────────────────────────
@@ -3056,6 +3055,32 @@ export class MetaAdsService {
 
   // ─── Retry wrapper for transient Meta API errors ────────────────────────────
 
+  /** Retry an explicitly rejected creative with the identity linked to its Page. */
+  private async createAdCreative(accountId: string, data: any): Promise<any> {
+    const url = `${META_API_BASE}/${accountId}/adcreatives`;
+    try {
+      return await this.metaApiCall('POST', url, data);
+    } catch (error: any) {
+      const pageId = data.object_story_spec?.page_id;
+      if (!error.message?.includes('subcode: 1772103') || !pageId ||
+          data.object_story_spec?.instagram_user_id) throw error;
+      const page = await this.metaApiCall('GET', `${META_API_BASE}/${pageId}`, {
+        fields: 'instagram_business_account,connected_instagram_account,connected_page_backed_instagram_account',
+        access_token: data.access_token,
+      });
+      const identity = page.data?.instagram_business_account?.id ??
+        page.data?.connected_instagram_account?.id ??
+        page.data?.connected_page_backed_instagram_account?.id;
+      if (!identity) {
+        throw new Error(`Instagram identity is missing for Facebook Page ${pageId}. Connect the intended Instagram account to this Page and grant the ad account access before retrying. (subcode: 1772103)`);
+      }
+      return this.metaApiCall('POST', url, {
+        ...data,
+        object_story_spec: { ...data.object_story_spec, instagram_user_id: identity },
+      });
+    }
+  }
+
   private async metaApiCall(
     method: 'POST' | 'GET' | 'DELETE',
     url: string,
@@ -3124,7 +3149,7 @@ export class MetaAdsService {
           : `${method} ${url.replace(/access_token=[^&]+/, 'access_token=***')} failed with no response (${errCode || 'no code'}: ${err.message})`;
         this.logger.error(`Meta API full error: ${errorDetail}`);
         throw new Error(
-          `Meta API error: ${errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`,
+          `Meta API error: ${fullError?.error_user_msg || errorMsg} (code: ${metaErrorCode ?? 'unknown'}, subcode: ${errorSubcode ?? 'none'})`,
         );
       }
     }
