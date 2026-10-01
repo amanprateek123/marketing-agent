@@ -31,7 +31,12 @@ import { buildMetaCampaignName } from './meta-campaign-name.util';
 import { clampAgeRanges, enforceGeoLanguageCoherence, checkAdSetOverlap } from './targeting-validator';
 import { getEffectiveConversionValue, getGrossConversionValue } from '../../common/conversion-value.util';
 import axios from 'axios';
-import { checkLaunchAudiences } from './launch-audience-check';
+import {
+  checkLaunchAudiences,
+  dropUnavailablePurchaserExclusions,
+  markOptionalPurchaserExclusions,
+  purchaserAudienceIds,
+} from './launch-audience-check';
 import { probeVideoRatio } from '../../common/media/video-probe';
 import {
   CampaignBudgetGuardService,
@@ -788,6 +793,12 @@ export class CampaignCreatorService {
         { $set: { 'campaignConfig.adSets': config.adSets } },
       );
     }
+    // Purchasers exclusions are optional whoever added them (see
+    // launch-audience-check.ts): drop unavailable ones instead of failing.
+    const purchasers = purchaserAudienceIds(company.products);
+    for (const { adSet, ids } of dropUnavailablePurchaserExclusions(config.adSets as any[], purchasers, audienceCheck.invalid)) {
+      this.logger.warn(`Ad set "${adSet}": dropping unavailable purchasers exclusion ${ids.join(', ')} (${ids.map((id) => audienceCheck.invalid.get(id)).join('; ')})`);
+    }
     for (const adSet of config.adSets as any[]) {
       const selectedAudienceIds = [adSet.metaAudienceId, ...(adSet.excludeAudienceIds ?? [])].filter(Boolean);
       const unavailable = selectedAudienceIds.filter(id => audienceCheck.invalid.has(id));
@@ -946,9 +957,6 @@ export class CampaignCreatorService {
         if (!existing.has(purchasersAudId)) {
           existing.add(purchasersAudId);
           adSet.excludeAudienceIds = Array.from(existing);
-          // Marked so MetaAdsService can drop it (and only it) if Meta still
-          // rejects it — an optional exclusion must not kill the launch.
-          adSet.autoExcludeAudienceIds = [purchasersAudId];
           injected++;
         }
       }
@@ -958,6 +966,10 @@ export class CampaignCreatorService {
     } else {
       this.logger.warn(`No verified purchasers audience for the selected product; no automatic exclusion added`);
     }
+    // Mark every purchasers exclusion — injected above, or saved on the
+    // campaign by manual-campaign.service / the dashboard — so MetaAdsService
+    // drops it (and only it) if Meta still rejects it at ad set creation.
+    markOptionalPurchaserExclusions(config.adSets as any[], purchasers);
 
     // Enforce per-format variant rules:
     //   video  → MUST be only the selected variant (video was generated for that one only)

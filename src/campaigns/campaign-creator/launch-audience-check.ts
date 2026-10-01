@@ -86,3 +86,55 @@ export async function checkLaunchAudiences(
 
   return check;
 }
+
+/**
+ * Purchasers exclusions are an optimisation, never a deliberate audience
+ * choice: campaign launch, manual-campaign.service and the dashboard all add
+ * them automatically, from any product. Whoever added one, it is optional.
+ * (2026-10-01: a dashboard-built campaign saved a Purchasers exclusion that
+ * was unavailable on the launch account, and launch refused to drop it.)
+ */
+export function purchaserAudienceIds(products: any[] | undefined): Set<string> {
+  return new Set(
+    (products ?? [])
+      .flatMap((p: any) => p.metaAudiences ?? [])
+      .filter((a: any) => /Purchasers?_/i.test(a?.name ?? ''))
+      .map((a: any) => a.id),
+  );
+}
+
+/** Remove purchasers exclusions the pre-launch check found unavailable. Returns what was dropped per ad set name. */
+export function dropUnavailablePurchaserExclusions(
+  adSets: Array<{ name: string; excludeAudienceIds?: string[] }>,
+  purchasers: Set<string>,
+  invalid: Map<string, string>,
+): Array<{ adSet: string; ids: string[] }> {
+  const dropped: Array<{ adSet: string; ids: string[] }> = [];
+  for (const adSet of adSets) {
+    const ids = (adSet.excludeAudienceIds ?? []).filter(
+      (id) => purchasers.has(id) && invalid.has(id),
+    );
+    if (!ids.length) continue;
+    adSet.excludeAudienceIds = adSet.excludeAudienceIds!.filter(
+      (id) => !ids.includes(id),
+    );
+    dropped.push({ adSet: adSet.name, ids });
+  }
+  return dropped;
+}
+
+/** Mark every purchasers exclusion so MetaAdsService may drop it if Meta rejects it at ad set creation. */
+export function markOptionalPurchaserExclusions(
+  adSets: Array<{
+    excludeAudienceIds?: string[];
+    autoExcludeAudienceIds?: string[];
+  }>,
+  purchasers: Set<string>,
+): void {
+  for (const adSet of adSets) {
+    const optional = (adSet.excludeAudienceIds ?? []).filter((id) =>
+      purchasers.has(id),
+    );
+    if (optional.length) adSet.autoExcludeAudienceIds = optional;
+  }
+}

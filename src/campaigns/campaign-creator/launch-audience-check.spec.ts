@@ -1,5 +1,10 @@
 import axios from 'axios';
-import { checkLaunchAudiences } from './launch-audience-check';
+import {
+  checkLaunchAudiences,
+  dropUnavailablePurchaserExclusions,
+  markOptionalPurchaserExclusions,
+  purchaserAudienceIds,
+} from './launch-audience-check';
 
 jest.mock('axios');
 const get = axios.get as jest.Mock;
@@ -62,5 +67,64 @@ describe('checkLaunchAudiences', () => {
     expect([...check.unchecked]).toEqual(['a']);
     expect(check.invalid.size).toBe(0);
     expect(check.valid.size).toBe(0);
+  });
+});
+
+describe('purchasers exclusions are optional whoever added them', () => {
+  // 2026-10-01: dashboard-built campaign saved Purchasers exclusion
+  // 120242739389540403; Meta rejected it on act_692074691787119 and launch
+  // refused to drop it because it wasn't marked as auto-added.
+  const products = [
+    {
+      name: 'Nadi Report',
+      metaAudiences: [
+        { id: '120242739389540403', name: 'Purchasers_NadiReport' },
+        { id: 'lal', name: 'LAL_1pct' },
+      ],
+    },
+    {
+      name: 'Nadi Leaf',
+      metaAudiences: [{ id: 'p2', name: 'Purchaser_NadiLeaf' }],
+    },
+  ];
+  const purchasers = purchaserAudienceIds(products);
+
+  it('collects purchasers audiences from every product', () =>
+    expect([...purchasers].sort()).toEqual(['120242739389540403', 'p2']));
+
+  it('marks a saved purchasers exclusion as optional, leaving chosen exclusions alone', () => {
+    const adSets: any[] = [
+      {
+        name: 'Ad set 1',
+        excludeAudienceIds: ['chosen', '120242739389540403'],
+      },
+    ];
+    markOptionalPurchaserExclusions(adSets, purchasers);
+    expect(adSets[0].autoExcludeAudienceIds).toEqual(['120242739389540403']);
+  });
+
+  it('drops an unavailable purchasers exclusion before launch, but not a chosen one', () => {
+    const adSets: any[] = [
+      {
+        name: 'Ad set 1',
+        excludeAudienceIds: ['chosen', '120242739389540403'],
+      },
+    ];
+    const invalid = new Map([
+      ['120242739389540403', 'not returned by Meta'],
+      ['chosen', 'deleted'],
+    ]);
+    expect(
+      dropUnavailablePurchaserExclusions(adSets, purchasers, invalid),
+    ).toEqual([{ adSet: 'Ad set 1', ids: ['120242739389540403'] }]);
+    expect(adSets[0].excludeAudienceIds).toEqual(['chosen']);
+  });
+
+  it('leaves ad sets without purchasers exclusions untouched', () => {
+    const adSets: any[] = [
+      { name: 'Retarget', excludeAudienceIds: ['chosen'] },
+    ];
+    markOptionalPurchaserExclusions(adSets, purchasers);
+    expect(adSets[0].autoExcludeAudienceIds).toBeUndefined();
   });
 });
