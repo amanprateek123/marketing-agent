@@ -10,6 +10,8 @@ import { SchedulerModule } from '../scheduler/scheduler.module';
 import { CommonModule } from '../common/common.module';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { LiveContextBuilder } from './prompt-generator/live-context.builder';
+import { ProductSyncService } from './product-sync.service';
+import { PipelineBridgeModule } from '../pipeline-bridge/pipeline-bridge.module';
 
 @Module({
   imports: [
@@ -22,9 +24,10 @@ import { LiveContextBuilder } from './prompt-generator/live-context.builder';
     CommonModule,
     forwardRef(() => CampaignsModule),
     forwardRef(() => SchedulerModule),
+    PipelineBridgeModule,
   ],
   controllers: [CompaniesController],
-  providers: [CompaniesService, PromptGeneratorService, LiveContextBuilder],
-  exports: [CompaniesService, LiveContextBuilder, PromptGeneratorService],
+  providers: [CompaniesService, PromptGeneratorService, LiveContextBuilder, ProductSyncService],
+  exports: [CompaniesService, LiveContextBuilder, PromptGeneratorService, ProductSyncService],
 })
 export class CompaniesModule {}

@@ -73,6 +73,7 @@ describe('Meta account currency provenance', () => {
       campaignSyncService as any,
       {} as any,
       {} as any,
+      {} as any,
     );
 
     await expect(
@@ -128,6 +129,7 @@ describe('Meta account currency provenance', () => {
       {} as any,
       metaAdsService as any,
       campaignSyncService as any,
+      {} as any,
       {} as any,
       {} as any,
     );

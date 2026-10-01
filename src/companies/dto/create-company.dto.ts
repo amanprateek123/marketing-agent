@@ -42,6 +42,7 @@ class ProductDto {
   @IsOptional() @IsString() metaAppStoreUrlIos?: string;
   @IsOptional() @IsString() metaAppStoreUrlAndroid?: string;
   @IsOptional() @IsString() pageId?: string;
+  @IsOptional() @IsString() offeringSlug?: string;
   @IsOptional() @IsString() metaOptimizationGoal?: string;
   @IsOptional() @IsBoolean() hidePriceInCreative?: boolean;
 

@@ -18,6 +18,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { UsageLog } from '../claude/schemas/usage-log.schema';
 import { CompaniesService } from './companies.service';
+import { ProductSyncService } from './product-sync.service';
 import { PromptGeneratorService } from './prompt-generator/prompt-generator.service';
 import { MetaLearningImporterService } from '../campaigns/meta-ads/meta-learning-importer.service';
 import { MetaAdsService, MetaAdAccountSummary } from '../campaigns/meta-ads/meta-ads.service';
@@ -79,6 +80,7 @@ export class CompaniesController {
     private readonly schedulerService: SchedulerService,
     @InjectModel(UsageLog.name)
     private readonly usageLogModel: Model<UsageLog>,
+    private readonly productSync: ProductSyncService,
   ) {}
 
   @Post()
@@ -223,6 +225,16 @@ export class CompaniesController {
    * can put ready-to-use Pages first instead of drowning them in every Page
    * the whole (often shared/agency) Business Manager happens to own.
    */
+  /**
+   * POST /companies/:tenantId/product-sync — carry the product list (and each product's Page,
+   * Instagram, pixel and conversion) to the Brain now, and say what happened per product.
+   */
+  @Post(':tenantId/product-sync')
+  async productSyncNow(@Param('tenantId') tenantId: string) {
+    const company = await this.companiesService.findByTenantId(tenantId);
+    return this.productSync.syncCompany(company);
+  }
+
   @Get(':tenantId/meta-pages')
   async listMetaPages(@Param('tenantId') tenantId: string) {
     const company = await this.companiesService.findByTenantId(tenantId);
@@ -330,6 +342,14 @@ export class CompaniesController {
       this.promptGenerator.generate(tenantId).catch((err) =>
         this.logger.error(`Prompt regeneration failed for ${tenantId}: ${err.message}`),
       );
+    }
+
+    // Products and the company's Page/pixel are the source of truth for the Brain's campaigns:
+    // carry a change there straight away (fire and forget — the save never waits on it).
+    if ('products' in (dto as any) || 'meta' in (dto as any)) {
+      this.productSync.syncCompany(company)
+        .then((r) => this.logger.log(`product sync ${tenantId}: ${this.productSync.summary(r)}`))
+        .catch((err) => this.logger.error(`product sync failed for ${tenantId}: ${err.message}`));
     }
 
     return {

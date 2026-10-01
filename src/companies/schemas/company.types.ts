@@ -118,6 +118,12 @@ export interface Product {
   metaAppStoreUrlAndroid?: string;
   pageId?: string;                   // Facebook Page ID this product's ads should post as, if different from company.meta.pageId (e.g. a tenant running multiple product-specific Pages)
   /**
+   * The Brain's product slug this product is linked to (e.g. `golu_devta_arzi`). Set by the
+   * product sync (exact name match, or a new registration) or picked by hand in Settings; the sync
+   * uses it to record this product's Page / Instagram / pixel / conversion on the Brain side.
+   */
+  offeringSlug?: string;
+  /**
    * Meta ad-set optimization goal. Defaults to 'OFFSITE_CONVERSIONS' when unset.
    * Set to 'VALUE' for Value-Based Bidding on funnels where revenue per conversion
    * varies meaningfully (refundable bookings, tiered pricing). VBB requires the
