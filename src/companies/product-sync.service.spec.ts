@@ -18,13 +18,24 @@ describe('linkProduct — which Brain product a platform product is', () => {
     ).toEqual({ slug: 'career_report', how: 'explicit' });
   });
 
-  it('a stale explicit slug is reported, not trusted', () => {
+  it('a typed slug the Brain does not have is reported as new, not trusted', () => {
     const r = linkProduct(
       { name: 'Golu Devta Arzi', offeringSlug: 'gone_slug' },
       offerings,
     );
     expect(r.slug).toBeNull();
+    expect(r.newSlug).toBe('gone_slug');
     expect(r.reason).toMatch(/gone_slug/);
+  });
+
+  it('a typed slug the Brain would refuse is reported before anything is registered', () => {
+    const r = linkProduct(
+      { name: 'Rudrabhishek Pooja', offeringSlug: 'Rudrabhishek Pooja' },
+      offerings,
+    );
+    expect(r.slug).toBeNull();
+    expect(r.newSlug).toBeUndefined();
+    expect(r.reason).toMatch(/rudrabhishek_pooja/);
   });
 
   it('matches the display name or slug exactly, ignoring case and punctuation', () => {
@@ -218,7 +229,7 @@ describe('ProductSyncService.syncCompany', () => {
     expect(c.save).toHaveBeenCalled();
   });
 
-  it('registers a new product everywhere when it has a landing page', async () => {
+  it('registers a new product only when someone typed its new Brain slug', async () => {
     const { svc, calls, pipeline } = make({
       brain_read: () => ({ rows: offerings }),
       offering_register: (a) => ({ slug: a.slug, outcome: 'created' }),
@@ -230,6 +241,7 @@ describe('ProductSyncService.syncCompany', () => {
         name: 'Kundli Match',
         active: true,
         price: 999,
+        offeringSlug: 'kundli_match',
         landingUrl: 'https://www.91astrology.com/kundli-match',
       },
     ]);
@@ -251,6 +263,41 @@ describe('ProductSyncService.syncCompany', () => {
     );
     expect(r.registered).toEqual(['kundli_match']);
     expect(c.products[0].offeringSlug).toBe('kundli_match');
+  });
+
+  it('never registers a product just because its name matched nothing', async () => {
+    // "wish letter" IS golu_devta_arzi under another name: registering it would duplicate it.
+    const { svc, calls, pipeline } = make({
+      brain_read: () => ({ rows: offerings }),
+    });
+    const c = company([
+      {
+        name: 'wish letter',
+        active: true,
+        landingUrl: 'https://www.91astrology.com/golu-devta-arzi',
+      },
+    ]);
+    const r = await svc.syncCompany(c as any);
+    expect(pipeline.addOffering).not.toHaveBeenCalled();
+    expect(calls.find(([t]) => t === 'offering_register')).toBeUndefined();
+    expect(r.registered).toEqual([]);
+    expect(r.unlinked[0].reason).toMatch(/Linked Brain product/);
+  });
+
+  it('a typed new slug without a landing page is reported, not registered', async () => {
+    const { svc, pipeline } = make({
+      brain_read: () => ({ rows: offerings }),
+    });
+    const c = company([
+      {
+        name: 'Rudrabhishek Pooja',
+        active: true,
+        offeringSlug: 'rudrabhishek_pooja',
+      },
+    ]);
+    const r = await svc.syncCompany(c as any);
+    expect(pipeline.addOffering).not.toHaveBeenCalled();
+    expect(r.unlinked[0].reason).toMatch(/landing page/);
   });
 
   it('reports an unlinkable product instead of guessing, and never throws', async () => {

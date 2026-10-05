@@ -14,8 +14,8 @@ import { McpClient } from '../foundry-bridge/mcp.client';
  *
  *   1. LINK each platform product (keyed by name) to a Brain product (keyed by slug) — the slug
  *      saved on the product, else an exact name match. A partial match is reported, never guessed.
- *   2. REGISTER a product the Brain does not have yet (it needs a landing page): creativebot gets its
- *      research pack, the Brain gets its offering row.
+ *   2. REGISTER a product the Brain does not have yet — only when a person typed a NEW slug for it
+ *      and it has a landing page: creativebot gets its research pack, the Brain its offering row.
  *   3. RECORD its Meta ids as product-scope rows on the Brain: Page (+ the Instagram account
  *      connected to that Page), pixel and conversion — only what the product sets itself and only
  *      what changed. The company's Page/pixel are the account default, exactly the platform's own
@@ -79,6 +79,8 @@ export interface ProductLink {
   slug: string | null;
   how?: 'explicit' | 'name' | 'registered';
   reason?: string;
+  /** A slug someone typed that the Brain does not have yet: the only way a product is registered. */
+  newSlug?: string;
 }
 
 export function linkProduct(
@@ -89,9 +91,16 @@ export function linkProduct(
   if (product.offeringSlug) {
     if (bySlug.has(product.offeringSlug))
       return { slug: product.offeringSlug, how: 'explicit' };
+    // The Brain's own slug rule, checked BEFORE creativebot is asked to build anything.
+    if (!/^[a-z0-9][a-z0-9_]{1,63}$/.test(product.offeringSlug))
+      return {
+        slug: null,
+        reason: `"${product.offeringSlug}" is not a valid Brain slug (lowercase letters, digits and _ — e.g. "${slugify(product.name ?? '')}")`,
+      };
     return {
       slug: null,
-      reason: `its linked Brain product "${product.offeringSlug}" no longer exists`,
+      newSlug: product.offeringSlug,
+      reason: `the Brain has no product "${product.offeringSlug}" yet (it is registered once the product has a landing page)`,
     };
   }
   const want = norm(product.name);
@@ -105,10 +114,12 @@ export function linkProduct(
       slug: null,
       reason: `matches several Brain products (${unique.join(', ')})`,
     };
+  // Never registered from a name alone: "wish letter" is golu_devta_arzi under another name, and a
+  // guess would duplicate it. A person says which product it is, or that it is a new one.
   return {
     slug: null,
     reason:
-      'no Brain product has this name (add a landing page to register it, or pick one)',
+      'no Brain product has this name — set its "Linked Brain product" (an existing slug links it, a new slug registers it)',
   };
 }
 
@@ -223,10 +234,10 @@ export class ProductSyncService {
 
         if (
           !link.slug &&
-          !product.offeringSlug &&
+          link.newSlug &&
           /^https:\/\//i.test(product.landingUrl ?? '')
         ) {
-          const slug = slugify(name);
+          const slug = link.newSlug;
           await this.pipeline.addOffering((company as any).tenantId, {
             landing_url: product.landingUrl!,
             display_name: name,
