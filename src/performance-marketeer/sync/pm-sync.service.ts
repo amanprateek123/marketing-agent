@@ -7,6 +7,7 @@ import { dayRange, istDayBounds, istDayFromToday } from '../pm.logic';
 import { PmLock } from '../schemas/pm-lock.schema';
 import { PmJob, PmSyncRun } from '../schemas/pm-sync-run.schema';
 import { AttributionSync } from './attribution.sync';
+import { MetaSync } from './meta.sync';
 import { OrdersSync } from './orders.sync';
 import { VisitorDaysSync } from './visitor-days.sync';
 
@@ -24,7 +25,17 @@ const ATTRIBUTION_CHUNK_DAYS = 3;
 const LEASE_MS = 60 * 60 * 1000;
 const REFUND_RECHECK_DAYS = 60;
 
+export const PM_META_PARTS = [
+  'daily',
+  'entities',
+  'breakdowns',
+  'changes',
+  'retag',
+] as const;
+export type PmMetaPart = (typeof PM_META_PARTS)[number];
+
 export class PmBusyError extends Error {}
+export class PmLockLostError extends Error {}
 
 /**
  * Runs the Performance Marketeer syncs. One sync at a time across every
@@ -42,6 +53,7 @@ export class PmSyncService {
     private readonly visitorDays: VisitorDaysSync,
     private readonly orders: OrdersSync,
     private readonly attribution: AttributionSync,
+    private readonly meta: MetaSync,
     @InjectModel(PmSyncRun.name) private readonly runs: Model<PmSyncRun>,
     @InjectModel(PmLock.name) private readonly locks: Model<PmLock>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
@@ -69,6 +81,24 @@ export class PmSyncService {
   }
 
   /**
+   * Meta: daily ad insights, settings of ads that spent, breakdowns, change
+   * log — or only some of these parts (e.g. to skip days already loaded).
+   */
+  syncMeta(req: PmSyncRequest, parts: PmMetaPart[] = [...PM_META_PARTS]) {
+    return this.exclusive('meta', async () => {
+      if (parts.includes('daily')) await this.metaDailyStep(req);
+      if (parts.includes('entities'))
+        await this.metaEntitiesStep(req, 'missing');
+      if (parts.includes('breakdowns')) await this.metaBreakdownsStep(req);
+      if (parts.includes('changes')) await this.metaChangesStep(req);
+      if (parts.includes('retag'))
+        await this.track('meta-entities', req, async () => ({
+          rows: await this.meta.retagAll(),
+        }));
+    });
+  }
+
+  /**
    * Hourly: today's visitor rows (so today's orders can be attributed), orders
    * of the last 3 days, new refunds, and attribution for those days.
    */
@@ -86,6 +116,12 @@ export class PmSyncService {
         rows: await this.orders.syncNewRefunds(istDayBounds(recent.from).start),
       }));
       await this.attributionStep(recent);
+      if (this.meta.configured) {
+        const metaReq = { ...recent, from: istDayFromToday(-1) };
+        await this.metaDailyStep(metaReq);
+        await this.metaEntitiesStep(metaReq, 'missing');
+        await this.metaChangesStep(metaReq);
+      }
     });
   }
 
@@ -115,6 +151,18 @@ export class PmSyncService {
         to: istDayFromToday(0),
         trigger: 'cron',
       });
+      if (this.meta.configured) {
+        const cron = { to: istDayFromToday(0), trigger: 'cron' as const };
+        // Meta keeps updating conversions for the attribution window (7 days).
+        await this.metaDailyStep({ ...cron, from: istDayFromToday(-7) });
+        await this.metaBreakdownsStep({ ...cron, from: istDayFromToday(-3) });
+        // Refresh settings (budgets, status, product tags) of everything that spent in 30 days.
+        await this.metaEntitiesStep(
+          { ...cron, from: istDayFromToday(-30) },
+          'all',
+        );
+        await this.metaChangesStep({ ...cron, from: istDayFromToday(-3) });
+      }
     });
   }
 
@@ -194,6 +242,92 @@ export class PmSyncService {
     });
   }
 
+  private metaDailyStep(req: PmSyncRequest) {
+    return this.track('meta-daily', req, async (errors, stats) => {
+      let rows = 0;
+      for (const account of this.meta.accounts) {
+        await this.heartbeat();
+        try {
+          const r = await this.meta.syncDaily(account, req.from, req.to);
+          rows += r.rows;
+          stats[account] = r.rows;
+        } catch (e) {
+          errors.push(`act_${account}: ${(e as Error).message}`);
+        }
+      }
+      return { rows };
+    });
+  }
+
+  /** 'missing' = ads that spent in range without a settings row; 'all' = every ad that spent in range. */
+  private metaEntitiesStep(req: PmSyncRequest, which: 'missing' | 'all') {
+    return this.track('meta-entities', req, async (errors, stats) => {
+      let rows = 0;
+      for (const account of this.meta.accounts) {
+        await this.heartbeat();
+        try {
+          const ids = await this.meta.adsToRefresh(
+            account,
+            req.from,
+            req.to,
+            which,
+          );
+          const n = await this.meta.syncEntities(account, ids);
+          rows += n;
+          stats[account] = n;
+        } catch (e) {
+          errors.push(`act_${account}: ${(e as Error).message}`);
+        }
+      }
+      return { rows };
+    });
+  }
+
+  private metaBreakdownsStep(req: PmSyncRequest) {
+    return this.track('meta-breakdowns', req, async (errors, stats) => {
+      let rows = 0;
+      for (const account of this.meta.accounts) {
+        await this.heartbeat();
+        try {
+          const n = await this.meta.syncBreakdowns(account, req.from, req.to);
+          rows += n;
+          stats[account] = n;
+        } catch (e) {
+          errors.push(`act_${account}: ${(e as Error).message}`);
+        }
+      }
+      return { rows };
+    });
+  }
+
+  private metaChangesStep(req: PmSyncRequest) {
+    return this.track('meta-changes', req, async (errors, stats) => {
+      let rows = 0;
+      for (const account of this.meta.accounts) {
+        await this.heartbeat();
+        try {
+          const n = await this.meta.syncChanges(account, req.from, req.to);
+          rows += n;
+          stats[account] = n;
+        } catch (e) {
+          errors.push(`act_${account}: ${(e as Error).message}`);
+        }
+      }
+      return { rows };
+    });
+  }
+
+  /** Extends the lease while a long sync (e.g. a Meta backfill waiting on rate limits) is still working. */
+  private async heartbeat() {
+    const r = await this.locks.updateOne(
+      { _id: this.lockId, tenantId: this.env.tenantId, holder: this.holder },
+      { $set: { until: new Date(Date.now() + LEASE_MS) } },
+    );
+    // Another process took over an expired lease: stop rather than run twice.
+    if (r.matchedCount === 0)
+      throw new PmLockLostError('Lost the Performance Marketeer sync lock');
+  }
+
   private products(id?: string) {
     if (!id) return PM_PRODUCTS;
     const product = findPmProduct(id);
@@ -230,9 +364,11 @@ export class PmSyncService {
       }
       throw e;
     }
+    this.meta.setHeartbeat(() => this.heartbeat());
     try {
       await work();
     } finally {
+      this.meta.setHeartbeat(null);
       await this.locks.updateOne(
         { _id: this.lockId, tenantId: this.env.tenantId, holder: this.holder },
         { $set: { until: new Date(0) } },

@@ -3,7 +3,15 @@ import { HydratedDocument } from 'mongoose';
 
 export type PmSyncRunDocument = HydratedDocument<PmSyncRun>;
 
-export type PmJob = 'visitor-days' | 'orders' | 'refunds' | 'attribution';
+export type PmJob =
+  | 'visitor-days'
+  | 'orders'
+  | 'refunds'
+  | 'attribution'
+  | 'meta-daily'
+  | 'meta-entities'
+  | 'meta-breakdowns'
+  | 'meta-changes';
 
 /** Audit trail of every sync: what ran, over which days, how many rows, and any error. */
 @Schema({ collection: 'pm_sync_runs', timestamps: true })

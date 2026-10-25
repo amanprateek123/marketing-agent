@@ -18,6 +18,19 @@ export const pmEnv = registerAs('pm', () => ({
     password: process.env.CLICKHOUSE_PASSWORD ?? '',
     project: process.env.OPENPANEL_PROJECT_ID ?? '91astro-website',
   },
+  meta: {
+    // System User token with ads_read only (read-only).
+    accessToken: process.env.META_ACCESS_TOKEN ?? '',
+    apiVersion: process.env.PM_META_API_VERSION ?? 'v21.0',
+    // 91Astrology ad accounts: JFM24, Account Shift, Mayank (docs/performance-marketeer/06-decisions.md D-10).
+    accountIds: (
+      process.env.PM_META_ACCOUNT_IDS ??
+      '6995951240481576,549390260260950,692074691787119'
+    )
+      .split(',')
+      .map((s) => s.trim().replace(/^act_/, ''))
+      .filter(Boolean),
+  },
   metabase: {
     url: process.env.METABASE_URL ?? '',
     apiKey: process.env.METABASE_API_KEY ?? '',
@@ -155,6 +168,8 @@ export const GST_RATE = 0.18;
 export const ATTRIBUTION_WINDOW_DAYS = 7;
 /** A Meta ad id in utm_content (Meta ids are 15+ digit numbers; some ads send slugs instead). */
 export const META_AD_ID_RE = '^[0-9]{15,}$';
+/** First day of OpenPanel history; Meta backfills start here too (D-11). */
+export const PM_HISTORY_START = '2026-04-10';
 
 /**
  * Transactions that are a customer paying 91astro. ASTROLOGER_* rows are
