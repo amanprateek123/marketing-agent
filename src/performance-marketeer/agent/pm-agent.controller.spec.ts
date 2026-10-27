@@ -4,7 +4,7 @@ import { PmAgentController } from './pm-agent.controller';
 import { PmAgentRun } from '../schemas/pm-agent-run.schema';
 import { PmEnv } from '../pm.config';
 import { PmAgentQueueService } from './pipeline/pm-agent-queue.service';
-import { PmAgentQueueDto } from './pm-agent.controller';
+import { PmAgentQueueDto, PmCampaignTargetDto } from './pm-agent.controller';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 
@@ -34,8 +34,10 @@ describe('PmAgentController', () => {
     list: jest.fn().mockResolvedValue({ queued: [] }),
     cancel: jest.fn().mockResolvedValue({ cancelled: 'deleted' }),
   };
+  const targets = { find: jest.fn(), findOneAndUpdate: jest.fn() };
   const c = new PmAgentController(
     model as unknown as Model<PmAgentRun>,
+    targets as never,
     { tenantId: '91astrology' } as PmEnv,
     queue as unknown as PmAgentQueueService,
   );
@@ -175,5 +177,31 @@ describe('PmAgentController', () => {
     await expect(
       c.cancel(T, 'bad id!', { date: '2026-10-27' }),
     ).rejects.toThrow(BadRequestException);
+  });
+
+  it('sets, changes and removes a lifetime purchase target, keeping history', async () => {
+    const ok = (v: unknown) =>
+      validateSync(plainToInstance(PmCampaignTargetDto, { targetPurchases: v })).length === 0;
+    expect(ok(500)).toBe(true);
+    expect(ok(null)).toBe(true);
+    expect(ok(0)).toBe(false);
+    expect(ok(2.5)).toBe(false);
+    expect(ok('500')).toBe(false);
+
+    targets.findOneAndUpdate.mockReturnValue(
+      q({ campaignId: '120', targetPurchases: 500, updatedBy: 'u1' }),
+    );
+    const r = await c.setTarget(T, '120', { targetPurchases: 500 }, {
+      user: { sub: 'u1' },
+    } as never);
+    expect(r.targetPurchases).toBe(500);
+    const [filter, update, opts] = targets.findOneAndUpdate.mock.calls[0];
+    expect(filter).toEqual({ tenantId: T, campaignId: '120' });
+    expect(update.$set).toEqual({ targetPurchases: 500, updatedBy: 'u1' });
+    expect(update.$push.history.$each[0]).toMatchObject({ targetPurchases: 500, by: 'u1' });
+    expect(opts).toMatchObject({ upsert: true });
+    await expect(
+      c.setTarget('other', '120', { targetPurchases: 1 }, {} as never),
+    ).rejects.toThrow(NotFoundException);
   });
 });

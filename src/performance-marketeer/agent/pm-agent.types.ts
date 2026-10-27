@@ -266,7 +266,8 @@ export const PM_LOOP = {
   maxSendBacks: 2,
   investigate: { majors: 3 }, // or any blocker, or the top cause rejected
   plan: { majors: 2, rejectedShare: 1 / 3 }, // or any blocker
-  maxBudgetStep: 0.2, // ±20% per change
+  maxBudgetUp: 1.0, // +100% per change (owner, D-29)
+  maxBudgetDown: 0.2, // −20% per change
   targetRoas: 1.0,
 } as const;
 

@@ -52,6 +52,10 @@ import {
 import { PmDataTools } from './agent/tools/data.tools';
 import { PmAgentRun, PmAgentRunSchema } from './schemas/pm-agent-run.schema';
 import {
+  PmCampaignTarget,
+  PmCampaignTargetSchema,
+} from './schemas/pm-campaign-target.schema';
+import {
   PmMetaEntitySnapshot,
   PmMetaEntitySnapshotSchema,
 } from './schemas/pm-entity-snapshot.schema';
@@ -100,6 +104,7 @@ import { VisitorDaysSync } from './sync/visitor-days.sync';
       { name: PmMetaAccountDaily.name, schema: PmMetaAccountDailySchema },
       { name: PmMetaEntitySnapshot.name, schema: PmMetaEntitySnapshotSchema },
       { name: PmAgentRun.name, schema: PmAgentRunSchema },
+      { name: PmCampaignTarget.name, schema: PmCampaignTargetSchema },
       { name: PmCompetitorAd.name, schema: PmCompetitorAdSchema },
       { name: PmProxyUsage.name, schema: PmProxyUsageSchema },
       { name: PmProxyCache.name, schema: PmProxyCacheSchema },

@@ -40,6 +40,7 @@ describe('PmAgentQueueService', () => {
       runs,
       entities,
       null,
+      null,
       { tenantId: T },
     );
   });

@@ -263,6 +263,8 @@ export interface CheckInput {
   settling: Set<string>;
   /** Campaign first-party ROAS (null = no verdict possible). */
   campaignRoas: number | null;
+  /** The owner's lifetime purchase target, when set (PmPipelineService.targetStatus). */
+  purchaseTarget?: { targetPurchases: number; remaining: number } | null;
   /** Run date YYYY-MM-DD; judgeOn may not be before it. */
   date: string;
   /** Owner rules; those with a `check` are enforced here. */
@@ -292,6 +294,7 @@ const num = (v: unknown) =>
 const isBudget = (a: Action) =>
   a.type === 'budget' || /budget/i.test(a.change.field);
 const EPS = 1e-9;
+export const BUDGET_STEPS = `+${PM_LOOP.maxBudgetUp * 100}% / −${PM_LOOP.maxBudgetDown * 100}%`;
 
 /**
  * Guardrails re-checked by code after the plan verifier. Failures never delete
@@ -345,18 +348,16 @@ export function runChecks(i: CheckInput): CheckResult[] {
         fail('budget_step', 'budget change needs numeric from and to');
       else {
         spendDelta += to - from;
-        if (
-          from > 0 &&
-          Math.abs(to - from) / from > PM_LOOP.maxBudgetStep + EPS
-        )
+        const max = to > from ? PM_LOOP.maxBudgetUp : PM_LOOP.maxBudgetDown;
+        if (from > 0 && Math.abs(to - from) / from > max + EPS)
           fail(
             'budget_step',
-            `${from} → ${to} is a ${Math.round(((to - from) / from) * 100)}% step (max ±${PM_LOOP.maxBudgetStep * 100}%)`,
+            `${from} → ${to} is a ${Math.round(((to - from) / from) * 100)}% step (max ${BUDGET_STEPS})`,
           );
         if (from === 0 && to > 0)
           fail(
             'budget_step',
-            `0 → ${to} cannot be checked against the ±${PM_LOOP.maxBudgetStep * 100}% step`,
+            `0 → ${to} cannot be checked against the ${BUDGET_STEPS} step`,
           );
       }
     }
@@ -396,7 +397,18 @@ export function runChecks(i: CheckInput): CheckResult[] {
         message: `expected ${e.metric} ${e.low}…${e.high} does not overlap ${l.lessonId}'s measured ${l.effect.low}…${l.effect.high} (median ${l.effect.median})`,
       });
   }
-  if (roasBelow && spendDelta > 0)
+  // Working towards the owner's purchase target, scaling is allowed below target ROAS;
+  // a net cut is what needs a second look instead (it costs purchases and upsells).
+  const chasing = (i.purchaseTarget?.remaining ?? 0) > 0;
+  if (chasing && spendDelta < 0)
+    for (const a of i.actions)
+      if (isBudget(a) && (num(a.change.to) ?? 0) < (num(a.change.from) ?? 0))
+        out.push({
+          check: 'cut_below_purchase_target',
+          target: a.id,
+          message: `cuts spend (net −₹${Math.round(-spendDelta)}/day) while ${i.purchaseTarget!.remaining} of the owner's ${i.purchaseTarget!.targetPurchases} lifetime purchases are still to go`,
+        });
+  if (roasBelow && spendDelta > 0 && !chasing)
     for (const a of i.actions)
       if (isBudget(a) && (num(a.change.to) ?? 0) > (num(a.change.from) ?? 0))
         out.push({

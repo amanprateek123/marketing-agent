@@ -17,7 +17,9 @@ import {
   PmQuery,
 } from '../../analysis/pm-analysis.types';
 import { addDays } from '../../analysis/pm-stats';
-import { pmEnv, PmEnv } from '../../pm.config';
+import { pmEnv, PmEnv, PM_HISTORY_START } from '../../pm.config';
+import { istDay } from '../../pm.logic';
+import { PmCampaignTarget } from '../../schemas/pm-campaign-target.schema';
 import { PmAgentRun } from '../../schemas/pm-agent-run.schema';
 import { PmLock } from '../../schemas/pm-lock.schema';
 import { PmMetaEntity } from '../../schemas/pm-meta.schema';
@@ -55,6 +57,7 @@ import {
   mergeCauses,
   mergeContradictions,
   runChecks,
+  BUDGET_STEPS,
   shouldSendBackInvestigation,
   shouldSendBackPlan,
   stopEarly,
@@ -175,6 +178,8 @@ export class PmPipelineService {
     @InjectModel(PmMetaEntity.name)
     private readonly entities: Model<PmMetaEntity>,
     @InjectModel(PmLock.name) private readonly locks: Model<PmLock>,
+    @InjectModel(PmCampaignTarget.name)
+    private readonly targets: Model<PmCampaignTarget>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
   ) {}
 
@@ -593,6 +598,7 @@ export class PmPipelineService {
         entityIds: new Set(ents.keys()),
         settling: await this.settlingEntities(campaignId, journal.entries),
         campaignRoas: m7.firstPartyRoas,
+        purchaseTarget: await this.targetStatus(date, camp),
         date,
         ownerRules,
         situation,
@@ -798,6 +804,41 @@ export class PmPipelineService {
     return out;
   }
 
+  // ---------------------------------------------------------------- target
+
+  /** The owner's lifetime purchase target and progress (first-party orders since launch), or null. */
+  private async targetStatus(date: string, camp: PmMetaEntity) {
+    const doc = await this.targets
+      .findOne({ tenantId: this.env.tenantId, campaignId: camp.entityId })
+      .lean();
+    if (!doc?.targetPurchases) return null;
+    const launched = camp.createdTime
+      ? istDay(new Date(camp.createdTime))
+      : PM_HISTORY_START;
+    const from = launched < PM_HISTORY_START ? PM_HISTORY_START : launched;
+    const to = addDays(date, -1);
+    const [life, m7] = await Promise.all([
+      this.analysis.scopeMetrics({ from, to }, 'campaign', camp.entityId),
+      this.analysis.scopeMetrics(window(date, 7), 'campaign', camp.entityId),
+    ]);
+    const purchases = from > to ? 0 : life.firstPartyOrders;
+    const remaining = Math.max(0, doc.targetPurchases - purchases);
+    const pace = m7.firstPartyOrders / 7;
+    return {
+      targetPurchases: doc.targetPurchases,
+      launched,
+      from,
+      to,
+      purchases,
+      remaining,
+      pacePerDay7: Math.round(pace * 100) / 100,
+      daysToTarget: remaining === 0 ? 0 : pace > 0 ? Math.ceil(remaining / pace) : null,
+      cpa7: m7.firstPartyCpa,
+      roas7: m7.firstPartyRoas,
+      cpaLifetime: from > to ? null : life.firstPartyCpa,
+    };
+  }
+
   // ---------------------------------------------------------------- brief
 
   /** Code-built data pack. Each section is also an evidence line, so the models can cite it. */
@@ -819,6 +860,7 @@ export class PmPipelineService {
       settings,
       coverage,
       missing,
+      target,
     ] = await Promise.all([
       this.analysis.scopeMetrics(window(date, 7), 'campaign', id),
       this.analysis.scopeMetrics(
@@ -841,6 +883,7 @@ export class PmPipelineService {
         .lean(),
       this.analysis.coverage(window(date, 7, camp.product)),
       this.analysis.missingDays(window(date, 30, camp.product)),
+      this.targetStatus(date, camp),
     ]);
     const byId = new Map(settings.map((s) => [s.entityId, s]));
     const adsets = settings.filter(
@@ -896,6 +939,9 @@ export class PmPipelineService {
       { campaignId: id, window: window(date, 14) },
       budgetRows,
     );
+    const evTarget = target
+      ? ev.record('prep', 0, 'brief_target', { campaignId: id, date }, target)
+      : null;
     const evAttr = ev.record(
       'prep',
       0,
@@ -941,6 +987,15 @@ export class PmPipelineService {
       `- Product: ${camp.product} · account ${camp.accountId} · objective ${camp.objective || '–'} · status ${camp.status}/${camp.effectiveStatus} · created ${camp.createdTime ? new Date(camp.createdTime).toISOString().slice(0, 10) : '–'}`,
       `- Budget: ${camp.budgetLevel === 'campaign' ? `campaign (CBO) ${inr(camp.dailyBudget)}/day` : camp.budgetLevel === 'adset' ? 'ad set level (ABO)' : '–'}${camp.lifetimeBudget ? ` · lifetime ${inr(camp.lifetimeBudget)}` : ''} · bid ${camp.bidStrategy || '–'}`,
       '',
+      ...(target
+        ? [
+            `## Purchase target (${evTarget})`,
+            `- Owner's lifetime target: **${target.targetPurchases} first-party purchases**; ${target.purchases} so far (${target.from} → ${target.to}${target.from > target.launched ? `, data starts ${target.from}` : ''}), **${target.remaining} to go**.`,
+            `- Pace last 7d: ${target.pacePerDay7}/day at 1P CPA ${inr(target.cpa7)}, 1P ROAS ${x2(target.roas7)} · lifetime 1P CPA ${inr(target.cpaLifetime)}. ${target.remaining === 0 ? 'Target reached.' : target.daysToTarget === null ? 'No purchases in the last 7 days, so no time-to-target at this pace.' : `At this pace ≈ ${target.daysToTarget} more days.`}`,
+            '- The owner can change this target at any time; plan towards the current number.',
+            '',
+          ]
+        : ['## Purchase target', '- None set by the owner.', '']),
       `## Metrics (${evMetrics})`,
       table(METRICS_HEAD, [
         metricsRow('last 7d', m7),
@@ -1262,8 +1317,8 @@ function checksMarkdown(
   return [
     `# Code checks — ${campaignId} — ${date}`,
     '',
-    'Run by code after the plan verifier: evidence ids exist, impacts come from impact_rupees, budget steps ≤ ±' +
-      `${PM_LOOP.maxBudgetStep * 100}%, entities exist, nothing stacked on a settling entity, no spend increase below target ROAS, owner rules, predictions vs measured lessons. Failures mark actions; they do not remove them.`,
+    'Run by code after the plan verifier: evidence ids exist, impacts come from impact_rupees, budget steps within ' +
+      `${BUDGET_STEPS}, entities exist, nothing stacked on a settling entity, no spend increase below target ROAS (unless chasing the owner's purchase target, where a net cut is flagged instead), owner rules, predictions vs measured lessons. Failures mark actions; they do not remove them.`,
     '',
     checks.length
       ? table(

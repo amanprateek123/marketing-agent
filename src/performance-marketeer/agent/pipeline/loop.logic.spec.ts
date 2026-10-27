@@ -286,8 +286,8 @@ describe('finalActions + checks', () => {
     const actions = finalActions(
       plan([
         action('A1', {
-          change: { field: 'daily_budget', from: 10000, to: 13000 },
-        }), // +30%, raises spend
+          change: { field: 'daily_budget', from: 10000, to: 21000 },
+        }), // +110%, over the +100% cap, raises spend
         action('A2', {
           type: 'creative',
           entityLevel: 'ad',
@@ -351,6 +351,35 @@ describe('finalActions + checks', () => {
     expect(
       results.some((r) => r.target === 'A3' && r.check === 'budget_step'),
     ).toBe(false);
+  });
+
+  it('allows up to +100% and −20%, and follows an open purchase target', () => {
+    const run = (to: number, purchaseTarget?: { targetPurchases: number; remaining: number }) => {
+      const actions = finalActions(
+        plan([action('A1', { change: { field: 'daily_budget', from: 10000, to } })]),
+        pv({}),
+        [],
+      );
+      return runChecks({
+        evidence: [
+          { id: 'ev-1', tool: 'campaign_overview' },
+          { id: 'ev-9', tool: 'impact_rupees' },
+        ],
+        causes: [cause('C1', 1, 0.5)],
+        actions,
+        entityIds: new Set(['as1']),
+        settling: new Set(),
+        campaignRoas: 0.6,
+        purchaseTarget,
+        date: '2026-10-27',
+      }).map((r) => r.check);
+    };
+    expect(run(20000)).toEqual(['no_spend_increase_below_target']); // +100% ok
+    expect(run(7000)).toEqual(['budget_step']); // −30% too big
+    const open = { targetPurchases: 500, remaining: 120 };
+    expect(run(20000, open)).toEqual([]); // scaling towards the target is fine below ROAS 1
+    expect(run(8000, open)).toEqual(['cut_below_purchase_target']);
+    expect(run(8000, { targetPurchases: 500, remaining: 0 })).toEqual([]); // reached
   });
 });
 

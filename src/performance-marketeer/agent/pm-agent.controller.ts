@@ -7,6 +7,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Put,
   Query,
   Req,
 } from '@nestjs/common';
@@ -16,10 +17,14 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsInt,
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
+  Min,
+  ValidateIf,
 } from 'class-validator';
 import { Model } from 'mongoose';
 import type { AuthedRequest } from '../../auth/roles';
@@ -27,6 +32,7 @@ import { PmAgentQueueService } from './pipeline/pm-agent-queue.service';
 import { pmEnv, PmEnv } from '../pm.config';
 import { dayRange } from '../pm.logic';
 import { PmAgentRun } from '../schemas/pm-agent-run.schema';
+import { PmCampaignTarget } from '../schemas/pm-campaign-target.schema';
 
 const ID_RE = /^[0-9A-Za-z_-]{1,64}$/;
 
@@ -60,6 +66,15 @@ export class PmAgentCancelDto {
   date: string;
 }
 
+export class PmCampaignTargetDto {
+  /** Lifetime first-party purchases; null removes the target. */
+  @ValidateIf((o: PmCampaignTargetDto) => o.targetPurchases !== null)
+  @IsInt()
+  @Min(1)
+  @Max(1_000_000)
+  targetPurchases: number | null;
+}
+
 type Q = Record<string, unknown>;
 type RunAction = PmAgentRun['actions'][number];
 
@@ -91,6 +106,8 @@ function campaign(v: string): string {
 export class PmAgentController {
   constructor(
     @InjectModel(PmAgentRun.name) private readonly runs: Model<PmAgentRun>,
+    @InjectModel(PmCampaignTarget.name)
+    private readonly targets: Model<PmCampaignTarget>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
     private readonly queue: PmAgentQueueService,
   ) {}
@@ -243,6 +260,56 @@ export class PmAgentController {
       campaignId: doc.campaignId,
       date: doc.date,
       userNote: doc.userNote,
+    };
+  }
+
+  /** Lifetime purchase targets that are set. */
+  @Get('targets')
+  async targetList(@Param('tenantId') t: string) {
+    this.assertTenant(t);
+    const docs = await this.targets
+      .find({ tenantId: t, targetPurchases: { $ne: null } })
+      .lean()
+      .exec();
+    return docs.map((d) => ({
+      campaignId: d.campaignId,
+      targetPurchases: d.targetPurchases,
+      updatedBy: d.updatedBy,
+      updatedAt: (d as { updatedAt?: Date }).updatedAt ?? null,
+    }));
+  }
+
+  /** Set, change or (null) remove a campaign's lifetime purchase target. Any logged-in user. */
+  @Put('targets/:campaignId')
+  async setTarget(
+    @Param('tenantId') t: string,
+    @Param('campaignId') c: string,
+    @Body() body: PmCampaignTargetDto,
+    @Req() req: AuthedRequest,
+  ) {
+    this.assertTenant(t);
+    const by = req.user?.sub ?? '';
+    const doc = await this.targets
+      .findOneAndUpdate(
+        { tenantId: t, campaignId: campaign(c) },
+        {
+          $set: { targetPurchases: body.targetPurchases, updatedBy: by },
+          $push: {
+            history: {
+              $each: [{ targetPurchases: body.targetPurchases, by, at: new Date() }],
+              $slice: -50,
+            },
+          },
+        },
+        { upsert: true, new: true },
+      )
+      .lean()
+      .exec();
+    return {
+      campaignId: doc.campaignId,
+      targetPurchases: doc.targetPurchases,
+      updatedBy: doc.updatedBy,
+      updatedAt: (doc as { updatedAt?: Date }).updatedAt ?? null,
     };
   }
 
