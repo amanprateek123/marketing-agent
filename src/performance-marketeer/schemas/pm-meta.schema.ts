@@ -73,6 +73,10 @@ export class PmMetaEntity {
     audienceType?: string;
   } | null;
   @Prop({ default: '' }) learningStage: string;
+  /** learning_stage_info.last_sig_edit_ts: the last edit that reset learning. */
+  @Prop({ type: Date, default: null }) lastSigEditTs: Date | null;
+  /** learning_stage_info.conversions: conversions counted toward leaving learning. */
+  @Prop({ type: Number, default: null }) learningConversions: number | null;
   // ad
   @Prop({ type: Object, default: null })
   creative: {
@@ -171,8 +175,18 @@ export class PmMetaChange {
   @Prop({ default: '' }) objectId: string;
   @Prop({ default: '' }) objectName: string;
   @Prop({ default: '' }) actorName: string;
+  @Prop({ default: '' }) actorId: string;
+  /** Set when the edit came from an app (e.g. an automated rule), not Ads Manager. */
+  @Prop({ default: '' }) applicationName: string;
   /** Meta's extra_data (old/new values), truncated. */
   @Prop({ default: '' }) extraData: string;
+  /** Parsed from extra_data (meta.logic parseExtraData); budgets in rupees. */
+  @Prop({ default: '' }) field: string;
+  @Prop({ type: Object, default: null }) oldValue: string | number | null;
+  @Prop({ type: Object, default: null }) newValue: string | number | null;
+  /** The changed object's campaign / ad set ('' when not in pm_meta_entities yet). */
+  @Prop({ default: '' }) campaignId: string;
+  @Prop({ default: '' }) adsetId: string;
   /** Stable id for de-duplication. */
   @Prop({ required: true }) key: string;
 }
@@ -181,6 +195,7 @@ export const PmMetaChangeSchema = SchemaFactory.createForClass(PmMetaChange);
 PmMetaChangeSchema.index({ tenantId: 1, key: 1 }, { unique: true });
 PmMetaChangeSchema.index({ tenantId: 1, eventTime: -1 });
 PmMetaChangeSchema.index({ tenantId: 1, objectId: 1, eventTime: -1 });
+PmMetaChangeSchema.index({ tenantId: 1, campaignId: 1, eventTime: -1 });
 
 /**
  * Account-level daily totals straight from Meta (level=account). The check

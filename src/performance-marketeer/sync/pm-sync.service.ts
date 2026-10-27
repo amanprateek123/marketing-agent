@@ -103,25 +103,32 @@ export class PmSyncService {
    * of the last 3 days, new refunds, and attribution for those days.
    */
   hourly() {
-    return this.exclusive('hourly', async () => {
+    return this.exclusive('hourly', () => {
       const today = istDayFromToday(0);
       const recent = {
         from: istDayFromToday(-2),
         to: today,
         trigger: 'cron' as const,
       };
-      await this.visitorDaysStep({ ...recent, from: today });
-      await this.ordersStep(recent);
-      await this.track('refunds', recent, async () => ({
-        rows: await this.orders.syncNewRefunds(istDayBounds(recent.from).start),
-      }));
-      await this.attributionStep(recent);
-      if (this.meta.configured) {
-        const metaReq = { ...recent, from: istDayFromToday(-1) };
-        await this.metaDailyStep(metaReq);
-        await this.metaEntitiesStep(metaReq, 'missing');
-        await this.metaChangesStep(metaReq);
-      }
+      const metaReq = { ...recent, from: istDayFromToday(-1) };
+      return this.steps('hourly', [
+        () => this.visitorDaysStep({ ...recent, from: today }),
+        () => this.ordersStep(recent),
+        () =>
+          this.track('refunds', recent, async () => ({
+            rows: await this.orders.syncNewRefunds(
+              istDayBounds(recent.from).start,
+            ),
+          })),
+        () => this.attributionStep(recent),
+        ...(this.meta.configured
+          ? [
+              () => this.metaDailyStep(metaReq),
+              () => this.metaEntitiesStep(metaReq, 'missing'),
+              () => this.metaChangesStep(metaReq),
+            ]
+          : []),
+      ]);
     });
   }
 
@@ -130,40 +137,72 @@ export class PmSyncService {
    * events), re-check refunds over 60 days, and re-attribute the week.
    */
   nightly() {
-    return this.exclusive('nightly', async () => {
-      await this.visitorDaysStep({
-        from: istDayFromToday(-2),
-        to: istDayFromToday(-1),
-        trigger: 'cron',
-      });
+    return this.exclusive('nightly', () => {
       const refundReq = {
         from: istDayFromToday(-REFUND_RECHECK_DAYS),
         to: istDayFromToday(0),
         trigger: 'cron' as const,
       };
-      await this.track('refunds', refundReq, async () => ({
-        rows: await this.orders.recheckRefunds(
-          dayRange(refundReq.from, refundReq.to),
-        ),
-      }));
-      await this.attributionStep({
-        from: istDayFromToday(-8),
-        to: istDayFromToday(0),
-        trigger: 'cron',
-      });
-      if (this.meta.configured) {
-        const cron = { to: istDayFromToday(0), trigger: 'cron' as const };
-        // Meta keeps updating conversions for the attribution window (7 days).
-        await this.metaDailyStep({ ...cron, from: istDayFromToday(-7) });
-        await this.metaBreakdownsStep({ ...cron, from: istDayFromToday(-3) });
-        // Refresh settings (budgets, status, product tags) of everything that spent in 30 days.
-        await this.metaEntitiesStep(
-          { ...cron, from: istDayFromToday(-30) },
-          'all',
-        );
-        await this.metaChangesStep({ ...cron, from: istDayFromToday(-3) });
-      }
+      const cron = { to: istDayFromToday(0), trigger: 'cron' as const };
+      return this.steps('nightly', [
+        () =>
+          this.visitorDaysStep({
+            from: istDayFromToday(-2),
+            to: istDayFromToday(-1),
+            trigger: 'cron',
+          }),
+        () =>
+          this.track('refunds', refundReq, async () => ({
+            rows: await this.orders.recheckRefunds(
+              dayRange(refundReq.from, refundReq.to),
+            ),
+          })),
+        () =>
+          this.attributionStep({
+            from: istDayFromToday(-8),
+            to: istDayFromToday(0),
+            trigger: 'cron',
+          }),
+        ...(this.meta.configured
+          ? [
+              // Meta keeps updating conversions for the attribution window (7 days).
+              () => this.metaDailyStep({ ...cron, from: istDayFromToday(-7) }),
+              () =>
+                this.metaBreakdownsStep({ ...cron, from: istDayFromToday(-3) }),
+              // Refresh settings (budgets, status, product tags) of everything that spent in 30 days.
+              () =>
+                this.metaEntitiesStep(
+                  { ...cron, from: istDayFromToday(-30) },
+                  'all',
+                ),
+              () =>
+                this.metaChangesStep({ ...cron, from: istDayFromToday(-3) }),
+            ]
+          : []),
+      ]);
     });
+  }
+
+  /**
+   * Run steps in order, but don't let one failure (e.g. Metabase unreachable
+   * for refunds) stop the rest: each failure is already logged and recorded
+   * in pm_sync_runs by track(). Throws once at the end so the job still
+   * reports failure. A lost lock stops everything — someone else holds it.
+   */
+  private async steps(job: string, list: (() => Promise<unknown>)[]) {
+    let failed = 0;
+    for (const step of list) {
+      try {
+        await step();
+      } catch (e) {
+        if (e instanceof PmLockLostError) throw e;
+        failed++;
+      }
+    }
+    if (failed)
+      throw new Error(
+        `${job}: ${failed} of ${list.length} steps failed (see pm_sync_runs); the others ran`,
+      );
   }
 
   async isBusy(): Promise<string | null> {

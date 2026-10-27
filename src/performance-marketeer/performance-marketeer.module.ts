@@ -9,6 +9,52 @@ import { PmMetaClient } from './clients/pm-meta.client';
 import { PmController } from './pm.controller';
 import { pmEnv } from './pm.config';
 import { PmScheduler } from './pm.scheduler';
+import { PmAgentController } from './agent/pm-agent.controller';
+import { PmLessonsController } from './agent/lessons/pm-lessons.controller';
+import { PmLessonsService } from './agent/lessons/lessons.service';
+import { PmRecordsService } from './agent/lessons/records.service';
+import { PmSituationService } from './agent/lessons/situation.service';
+import {
+  PmLessonDoc,
+  PmLessonEventDoc,
+  PmLessonEventSchema,
+  PmLessonProposalDoc,
+  PmLessonProposalSchema,
+  PmLessonSchema,
+  PmOwnerRuleDoc,
+  PmOwnerRuleSchema,
+} from './schemas/pm-lessons.schema';
+import {
+  PmDecisionRecord,
+  PmDecisionRecordSchema,
+  PmDiagnosisCheck,
+  PmDiagnosisCheckSchema,
+  PmOutcomeRecord,
+  PmOutcomeRecordSchema,
+} from './schemas/pm-lesson-records.schema';
+import { PmJournalService } from './agent/journal/journal.service';
+import { PmPipelineService } from './agent/pipeline/pm-pipeline.service';
+import { PmAgentQueueService } from './agent/pipeline/pm-agent-queue.service';
+import { PmCalendarTools } from './agent/tools/calendar.tools';
+import { PmCompetitorSync } from './agent/competitors/competitor.sync';
+import { PmProxyClient } from './agent/competitors/proxy.client';
+import { PmCompetitorTools } from './agent/tools/competitors.tools';
+import { PmCreativeTools } from './agent/tools/creatives.tools';
+import { PmLandingTools } from './agent/tools/landing.tools';
+import {
+  PmCompetitorAd,
+  PmCompetitorAdSchema,
+  PmProxyCache,
+  PmProxyCacheSchema,
+  PmProxyUsage,
+  PmProxyUsageSchema,
+} from './schemas/pm-competitor-ad.schema';
+import { PmDataTools } from './agent/tools/data.tools';
+import { PmAgentRun, PmAgentRunSchema } from './schemas/pm-agent-run.schema';
+import {
+  PmMetaEntitySnapshot,
+  PmMetaEntitySnapshotSchema,
+} from './schemas/pm-entity-snapshot.schema';
 import { PmLock, PmLockSchema } from './schemas/pm-lock.schema';
 import {
   PmMetaAccountDaily,
@@ -52,9 +98,26 @@ import { VisitorDaysSync } from './sync/visitor-days.sync';
       { name: PmMetaBreakdown.name, schema: PmMetaBreakdownSchema },
       { name: PmMetaChange.name, schema: PmMetaChangeSchema },
       { name: PmMetaAccountDaily.name, schema: PmMetaAccountDailySchema },
+      { name: PmMetaEntitySnapshot.name, schema: PmMetaEntitySnapshotSchema },
+      { name: PmAgentRun.name, schema: PmAgentRunSchema },
+      { name: PmCompetitorAd.name, schema: PmCompetitorAdSchema },
+      { name: PmProxyUsage.name, schema: PmProxyUsageSchema },
+      { name: PmProxyCache.name, schema: PmProxyCacheSchema },
+      { name: PmLessonDoc.name, schema: PmLessonSchema },
+      { name: PmLessonEventDoc.name, schema: PmLessonEventSchema },
+      { name: PmLessonProposalDoc.name, schema: PmLessonProposalSchema },
+      { name: PmOwnerRuleDoc.name, schema: PmOwnerRuleSchema },
+      { name: PmDecisionRecord.name, schema: PmDecisionRecordSchema },
+      { name: PmOutcomeRecord.name, schema: PmOutcomeRecordSchema },
+      { name: PmDiagnosisCheck.name, schema: PmDiagnosisCheckSchema },
     ]),
   ],
-  controllers: [PmController, PmAnalysisController],
+  controllers: [
+    PmController,
+    PmAnalysisController,
+    PmAgentController,
+    PmLessonsController,
+  ],
   providers: [
     PmClickhouseClient,
     PmMetabaseClient,
@@ -66,6 +129,19 @@ import { VisitorDaysSync } from './sync/visitor-days.sync';
     PmSyncService,
     PmScheduler,
     PmAnalysisService,
+    PmJournalService,
+    PmDataTools,
+    PmCalendarTools,
+    PmProxyClient,
+    PmCompetitorSync,
+    PmCompetitorTools,
+    PmCreativeTools,
+    PmLandingTools,
+    PmPipelineService,
+    PmAgentQueueService,
+    PmSituationService,
+    PmRecordsService,
+    PmLessonsService,
   ],
   exports: [PmSyncService],
 })

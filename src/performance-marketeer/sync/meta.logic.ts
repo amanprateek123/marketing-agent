@@ -219,3 +219,76 @@ export function dateChunks(
   }
   return out;
 }
+
+export type PmChangeValue = string | number | null;
+
+/** Which setting an activity-log event changed (budget events are rupees after parsing). */
+export function changeField(eventType: string, hint = ''): string {
+  const t = eventType.toLowerCase();
+  if (/budget|spend_cap/.test(t))
+    return /lifetime/i.test(t + hint) ? 'lifetime_budget' : 'daily_budget';
+  if (/run_status|status/.test(t)) return 'status';
+  if (/target/.test(t)) return 'targeting';
+  if (/bid_strategy/.test(t)) return 'bid_strategy';
+  if (/bid/.test(t)) return 'bid_amount';
+  if (/optimization_goal/.test(t)) return 'optimization_goal';
+  if (/^create_/.test(t)) return 'created';
+  if (/creative/.test(t)) return 'creative';
+  if (/name/.test(t)) return 'name';
+  return t;
+}
+
+/** Budget amounts: bare digits are minor units (paise); formatted strings ("₹7,500.00") are rupees. */
+const money = (v: unknown): PmChangeValue => {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v === 'number' || /^\d+$/.test(String(v))) return rupees(v);
+  const n = Number(String(v).replace(/[^\d.]/g, ''));
+  return Number.isFinite(n) && /\d/.test(String(v)) ? n : String(v);
+};
+
+const plain = (v: unknown): PmChangeValue => {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v === 'number' || typeof v === 'string') return v;
+  return JSON.stringify(v).slice(0, 300);
+};
+
+/** { old_value: { old_value: 1000, … } } and { old_value: 1000 } both → 1000. */
+const unwrap = (v: any, key: 'old_value' | 'new_value') =>
+  v && typeof v === 'object' && !Array.isArray(v) && (key in v || 'value' in v)
+    ? (v[key] ?? v.value)
+    : v;
+
+/**
+ * Meta's extra_data (a JSON string whose shape varies by event type) →
+ * field / old / new. Unknown shapes keep the field and give null values;
+ * the raw string is stored alongside.
+ */
+export function parseExtraData(
+  eventType: string,
+  raw: string,
+): { field: string; oldValue: PmChangeValue; newValue: PmChangeValue } {
+  let d: any = null;
+  try {
+    d = raw ? JSON.parse(raw) : null;
+  } catch {
+    d = null;
+  }
+  const obj = d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+  const field = changeField(
+    eventType,
+    `${obj.type ?? ''} ${obj.old_value?.type ?? ''} ${obj.new_value?.type ?? ''}`,
+  );
+  const oldRaw = unwrap(obj.old_value, 'old_value');
+  const newRaw = unwrap(obj.new_value, 'new_value');
+  if (/budget$/.test(field))
+    return { field, oldValue: money(oldRaw), newValue: money(newRaw) };
+  if (field === 'status') {
+    // ponytail: numeric run_status codes are kept as-is; map them once a real sample shows them.
+    const s = (v: unknown) =>
+      typeof v === 'string'
+        ? v.trim().toUpperCase().replace(/\s+/g, '_')
+        : plain(v);
+    return { field, oldValue: s(oldRaw), newValue: s(newRaw) };
+  }
+  return { field, oldValue: plain(oldRaw), newValue: plain(newRaw) };
+}

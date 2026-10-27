@@ -8,7 +8,8 @@ import {
   PmMetaError,
 } from '../clients/pm-meta.client';
 import { pmEnv, PmEnv } from '../pm.config';
-import { istDayBounds } from '../pm.logic';
+import { istDay, istDayBounds } from '../pm.logic';
+import { PmMetaEntitySnapshot } from '../schemas/pm-entity-snapshot.schema';
 import {
   PmBreakdown,
   PmMetaAccountDaily,
@@ -25,6 +26,7 @@ import {
   adProduct,
   majorityProduct,
   metricsOf,
+  parseExtraData,
   rupees,
   targetingSummary,
 } from './meta.logic';
@@ -79,6 +81,8 @@ export class MetaSync {
     private readonly visitors: Model<PmVisitorDay>,
     @InjectModel(PmMetaAccountDaily.name)
     private readonly accountDaily: Model<PmMetaAccountDaily>,
+    @InjectModel(PmMetaEntitySnapshot.name)
+    private readonly snapshots: Model<PmMetaEntitySnapshot>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
   ) {}
 
@@ -318,6 +322,13 @@ export class MetaSync {
           targeting: s.targeting ?? null,
           targetingSummary: targetingSummary(s.targeting),
           learningStage: s.learning_stage_info?.status ?? '',
+          lastSigEditTs: s.learning_stage_info?.last_sig_edit_ts
+            ? new Date(Number(s.learning_stage_info.last_sig_edit_ts) * 1000)
+            : null,
+          learningConversions:
+            s.learning_stage_info?.conversions === undefined
+              ? null
+              : Number(s.learning_stage_info.conversions),
         });
       }),
       ...ads.map((a) => {
@@ -348,9 +359,64 @@ export class MetaSync {
         });
       }),
     ];
+    await this.snapshot(ops);
     if (ops.length) await this.entities.bulkWrite(ops, { ordered: false });
     await this.retagParents(adsetIds, campaignIds);
     return ops.length;
+  }
+
+  /**
+   * Daily settings snapshot, written before the overwrite: the stored state is
+   * kept for the day it was last refreshed (if that day has none yet), the new
+   * state becomes today's.
+   */
+  private async snapshot(ops: AnyBulkWriteOperation<PmMetaEntity>[]) {
+    if (!ops.length) return;
+    const tenantId = this.env.tenantId;
+    const today = istDay(new Date());
+    const fresh = ops.map((o) => {
+      const u = (o as any).updateOne;
+      return { ...u.filter, ...u.update.$set } as PmMetaEntity;
+    });
+    const stored = await this.entities
+      .find({ tenantId, entityId: { $in: fresh.map((e) => e.entityId) } })
+      .lean();
+    const row = (e: Partial<PmMetaEntity>) => ({
+      accountId: e.accountId ?? '',
+      level: e.level,
+      name: e.name ?? '',
+      campaignId: e.campaignId ?? '',
+      adsetId: e.adsetId ?? '',
+      status: e.status ?? '',
+      effectiveStatus: e.effectiveStatus ?? '',
+      dailyBudget: e.dailyBudget ?? null,
+      lifetimeBudget: e.lifetimeBudget ?? null,
+      bidStrategy: e.bidStrategy ?? '',
+      targetingSummary: e.targetingSummary ?? null,
+      learningStage: e.learningStage ?? '',
+      creativeId: e.creative?.id ?? '',
+    });
+    const snapOps: AnyBulkWriteOperation<PmMetaEntitySnapshot>[] = [
+      ...stored.map((e: any) => ({
+        updateOne: {
+          filter: {
+            tenantId,
+            entityId: e.entityId,
+            date: istDay(e.updatedAt ?? new Date()),
+          },
+          update: { $setOnInsert: row(e) },
+          upsert: true,
+        },
+      })),
+      ...fresh.map((e) => ({
+        updateOne: {
+          filter: { tenantId, entityId: e.entityId, date: today },
+          update: { $set: row(e) },
+          upsert: true,
+        },
+      })),
+    ];
+    await this.snapshots.bulkWrite(snapOps, { ordered: true });
   }
 
   /**
@@ -447,14 +513,32 @@ export class MetaSync {
       `act_${accountId}/activities`,
       {
         fields:
-          'event_time,event_type,translated_event_type,object_id,object_name,object_type,extra_data,actor_name',
+          'event_time,event_type,translated_event_type,object_id,object_name,object_type,extra_data,actor_id,actor_name,application_name',
         // Bare dates make Meta drop the last day; use the IST bounds of the whole range.
         since: Math.floor(istDayBounds(from).start.getTime() / 1000),
         until: Math.floor(istDayBounds(to).end.getTime() / 1000),
         limit: 500,
       },
     );
+    // Map every changed object to its campaign / ad set via the stored settings.
+    const parents = new Map(
+      (
+        await this.entities
+          .find(
+            {
+              tenantId,
+              entityId: {
+                $in: [...new Set(rows.map((r) => String(r.object_id ?? '')))],
+              },
+            },
+            { entityId: 1, campaignId: 1, adsetId: 1 },
+          )
+          .lean()
+      ).map((e) => [e.entityId, e]),
+    );
     const ops: AnyBulkWriteOperation<PmMetaChange>[] = rows.map((r) => {
+      const objectId = String(r.object_id ?? '');
+      const extraData = String(r.extra_data ?? '');
       const key = createHash('sha1')
         .update(
           `${accountId}|${r.event_time}|${r.object_id}|${r.event_type}|${r.extra_data ?? ''}`,
@@ -470,10 +554,15 @@ export class MetaSync {
               eventType: r.event_type ?? '',
               translatedEventType: r.translated_event_type ?? '',
               objectType: r.object_type ?? '',
-              objectId: String(r.object_id ?? ''),
+              objectId,
               objectName: r.object_name ?? '',
               actorName: r.actor_name ?? '',
-              extraData: String(r.extra_data ?? '').slice(0, 4000),
+              actorId: String(r.actor_id ?? ''),
+              applicationName: r.application_name ?? '',
+              extraData: extraData.slice(0, 4000),
+              ...parseExtraData(r.event_type ?? '', extraData),
+              campaignId: parents.get(objectId)?.campaignId ?? '',
+              adsetId: parents.get(objectId)?.adsetId ?? '',
             },
           },
           upsert: true,

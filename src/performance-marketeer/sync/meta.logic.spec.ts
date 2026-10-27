@@ -5,6 +5,7 @@ import {
   landingUrlOf,
   adProduct,
   majorityProduct,
+  parseExtraData,
   metricsOf,
   productFromName,
   productFromUrl,
@@ -217,5 +218,70 @@ describe('meta.logic', () => {
         { product: 'nadi-report-premium', spend: 10 },
       ]),
     ).toBe('other');
+  });
+});
+
+describe('parseExtraData', () => {
+  it('budget in paise (nested old/new) → rupees', () => {
+    expect(
+      parseExtraData(
+        'update_ad_set_budget',
+        JSON.stringify({
+          old_value: {
+            type: 'payment_amount',
+            old_value: '1000000',
+            currency: 'INR',
+          },
+          new_value: {
+            type: 'payment_amount',
+            new_value: '800000',
+            currency: 'INR',
+          },
+        }),
+      ),
+    ).toEqual({ field: 'daily_budget', oldValue: 10000, newValue: 8000 });
+  });
+
+  it('flat budget, lifetime, formatted rupees', () => {
+    expect(
+      parseExtraData(
+        'update_campaign_budget',
+        '{"old_value":"₹7,500.00","new_value":"₹25,000.00","type":"lifetime_budget"}',
+      ),
+    ).toEqual({ field: 'lifetime_budget', oldValue: 7500, newValue: 25000 });
+  });
+
+  it('status change', () => {
+    expect(
+      parseExtraData(
+        'update_ad_run_status',
+        '{"old_value":"Active","new_value":"Paused"}',
+      ),
+    ).toEqual({ field: 'status', oldValue: 'ACTIVE', newValue: 'PAUSED' });
+  });
+
+  it('targeting objects are kept as short JSON', () => {
+    const r = parseExtraData(
+      'update_ad_set_target_spec',
+      '{"old_value":{"age_min":18},"new_value":{"age_min":25}}',
+    );
+    expect(r).toEqual({
+      field: 'targeting',
+      oldValue: '{"age_min":18}',
+      newValue: '{"age_min":25}',
+    });
+  });
+
+  it('unknown or broken shapes → field from the event, null values', () => {
+    expect(parseExtraData('create_ad', '{"foo":1}')).toEqual({
+      field: 'created',
+      oldValue: null,
+      newValue: null,
+    });
+    expect(parseExtraData('something_new', 'not json')).toEqual({
+      field: 'something_new',
+      oldValue: null,
+      newValue: null,
+    });
   });
 });

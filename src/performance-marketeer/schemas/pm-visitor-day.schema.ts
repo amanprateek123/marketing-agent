@@ -87,3 +87,6 @@ PmVisitorDaySchema.index(
 PmVisitorDaySchema.index({ tenantId: 1, 'payments.ref': 1 });
 PmVisitorDaySchema.index({ tenantId: 1, 'purchases.orderId': 1 });
 PmVisitorDaySchema.index({ tenantId: 1, day: 1, 'metaAd.last.adId': 1 });
+// Campaign / ad set scoped reads (agent tools, journal results, scopeMetrics).
+PmVisitorDaySchema.index({ tenantId: 1, 'metaAd.last.campaignId': 1, day: 1 });
+PmVisitorDaySchema.index({ tenantId: 1, 'metaAd.last.adsetId': 1, day: 1 });
