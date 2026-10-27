@@ -40,6 +40,13 @@ services:
       # the dir and 666 the two files instead — ownership doesn't need to
       # match for the container's uid to read/write them, just permissions.
       - ../higgsfield-config:/home/nestjs/.config/higgsfield
+      # Performance Marketeer AI analyst working folder (run files, evidence,
+      # creative/video cache). /app is root-owned and rebuilt on every deploy,
+      # so it lives on the host instead. Create once:
+      #   mkdir ../pm-agent-data && sudo chown 1001:1001 ../pm-agent-data
+      # (or chmod 777). Set PM_AGENT_DIR=/home/nestjs/pm-agent and
+      # PM_AGENT_CACHE_DIR=/home/nestjs/pm-agent/cache in .env.
+      - ../pm-agent-data:/home/nestjs/pm-agent
     depends_on:
       - mongo
       - redis
