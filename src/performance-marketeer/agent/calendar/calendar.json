@@ -1,0 +1,1493 @@
+{
+  "about": "Hand-kept calendar for the Performance Marketeer (2026-04-01 → 2027-12-31). Dates IST, New Delhi. verified=false rows are estimates — say so when using them. Re-check yearly.",
+  "updated": "2026-10-26",
+  "rules": [
+    "Salary-day effect: purchases and order values tend to rise on the 1st–5th of each month (salaried users), softer in the last week. Compare like-for-like days of month, not just week-on-week.",
+    "Festive season: Meta CPMs in India rise from ~1 week before Navratri through Diwali as e-commerce sales and brands compete; expect costs up even with unchanged creative.",
+    "Pitru Paksha / Kharmas / Adhik Maas: demand for auspicious or wish-fulfilment products dips; remedy/ancestor/dosh angles hold up better.",
+    "Eclipse visible in India: sutak day — auspicious purchases avoided; remedy and grahan content interest spikes."
+  ],
+  "rows": [
+    {
+      "id": "kharmas-2026-03",
+      "kind": "festival",
+      "name": "Kharmas (Meena Sankranti → Mesha Sankranti)",
+      "start": "2026-03-15",
+      "end": "2026-04-13",
+      "regions": [
+        "North India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Sun in Pisces: no weddings/new starts; big-ticket auspicious buying is postponed.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26 (end via Mesha Sankranti 2026-04-14; start date not re-checked)",
+      "verified": false
+    },
+    {
+      "id": "ipl-2026",
+      "kind": "market_event",
+      "name": "IPL 2026",
+      "start": "2026-03-28",
+      "end": "2026-05-31",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Evening prime-time inventory gets expensive; attention shifts to cricket.",
+      "source": "crictracker.com, wionews.com, thestatesman.com (BCCI: final 2026-05-31 Ahmedabad)",
+      "verified": true
+    },
+    {
+      "id": "hanuman-jayanti-2026",
+      "kind": "festival",
+      "name": "Hanuman Jayanti",
+      "start": "2026-04-02",
+      "end": "2026-04-02",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Hanuman/Bajrang devotion; Chaitra Purnima.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "elections-2026",
+      "kind": "market_event",
+      "name": "Assembly elections: Kerala, Assam, Puducherry (04-09), Tamil Nadu (04-23), West Bengal (04-23, 04-29); results 05-04",
+      "start": "2026-04-09",
+      "end": "2026-05-04",
+      "regions": [
+        "Kerala",
+        "Assam",
+        "Tamil Nadu",
+        "West Bengal",
+        "Puducherry"
+      ],
+      "mood": "cpm_up",
+      "note": "Political ad spend raises CPMs in these states; attention shifts.",
+      "source": "wionews.com, sakshipost.com (ECI schedule)",
+      "verified": true
+    },
+    {
+      "id": "baisakhi-2026",
+      "kind": "festival",
+      "name": "Baisakhi / Mesha Sankranti (solar new year: Punjab, Bengal, Tamil Nadu, Kerala, Odisha)",
+      "start": "2026-04-14",
+      "end": "2026-04-14",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Kharmas ends; regional new year; buying resumes.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "akshaya-tritiya-2026",
+      "kind": "festival",
+      "name": "Akshaya Tritiya",
+      "start": "2026-04-19",
+      "end": "2026-04-19",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "One of the most auspicious days to buy/start anything (gold, new ventures, wishes).",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "buddha-purnima-2026",
+      "kind": "festival",
+      "name": "Buddha Purnima (Vaishakha Purnima)",
+      "start": "2026-05-01",
+      "end": "2026-05-01",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Purnima — vrat/daan day.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "vat-savitri-2026",
+      "kind": "festival",
+      "name": "Vat Savitri Vrat (Amavasya)",
+      "start": "2026-05-16",
+      "end": "2026-05-16",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Married women fast for husband’s long life.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "adhik-maas-2026",
+      "kind": "festival",
+      "name": "Adhik (Purushottam) Maas — Jyeshtha Adhika",
+      "start": "2026-05-17",
+      "end": "2026-06-15",
+      "regions": [
+        "All India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Extra lunar month: no weddings, griha pravesh or new purchases; japa/daan/devotion rises. Pushes all later 2026 festivals ~3 weeks later than 2025.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "jupiter-cancer-2026",
+      "kind": "astro_event",
+      "name": "Jupiter enters Cancer (exalted) — Guru Gochar",
+      "start": "2026-06-02",
+      "end": "2026-06-02",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Big yearly transit; rashifal/predictions demand spikes.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa); astromitra.com 2026-06-02 01:49 IST",
+      "verified": true
+    },
+    {
+      "id": "womens-t20-wc-2026",
+      "kind": "market_event",
+      "name": "ICC Women’s T20 World Cup (England)",
+      "start": "2026-06-12",
+      "end": "2026-07-05",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Minor CPM effect on India match days.",
+      "source": "icc-cricket.com, lords.org",
+      "verified": true
+    },
+    {
+      "id": "mercury-retro-2026-06",
+      "kind": "astro_event",
+      "name": "Mercury retrograde (sidereal Cancer → Gemini)",
+      "start": "2026-06-29",
+      "end": "2026-07-24",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Mercury retrograde: users ask about delays/reversals; popular content hook (contracts, communication, tech).",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "vat-purnima-2026",
+      "kind": "festival",
+      "name": "Vat Purnima Vrat",
+      "start": "2026-06-29",
+      "end": "2026-06-29",
+      "regions": [
+        "Maharashtra",
+        "Gujarat",
+        "Karnataka"
+      ],
+      "mood": "devotional_peak",
+      "note": "Purnimanta-region counterpart of Vat Savitri.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "harela-2026",
+      "kind": "festival",
+      "name": "Harela (Karka Sankranti, Kumaon)",
+      "start": "2026-07-16",
+      "end": "2026-07-16",
+      "regions": [
+        "Uttarakhand"
+      ],
+      "mood": "auspicious",
+      "note": "Kumaon green festival of Shravan; strong local devotional mood — relevant for Golu Devta (Kumaon deity).",
+      "source": "factohr.com + navbharatlive.com Uttarakhand holiday lists; Karka Sankranti per drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "chaturmas-2026",
+      "kind": "festival",
+      "name": "Chaturmas (Devshayani → Devutthana Ekadashi)",
+      "start": "2026-07-25",
+      "end": "2026-11-20",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Vishnu sleeps: weddings/griha pravesh paused; devotional and vrat spend steady; Navratri/Diwali fall inside.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "saturn-retro-2026-07",
+      "kind": "astro_event",
+      "name": "Saturn retrograde (sidereal Pisces)",
+      "start": "2026-07-27",
+      "end": "2026-12-11",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Saturn retrograde: users ask about delays/reversals.",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "guru-purnima-2026",
+      "kind": "festival",
+      "name": "Guru Purnima",
+      "start": "2026-07-29",
+      "end": "2026-07-29",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Honouring gurus/astrologers — good day for astrology offers.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "solar-eclipse-2026-08-12",
+      "kind": "astro_event",
+      "name": "Total solar eclipse (not visible in India)",
+      "start": "2026-08-12",
+      "end": "2026-08-12",
+      "regions": [],
+      "mood": "neutral",
+      "note": "Peak 23:15 IST; no sutak in India. Content hook only.",
+      "source": "astronomy-engine 2.1.19 computed (IST); listed on drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "hariyali-teej-2026",
+      "kind": "festival",
+      "name": "Hariyali Teej",
+      "start": "2026-08-15",
+      "end": "2026-08-15",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Women’s Shravan festival (same day as Independence Day).",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "ghee-sankranti-2026",
+      "kind": "festival",
+      "name": "Ghee Sankranti / Olgia (Simha Sankranti, Kumaon)",
+      "start": "2026-08-17",
+      "end": "2026-08-17",
+      "regions": [
+        "Uttarakhand"
+      ],
+      "mood": "auspicious",
+      "note": "Bhado Sankranti harvest festival in Uttarakhand.",
+      "source": "Simha Sankranti per drikpanchang.com/festivals/month (New Delhi), read 2026-10-26; Ghee Sankranti = Simha Sankranti by tradition, not confirmed by a dated source",
+      "verified": false
+    },
+    {
+      "id": "nag-panchami-2026",
+      "kind": "festival",
+      "name": "Nag Panchami",
+      "start": "2026-08-17",
+      "end": "2026-08-17",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Serpent worship; Kaal Sarp / Rahu-Ketu remedies searched.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "onam-2026",
+      "kind": "festival",
+      "name": "Onam (Thiruvonam)",
+      "start": "2026-08-26",
+      "end": "2026-08-26",
+      "regions": [
+        "Kerala"
+      ],
+      "mood": "auspicious",
+      "note": "Kerala harvest festival; shopping peak in Kerala.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "lunar-eclipse-2026-08-28",
+      "kind": "astro_event",
+      "name": "Partial lunar eclipse (not visible in India)",
+      "start": "2026-08-28",
+      "end": "2026-08-28",
+      "regions": [],
+      "mood": "neutral",
+      "note": "Peak 09:42 IST (daytime) on Raksha Bandhan; no sutak in India.",
+      "source": "astronomy-engine 2.1.19 computed (IST); listed on drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "raksha-bandhan-2026",
+      "kind": "festival",
+      "name": "Raksha Bandhan (Shravana Purnima)",
+      "start": "2026-08-28",
+      "end": "2026-08-28",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Gifting day; partial lunar eclipse same day is not visible in India.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "janmashtami-2026",
+      "kind": "festival",
+      "name": "Krishna Janmashtami",
+      "start": "2026-09-04",
+      "end": "2026-09-04",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Major Vaishnav festival.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "ganesh-chaturthi-2026",
+      "kind": "festival",
+      "name": "Ganesh Chaturthi (+ Hartalika Teej)",
+      "start": "2026-09-14",
+      "end": "2026-09-14",
+      "regions": [
+        "Maharashtra",
+        "Karnataka",
+        "Telangana",
+        "Goa",
+        "North India"
+      ],
+      "mood": "auspicious",
+      "note": "Starts the 10-day Ganeshotsav (to Anant Chaturdashi); new beginnings.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "pitru-paksha-2026",
+      "kind": "festival",
+      "name": "Pitru Paksha (Shraddh) → Sarva Pitru Amavasya",
+      "start": "2026-09-27",
+      "end": "2026-10-10",
+      "regions": [
+        "All India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Ancestor fortnight: auspicious/new purchases are avoided; demand for wish/prosperity products dips, recovers from Navratri. Ancestral remedies (pitru dosh) rise.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "venus-retro-2026-10",
+      "kind": "astro_event",
+      "name": "Venus retrograde (sidereal Libra → Virgo)",
+      "start": "2026-10-03",
+      "end": "2026-11-14",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Venus retrograde: users ask about delays/reversals.",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "amazon-gif-2026",
+      "kind": "market_event",
+      "name": "Amazon Great Indian Festival 2026",
+      "start": "2026-10-08",
+      "end": "2026-11-08",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Start confirmed (Prime early access ~10-07); end not announced — assumed to run to Diwali.",
+      "source": "outlookbusiness.com, 91mobiles.com, fonearena.com",
+      "verified": false
+    },
+    {
+      "id": "flipkart-bbd-2026",
+      "kind": "market_event",
+      "name": "Flipkart Big Billion Days 2026",
+      "start": "2026-10-08",
+      "end": "2026-10-18",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Start confirmed (Plus/Black early access 10-08, all users 10-09); end 10-18 from one source only.",
+      "source": "thecsrjournal.in, 91mobiles.com, newsbytesapp.com; end: desidime.com",
+      "verified": false
+    },
+    {
+      "id": "sharad-navratri-2026",
+      "kind": "festival",
+      "name": "Sharad Navratri (Ghatasthapana → Maha Navami)",
+      "start": "2026-10-11",
+      "end": "2026-10-19",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Peak devotional spend; CPMs rise with festive e-commerce. Durga Ashtami 10-19.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "dussehra-2026",
+      "kind": "festival",
+      "name": "Dussehra / Vijayadashami",
+      "start": "2026-10-20",
+      "end": "2026-10-20",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Very auspicious to start/buy.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "mercury-retro-2026-10",
+      "kind": "astro_event",
+      "name": "Mercury retrograde (sidereal Libra)",
+      "start": "2026-10-24",
+      "end": "2026-11-13",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Mercury retrograde: users ask about delays/reversals; popular content hook (contracts, communication, tech).",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "sharad-purnima-2026",
+      "kind": "festival",
+      "name": "Sharad Purnima (Kojagara)",
+      "start": "2026-10-25",
+      "end": "2026-10-25",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Lakshmi puja in the East; Kartika month begins 10-27 (North).",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "karva-chauth-2026",
+      "kind": "festival",
+      "name": "Karva Chauth",
+      "start": "2026-10-29",
+      "end": "2026-10-29",
+      "regions": [
+        "North India",
+        "Punjab",
+        "Rajasthan",
+        "Haryana",
+        "Delhi"
+      ],
+      "mood": "devotional_peak",
+      "note": "Married women fast; gifting.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "jupiter-leo-2026",
+      "kind": "astro_event",
+      "name": "Jupiter enters Leo — Guru Gochar",
+      "start": "2026-10-31",
+      "end": "2026-10-31",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Big yearly transit; rashifal demand.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa); astromitra.com 2026-10-31 12:02 IST",
+      "verified": true
+    },
+    {
+      "id": "dhanteras-2026",
+      "kind": "festival",
+      "name": "Dhanteras",
+      "start": "2026-11-06",
+      "end": "2026-11-06",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Biggest buying day of the year (gold, utensils, prosperity).",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "diwali-2026",
+      "kind": "festival",
+      "name": "Diwali / Lakshmi Puja (+ Narak Chaturdashi)",
+      "start": "2026-11-08",
+      "end": "2026-11-08",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Peak devotional + prosperity spend; CPMs at yearly high in the run-up, ad traffic drops on the day itself.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "govardhan-bhai-dooj-2026",
+      "kind": "festival",
+      "name": "Govardhan Puja → Bhai Dooj",
+      "start": "2026-11-10",
+      "end": "2026-11-11",
+      "regions": [
+        "North India"
+      ],
+      "mood": "auspicious",
+      "note": "Tail of Diwali week.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "chhath-2026",
+      "kind": "festival",
+      "name": "Chhath Puja (Sandhya Arghya)",
+      "start": "2026-11-15",
+      "end": "2026-11-15",
+      "regions": [
+        "Bihar",
+        "Jharkhand",
+        "East UP"
+      ],
+      "mood": "devotional_peak",
+      "note": "Sun worship; very strong devotional mood in Purvanchal.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "dev-uthani-2026",
+      "kind": "festival",
+      "name": "Dev Uthani (Devutthana) Ekadashi",
+      "start": "2026-11-20",
+      "end": "2026-11-20",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Chaturmas ends; wedding season opens.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "kartik-purnima-2026",
+      "kind": "festival",
+      "name": "Kartik Purnima / Dev Deepawali",
+      "start": "2026-11-24",
+      "end": "2026-11-24",
+      "regions": [
+        "North India",
+        "Varanasi"
+      ],
+      "mood": "devotional_peak",
+      "note": "Holy dip, deep daan.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "black-friday-2026",
+      "kind": "market_event",
+      "name": "Black Friday → Cyber Monday",
+      "start": "2026-11-27",
+      "end": "2026-11-30",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Global ad auction pressure (Meta CPMs up worldwide); Indian D2C runs sales too.",
+      "source": "Calendar rule: Friday after US Thanksgiving (2026-11-26)",
+      "verified": true
+    },
+    {
+      "id": "rahu-ketu-2026",
+      "kind": "astro_event",
+      "name": "Rahu enters Capricorn, Ketu enters Cancer",
+      "start": "2026-12-05",
+      "end": "2026-12-05",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "18-month Rahu-Ketu shift; Rahu/Ketu remedies and dosh content.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa) (mean node: 2026-12-06 00:18 IST); ajmerastro.com + astroyogi.com: 2026-12-05 evening IST",
+      "verified": true
+    },
+    {
+      "id": "jupiter-retro-2026-12",
+      "kind": "astro_event",
+      "name": "Jupiter retrograde (sidereal Leo → Cancer)",
+      "start": "2026-12-13",
+      "end": "2027-04-13",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Jupiter retrograde: users ask about delays/reversals.",
+      "source": "astronomy-engine 2.1.19 computed (IST); DrikPanchang guru-retrograde page lists 2026-12-12 → 2027-04-12 (±1 day, station times)",
+      "verified": true
+    },
+    {
+      "id": "kharmas-2026-12",
+      "kind": "festival",
+      "name": "Kharmas (Dhanu Sankranti → Makar Sankranti)",
+      "start": "2026-12-16",
+      "end": "2027-01-14",
+      "regions": [
+        "North India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Sun in Sagittarius: no weddings/new starts.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26 (Dhanu Sankranti 2026-12-16, Makar Sankranti 2027-01-15)",
+      "verified": true
+    },
+    {
+      "id": "mars-retro-2027-01",
+      "kind": "astro_event",
+      "name": "Mars retrograde (sidereal Leo → Cancer)",
+      "start": "2027-01-10",
+      "end": "2027-04-01",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Mars retrograde: users ask about delays/reversals.",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "lohri-2027",
+      "kind": "festival",
+      "name": "Lohri",
+      "start": "2027-01-14",
+      "end": "2027-01-14",
+      "regions": [
+        "Punjab",
+        "Haryana",
+        "Delhi"
+      ],
+      "mood": "auspicious",
+      "note": "Bonfire harvest festival.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "makar-sankranti-2027",
+      "kind": "festival",
+      "name": "Makar Sankranti / Pongal / Uttarayan / Ghughutiya (Kumaon)",
+      "start": "2027-01-15",
+      "end": "2027-01-15",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Kharmas ends; daan day; Ghughutiya in Kumaon (Golu Devta region).",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "jupiter-cancer-2027",
+      "kind": "astro_event",
+      "name": "Jupiter (retrograde) re-enters Cancer",
+      "start": "2027-01-25",
+      "end": "2027-01-25",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Retrograde ingress.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa); astromitra.com + vedicmarga.com 2027-01-25",
+      "verified": true
+    },
+    {
+      "id": "elections-2027-feb-mar",
+      "kind": "market_event",
+      "name": "Assembly elections expected: UP, Uttarakhand, Punjab, Goa (Manipur maybe later)",
+      "start": "2027-02-01",
+      "end": "2027-03-31",
+      "regions": [
+        "Uttar Pradesh",
+        "Uttarakhand",
+        "Punjab",
+        "Goa",
+        "Manipur"
+      ],
+      "mood": "cpm_up",
+      "note": "Not announced. Terms end 2027-03-13 (Manipur) … 2027-05-22 (UP); polls expected Feb–Mar 2027. Uttarakhand = Golu Devta home market.",
+      "source": "news24online.com, wikipedia 2027 elections in India (expected, not ECI-announced)",
+      "verified": false
+    },
+    {
+      "id": "mauni-amavasya-2027",
+      "kind": "festival",
+      "name": "Mauni Amavasya",
+      "start": "2027-02-06",
+      "end": "2027-02-06",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Holy dip / silence; annular solar eclipse same day is not visible in India.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "solar-eclipse-2027-02-06",
+      "kind": "astro_event",
+      "name": "Annular solar eclipse (not visible in India)",
+      "start": "2027-02-06",
+      "end": "2027-02-06",
+      "regions": [],
+      "mood": "neutral",
+      "note": "Peak 21:29 IST, Mauni Amavasya.",
+      "source": "astronomy-engine 2.1.19 computed (IST); listed on drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "mercury-retro-2027-02",
+      "kind": "astro_event",
+      "name": "Mercury retrograde (sidereal Aquarius → Capricorn)",
+      "start": "2027-02-09",
+      "end": "2027-03-03",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Mercury retrograde: users ask about delays/reversals; popular content hook (contracts, communication, tech).",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "vasant-panchami-2027",
+      "kind": "festival",
+      "name": "Vasant Panchami",
+      "start": "2027-02-11",
+      "end": "2027-02-11",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Saraswati puja; abujh muhurat for new starts.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "lunar-eclipse-2027-02-21",
+      "kind": "astro_event",
+      "name": "Penumbral lunar eclipse (visible in India)",
+      "start": "2027-02-21",
+      "end": "2027-02-21",
+      "regions": [
+        "All India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Peak 04:42 IST; penumbral — most panchangs observe no sutak, but grahan content/remedy searches rise.",
+      "source": "astronomy-engine 2.1.19 computed (IST); listed on drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "maha-shivratri-2027",
+      "kind": "festival",
+      "name": "Maha Shivratri",
+      "start": "2027-03-06",
+      "end": "2027-03-06",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Major Shaiva night.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "ipl-2027",
+      "kind": "market_event",
+      "name": "IPL 2027",
+      "start": "2027-03-14",
+      "end": "2027-05-30",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Not announced. BCCI 2024 window 03-14 → 05-30; secretary has floated 03-10 → 05-15.",
+      "source": "onmanorama.com (BCCI 2024 window), wionews.com (proposal)",
+      "verified": false
+    },
+    {
+      "id": "kharmas-2027-03",
+      "kind": "festival",
+      "name": "Kharmas (Meena Sankranti → Mesha Sankranti)",
+      "start": "2027-03-15",
+      "end": "2027-04-13",
+      "regions": [
+        "North India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Sun in Pisces: no weddings/new starts.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26 (Meena Sankranti 2027-03-15, Mesha Sankranti 2027-04-14)",
+      "verified": true
+    },
+    {
+      "id": "phool-dei-2027",
+      "kind": "festival",
+      "name": "Phool Dei (Chaitra Sankranti, Uttarakhand)",
+      "start": "2027-03-15",
+      "end": "2027-03-15",
+      "regions": [
+        "Uttarakhand"
+      ],
+      "mood": "auspicious",
+      "note": "Children’s flower festival of Chaitra in Uttarakhand.",
+      "source": "Meena Sankranti per drikpanchang.com/festivals/month (New Delhi), read 2026-10-26; Phool Dei mapping by tradition, not confirmed by a dated source",
+      "verified": false
+    },
+    {
+      "id": "holi-2027",
+      "kind": "festival",
+      "name": "Holika Dahan → Holi",
+      "start": "2027-03-21",
+      "end": "2027-03-22",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Festive; ad traffic dips on Holi day itself.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "chaitra-navratri-2027",
+      "kind": "festival",
+      "name": "Chaitra Navratri (Ugadi / Gudi Padwa → Ram Navami)",
+      "start": "2027-04-07",
+      "end": "2027-04-15",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Hindu new year + Navratri; overlaps Kharmas end.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "baisakhi-2027",
+      "kind": "festival",
+      "name": "Baisakhi / Mesha Sankranti",
+      "start": "2027-04-14",
+      "end": "2027-04-14",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Kharmas ends; regional new year.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "ram-navami-2027",
+      "kind": "festival",
+      "name": "Ram Navami",
+      "start": "2027-04-15",
+      "end": "2027-04-15",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Navratri ends.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "hanuman-jayanti-2027",
+      "kind": "festival",
+      "name": "Hanuman Jayanti",
+      "start": "2027-04-20",
+      "end": "2027-04-20",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Chaitra Purnima.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "akshaya-tritiya-2027",
+      "kind": "festival",
+      "name": "Akshaya Tritiya",
+      "start": "2027-05-09",
+      "end": "2027-05-09",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Most auspicious buying/new-start day.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "buddha-purnima-2027",
+      "kind": "festival",
+      "name": "Buddha Purnima",
+      "start": "2027-05-20",
+      "end": "2027-05-20",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Purnima — vrat/daan day.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "saturn-aries-2027",
+      "kind": "astro_event",
+      "name": "Saturn enters Aries (debilitated) — Shani Gochar",
+      "start": "2027-06-03",
+      "end": "2027-06-03",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Biggest transit of 2027: Sade Sati/Dhaiya shifts for Pisces/Aries/Taurus/Leo/Sagittarius Moon signs — strong demand for Shani remedies/reports.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa); ajmerastro.com + vedicmarga.com 2027-06-03",
+      "verified": true
+    },
+    {
+      "id": "vat-savitri-2027",
+      "kind": "festival",
+      "name": "Vat Savitri Vrat",
+      "start": "2027-06-04",
+      "end": "2027-06-04",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Married women fast.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "mercury-retro-2027-06",
+      "kind": "astro_event",
+      "name": "Mercury retrograde (sidereal Gemini)",
+      "start": "2027-06-10",
+      "end": "2027-07-05",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Mercury retrograde: users ask about delays/reversals; popular content hook (contracts, communication, tech).",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "jupiter-leo-2027",
+      "kind": "astro_event",
+      "name": "Jupiter enters Leo",
+      "start": "2027-06-26",
+      "end": "2027-06-26",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Yearly transit.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa); vedicmarga.com ~2027-06-26 (moondance says 06-24)",
+      "verified": true
+    },
+    {
+      "id": "chaturmas-2027",
+      "kind": "festival",
+      "name": "Chaturmas (Devshayani → Devutthana Ekadashi)",
+      "start": "2027-07-14",
+      "end": "2027-11-10",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Weddings paused; devotional spend steady.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "harela-2027",
+      "kind": "festival",
+      "name": "Harela (Karka Sankranti, Kumaon)",
+      "start": "2027-07-17",
+      "end": "2027-07-17",
+      "regions": [
+        "Uttarakhand"
+      ],
+      "mood": "auspicious",
+      "note": "Kumaon Shravan festival — Golu Devta region.",
+      "source": "Karka Sankranti per drikpanchang.com/festivals/month (New Delhi), read 2026-10-26; bhaktibharat.com lists Harela 2027-07-17",
+      "verified": true
+    },
+    {
+      "id": "guru-purnima-2027",
+      "kind": "festival",
+      "name": "Guru Purnima",
+      "start": "2027-07-18",
+      "end": "2027-07-18",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Honouring gurus/astrologers.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "lunar-eclipse-2027-07-18",
+      "kind": "astro_event",
+      "name": "Penumbral lunar eclipse (very shallow, visible in India)",
+      "start": "2027-07-18",
+      "end": "2027-07-18",
+      "regions": [],
+      "mood": "neutral",
+      "note": "Peak 21:32 IST; barely perceptible; not listed on DrikPanchang July 2027.",
+      "source": "astronomy-engine 2.1.19 computed (IST); not listed on DrikPanchang",
+      "verified": false
+    },
+    {
+      "id": "solar-eclipse-2027-08-02",
+      "kind": "astro_event",
+      "name": "Total solar eclipse (partial in India)",
+      "start": "2027-08-02",
+      "end": "2027-08-02",
+      "regions": [
+        "All India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Peak 15:36 IST; partial from India (Delhi ~8% obscured); sutak observed — auspicious buying avoided that day. Somavati/Hariyali Amavasya.",
+      "source": "astronomy-engine 2.1.19 computed (IST); listed on drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "hariyali-teej-2027",
+      "kind": "festival",
+      "name": "Hariyali Teej",
+      "start": "2027-08-04",
+      "end": "2027-08-04",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Women’s Shravan festival.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "nag-panchami-2027",
+      "kind": "festival",
+      "name": "Nag Panchami",
+      "start": "2027-08-06",
+      "end": "2027-08-06",
+      "regions": [
+        "North India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Rahu-Ketu / Kaal Sarp remedies searched.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "saturn-retro-2027-08",
+      "kind": "astro_event",
+      "name": "Saturn retrograde (sidereal Aries → Pisces)",
+      "start": "2027-08-09",
+      "end": "2027-12-24",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Saturn retrograde: users ask about delays/reversals.",
+      "source": "astronomy-engine 2.1.19 computed (IST); vedicmarga/ajmerastro: 2027-08-09 → 2027-12-24",
+      "verified": true
+    },
+    {
+      "id": "ghee-sankranti-2027",
+      "kind": "festival",
+      "name": "Ghee Sankranti / Olgia (Simha Sankranti, Kumaon)",
+      "start": "2027-08-17",
+      "end": "2027-08-17",
+      "regions": [
+        "Uttarakhand"
+      ],
+      "mood": "auspicious",
+      "note": "Bhado Sankranti in Uttarakhand.",
+      "source": "Simha Sankranti per drikpanchang.com/festivals/month (New Delhi), read 2026-10-26; mapping by tradition",
+      "verified": false
+    },
+    {
+      "id": "lunar-eclipse-2027-08-17",
+      "kind": "astro_event",
+      "name": "Penumbral lunar eclipse (not visible in India)",
+      "start": "2027-08-17",
+      "end": "2027-08-17",
+      "regions": [],
+      "mood": "neutral",
+      "note": "Peak 12:43 IST, on Raksha Bandhan.",
+      "source": "astronomy-engine 2.1.19 computed (IST); listed on drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "raksha-bandhan-2027",
+      "kind": "festival",
+      "name": "Raksha Bandhan (Shravana Purnima)",
+      "start": "2027-08-17",
+      "end": "2027-08-17",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Gifting day.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "janmashtami-2027",
+      "kind": "festival",
+      "name": "Krishna Janmashtami",
+      "start": "2027-08-25",
+      "end": "2027-08-25",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Major Vaishnav festival.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "ganesh-chaturthi-2027",
+      "kind": "festival",
+      "name": "Ganesh Chaturthi (Hartalika Teej 09-03)",
+      "start": "2027-09-04",
+      "end": "2027-09-04",
+      "regions": [
+        "Maharashtra",
+        "Karnataka",
+        "Telangana",
+        "Goa",
+        "North India"
+      ],
+      "mood": "auspicious",
+      "note": "10-day Ganeshotsav begins.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "onam-2027",
+      "kind": "festival",
+      "name": "Onam",
+      "start": "2027-09-12",
+      "end": "2027-09-12",
+      "regions": [
+        "Kerala"
+      ],
+      "mood": "auspicious",
+      "note": "Kerala harvest festival.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "pitru-paksha-2027",
+      "kind": "festival",
+      "name": "Pitru Paksha (Shraddh) → Sarva Pitru Amavasya",
+      "start": "2027-09-16",
+      "end": "2027-09-29",
+      "regions": [
+        "All India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "Auspicious/new purchases avoided; pitru-dosh remedies rise.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "festive-sales-2027",
+      "kind": "market_event",
+      "name": "Festive e-commerce sales 2027 (Amazon GIF / Flipkart BBD)",
+      "start": "2027-09-20",
+      "end": "2027-10-29",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Not announced; usually start ~1 week before Navratri (09-30) and run to Diwali (10-29).",
+      "source": "pattern from 2025–2026 sales",
+      "verified": false
+    },
+    {
+      "id": "sharad-navratri-2027",
+      "kind": "festival",
+      "name": "Sharad Navratri",
+      "start": "2027-09-30",
+      "end": "2027-10-08",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Peak devotional spend; Durga Ashtami 10-07.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "odi-wc-2027",
+      "kind": "market_event",
+      "name": "ICC Men’s Cricket World Cup 2027 (South Africa/Zimbabwe/Namibia)",
+      "start": "2027-10-02",
+      "end": "2027-11-21",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Overlaps Navratri→Diwali; India matches (from 10-07) pull attention and raise CPMs; SA evening = India night.",
+      "source": "icc-cricket.com fixture release, ewn.co.za",
+      "verified": true
+    },
+    {
+      "id": "mercury-retro-2027-10",
+      "kind": "astro_event",
+      "name": "Mercury retrograde (sidereal Libra → Virgo)",
+      "start": "2027-10-07",
+      "end": "2027-10-28",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Mercury retrograde: users ask about delays/reversals; popular content hook (contracts, communication, tech).",
+      "source": "astronomy-engine 2.1.19 computed (IST)",
+      "verified": true
+    },
+    {
+      "id": "dussehra-2027",
+      "kind": "festival",
+      "name": "Dussehra / Vijayadashami",
+      "start": "2027-10-09",
+      "end": "2027-10-09",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Very auspicious to start/buy.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "sharad-purnima-2027",
+      "kind": "festival",
+      "name": "Sharad Purnima",
+      "start": "2027-10-14",
+      "end": "2027-10-14",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Kojagara Lakshmi puja.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "karva-chauth-2027",
+      "kind": "festival",
+      "name": "Karva Chauth",
+      "start": "2027-10-18",
+      "end": "2027-10-18",
+      "regions": [
+        "North India",
+        "Punjab",
+        "Rajasthan",
+        "Haryana",
+        "Delhi"
+      ],
+      "mood": "devotional_peak",
+      "note": "Married women fast.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26 (festival list; one page header said Oct 29 — 10-18 fits Sharad Purnima + 4)",
+      "verified": true
+    },
+    {
+      "id": "saturn-pisces-2027",
+      "kind": "astro_event",
+      "name": "Saturn (retrograde) returns to Pisces",
+      "start": "2027-10-20",
+      "end": "2027-10-20",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Sade Sati back-shift; Saturn returns to Aries 2028-02.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa); vedicmarga.com + ajmerastro.com 2027-10-20",
+      "verified": true
+    },
+    {
+      "id": "dhanteras-2027",
+      "kind": "festival",
+      "name": "Dhanteras",
+      "start": "2027-10-27",
+      "end": "2027-10-27",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Biggest buying day of the year.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "diwali-2027",
+      "kind": "festival",
+      "name": "Diwali / Lakshmi Puja",
+      "start": "2027-10-29",
+      "end": "2027-10-29",
+      "regions": [
+        "All India"
+      ],
+      "mood": "devotional_peak",
+      "note": "Peak prosperity spend.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "govardhan-bhai-dooj-2027",
+      "kind": "festival",
+      "name": "Govardhan Puja → Bhai Dooj",
+      "start": "2027-10-30",
+      "end": "2027-10-31",
+      "regions": [
+        "North India"
+      ],
+      "mood": "auspicious",
+      "note": "Tail of Diwali week.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "elections-2027-gj-hp",
+      "kind": "market_event",
+      "name": "Assembly elections expected: Gujarat, Himachal Pradesh",
+      "start": "2027-11-01",
+      "end": "2027-12-15",
+      "regions": [
+        "Gujarat",
+        "Himachal Pradesh"
+      ],
+      "mood": "cpm_up",
+      "note": "Not announced; 2022 polls were Nov–Dec.",
+      "source": "pattern (terms end early 2028)",
+      "verified": false
+    },
+    {
+      "id": "chhath-2027",
+      "kind": "festival",
+      "name": "Chhath Puja",
+      "start": "2027-11-04",
+      "end": "2027-11-04",
+      "regions": [
+        "Bihar",
+        "Jharkhand",
+        "East UP"
+      ],
+      "mood": "devotional_peak",
+      "note": "Sun worship.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "dev-uthani-2027",
+      "kind": "festival",
+      "name": "Dev Uthani Ekadashi",
+      "start": "2027-11-10",
+      "end": "2027-11-10",
+      "regions": [
+        "All India"
+      ],
+      "mood": "auspicious",
+      "note": "Wedding season opens.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "kartik-purnima-2027",
+      "kind": "festival",
+      "name": "Dev Deepawali → Kartik Purnima",
+      "start": "2027-11-13",
+      "end": "2027-11-14",
+      "regions": [
+        "North India",
+        "Varanasi"
+      ],
+      "mood": "devotional_peak",
+      "note": "Holy dip, deep daan.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26",
+      "verified": true
+    },
+    {
+      "id": "black-friday-2027",
+      "kind": "market_event",
+      "name": "Black Friday → Cyber Monday",
+      "start": "2027-11-26",
+      "end": "2027-11-29",
+      "regions": [
+        "All India"
+      ],
+      "mood": "cpm_up",
+      "note": "Global ad auction pressure.",
+      "source": "Calendar rule: Friday after US Thanksgiving (2027-11-25)",
+      "verified": true
+    },
+    {
+      "id": "jupiter-virgo-2027",
+      "kind": "astro_event",
+      "name": "Jupiter enters Virgo",
+      "start": "2027-11-26",
+      "end": "2027-11-26",
+      "regions": [
+        "All India"
+      ],
+      "mood": "neutral",
+      "note": "Yearly transit.",
+      "source": "astronomy-engine 2.1.19 computed (IST), sidereal Lahiri (approx. ayanamsa) (not web-checked)",
+      "verified": false
+    },
+    {
+      "id": "kharmas-2027-12",
+      "kind": "festival",
+      "name": "Kharmas (Dhanu Sankranti → Makar Sankranti)",
+      "start": "2027-12-16",
+      "end": "2028-01-14",
+      "regions": [
+        "North India"
+      ],
+      "mood": "inauspicious_to_buy",
+      "note": "No weddings/new starts.",
+      "source": "drikpanchang.com/festivals/month (New Delhi), read 2026-10-26 (Dhanu Sankranti 2027-12-16; end assumed 2028-01-14, not checked)",
+      "verified": false
+    }
+  ]
+}

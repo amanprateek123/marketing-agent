@@ -47,3 +47,5 @@ docs
 
 # Playwright MCP browser test output
 .playwright-mcp/
+# Performance Marketeer agent run files (PM_AGENT_DIR default)
+var/
