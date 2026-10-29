@@ -1,6 +1,7 @@
 import {
   classifyChannel,
   dayRange,
+  dayRuns,
   isFirst,
   istDay,
   istDayBounds,
@@ -40,6 +41,21 @@ describe('pm.logic', () => {
     ]);
     expect(() => dayRange('2026-11-02', '2026-10-30')).toThrow();
     expect(() => dayRange('2026-01-01', '2026-12-31', 30)).toThrow();
+  });
+
+  it('dayRuns groups consecutive days, capped in length', () => {
+    expect(
+      dayRuns(['2026-10-31', '2026-11-01', '2026-10-30', '2026-11-03', '2026-11-01']),
+    ).toEqual([
+      { from: '2026-10-30', to: '2026-11-01' },
+      { from: '2026-11-03', to: '2026-11-03' },
+    ]);
+    expect(dayRuns(dayRange('2026-10-01', '2026-10-05'), 2)).toEqual([
+      { from: '2026-10-01', to: '2026-10-02' },
+      { from: '2026-10-03', to: '2026-10-04' },
+      { from: '2026-10-05', to: '2026-10-05' },
+    ]);
+    expect(dayRuns([])).toEqual([]);
   });
 
   it('money', () => {

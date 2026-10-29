@@ -71,6 +71,8 @@ import {
   PmMetaDailySchema,
   PmMetaEntity,
   PmMetaEntitySchema,
+  PmSyncCoverage,
+  PmSyncCoverageSchema,
 } from './schemas/pm-meta.schema';
 import { PmOrder, PmOrderSchema } from './schemas/pm-order.schema';
 import { PmSyncRun, PmSyncRunSchema } from './schemas/pm-sync-run.schema';
@@ -102,6 +104,7 @@ import { VisitorDaysSync } from './sync/visitor-days.sync';
       { name: PmMetaBreakdown.name, schema: PmMetaBreakdownSchema },
       { name: PmMetaChange.name, schema: PmMetaChangeSchema },
       { name: PmMetaAccountDaily.name, schema: PmMetaAccountDailySchema },
+      { name: PmSyncCoverage.name, schema: PmSyncCoverageSchema },
       { name: PmMetaEntitySnapshot.name, schema: PmMetaEntitySnapshotSchema },
       { name: PmAgentRun.name, schema: PmAgentRunSchema },
       { name: PmCampaignTarget.name, schema: PmCampaignTargetSchema },

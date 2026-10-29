@@ -221,3 +221,19 @@ PmMetaAccountDailySchema.index(
   { tenantId: 1, accountId: 1, date: 1 },
   { unique: true },
 );
+
+/**
+ * Days a partial sync covered, where the data itself can't tell "synced, no
+ * rows" from "never synced": `campaign:<id>` = that campaign's ad rows
+ * (campaign-only insights, no account total), `changes:<accountId>` = the
+ * account's change log.
+ */
+@Schema({ collection: 'pm_sync_coverage', timestamps: true })
+export class PmSyncCoverage {
+  @Prop({ required: true }) tenantId: string;
+  @Prop({ required: true }) key: string;
+  @Prop({ type: [String], default: [] }) days: string[];
+}
+export const PmSyncCoverageSchema =
+  SchemaFactory.createForClass(PmSyncCoverage);
+PmSyncCoverageSchema.index({ tenantId: 1, key: 1 }, { unique: true });

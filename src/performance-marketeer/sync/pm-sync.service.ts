@@ -2,9 +2,28 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { randomUUID } from 'crypto';
 import { Model } from 'mongoose';
-import { findPmProduct, PM_PRODUCTS, pmEnv, PmEnv } from '../pm.config';
-import { dayRange, istDayBounds, istDayFromToday } from '../pm.logic';
+import { addDays } from '../analysis/pm-stats';
+import { PmAnalysisService } from '../analysis/pm-analysis.service';
+import {
+  findPmProduct,
+  PM_HISTORY_START,
+  PM_PRODUCTS,
+  pmEnv,
+  PmEnv,
+} from '../pm.config';
+import {
+  dayRange,
+  dayRuns,
+  istDay,
+  istDayBounds,
+  istDayFromToday,
+} from '../pm.logic';
 import { PmLock } from '../schemas/pm-lock.schema';
+import {
+  PmMetaBreakdown,
+  PmMetaDaily,
+  PmSyncCoverage,
+} from '../schemas/pm-meta.schema';
 import { PmJob, PmSyncRun } from '../schemas/pm-sync-run.schema';
 import { AttributionSync } from './attribution.sync';
 import { MetaSync } from './meta.sync';
@@ -24,6 +43,12 @@ const ATTRIBUTION_CHUNK_DAYS = 3;
 // Longest a sync may hold the lock (a 200-day backfill takes ~15 min).
 const LEASE_MS = 60 * 60 * 1000;
 const REFUND_RECHECK_DAYS = 60;
+// Before an AI run: account-wide Meta days and campaign breakdowns this far back (D-30).
+const HISTORY_RECENT_DAYS = 30;
+// Change log before an AI run: only recent edits matter, and a big account's log is slow to page.
+const HISTORY_CHANGES_DAYS = 14;
+// Attribution looks 7 days back for the click, so newly loaded visitor days re-attribute a week on.
+const ATTRIBUTION_LOOKAHEAD_DAYS = 7;
 
 export const PM_META_PARTS = [
   'daily',
@@ -57,6 +82,13 @@ export class PmSyncService {
     @InjectModel(PmSyncRun.name) private readonly runs: Model<PmSyncRun>,
     @InjectModel(PmLock.name) private readonly locks: Model<PmLock>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
+    private readonly analysis: PmAnalysisService,
+    @InjectModel(PmMetaDaily.name)
+    private readonly metaDaily: Model<PmMetaDaily>,
+    @InjectModel(PmMetaBreakdown.name)
+    private readonly breakdowns: Model<PmMetaBreakdown>,
+    @InjectModel(PmSyncCoverage.name)
+    private readonly coverage: Model<PmSyncCoverage>,
   ) {}
 
   /** Visitor-days, then orders, then attribution for the same days — the order matters. */
@@ -96,6 +128,181 @@ export class PmSyncService {
           rows: await this.meta.retagAll(),
         }));
     });
+  }
+
+  /**
+   * Before an AI run (D-30): load what this campaign's analysis reads and is
+   * not loaded yet, from launch (not before PM_HISTORY_START) to `to`. Only
+   * missing days are fetched, so a second run is quick:
+   * - first-party visitors, orders, attribution;
+   * - Meta, all accounts, for the last 30 days (the account file compares
+   *   against them); before that only this campaign's rows (much faster);
+   * - ad settings, this campaign's breakdowns (last 30 days), and its
+   *   account's change log (last 14 days).
+   * Any failed step throws, so the run never analyses half-loaded data.
+   * Throws PmBusyError while another sync holds the lock.
+   */
+  campaignHistory(
+    camp: { entityId: string; accountId: string; createdTime?: Date | null },
+    to: string,
+    onStep: (step: string) => Promise<unknown> = async () => undefined,
+  ) {
+    return this.exclusive('history', async () => {
+      const t = this.env.tenantId;
+      const cid = camp.entityId;
+      const launched = camp.createdTime
+        ? istDay(new Date(camp.createdTime))
+        : PM_HISTORY_START;
+      const clamp = (d: string) =>
+        d < PM_HISTORY_START ? PM_HISTORY_START : d > to ? to : d;
+      const from = clamp(launched);
+      const recent = clamp(addDays(to, -(HISTORY_RECENT_DAYS - 1)));
+      const start = from < recent ? from : recent;
+      const req = (r: { from: string; to: string }): PmSyncRequest => ({
+        ...r,
+        trigger: 'api',
+      });
+      const must = async (
+        p: Promise<{ status: string; errors: string[] }>,
+      ) => {
+        const r = await p;
+        if (r.status !== 'succeeded')
+          throw new Error(r.errors[0] ?? `sync ${r.status}`);
+      };
+
+      const gaps = await this.analysis.missingDays({ from: start, to });
+      if (gaps.visitors.length) {
+        await onStep(`history: visitors (${gaps.visitors.length} days)`);
+        for (const r of dayRuns(gaps.visitors))
+          await must(this.visitorDaysStep(req(r)));
+      }
+      if (gaps.orders.length) {
+        await onStep(`history: orders (${gaps.orders.length} days)`);
+        for (const r of dayRuns(gaps.orders))
+          await must(this.ordersStep(req(r)));
+      }
+      const reattribute = dayRuns([...gaps.visitors, ...gaps.orders]);
+      if (reattribute.length) {
+        await onStep('history: attribution');
+        for (const r of reattribute) {
+          const end = addDays(r.to, ATTRIBUTION_LOOKAHEAD_DAYS);
+          await must(
+            this.attributionStep(req({ from: r.from, to: end < to ? end : to })),
+          );
+        }
+      }
+
+      const metaGaps = gaps.meta;
+      const accountDays = metaGaps.filter((d) => d >= recent);
+      if (accountDays.length) {
+        await onStep(`history: Meta, all accounts (${accountDays.length} days)`);
+        for (const r of dayRuns(accountDays))
+          await must(this.metaDailyStep(req(r)));
+      }
+      const key = `campaign:${cid}`;
+      const covered = new Set(
+        (await this.coverage.findOne({ tenantId: t, key }).lean())?.days ?? [],
+      );
+      const campaignDays = metaGaps.filter(
+        (d) => d >= from && d < recent && !covered.has(d),
+      );
+      if (campaignDays.length) {
+        await onStep(`history: Meta, this campaign (${campaignDays.length} days)`);
+        for (const r of dayRuns(campaignDays)) {
+          await must(
+            this.track('meta-daily', req(r), async (_e, stats) => {
+              await this.heartbeat();
+              const { rows } = await this.meta.syncDaily(
+                camp.accountId,
+                r.from,
+                r.to,
+                cid,
+              );
+              stats[cid] = rows;
+              return { rows };
+            }),
+          );
+          await this.markCovered(key, dayRange(r.from, r.to, 400));
+        }
+      }
+
+      await onStep('history: ad settings');
+      await must(this.metaEntitiesStep(req({ from, to }), 'missing'));
+
+      const bFrom = from > recent ? from : recent;
+      const range = { $gte: bFrom, $lte: to };
+      const [spent, have] = await Promise.all([
+        this.metaDaily.distinct('date', {
+          tenantId: t,
+          campaignId: cid,
+          date: range,
+          spend: { $gt: 0 },
+        }),
+        // 'device' is written last, so a day that has it has all four.
+        this.breakdowns.distinct('date', {
+          tenantId: t,
+          campaignId: cid,
+          breakdown: 'device',
+          date: range,
+        }),
+      ]);
+      const haveSet = new Set(have);
+      const bDays = (spent as string[]).filter((d) => !haveSet.has(d));
+      if (bDays.length) {
+        await onStep(`history: breakdowns (${bDays.length} days)`);
+        for (const r of dayRuns(bDays))
+          await must(
+            this.track('meta-breakdowns', req(r), async (_e, stats) => {
+              await this.heartbeat();
+              const rows = await this.meta.syncBreakdowns(
+                camp.accountId,
+                r.from,
+                r.to,
+                cid,
+              );
+              stats[cid] = rows;
+              return { rows };
+            }),
+          );
+      }
+
+      const cKey = `changes:${camp.accountId}`;
+      const cCovered = new Set(
+        (await this.coverage.findOne({ tenantId: t, key: cKey }).lean())
+          ?.days ?? [],
+      );
+      const cFrom = clamp(addDays(to, -(HISTORY_CHANGES_DAYS - 1)));
+      const cDays = dayRange(cFrom > from ? cFrom : from, to, 400).filter(
+        (d) => !cCovered.has(d),
+      );
+      if (cDays.length) {
+        await onStep(`history: change log (${cDays.length} days)`);
+        // One day at a time, so a stopped load keeps the days it finished.
+        for (const r of dayRuns(cDays, 1)) {
+          await must(
+            this.track('meta-changes', req(r), async (_e, stats) => {
+              await this.heartbeat();
+              const rows = await this.meta.syncChanges(
+                camp.accountId,
+                r.from,
+                r.to,
+              );
+              stats[camp.accountId] = rows;
+              return { rows };
+            }),
+          );
+          await this.markCovered(cKey, dayRange(r.from, r.to, 400));
+        }
+      }
+    });
+  }
+
+  private markCovered(key: string, days: string[]) {
+    return this.coverage.updateOne(
+      { tenantId: this.env.tenantId, key },
+      { $addToSet: { days: { $each: days } } },
+      { upsert: true },
+    );
   }
 
   /**
