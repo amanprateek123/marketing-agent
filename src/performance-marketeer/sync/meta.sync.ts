@@ -58,6 +58,14 @@ const chunk = <T>(xs: T[], n: number) =>
     xs.slice(i * n, i * n + n),
   );
 const date = (v: unknown) => (v ? new Date(String(v)) : null);
+const campaignFilter = (campaignId?: string): Record<string, string> =>
+  campaignId
+    ? {
+        filtering: JSON.stringify([
+          { field: 'campaign.id', operator: 'IN', value: [campaignId] },
+        ]),
+      }
+    : {};
 
 /**
  * Copies Meta Ads data (read-only) for the configured ad accounts:
@@ -102,11 +110,16 @@ export class MetaSync {
     this.meta.onWait = beat;
   }
 
-  /** Ad-level daily insights for one account. Returns the ad ids seen. */
+  /**
+   * Ad-level daily insights for one account (or only one campaign of it).
+   * Returns the ad ids seen. Account totals are written only for a full
+   * account sync: they are what marks a day as complete.
+   */
   async syncDaily(
     accountId: string,
     from: string,
     to: string,
+    campaignId?: string,
   ): Promise<{ rows: number; adIds: string[] }> {
     const tenantId = this.env.tenantId;
     const adIds = new Set<string>();
@@ -116,6 +129,7 @@ export class MetaSync {
       const data = await this.insights(accountId, range, {
         level: 'ad',
         fields: `ad_id,adset_id,campaign_id,${INSIGHT_FIELDS}`,
+        ...campaignFilter(campaignId),
       });
       const known = await this.productsByEntity(
         'ad',
@@ -145,7 +159,7 @@ export class MetaSync {
       });
       if (ops.length) await this.daily.bulkWrite(ops, { ordered: false });
       rows += ops.length;
-      await this.syncAccountTotals(accountId, range);
+      if (!campaignId) await this.syncAccountTotals(accountId, range);
     }
     return { rows, adIds: [...adIds] };
   }
@@ -186,11 +200,12 @@ export class MetaSync {
     await this.accountDaily.bulkWrite(ops, { ordered: false });
   }
 
-  /** Ad-set daily breakdowns for one account, kept by date. */
+  /** Ad-set daily breakdowns for one account (or one campaign of it), kept by date. */
   async syncBreakdowns(
     accountId: string,
     from: string,
     to: string,
+    campaignId?: string,
   ): Promise<number> {
     const tenantId = this.env.tenantId;
     let rows = 0;
@@ -204,6 +219,7 @@ export class MetaSync {
           level: 'adset',
           fields: `adset_id,campaign_id,${INSIGHT_FIELDS}`,
           breakdowns: fields.join(','),
+          ...campaignFilter(campaignId),
         });
         const known = await this.productsByEntity(
           'adset',
@@ -502,22 +518,34 @@ export class MetaSync {
     );
   }
 
-  /** Meta's activity log for one account. */
+  /**
+   * Meta's activity log for one account, one day per request: paging deep
+   * through a long range (or 500-row pages) fails with Meta error 1.
+   */
   async syncChanges(
     accountId: string,
     from: string,
     to: string,
   ): Promise<number> {
+    let n = 0;
+    for (const day of dateChunks(from, to, 1)) {
+      await this.beat?.();
+      n += await this.syncChangesDay(accountId, day.since);
+    }
+    return n;
+  }
+
+  private async syncChangesDay(accountId: string, day: string) {
     const tenantId = this.env.tenantId;
     const rows = await this.meta.getAll<Record<string, any>>(
       `act_${accountId}/activities`,
       {
         fields:
           'event_time,event_type,translated_event_type,object_id,object_name,object_type,extra_data,actor_id,actor_name,application_name',
-        // Bare dates make Meta drop the last day; use the IST bounds of the whole range.
-        since: Math.floor(istDayBounds(from).start.getTime() / 1000),
-        until: Math.floor(istDayBounds(to).end.getTime() / 1000),
-        limit: 500,
+        // Bare dates make Meta drop the last day; use the IST bounds of the day.
+        since: Math.floor(istDayBounds(day).start.getTime() / 1000),
+        until: Math.floor(istDayBounds(day).end.getTime() / 1000),
+        limit: 100,
       },
     );
     // Map every changed object to its campaign / ad set via the stored settings.

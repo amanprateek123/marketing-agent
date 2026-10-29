@@ -9,6 +9,7 @@ import {
   PmAgentRunSchema,
 } from '../../schemas/pm-agent-run.schema';
 import { PmMetaEntity, PmMetaEntitySchema } from '../../schemas/pm-meta.schema';
+import { PmBusyError } from '../../sync/pm-sync.service';
 import { PmAgentQueueService } from './pm-agent-queue.service';
 import { PM_RUN_STALE_MS, PmPipelineService } from './pm-pipeline.service';
 
@@ -25,6 +26,7 @@ describe('PmAgentQueueService', () => {
   let svc: PmAgentQueueService;
   const records = { daily: jest.fn() };
   const lessons = { scoreDaily: jest.fn() };
+  const sync = { campaignHistory: jest.fn() };
 
   beforeAll(async () => {
     mongo = await MongoMemoryServer.create();
@@ -70,6 +72,7 @@ describe('PmAgentQueueService', () => {
       runs,
       entities,
       { tenantId: T } as any,
+      sync as any,
     );
   });
 
@@ -142,6 +145,7 @@ describe('PmAgentQueueService', () => {
       runs,
       entities,
       { tenantId: T } as any,
+      sync as any,
     );
     const got = await Promise.all([svc.claimNext(), other.claimNext()]);
     expect(got.filter(Boolean)).toHaveLength(1);
@@ -302,6 +306,29 @@ describe('PmAgentQueueService', () => {
     await svc.enqueue(['111'], '2026-10-28');
     expect(await svc.tick()).toBe(false); // logged, never thrown
     prep.mockRestore();
+    run.mockRestore();
+  });
+
+  it('tick: loads history first; sync busy → requeued, load failure → failed', async () => {
+    const run = jest.spyOn(pipeline, 'runCampaign');
+    await svc.enqueue(['111'], D);
+    sync.campaignHistory.mockRejectedValueOnce(new PmBusyError('busy'));
+    expect(await svc.tick()).toBe(false);
+    expect(await runs.findOne({ campaignId: '111' }).lean()).toMatchObject({
+      status: 'queued',
+      step: 'waiting: another data sync is running',
+    });
+    expect(sync.campaignHistory.mock.calls[0].slice(0, 2)).toEqual([
+      expect.objectContaining({ entityId: '111', accountId: 'act_1' }),
+      '2026-10-26',
+    ]);
+    sync.campaignHistory.mockRejectedValueOnce(new Error('Meta API error 190'));
+    expect(await svc.tick()).toBe(true);
+    expect(await runs.findOne({ campaignId: '111' }).lean()).toMatchObject({
+      status: 'failed',
+      error: 'loading history failed: Meta API error 190',
+    });
+    expect(run).not.toHaveBeenCalled();
     run.mockRestore();
   });
 });

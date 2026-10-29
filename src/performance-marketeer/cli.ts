@@ -22,6 +22,9 @@ import {
   PmSyncService,
 } from './sync/pm-sync.service';
 
+// The sync CLI must never pick up queued AI runs (the app's worker does that).
+process.env.PM_AGENT_WORKER = 'false';
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration] }),

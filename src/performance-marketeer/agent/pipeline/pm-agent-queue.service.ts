@@ -11,10 +11,12 @@ import { InjectModel } from '@nestjs/mongoose';
 import { existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { Model } from 'mongoose';
+import { addDays } from '../../analysis/pm-stats';
 import { pmEnv, PmEnv } from '../../pm.config';
 import { istDayFromToday } from '../../pm.logic';
 import { PmAgentRun } from '../../schemas/pm-agent-run.schema';
 import { PmMetaEntity } from '../../schemas/pm-meta.schema';
+import { PmBusyError, PmSyncService } from '../../sync/pm-sync.service';
 import { PM_DAY_FILES } from '../pm-agent.types';
 import { PmLessonsService } from '../lessons/lessons.service';
 import { PmRecordsService } from '../lessons/records.service';
@@ -22,6 +24,8 @@ import { PM_RUN_STALE_MS, PmPipelineService } from './pm-pipeline.service';
 
 const POLL_MS = 60_000;
 const BUDGET_STEP = 'waiting: daily budget reached';
+const SYNC_BUSY_STEP = 'waiting: another data sync is running';
+const HISTORY_BEAT_MS = 60_000;
 const envNum = (key: string, def: number) => {
   const n = Number(process.env[key]);
   return Number.isFinite(n) && n > 0 ? n : def;
@@ -61,6 +65,7 @@ export class PmAgentQueueService implements OnModuleInit, OnModuleDestroy {
     @InjectModel(PmMetaEntity.name)
     private readonly entities: Model<PmMetaEntity>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
+    private readonly sync: PmSyncService,
   ) {}
 
   get workerEnabled() {
@@ -350,6 +355,8 @@ export class PmAgentQueueService implements OnModuleInit, OnModuleDestroy {
     try {
       const run = await this.claimNext();
       if (!run) return false;
+      const history = await this.loadHistory(run);
+      if (history !== 'ok') return history === 'failed';
       await this.prepareDate(run.date);
       const r = await this.pipeline.runCampaign(run.date, run.campaignId, {
         claimed: true,
@@ -362,6 +369,55 @@ export class PmAgentQueueService implements OnModuleInit, OnModuleDestroy {
       // runCampaign marks its own failures; this is Mongo trouble around it.
       this.logger.error(`worker tick failed: ${(e as Error).message}`);
       return false;
+    }
+  }
+
+  /**
+   * The campaign's missing data first (D-30), so the analysis never runs on
+   * gaps. Sync lock busy → back to queued, retried next poll. Failure → the
+   * run fails with the reason.
+   */
+  private async loadHistory(run: {
+    campaignId: string;
+    date: string;
+  }): Promise<'ok' | 'busy' | 'failed'> {
+    const t = this.env.tenantId;
+    const key = { tenantId: t, campaignId: run.campaignId, date: run.date };
+    const camp = await this.entities
+      .findOne(
+        { tenantId: t, level: 'campaign', entityId: run.campaignId },
+        { entityId: 1, accountId: 1, createdTime: 1 },
+      )
+      .lean();
+    // No entity: runCampaign fails it with the reason.
+    if (!camp) return 'ok';
+    const beat = setInterval(
+      () =>
+        void this.runs
+          .updateOne(key, { $set: { heartbeatAt: new Date() } })
+          .catch(() => undefined),
+      HISTORY_BEAT_MS,
+    );
+    try {
+      await this.sync.campaignHistory(camp, addDays(run.date, -1), (step) =>
+        this.runs.updateOne(key, { $set: { step, heartbeatAt: new Date() } }),
+      );
+      return 'ok';
+    } catch (e) {
+      if (e instanceof PmBusyError) {
+        await this.runs.updateOne(key, {
+          $set: { status: 'queued', step: SYNC_BUSY_STEP },
+        });
+        return 'busy';
+      }
+      const message = `loading history failed: ${(e as Error).message}`;
+      this.logger.error(`[${run.campaignId} ${run.date}] ${message}`);
+      await this.runs.updateOne(key, {
+        $set: { status: 'failed', error: message, finishedAt: new Date() },
+      });
+      return 'failed';
+    } finally {
+      clearInterval(beat);
     }
   }
 

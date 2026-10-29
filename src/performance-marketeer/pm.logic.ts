@@ -43,6 +43,19 @@ export function dayRange(from: string, to: string, maxDays = 200): string[] {
   return days;
 }
 
+/** Days → runs of consecutive days, at most `max` long: [1,2,3,5] → [1..3, 5..5]. */
+export function dayRuns(days: string[], max = 60): { from: string; to: string }[] {
+  const out: { from: string; to: string; n: number }[] = [];
+  for (const d of [...new Set(days)].sort()) {
+    const last = out[out.length - 1];
+    if (last && last.n < max && nextDay(last.to) === d) {
+      last.to = d;
+      last.n++;
+    } else out.push({ from: d, to: d, n: 1 });
+  }
+  return out.map(({ from, to }) => ({ from, to }));
+}
+
 /** Money as stored in 91astro (orderTotal is a string, GST-inclusive). */
 export const toAmount = (v: unknown): number => {
   const n =
