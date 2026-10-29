@@ -29,10 +29,11 @@ import {
 import { Model } from 'mongoose';
 import type { AuthedRequest } from '../../auth/roles';
 import { PmAgentQueueService } from './pipeline/pm-agent-queue.service';
-import { pmEnv, PmEnv } from '../pm.config';
+import { pmEnv, PmEnv, PM_HISTORY_START } from '../pm.config';
 import { dayRange } from '../pm.logic';
 import { PmAgentRun } from '../schemas/pm-agent-run.schema';
 import { PmCampaignTarget } from '../schemas/pm-campaign-target.schema';
+import { PmMetaEntity } from '../schemas/pm-meta.schema';
 
 const ID_RE = /^[0-9A-Za-z_-]{1,64}$/;
 
@@ -110,7 +111,58 @@ export class PmAgentController {
     private readonly targets: Model<PmCampaignTarget>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
     private readonly queue: PmAgentQueueService,
+    @InjectModel(PmMetaEntity.name)
+    private readonly entities: Model<PmMetaEntity>,
   ) {}
+
+  /**
+   * Campaigns to pick for analysis, whether or not their data is loaded yet
+   * (the list comes from Meta, refreshed hourly): active ones, and any
+   * launched since PM_HISTORY_START. Active first, newest first.
+   */
+  @Get('campaigns')
+  async campaigns(@Param('tenantId') t: string) {
+    this.assertTenant(t);
+    const docs = await this.entities
+      .find(
+        {
+          tenantId: t,
+          level: 'campaign',
+          $or: [
+            { effectiveStatus: 'ACTIVE' },
+            { createdTime: { $gte: new Date(`${PM_HISTORY_START}T00:00:00+05:30`) } },
+          ],
+        },
+        {
+          entityId: 1,
+          name: 1,
+          accountId: 1,
+          effectiveStatus: 1,
+          createdTime: 1,
+          product: 1,
+          dailyBudget: 1,
+        },
+      )
+      .lean()
+      .exec();
+    return docs
+      .map((d) => ({
+        id: d.entityId,
+        name: d.name,
+        accountId: d.accountId,
+        effectiveStatus: d.effectiveStatus,
+        createdTime: d.createdTime ?? null,
+        product: d.product,
+        dailyBudget: d.dailyBudget ?? null,
+      }))
+      .sort(
+        (a, b) =>
+          Number(b.effectiveStatus === 'ACTIVE') -
+            Number(a.effectiveStatus === 'ACTIVE') ||
+          new Date(b.createdTime ?? 0).getTime() -
+            new Date(a.createdTime ?? 0).getTime(),
+      );
+  }
 
   /** Queue campaigns for AI analysis (date default: today IST). */
   @Post('queue')

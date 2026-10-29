@@ -80,6 +80,8 @@ export class PmAgentQueueService implements OnModuleInit, OnModuleDestroy {
     await this.requeueStale().catch((e) =>
       this.logger.error(`stale requeue failed: ${(e as Error).message}`),
     );
+    // The Overview lists campaigns from this; the hourly sync keeps it fresh.
+    void this.sync.syncCampaignList('cron').catch(() => undefined);
     this.stopped = false;
     const n = envNum('PM_AGENT_CONCURRENCY', 1);
     this.logger.log(`PM agent worker started (concurrency ${n})`);

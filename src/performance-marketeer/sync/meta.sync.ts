@@ -58,6 +58,20 @@ const chunk = <T>(xs: T[], n: number) =>
     xs.slice(i * n, i * n + n),
   );
 const date = (v: unknown) => (v ? new Date(String(v)) : null);
+const campaignSettings = (c: Record<string, any>): Partial<PmMetaEntity> => ({
+  name: c.name ?? '',
+  campaignId: c.id,
+  status: c.status ?? '',
+  effectiveStatus: c.effective_status ?? '',
+  createdTime: date(c.created_time),
+  objective: c.objective ?? '',
+  dailyBudget: rupees(c.daily_budget),
+  lifetimeBudget: rupees(c.lifetime_budget),
+  bidStrategy: c.bid_strategy ?? '',
+  buyingType: c.buying_type ?? '',
+  budgetLevel:
+    Number(c.daily_budget) || Number(c.lifetime_budget) ? 'campaign' : 'adset',
+});
 const campaignFilter = (campaignId?: string): Record<string, string> =>
   campaignId
     ? {
@@ -256,6 +270,63 @@ export class MetaSync {
   }
 
   /**
+   * Every campaign of one account (~3 requests per account), so the dashboard
+   * can list campaigns before any of their data is loaded. Writes only new
+   * campaigns and ones whose name, status or budget changed (snapshotted like
+   * syncEntities), so the hourly run stays small.
+   */
+  async syncCampaignList(accountId: string): Promise<number> {
+    const tenantId = this.env.tenantId;
+    const rows = await this.meta.getAll<Record<string, any>>(
+      `act_${accountId}/campaigns`,
+      { fields: CAMPAIGN_FIELDS, limit: 200 },
+    );
+    const stored = new Map(
+      (
+        await this.entities
+          .find(
+            { tenantId, level: 'campaign', accountId },
+            {
+              entityId: 1,
+              name: 1,
+              status: 1,
+              effectiveStatus: 1,
+              dailyBudget: 1,
+              lifetimeBudget: 1,
+              bidStrategy: 1,
+            },
+          )
+          .lean()
+      ).map((e) => [e.entityId, e]),
+    );
+    const KEYS = [
+      'name',
+      'status',
+      'effectiveStatus',
+      'dailyBudget',
+      'lifetimeBudget',
+      'bidStrategy',
+    ] as const;
+    const ops: AnyBulkWriteOperation<PmMetaEntity>[] = [];
+    for (const c of rows) {
+      const set = campaignSettings(c);
+      const old = stored.get(c.id) as Partial<PmMetaEntity> | undefined;
+      if (old && KEYS.every((k) => (old[k] ?? null) === (set[k] ?? null)))
+        continue;
+      ops.push({
+        updateOne: {
+          filter: { tenantId, level: 'campaign', entityId: c.id },
+          update: { $set: { accountId, ...set } },
+          upsert: true,
+        },
+      });
+    }
+    await this.snapshot(ops);
+    if (ops.length) await this.entities.bulkWrite(ops, { ordered: false });
+    return ops.length;
+  }
+
+  /**
    * Settings for these ads and their ad sets and campaigns, then the product
    * tag for each, pushed down onto the daily and breakdown rows.
    */
@@ -297,24 +368,7 @@ export class MetaSync {
       },
     });
     const ops: AnyBulkWriteOperation<PmMetaEntity>[] = [
-      ...campaigns.map((c) => {
-        const hasBudget = Boolean(
-          Number(c.daily_budget) || Number(c.lifetime_budget),
-        );
-        return upsert('campaign', c.id, {
-          name: c.name ?? '',
-          campaignId: c.id,
-          status: c.status ?? '',
-          effectiveStatus: c.effective_status ?? '',
-          createdTime: date(c.created_time),
-          objective: c.objective ?? '',
-          dailyBudget: rupees(c.daily_budget),
-          lifetimeBudget: rupees(c.lifetime_budget),
-          bidStrategy: c.bid_strategy ?? '',
-          buyingType: c.buying_type ?? '',
-          budgetLevel: hasBudget ? 'campaign' : 'adset',
-        });
-      }),
+      ...campaigns.map((c) => upsert('campaign', c.id, campaignSettings(c))),
       ...adsets.map((s) => {
         const campaignBudget = campaigns.find((c) => c.id === s.campaign_id);
         const cbo = Boolean(

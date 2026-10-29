@@ -23,6 +23,7 @@ describe('PmSyncService hourly', () => {
       adsToRefresh: jest.fn().mockResolvedValue([]),
       syncEntities: jest.fn().mockResolvedValue(0),
       syncChanges: jest.fn().mockResolvedValue(0),
+      syncCampaignList: jest.fn().mockResolvedValue(2),
     };
     const statuses: string[] = [];
     const runs = {
@@ -51,12 +52,13 @@ describe('PmSyncService hourly', () => {
       null as any,
     );
 
-    await expect(sync.hourly()).rejects.toThrow('1 of 7 steps failed');
+    await expect(sync.hourly()).rejects.toThrow('1 of 8 steps failed');
     expect(attribution.attributeDays).toHaveBeenCalled();
     expect(meta.syncDaily).toHaveBeenCalled();
     expect(meta.syncChanges).toHaveBeenCalled();
     expect(statuses).toContain('failed');
-    expect(statuses.filter((s) => s === 'succeeded').length).toBe(6);
+    expect(meta.syncCampaignList).toHaveBeenCalledWith('111');
+    expect(statuses.filter((s) => s === 'succeeded').length).toBe(7);
   });
 });
 
@@ -135,7 +137,7 @@ describe('PmSyncService campaignHistory', () => {
     createdTime: new Date('2026-09-25T06:00:00Z'),
   };
 
-  it('fills only the gaps: account-wide recent, campaign-only older', async () => {
+  it('fills only the gaps; Meta only for this campaign', async () => {
     const m = setup();
     const steps: string[] = [];
     await m.sync.campaignHistory(camp, '2026-10-26', async (s) => steps.push(s));
@@ -147,11 +149,10 @@ describe('PmSyncService campaignHistory', () => {
     expect(m.orders.syncDay).not.toHaveBeenCalled();
     // Attribution re-runs a week on from the new visitor day.
     expect(m.attribution.attributeDays.mock.calls.flat(2)).toContain('2026-10-26');
-    // Recent gap → every account; older gap (09-26 already covered) → campaign only.
+    // Every gap → this campaign only (09-26 already covered), never whole accounts.
     expect(m.meta.syncDaily.mock.calls).toEqual([
-      ['111', '2026-10-20', '2026-10-20'],
-      ['222', '2026-10-20', '2026-10-20'],
       ['111', '2026-09-25', '2026-09-25', 'c1'],
+      ['111', '2026-10-20', '2026-10-20', 'c1'],
     ]);
     expect(m.coverage.updateOne).toHaveBeenCalledWith(
       { tenantId: 't', key: 'campaign:c1' },

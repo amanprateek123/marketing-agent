@@ -51,6 +51,7 @@ const HISTORY_CHANGES_DAYS = 14;
 const ATTRIBUTION_LOOKAHEAD_DAYS = 7;
 
 export const PM_META_PARTS = [
+  'campaigns',
   'daily',
   'entities',
   'breakdowns',
@@ -118,6 +119,7 @@ export class PmSyncService {
    */
   syncMeta(req: PmSyncRequest, parts: PmMetaPart[] = [...PM_META_PARTS]) {
     return this.exclusive('meta', async () => {
+      if (parts.includes('campaigns')) await this.syncCampaignList(req.trigger);
       if (parts.includes('daily')) await this.metaDailyStep(req);
       if (parts.includes('entities'))
         await this.metaEntitiesStep(req, 'missing');
@@ -134,9 +136,9 @@ export class PmSyncService {
    * Before an AI run (D-30): load what this campaign's analysis reads and is
    * not loaded yet, from launch (not before PM_HISTORY_START) to `to`. Only
    * missing days are fetched, so a second run is quick:
-   * - first-party visitors, orders, attribution;
-   * - Meta, all accounts, for the last 30 days (the account file compares
-   *   against them); before that only this campaign's rows (much faster);
+   * - first-party visitors, orders, attribution (also the last 30 days, for
+   *   the account file);
+   * - Meta: only this campaign's rows (whole accounts take hours);
    * - ad settings, this campaign's breakdowns (last 30 days), and its
    *   account's change log (last 14 days).
    * Any failed step throws, so the run never analyses half-loaded data.
@@ -192,19 +194,15 @@ export class PmSyncService {
         }
       }
 
+      // Meta: only this campaign's rows — whole accounts take hours (JFM24);
+      // the hourly/nightly sync fills recent account-wide days.
       const metaGaps = gaps.meta;
-      const accountDays = metaGaps.filter((d) => d >= recent);
-      if (accountDays.length) {
-        await onStep(`history: Meta, all accounts (${accountDays.length} days)`);
-        for (const r of dayRuns(accountDays))
-          await must(this.metaDailyStep(req(r)));
-      }
       const key = `campaign:${cid}`;
       const covered = new Set(
         (await this.coverage.findOne({ tenantId: t, key }).lean())?.days ?? [],
       );
       const campaignDays = metaGaps.filter(
-        (d) => d >= from && d < recent && !covered.has(d),
+        (d) => d >= from && !covered.has(d),
       );
       if (campaignDays.length) {
         await onStep(`history: Meta, this campaign (${campaignDays.length} days)`);
@@ -297,6 +295,28 @@ export class PmSyncService {
     });
   }
 
+  /** Every campaign's name/status/launch from Meta (~15 s, no lock: settings upserts only). */
+  syncCampaignList(trigger: PmSyncRequest['trigger'] = 'api') {
+    const today = istDayFromToday(0);
+    return this.track(
+      'meta-campaigns',
+      { from: today, to: today, trigger },
+      async (errors, stats) => {
+        let rows = 0;
+        for (const account of this.meta.accounts) {
+          try {
+            const n = await this.meta.syncCampaignList(account);
+            rows += n;
+            stats[account] = n;
+          } catch (e) {
+            errors.push(`act_${account}: ${(e as Error).message}`);
+          }
+        }
+        return { rows };
+      },
+    );
+  }
+
   private markCovered(key: string, days: string[]) {
     return this.coverage.updateOne(
       { tenantId: this.env.tenantId, key },
@@ -330,6 +350,7 @@ export class PmSyncService {
         () => this.attributionStep(recent),
         ...(this.meta.configured
           ? [
+              () => this.syncCampaignList('cron'),
               () => this.metaDailyStep(metaReq),
               () => this.metaEntitiesStep(metaReq, 'missing'),
               () => this.metaChangesStep(metaReq),
