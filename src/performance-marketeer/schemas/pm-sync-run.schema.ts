@@ -11,7 +11,8 @@ export type PmJob =
   | 'meta-daily'
   | 'meta-entities'
   | 'meta-breakdowns'
-  | 'meta-changes';
+  | 'meta-changes'
+  | 'meta-campaigns';
 
 /** Audit trail of every sync: what ran, over which days, how many rows, and any error. */
 @Schema({ collection: 'pm_sync_runs', timestamps: true })

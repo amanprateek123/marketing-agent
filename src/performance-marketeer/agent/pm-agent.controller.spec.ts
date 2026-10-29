@@ -35,11 +35,13 @@ describe('PmAgentController', () => {
     cancel: jest.fn().mockResolvedValue({ cancelled: 'deleted' }),
   };
   const targets = { find: jest.fn(), findOneAndUpdate: jest.fn() };
+  const entities = { find: jest.fn() };
   const c = new PmAgentController(
     model as unknown as Model<PmAgentRun>,
     targets as never,
     { tenantId: '91astrology' } as PmEnv,
     queue as unknown as PmAgentQueueService,
+    entities as never,
   );
   const T = '91astrology';
   beforeEach(() => jest.clearAllMocks());
@@ -203,5 +205,18 @@ describe('PmAgentController', () => {
     await expect(
       c.setTarget('other', '120', { targetPurchases: 1 }, {} as never),
     ).rejects.toThrow(NotFoundException);
+  });
+
+  it('campaign list: active first, then newest; tenant checked', async () => {
+    entities.find.mockReturnValue(
+      q([
+        { entityId: '1', name: 'Old paused', effectiveStatus: 'PAUSED', createdTime: new Date('2026-05-01') },
+        { entityId: '2', name: 'New paused', effectiveStatus: 'PAUSED', createdTime: new Date('2026-10-01') },
+        { entityId: '3', name: 'Active', effectiveStatus: 'ACTIVE', createdTime: new Date('2026-04-01') },
+      ]),
+    );
+    expect((await c.campaigns(T)).map((x) => x.id)).toEqual(['3', '2', '1']);
+    expect(entities.find.mock.calls[0][0]).toMatchObject({ tenantId: T, level: 'campaign' });
+    await expect(c.campaigns('other')).rejects.toThrow(NotFoundException);
   });
 });
