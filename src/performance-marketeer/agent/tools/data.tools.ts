@@ -552,7 +552,7 @@ export class PmDataTools {
       date: range,
     };
     const region = breakdown === 'region';
-    const [rows, bdDays, spendDays, accountMissing, site, ords] =
+    const [rows, bdDays, spendDays, partialDays, site, ords] =
       await Promise.all([
         this.bds.aggregate<{
           _id: string;
@@ -581,7 +581,7 @@ export class PmDataTools {
           date: range,
           spend: { $gt: 0 },
         }),
-        this.pm.breakdownMissingDays(q.from, q.to, breakdown),
+        this.pm.breakdownMissingDays(q.from, q.to, breakdown, id),
         region
           ? this.visitors.aggregate<{ _id: string | null; n: number }>([
               { $match: this.visitorScopes(q, id).campaign },
@@ -591,11 +591,11 @@ export class PmDataTools {
         region ? this.ordersByVisitRegion(q, id) : [],
       ]);
     const days = new Set(bdDays as string[]);
-    // Days the campaign spent but has no breakdown rows, plus account-level gaps.
+    // Days the campaign spent but has no breakdown rows, or rows that don't add up to its spend.
     const missingDays = [
       ...new Set([
         ...(spendDays as string[]).filter((d) => !days.has(d)),
-        ...accountMissing,
+        ...partialDays,
       ]),
     ].sort();
     type Acc = {

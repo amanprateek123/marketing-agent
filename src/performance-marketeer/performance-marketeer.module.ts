@@ -151,6 +151,14 @@ import { VisitorDaysSync } from './sync/visitor-days.sync';
     PmRecordsService,
     PmLessonsService,
   ],
-  exports: [PmSyncService],
+  exports: [
+    PmSyncService,
+    PmMetaClient,
+    PmPipelineService,
+    PmAgentQueueService,
+    PmLandingTools,
+    PmCalendarTools,
+    PmCompetitorTools,
+  ],
 })
 export class PerformanceMarketeerModule {}

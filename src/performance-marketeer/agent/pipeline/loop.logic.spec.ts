@@ -354,9 +354,15 @@ describe('finalActions + checks', () => {
   });
 
   it('allows up to +100% and −20%, and follows an open purchase target', () => {
-    const run = (to: number, purchaseTarget?: { targetPurchases: number; remaining: number }) => {
+    const run = (
+      to: number,
+      purchaseTarget?: { targetPurchases: number; remaining: number },
+      metaRoas?: number,
+    ) => {
       const actions = finalActions(
-        plan([action('A1', { change: { field: 'daily_budget', from: 10000, to } })]),
+        plan([
+          action('A1', { change: { field: 'daily_budget', from: 10000, to } }),
+        ]),
         pv({}),
         [],
       );
@@ -371,6 +377,7 @@ describe('finalActions + checks', () => {
         settling: new Set(),
         campaignRoas: 0.6,
         purchaseTarget,
+        metaRoas: new Map([['as1', metaRoas ?? null]]),
         date: '2026-10-27',
       }).map((r) => r.check);
     };
@@ -380,6 +387,9 @@ describe('finalActions + checks', () => {
     expect(run(20000, open)).toEqual([]); // scaling towards the target is fine below ROAS 1
     expect(run(8000, open)).toEqual(['cut_below_purchase_target']);
     expect(run(8000, { targetPurchases: 500, remaining: 0 })).toEqual([]); // reached
+    // first-party below target but Meta says it pays back: cut is flagged
+    expect(run(8000, undefined, 1.2)).toEqual(['cut_while_meta_roas_ok']);
+    expect(run(8000, undefined, 0.4)).toEqual([]); // both bad: cut is fine
   });
 });
 

@@ -155,6 +155,29 @@ export const PM_PRODUCTS: PmProduct[] = [
     paymentEvent: 'golu_devta_arzi_payment_initiated',
     orderMatch: { 'products.0.productId': 'golu-devta-arzi' },
   },
+  {
+    id: 'career-report',
+    label: 'Career Report',
+    landingRe: anyLocale('/career-report'),
+    cartRe: anyLocale('/career-report/cart'),
+    steps: [
+      { key: 'ctaClick', event: 'career_report_cta_clicked' },
+      { key: 'beginCheckout', event: 'career_report_begin_checkout' },
+      {
+        key: 'couponApplied',
+        event: 'cart_coupon_applied',
+        pathRe: '/career-report/cart',
+      },
+      { key: 'paymentInitiated', event: 'career_report_payment_initiated' },
+    ],
+    paymentEvent: 'career_report_payment_initiated',
+    purchaseEvent: 'career_report_purchase',
+    // ₹0 and ₹1 orders are internal tests (confirmed by the owner, 2026-11-03).
+    orderMatch: {
+      'products.0.title': 'Career Report',
+      orderTotal: { $nin: ['0', '1', 0, 1] },
+    },
+  },
 ];
 
 export const findPmProduct = (id: string) =>

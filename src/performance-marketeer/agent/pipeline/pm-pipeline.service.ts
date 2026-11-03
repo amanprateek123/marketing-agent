@@ -591,6 +591,11 @@ export class PmPipelineService {
         ).filter((x): x is [string, NonNullable<(typeof x)[1]>] => !!x[1]),
       );
       const ents = await this.campaignEntities(campaignId);
+      const [adset7, ad7] = await Promise.all(
+        (['adset', 'ad'] as const).map((l) =>
+          this.analysis.entities(window(date, 7), l, campaignId),
+        ),
+      );
       const checks = runChecks({
         evidence: readEvidence(evidence.file),
         causes,
@@ -598,6 +603,12 @@ export class PmPipelineService {
         entityIds: new Set(ents.keys()),
         settling: await this.settlingEntities(campaignId, journal.entries),
         campaignRoas: m7.firstPartyRoas,
+        metaRoas: new Map([
+          [campaignId, m7.metaRoas],
+          ...[...adset7.rows, ...ad7.rows].map(
+            (r) => [r.id, r.metrics.metaRoas] as const,
+          ),
+        ]),
         purchaseTarget: await this.targetStatus(date, camp),
         date,
         ownerRules,
@@ -832,7 +843,8 @@ export class PmPipelineService {
       purchases,
       remaining,
       pacePerDay7: Math.round(pace * 100) / 100,
-      daysToTarget: remaining === 0 ? 0 : pace > 0 ? Math.ceil(remaining / pace) : null,
+      daysToTarget:
+        remaining === 0 ? 0 : pace > 0 ? Math.ceil(remaining / pace) : null,
       cpa7: m7.firstPartyCpa,
       roas7: m7.firstPartyRoas,
       cpaLifetime: from > to ? null : life.firstPartyCpa,
@@ -848,6 +860,15 @@ export class PmPipelineService {
     ev: EvidenceLog,
   ) {
     const id = camp.entityId;
+    // Lifetime = since launch (data starts PM_HISTORY_START): the owner compares with Ads Manager.
+    const launched = camp.createdTime
+      ? istDay(new Date(camp.createdTime))
+      : PM_HISTORY_START;
+    const life = {
+      from: launched < PM_HISTORY_START ? PM_HISTORY_START : launched,
+      to: addDays(date, -1),
+    };
+    const hasLife = life.from <= life.to;
     const [
       m7,
       p7,
@@ -861,6 +882,8 @@ export class PmPipelineService {
       coverage,
       missing,
       target,
+      mLife,
+      adsetLife,
     ] = await Promise.all([
       this.analysis.scopeMetrics(window(date, 7), 'campaign', id),
       this.analysis.scopeMetrics(
@@ -884,6 +907,12 @@ export class PmPipelineService {
       this.analysis.coverage(window(date, 7, camp.product)),
       this.analysis.missingDays(window(date, 30, camp.product)),
       this.targetStatus(date, camp),
+      hasLife
+        ? this.analysis.scopeMetrics(life, 'campaign', id)
+        : Promise.resolve(null),
+      hasLife
+        ? this.analysis.entities(life, 'adset', id)
+        : Promise.resolve(null),
     ]);
     const byId = new Map(settings.map((s) => [s.entityId, s]));
     const adsets = settings.filter(
@@ -909,7 +938,14 @@ export class PmPipelineService {
       0,
       'brief_metrics',
       { campaignId: id, date },
-      { last7: m7, prior7: p7, last14: m14, last30: m30 },
+      {
+        last7: m7,
+        prior7: p7,
+        last14: m14,
+        last30: m30,
+        sinceLaunch: mLife,
+        sinceLaunchRange: life,
+      },
     );
     const evAdsets = ev.record(
       'prep',
@@ -918,6 +954,15 @@ export class PmPipelineService {
       { campaignId: id, window: window(date, 7) },
       adsetRows.rows,
     );
+    const evAdsetsLife = adsetLife
+      ? ev.record(
+          'prep',
+          0,
+          'brief_adsets_lifetime',
+          { campaignId: id, window: life },
+          adsetLife.rows,
+        )
+      : null;
     const evAds = ev.record(
       'prep',
       0,
@@ -1002,6 +1047,7 @@ export class PmPipelineService {
         metricsRow('prior 7d', p7),
         metricsRow('last 14d', m14),
         metricsRow('last 30d', m30),
+        ...(mLife ? [metricsRow(`since launch ${life.from}…`, mLife)] : []),
       ]),
       '',
       `Funnel 7d (${evMetrics}): ${funnel(m7)}`,
@@ -1034,7 +1080,7 @@ export class PmPipelineService {
         ]),
       ),
       '',
-      `## Ad sets (7d metrics ${evAdsets})`,
+      `## Ad sets (7d metrics ${evAdsets}${evAdsetsLife ? `; "life" = since launch ${life.from}… ${evAdsetsLife}` : ''})`,
       table(
         [
           'Ad set',
@@ -1050,9 +1096,14 @@ export class PmPipelineService {
           '1P orders',
           '1P ROAS',
           'Meta ROAS',
+          'Life spend',
+          'Life 1P orders',
+          'Life 1P ROAS',
+          'Life Meta ROAS',
         ],
         adsets.map((s) => {
           const m = row7(s.entityId, adsetRows.rows);
+          const l = adsetLife ? row7(s.entityId, adsetLife.rows) : undefined;
           return [
             s.name,
             s.entityId,
@@ -1067,6 +1118,10 @@ export class PmPipelineService {
             m?.firstPartyOrders ?? 0,
             x2(m?.firstPartyRoas),
             x2(m?.metaRoas),
+            inr(l?.spend),
+            l?.firstPartyOrders ?? 0,
+            x2(l?.firstPartyRoas),
+            x2(l?.metaRoas),
           ];
         }),
       ),

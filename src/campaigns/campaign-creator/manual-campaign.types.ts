@@ -145,6 +145,8 @@ export interface ManualCampaignInternalMetadata {
   reviewNotes?: string;
   authoringMode?: 'campaign_copilot';
   copilotSessionId?: string;
+  /** Launch Planner: the approved plan already lists its exclusions, so add none. */
+  exactAudiences?: boolean;
 }
 
 /**

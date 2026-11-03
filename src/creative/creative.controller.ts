@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Controller, Get, Post, Patch, Param, Body, NotFoundException, BadRequestException, UnprocessableEntityException, Logger, Query, UseInterceptors, UploadedFile } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { InjectModel } from '@nestjs/mongoose';
@@ -377,7 +378,8 @@ export class CreativeController {
     }
 
     const ext = file.originalname.split('.').pop()?.toLowerCase() || (file.mimetype.startsWith('video') ? 'mp4' : 'png');
-    const key = `${tenantId}/uploads/${Date.now()}.${ext}`;
+    // Several files arrive in the same millisecond; the time alone would overwrite one with another.
+    const key = `${tenantId}/uploads/${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
 
     this.logger.log(`Uploading local file to S3: tenantId=${tenantId} originalname=${file.originalname} size=${file.size}`);
 

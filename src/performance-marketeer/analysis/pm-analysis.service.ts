@@ -468,9 +468,15 @@ export class PmAnalysisService {
   /**
    * Days whose `breakdown` spend (all products) is not within 5% of the summed
    * account totals in pm_meta_account_daily for the configured accounts.
-   * Both 0 counts as covered.
+   * With `campaignId`, against that campaign's ad rows instead (breakdowns
+   * are loaded per campaign, D-31). Both 0 counts as covered.
    */
-  async breakdownMissingDays(from: string, to: string, breakdown = 'region') {
+  async breakdownMissingDays(
+    from: string,
+    to: string,
+    breakdown = 'region',
+    campaignId?: string,
+  ) {
     const days = dayRange(from, to, 400);
     const accounts = this.env.meta.accountIds;
     const base = {
@@ -482,9 +488,10 @@ export class PmAnalysisService {
       this.sums<{ spend: number }>(m, $m({ ...base, ...extra }), '$date', {
         spend: { $sum: '$spend' },
       });
+    const camp = campaignId ? { campaignId } : {};
     const [acct, bd] = await Promise.all([
-      byDate(this.accountDaily),
-      byDate(this.breakdowns, { breakdown }),
+      byDate(campaignId ? this.metaDaily : this.accountDaily, camp),
+      byDate(this.breakdowns, { breakdown, ...camp }),
     ]);
     return days.filter((d) => {
       const a = acct.get(d)?.spend ?? 0;

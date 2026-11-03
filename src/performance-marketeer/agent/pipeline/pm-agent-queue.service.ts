@@ -467,6 +467,11 @@ export class PmAgentQueueService implements OnModuleInit, OnModuleDestroy {
     return p;
   }
 
+  /** AI analyst spend on one IST day, for anything sharing the daily cap. */
+  async spentOn(date: string) {
+    return (await this.spentUsd([date])).get(date) ?? 0;
+  }
+
   private async spentUsd(dates: string[]) {
     const rows = await this.runs.aggregate<{ _id: string; usd: number }>([
       { $match: { tenantId: this.env.tenantId, date: { $in: dates } } },
