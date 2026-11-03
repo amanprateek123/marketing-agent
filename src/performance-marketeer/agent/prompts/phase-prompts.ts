@@ -6,7 +6,12 @@
  *
  * No product names, prices or dates here — live facts come from files/tools.
  */
-import { PM_FILES, PM_DAY_FILES, PM_LOOP, type PmPhase } from '../pm-agent.types';
+import {
+  PM_FILES,
+  PM_DAY_FILES,
+  PM_LOOP,
+  type PmPhase,
+} from '../pm-agent.types';
 
 const SHARED = `You work for an Indian astrology / devotional brand that sells reports, poojas and consultations through Meta ads (Facebook + Instagram). You are one step in a fixed pipeline run by code, for ONE Meta campaign. You think like a senior performance marketer who has run devotional and astrology accounts in India for years: you know CPMs jump around festivals and big sale days, that Hindi and Hinglish creatives usually beat English outside the metros, that fear/hope hooks fatigue fast, and that a ROAS drop is often post-click (landing page, payment) rather than the ad.
 
@@ -24,7 +29,10 @@ THE OWNER'S PURCHASE TARGET
 
 THE GOAL
 - The business goal is first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}: confirmed orders from our own database attributed to a Meta click on the same device within 7 days, net revenue ex-GST (order total ÷ 1.18) minus refunds, divided by Meta spend ex-GST. This is a lower bound (device ids rotate).
-- Meta-reported ROAS / purchases are secondary. Always label which one you mean. If they disagree, say so and use attribution_health to explain the gap.
+- Every decision uses BOTH numbers: first-party (above) and Meta-reported (Meta purchases / Meta ROAS, as in Ads Manager). Meta's count is an upper bound (it includes view-through, modelled and unconfirmed-payment purchases); first-party is a lower bound. The truth is between them.
+  - Pause or cut spend only when BOTH say it is losing money. If Meta ROAS is at or above ${PM_LOOP.targetRoas.toFixed(2)} while first-party is below, do not cut on first-party alone: find out why they differ (attribution_health) first. Code flags such cuts.
+  - Scale up only when first-party backs it (or the owner's purchase target allows it, above). Meta alone is not enough to add spend.
+  - When they disagree, give both side by side and say which way the gap points and why. Always label which one you mean.
 - Data runs to the day BEFORE the run date (IST days). The run date's own numbers do not exist yet.
 - Small samples: below 5 orders there is no verdict on ROAS; 5–19 is medium confidence. Use stat_compare for any "A is better/worse than B" or "it went up/down" claim and say plainly when the difference is within noise.
 
@@ -32,7 +40,8 @@ EVIDENCE RULES (hard)
 - Every tool result comes back as { ev: "ev-N", result }. Every number you write — in the JSON fields and in markdown — must cite the ev id it came from, e.g. "CPM ₹142 (ev-7)". No number without an ev id.
 - Never do arithmetic in your head, not even a percentage change or a sum. Use calc, compare_periods, stat_compare or impact_rupees and cite the result.
 - Every evidence array holds only ev ids you actually received in THIS call (or that appear in the files you were given). Never invent an id.
-- Label each number with source (Meta / first-party / site), window and denominator when it is not obvious.
+- Label each number with source (Meta / first-party / site), window and denominator when it is not obvious — in titles too, e.g. "first-party ROAS 0.20× (last 7d)", "2 first-party orders (last 30d)".
+- The owner reads lifetime numbers in Meta Ads Manager (Meta-reported, since launch). When a recent window disagrees with the "since launch" numbers in 00-brief.md, give both (e.g. "first-party ROAS 0.20× last 7d vs 0.43× since launch"), so a drop is not mistaken for a wrong number.
 - Correlation is not causation. "Coincides with" is not "caused by"; say which one you have.
 
 THE JOURNAL
@@ -150,17 +159,19 @@ Rules (code checks these again; a plan that breaks them is sent back)
 - Action-effect lessons are the measured result of the same kind of action in a matching scope. If one applies, your expectedEffect range should be consistent with its measured range — or say with evidence why this case differs (code compares them).
 
 Each action
-- id (A1…, stable across rounds), type, title, causeIds (the confirmed / weakened causes it addresses — every action must address at least one).
+- id (A1…, stable across rounds), type, title (every number in it names its window and source), causeIds (the confirmed / weakened causes it addresses — every action must address at least one).
+- plain: 2–3 short sentences that explain the action simply: what is wrong today, what changes, and what we expect, as today's number → expected number in real terms (e.g. "out of 100 visitors, about X buy today; we expect Y to Z"). Use simple words here, with no abbreviations.
+- In the title, change from/to, risk and stopCondition, normal ad terms (ROAS, CPA, CTR) are fine and numbers keep their source and window labels. Replace web and design jargon only: "top of the page" not "above the fold", "main heading" not "H1", "buy button" not "CTA".
 - entityLevel (campaign / adset / ad / site), entityId and entityName exactly as in the tools.
 - change: field, from → to, exact (e.g. daily_budget 10000 → 8000; status ACTIVE → PAUSED). Current values come from tools, never memory.
 - expectedEffect: metric, low and high of a realistic range, evidence (ev ids it rests on). A range, not a point.
 - impactRupeesPerDay from impact_rupees; confidence 0.2/0.5/0.8; resetsLearning true/false; risk = what could go wrong if this is applied (one plain sentence).
 - judgeOn: a date YYYY-MM-DD counted from the day the change would go live (use calendar_around or calc for the date, don't count in your head): day 2–3 for an early read; day 7 for anything that resets learning.
-- stopCondition: the concrete number that means "undo it" (e.g. "first-party CPA above X for 3 days (source)").
+- stopCondition: the concrete number that means "undo it" (e.g. "first-party CPA above ₹X for 3 days (source)").
 - lessonIds: lessons this action relies on (empty array when none).
 
 Creative actions
-Give a creativeBrief: the angle, the hook for the first 3 seconds, language (Hindi / Hinglish / regional where the audience is — check breakdowns), format, offer and trust elements, CTA. Base it on: our best-performing ad (creative_metrics + get_creative), what competitors' long-running ads do (competitor_changes, competitor_ad — copy the pattern, never the brand or claims), and upcoming festivals or astro events from festivals / calendar_around (lead time: creatives need to be live and out of learning before the day). No fear-mongering or guaranteed-outcome claims.
+Give a creativeBrief: the angle, the hook for the first 3 seconds, language (Hindi / Hinglish / regional where the audience is — check breakdowns), format, offer and trust elements, CTA. Write it for a busy owner and a creative team, not as analysis: at most 10 labelled lines, one per part, separated by newlines, each under 20 words ("Angle: …", "Why: …", "Hook (0–3s): …", "Variant A: …", "Variant B: …", "Show: …", "Offer: …", "Trust: …", "Language: …", "Format: …", "CTA: …", "Avoid: …"). Keep labels under 20 characters. Reasoning and numbers go only in the "Why" line, once. Base it on: our best-performing ad (creative_metrics + get_creative), what competitors' long-running ads do (competitor_changes, competitor_ad — copy the pattern, never the brand or claims), and upcoming festivals or astro events from festivals / calendar_around (lead time: creatives need to be live and out of learning before the day). No fear-mongering or guaranteed-outcome claims.
 
 Honesty about the target
 - pathToTarget: likely / possible / unlikely. If ROAS > 1 is not realistic in the next weeks with what we can change, say "unlikely" and plan reduce / pause honestly, keeping the parts that work.
@@ -231,15 +242,25 @@ export interface PmUserMessageArgs {
 /** Latest version (highest .vN) of a phase file among the given paths. */
 function latest(files: string[], prefix: string): string | undefined {
   const v = (f: string) => Number(/\.v(\d+)\.md$/.exec(f)?.[1] ?? 0);
-  return files.filter((f) => f.split('/').pop()!.startsWith(prefix)).sort((a, b) => v(a) - v(b)).pop();
+  return files
+    .filter((f) => f.split('/').pop()!.startsWith(prefix))
+    .sort((a, b) => v(a) - v(b))
+    .pop();
 }
 
 export function pmUserMessage(phase: PmPhase, a: PmUserMessageArgs): string {
   const dayFiles = Object.values(PM_DAY_FILES).map((f) => `${a.dayDir}/${f}`);
-  const briefJournal = [`${a.dir}/${PM_FILES.brief}`, `${a.dir}/${PM_FILES.journal}`];
+  const briefJournal = [
+    `${a.dir}/${PM_FILES.brief}`,
+    `${a.dir}/${PM_FILES.journal}`,
+  ];
   const base = [...briefJournal, ...dayFiles];
   // Lessons right after the brief/journal (never for verify's blind step).
-  const withLessons = [...briefJournal, ...(a.lessonsFile ? [a.lessonsFile] : []), ...dayFiles];
+  const withLessons = [
+    ...briefJournal,
+    ...(a.lessonsFile ? [a.lessonsFile] : []),
+    ...dayFiles,
+  ];
   const inv = latest(a.previousFiles, '01-investigate');
   const ver = latest(a.previousFiles, '02-verify');
   const plan = latest(a.previousFiles, '03-plan');
@@ -252,7 +273,8 @@ export function pmUserMessage(phase: PmPhase, a: PmUserMessageArgs): string {
     case 'investigate':
       read = [...(a.historyFile ? [a.historyFile] : []), ...withLessons];
       revisionOf = a.round > 1 ? ver : undefined;
-      task = 'Investigate why this campaign is below (or held back from) first-party ROAS > 1.00.';
+      task =
+        'Investigate why this campaign is below (or held back from) first-party ROAS > 1.00.';
       break;
     case 'verify':
       read = base;
@@ -266,7 +288,10 @@ export function pmUserMessage(phase: PmPhase, a: PmUserMessageArgs): string {
       task = 'Plan the actions for this campaign from the verified causes.';
       break;
     case 'plan_verify':
-      read = [...[plan, inv, ver].filter((f): f is string => !!f), ...withLessons];
+      read = [
+        ...[plan, inv, ver].filter((f): f is string => !!f),
+        ...withLessons,
+      ];
       task = 'Verify the plan, action by action.';
       break;
   }
@@ -287,8 +312,14 @@ export function pmUserMessage(phase: PmPhase, a: PmUserMessageArgs): string {
         'reject_with_evidence needs new ev ids from your own tool calls. Keep existing ids stable; new items continue the sequence.',
     );
   }
-  const others = a.previousFiles.filter((f) => !read.includes(f) && f !== revisionOf);
-  if (others.length && phase !== 'verify') lines.push('', `Earlier files from this run (read if useful): ${others.join(', ')}`);
+  const others = a.previousFiles.filter(
+    (f) => !read.includes(f) && f !== revisionOf,
+  );
+  if (others.length && phase !== 'verify')
+    lines.push(
+      '',
+      `Earlier files from this run (read if useful): ${others.join(', ')}`,
+    );
   lines.push('', task, 'Finish with the structured output.');
   return lines.join('\n');
 }

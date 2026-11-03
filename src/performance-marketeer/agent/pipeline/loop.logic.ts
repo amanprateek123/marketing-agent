@@ -263,6 +263,8 @@ export interface CheckInput {
   settling: Set<string>;
   /** Campaign first-party ROAS (null = no verdict possible). */
   campaignRoas: number | null;
+  /** Entity id (campaign, ad sets, ads) → Meta-reported ROAS, same window as campaignRoas. */
+  metaRoas?: Map<string, number | null>;
   /** The owner's lifetime purchase target, when set (PmPipelineService.targetStatus). */
   purchaseTarget?: { targetPurchases: number; remaining: number } | null;
   /** Run date YYYY-MM-DD; judgeOn may not be before it. */
@@ -408,6 +410,19 @@ export function runChecks(i: CheckInput): CheckResult[] {
           target: a.id,
           message: `cuts spend (net −₹${Math.round(-spendDelta)}/day) while ${i.purchaseTarget!.remaining} of the owner's ${i.purchaseTarget!.targetPurchases} lifetime purchases are still to go`,
         });
+  // First-party is a lower bound: don't cut what Meta's own count says is paying back.
+  for (const a of i.actions) {
+    const meta = i.metaRoas?.get(a.entityId) ?? null;
+    const cut =
+      isPause(a) ||
+      (isBudget(a) && (num(a.change.to) ?? 0) < (num(a.change.from) ?? 0));
+    if (cut && meta !== null && meta >= PM_LOOP.targetRoas)
+      out.push({
+        check: 'cut_while_meta_roas_ok',
+        target: a.id,
+        message: `cuts ${a.entityLevel} ${a.entityId} while its Meta ROAS ${meta.toFixed(2)} ≥ ${PM_LOOP.targetRoas} — explain the Meta vs first-party gap first`,
+      });
+  }
   if (roasBelow && spendDelta > 0 && !chasing)
     for (const a of i.actions)
       if (isBudget(a) && (num(a.change.to) ?? 0) > (num(a.change.from) ?? 0))

@@ -518,7 +518,7 @@ export class CampaignCreatorService {
     campaignId: string,
     company: CompanyDocument,
     accountId: string,
-    options: { launchPaused?: boolean } = {},
+    options: { launchPaused?: boolean; strictPlan?: boolean } = {},
   ): Promise<CampaignDocument> {
     // ── Pre-flight: WHICH PRODUCT is this campaign selling? ──────────────────
     // Runs BEFORE the atomic claim below, deliberately. Everything here is a
@@ -548,6 +548,11 @@ export class CampaignCreatorService {
     }
     if (preflight.status !== 'pending_approval') {
       throw new Error(`Campaign ${campaignId} cannot be launched (status: ${preflight.status} — must be pending_approval)`);
+    }
+    // A Launch Planner draft (doc 11) only ever goes out paused, through its
+    // readiness check and checklist. Never live from the generic /approve.
+    if (String(preflight.runId ?? '').startsWith('launch-plan-') && !options.launchPaused) {
+      throw new Error(`Campaign ${campaignId} comes from a Launch Plan and can only be created paused, from that plan`);
     }
     const preflightBrief = preflight.briefId
       ? await this.campaignsService.findCreativeBrief(company.tenantId, preflight.briefId)
@@ -1085,7 +1090,8 @@ export class CampaignCreatorService {
         `Product "${product?.name}" has avgCPA ₹${histCPA} but breakeven CPA is only ₹${Math.round(breakevenCPA)} — the COST_CAP below authorises Meta to buy conversions at a loss of ₹${Math.round(histCPA - breakevenCPA)} each. Lower the bid or fix the product's price/margin before scaling.`,
       );
     }
-    if (typeof histCPA === 'number' && histCPA > 0) {
+    // strictPlan: the admin approved lowest-cost bidding with no past results behind it.
+    if (!options.strictPlan && typeof histCPA === 'number' && histCPA > 0) {
       const COLD_PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
       const CONVERSION_GOALS = new Set(['OFFSITE_CONVERSIONS', 'VALUE']);
       let bidCapped = 0;
@@ -1211,6 +1217,9 @@ export class CampaignCreatorService {
             this.logger.warn(
               `Ad set "${adSet.name}": dropped ${removed.length} invalid Meta interest ID(s) [${removed.join(', ')}] — remaining ${adSet.interests.length}. Interest-type ad sets with ZERO remaining interests become broad targeting.`,
             );
+          }
+          if (options.strictPlan && !adSet.interests.length) {
+            throw new Error(`Ad set "${adSet.name}": every interest in the approved plan is no longer valid on Meta. Make a new plan.`);
           }
         }
       }
@@ -1467,6 +1476,9 @@ export class CampaignCreatorService {
         company.meta.accessToken,
         product?.customConversionId,
       );
+    if (options.strictPlan && product?.customConversionId && !validatedCustomConversionId) {
+      throw new Error(`Could not confirm conversion ${product.customConversionId} on ${accountId}, so the campaign would not optimise on the approved event. Nothing was created.`);
+    }
 
     // Launch: campaign → ad sets → ads via Meta Graph API. From this point
     // onward, a timeout can hide a real Meta object, so never restore pending.

@@ -165,6 +165,8 @@ export const ActionSchema = z.object({
     'hold',
   ]),
   title: z.string(),
+  /** 2–3 simple sentences: what's wrong, what changes, what we expect. Optional so older plans still parse. */
+  plain: z.string().optional(),
   causeIds: z.array(z.string()),
   entityLevel: z.enum(['campaign', 'adset', 'ad', 'site']),
   entityId: z.string(),
@@ -236,7 +238,7 @@ export const PHASE_SCHEMAS = {
 export interface PmEvidence {
   id: string; // "ev-12"
   at: string; // ISO time
-  phase: PmPhase | 'prep' | 'curator';
+  phase: PmPhase | 'prep' | 'curator' | 'launch';
   round: number;
   tool: string;
   args: unknown;
@@ -254,8 +256,8 @@ export interface PmToolCtx {
   date: string; // run date YYYY-MM-DD (IST); data runs to the day before
   /** Absolute path of campaigns/<campaignId>/<date>/ */
   dir: string;
-  /** 'curator' = the weekly lessons curator (agent/lessons/curator.ts). */
-  phase: PmPhase | 'curator';
+  /** 'curator' = the weekly lessons curator (agent/lessons/curator.ts); 'launch' = the Launch Planner (doc 11). */
+  phase: PmPhase | 'curator' | 'launch';
   round: number;
   record(tool: string, args: unknown, result: unknown): Promise<string>;
 }

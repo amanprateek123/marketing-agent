@@ -19,6 +19,7 @@ import { PipelineBridgeModule } from './pipeline-bridge/pipeline-bridge.module';
 import { FoundryBridgeModule } from './foundry-bridge/foundry-bridge.module';
 import { CampaignCopilotModule } from './campaign-copilot/campaign-copilot.module';
 import { PerformanceMarketeerModule } from './performance-marketeer/performance-marketeer.module';
+import { PmLaunchModule } from './performance-marketeer/agent/launch/launch.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { PerformanceMarketeerModule } from './performance-marketeer/performance-
     FoundryBridgeModule,
     CampaignCopilotModule,
     PerformanceMarketeerModule,
+    PmLaunchModule,
   ],
 })
 export class AppModule {}

@@ -162,7 +162,7 @@ export class ManualCampaignService {
     // rather than at /approve with the operator watching a spinner.
     assertProductLaunchable(product, 'create');
 
-    const adSets = this.buildAdSetConfigs(dto, creativePackage, company);
+    const adSets = this.buildAdSetConfigs(dto, creativePackage, company, internal?.exactAudiences);
 
     const objective = dto.objective?.trim() || 'OUTCOME_SALES';
     const campaignConfig = {
@@ -491,6 +491,7 @@ export class ManualCampaignService {
     dto: CreateManualCampaignDto,
     creativePackage: CreativePackageDocument,
     company: CompanyDocument,
+    exactAudiences = false,
   ) {
     // Sourced from the resolved package, not dto.creative directly — this
     // is identical whether the package was just built from pasted URLs or
@@ -596,7 +597,7 @@ export class ManualCampaignService {
     const purchasersAudId = (company.products ?? [])
       .flatMap((p: any) => p.metaAudiences ?? [])
       .find((a: any) => /Purchasers?_/i.test(a?.name ?? ''))?.id;
-    if (purchasersAudId) {
+    if (purchasersAudId && !exactAudiences) {
       const PROSPECTING_TYPES = new Set(['advantage_plus', 'lookalike', 'broad', 'interest']);
       for (const adSet of adSets as any[]) {
         if (!PROSPECTING_TYPES.has(adSet.audienceType)) continue;

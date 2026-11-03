@@ -167,10 +167,23 @@ export interface PhaseResult<P extends PmPhase> {
 }
 
 /** Run one phase, or reuse its saved JSON from an earlier attempt of the same date/round. */
-export async function runPhase<P extends PmPhase>(
+export function runPhase<P extends PmPhase>(
   a: RunPhaseArgs<P>,
 ): Promise<PhaseResult<P>> {
-  const schema = PHASE_SCHEMAS[a.phase] as unknown as z.ZodType<PhaseOutput<P>>;
+  return runStructured({
+    ...a,
+    schema: PHASE_SCHEMAS[a.phase] as unknown as z.ZodType<PhaseOutput<P>>,
+  });
+}
+
+/** One query() with zod-validated structured output, for any schema. */
+export async function runStructured<T>(
+  a: Omit<RunPhaseArgs<PmPhase>, 'phase'> & {
+    phase: PmEvidence['phase'] & PmToolCtx['phase'];
+    schema: z.ZodType<T>;
+  },
+): Promise<{ output: T; costUsd: number; reused: boolean }> {
+  const { schema } = a;
   const saved = `${a.file}.json`;
   if (existsSync(saved)) {
     const r = schema.safeParse(JSON.parse(readFileSync(saved, 'utf8')));
@@ -194,7 +207,7 @@ export async function runPhase<P extends PmPhase>(
     ),
   });
   const timeoutMs = envNum('PM_AGENT_PHASE_TIMEOUT_MIN', 40) * 60_000;
-  const jsonSchema = z.toJSONSchema(PHASE_SCHEMAS[a.phase], {
+  const jsonSchema = z.toJSONSchema(schema, {
     target: 'draft-7',
   }) as Record<string, unknown>;
 
