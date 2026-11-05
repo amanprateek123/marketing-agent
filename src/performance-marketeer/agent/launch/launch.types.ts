@@ -10,8 +10,6 @@ export const EvidenceLabel = z.enum([
 ]);
 export type EvidenceLabel = z.infer<typeof EvidenceLabel>;
 
-const Score = z.number().int().min(1).max(5);
-
 const Finding = z.object({
   text: z.string(),
   label: EvidenceLabel,
@@ -31,22 +29,41 @@ export const LaunchReview = z.object({
       hook: z.string(),
       language: z.string(),
       angle: z.string(),
-      messaging: z.enum(['good', 'needs_changes']),
-      policyRisk: z.enum(['low', 'review', 'block']),
-      phoneReadability: z.enum(['pass', 'fail']),
-      landingMatch: z.enum(['pass', 'warning']),
-      finalStatus: z.enum(['ready', 'needs_fixes', 'excluded']),
-      /** AI opinion, 1 (weak) to 5 (strong). */
-      scores: z.object({
-        hook: Score,
-        clarity: Score,
-        offer: Score,
-        trust: Score,
+      /** A real person meeting this ad in their feed. */
+      firstLook: z.object({
+        viewer: z.string(),
+        noticesFirst: z.string(),
+        /** The thought in their own words. */
+        thinks: z.string(),
+        reaction: z.enum(['stops_and_taps', 'stops_only', 'scrolls_past']),
+        why: z.string(),
       }),
+      /** ready = run it; needs_fixes = worth fixing first; excluded = don't run. */
+      finalStatus: z.enum(['ready', 'needs_fixes', 'excluded']),
+      /** One or two sentences: the call and the reason. */
+      verdict: z.string(),
       strengths: z.array(z.string()),
-      weaknesses: z.array(z.string()),
+      /** Only what would change what viewers do. Empty is a good answer. */
+      changes: z.array(
+        z.object({
+          where: z.string(),
+          problem: z.string(),
+          whatViewerDoes: z.string(),
+          /** The exact new wording or placement. */
+          fix: z.string(),
+        }),
+      ),
+      /** Variations worth testing. These are not flaws. */
+      tests: z.array(z.string()),
+      /** Does the page keep the promise that earned the click? */
+      promise: z.object({
+        adPromises: z.string(),
+        pageDelivers: z.enum(['yes', 'no', 'unclear']),
+        note: z.string(),
+      }),
+      policyRisk: z.enum(['low', 'review', 'block']),
       resizeAdvice: z.array(z.string()),
-      /** Exact phrases on the image needing proof (numbers, ratings, certain outcomes). */
+      /** Only phrases Meta would reject or invented facts about the business. */
       claimsToVerify: z.array(z.string()),
     }),
   ),
@@ -66,7 +83,7 @@ export const LaunchReview = z.object({
     ),
     whatWorks: z.array(z.string()),
     issues: z.array(z.string()),
-    /** Exact phrases on the page needing proof before they appear in ads. */
+    /** Invented-sounding facts about the business on the page; never reused in ads. */
     claimsToVerify: z.array(z.string()),
   }),
 });
@@ -136,6 +153,16 @@ export const LaunchResearch = z.object({
   ),
   /** Patterns across competitors. */
   patterns: z.array(Finding),
+  /** What gets attention on Indian social feeds in this category, and how to use it. */
+  socialPlaybook: z.array(
+    z.object({
+      pattern: z.string(),
+      seenAt: z.string(),
+      howToUse: z.string(),
+      label: EvidenceLabel,
+      source: z.string(),
+    }),
+  ),
   /** What could not be researched (e.g. competitor source down). */
   gaps: z.array(z.string()),
 });
@@ -199,6 +226,24 @@ export const LaunchPlanOutput = z.object({
     ),
     creativeTakeaway: z.string(),
     competitorTakeaway: z.string(),
+    /** One per design: what to do with it, after the research. */
+    creativeCalls: z.array(
+      z.object({
+        designId: z.string(),
+        call: z.enum(['run', 'fix', 'replace']),
+        why: z.string(),
+        /** Required for replace: different topics to make instead. */
+        replacements: z.array(
+          z.object({
+            topic: z.string(),
+            hook: z.string(),
+            format: z.string(),
+            forWho: z.string(),
+            why: z.string(),
+          }),
+        ),
+      }),
+    ),
     todo: z.array(
       z.object({
         priority: z.enum(['must', 'should', 'nice']),

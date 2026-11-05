@@ -57,10 +57,7 @@ const REVIEW = {
       hook: '',
       language: '',
       angle: '',
-      messaging: 'good',
       policyRisk: 'low',
-      phoneReadability: 'pass',
-      landingMatch: 'pass',
       finalStatus: 'ready',
       resizeAdvice: [],
       claimsToVerify: [],
@@ -77,6 +74,9 @@ const REVIEW = {
 };
 const PLAN = {
   markdown: '',
+  analysis: {
+    creativeCalls: [{ designId: 'D1', call: 'run', why: '', replacements: [] }],
+  },
   targetVerdict: 'unknown',
   targetNote: '',
   campaignName: 'Launch',
@@ -405,6 +405,7 @@ describe('planning run', () => {
         competitors: [],
         gaps: [],
       },
+      '01-review-draft': REVIEW,
       '03-plan.v1': bad,
       '03-plan.v2': PLAN,
       '04-verify.v1': { markdown: '', issues: [], confirmedRight: [] },
@@ -421,7 +422,7 @@ describe('planning run', () => {
     await (service as unknown as { run(d: unknown): Promise<void> }).run(doc);
     expect(doc.status).toBe('done');
     expect(doc.plan).toEqual(PLAN);
-    expect(doc.costUsd).toBe(6);
+    expect(doc.costUsd).toBe(7);
     expect(calls.find((c) => c.name === '03-plan.v2')!.msg).toContain(
       'D1 has no ad copy',
     );

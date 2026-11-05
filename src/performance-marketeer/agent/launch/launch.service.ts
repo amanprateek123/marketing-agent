@@ -10,7 +10,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import axios from 'axios';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { Model } from 'mongoose';
 import { join } from 'path';
 // Namespace import on purpose: see common/media/image-resizer.service.ts.
@@ -39,6 +39,7 @@ import { PmToolDef } from '../tools/pm-tool';
 import {
   checklistMissing,
   checkPlan,
+  cleanReviewFiles,
   economics,
   KnownIds,
   ratioLabel,
@@ -46,10 +47,12 @@ import {
   ruleIsPurchase,
   ruleMatchesProduct,
   toManualDto,
+  unreviewedFiles,
 } from './launch.logic';
 import {
   LAUNCH_PLAN_PROMPT,
   LAUNCH_RESEARCH_PROMPT,
+  LAUNCH_REVIEW_EDIT_PROMPT,
   LAUNCH_REVIEW_PROMPT,
   LAUNCH_VERIFY_PROMPT,
 } from './launch.prompts';
@@ -327,12 +330,28 @@ export class PmLaunchService implements OnModuleInit, OnModuleDestroy {
         return r.output;
       };
 
-      const review = await phase(
-        '01-review',
+      await phase(
+        '01-review-draft',
         LaunchReview,
         LAUNCH_REVIEW_PROMPT,
         PM_MODELS.investigate,
       );
+      await set({ step: 'review edit' });
+      const review = cleanReviewFiles(
+        await phase(
+          '01-review',
+          LaunchReview,
+          LAUNCH_REVIEW_EDIT_PROMPT,
+          PM_MODELS.investigate,
+        ),
+      );
+      // The planner can't fix this, so stop before spending on it. Removing the
+      // saved answer lets Retry run the edit again.
+      const skipped = unreviewedFiles(review, creatives);
+      if (skipped.length) {
+        rmSync(join(dir, '01-review.md.json'), { force: true });
+        throw new Error(`The review skipped ${skipped.join(', ')}. Retry.`);
+      }
       await set({ review, step: 'research' });
       const research = await phase(
         '02-research',
