@@ -205,6 +205,16 @@ describe('meta.logic', () => {
       product: 'golu-devta-arzi',
       source: 'name',
     });
+    // An ad set promoting our app decides, even with a store link or a known page.
+    const store = 'http://play.google.com/store/apps/details?id=x';
+    expect(adProduct(store, undefined, 'x', '935762695083961')).toEqual({
+      product: 'app-chat',
+      source: 'app',
+    });
+    expect(adProduct(store, undefined, 'x', 'another-app')).toEqual({
+      product: 'other',
+      source: 'url',
+    });
     expect(adProduct('', undefined, 'App Chat')).toEqual({
       product: 'other',
       source: 'none',

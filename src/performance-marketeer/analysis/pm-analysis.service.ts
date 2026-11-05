@@ -303,6 +303,51 @@ export class PmAnalysisService {
     return toMetrics(m.get('_'), o.get('_'), v.get('_'));
   }
 
+  /** Meta's app steps for one campaign. Uses the omni_ names: they have no dots, so Mongo can sum them. */
+  async appFunnel(q: PmQuery, campaignId: string) {
+    const [r] = await this.metaDaily.aggregate<{
+      spend: number;
+      storeVisits: number;
+      installs: number;
+      appOpens: number;
+      purchases: number;
+      purchaseValue: number;
+    }>([
+      {
+        $match: {
+          tenantId: this.env.tenantId,
+          campaignId,
+          date: { $gte: q.from, $lte: q.to },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          spend: { $sum: '$spend' },
+          storeVisits: { $sum: '$actions.app_store_visit' },
+          installs: { $sum: '$actions.omni_app_install' },
+          appOpens: { $sum: '$actions.omni_activate_app' },
+          purchases: { $sum: '$metaPurchases' },
+          purchaseValue: { $sum: '$metaPurchaseValue' },
+        },
+      },
+    ]);
+    const m = r ?? {
+      spend: 0,
+      storeVisits: 0,
+      installs: 0,
+      appOpens: 0,
+      purchases: 0,
+      purchaseValue: 0,
+    };
+    return {
+      ...m,
+      costPerInstall: m.installs ? m.spend / m.installs : null,
+      costPerPurchase: m.purchases ? m.spend / m.purchases : null,
+      roas: m.spend ? m.purchaseValue / m.spend : null,
+    };
+  }
+
   // ---------- summary ----------
 
   async summary(q: PmQuery): Promise<PmSummaryResponse> {

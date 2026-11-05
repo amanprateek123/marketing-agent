@@ -30,6 +30,7 @@ export class PmMetaEntity {
   /** Product this entity sells (from its ads' landing URLs, else traffic, else name). */
   @Prop({ default: 'other' }) product: PmProductTag;
   @Prop({ default: 'none' }) productSource:
+    | 'app'
     | 'url'
     | 'traffic'
     | 'name'

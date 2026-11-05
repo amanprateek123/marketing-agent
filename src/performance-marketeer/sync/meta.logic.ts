@@ -2,7 +2,7 @@
  * Pure parsing rules for Meta Marketing API responses (tested in
  * meta.logic.spec.ts). No I/O.
  */
-import { PM_PRODUCTS } from '../pm.config';
+import { PM_APP_PRODUCTS, PM_PRODUCTS } from '../pm.config';
 
 type ActionList = { action_type: string; value: string }[] | undefined;
 
@@ -175,13 +175,18 @@ export function majorityProduct(
 /**
  * An ad's product. A readable landing URL decides on its own: a covered
  * product's page → that product, any other page → 'other'. OpenPanel traffic
- * and the name are fallbacks only when the ad has no usable URL.
+ * and the name are fallbacks only when the ad has no usable URL. An ad set
+ * promoting one of our app products beats all of them: those ads link to an
+ * app store, not a page we know.
  */
 export function adProduct(
   linkUrl: string,
   traffic: string | undefined,
   name: string,
-): { product: string; source: 'url' | 'traffic' | 'name' | 'none' } {
+  promotedAppId?: string,
+): { product: string; source: 'app' | 'url' | 'traffic' | 'name' | 'none' } {
+  const app = PM_APP_PRODUCTS.find((p) => p.metaAppId === promotedAppId);
+  if (app) return { product: app.id, source: 'app' };
   const fromUrl = productFromUrl(linkUrl);
   if (fromUrl) return { product: fromUrl, source: 'url' };
   if (isUrl(linkUrl)) return { product: 'other', source: 'url' };

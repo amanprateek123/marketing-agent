@@ -9,8 +9,9 @@ import { IntelligenceBriefDocument } from '../../pipeline/schemas/intelligence-b
  *   2. IntelligenceBrief.product — legacy agent campaigns predate productName.
  *   3. Caller-supplied detected product — e.g. historical Meta import using
  *      promoted_object/custom-conversion metadata.
- *   4. A unique, whole-phrase product-name match in the campaign name.
- *   5. The active product only when exactly one product is active.
+ *   4. The one product whose metaAppId is the app the campaign's ad sets promote.
+ *   5. A unique, whole-phrase product-name match in the campaign name.
+ *   6. The active product only when exactly one product is active.
  *
  * Done once per sync pass across all campaigns instead of once per campaign,
  * so a large-account sync doesn't turn into an N+1 brief lookup.
@@ -108,12 +109,13 @@ export async function buildProductResolver(
 
   const existingDocs = await campaignModel
     .find({ tenantId, metaCampaignId: { $in: metaCampaignIds } })
-    .select('metaCampaignId briefId productName name')
+    .select('metaCampaignId briefId productName name metaAdSets.promotedObject')
     .lean()
     .exec();
   const briefIdByCampaign = new Map<string, string>();
   const explicitProductNameByCampaign = new Map<string, string>();
   const campaignNameByCampaign = new Map<string, string>();
+  const appProductByCampaign = new Map<string, any>();
   for (const d of existingDocs) {
     const briefId = (d as any).briefId;
     const metaCampaignId = (d as any).metaCampaignId;
@@ -125,6 +127,16 @@ export async function buildProductResolver(
     const campaignName = String((d as any).name ?? '').trim();
     if (campaignName && metaCampaignId)
       campaignNameByCampaign.set(metaCampaignId, campaignName);
+    const appIds = new Set(
+      ((d as any).metaAdSets ?? [])
+        .map((s: any) => String(s?.promotedObject?.application_id ?? ''))
+        .filter(Boolean),
+    );
+    const appProducts = productList.filter((p: any) =>
+      appIds.has(String(p?.metaAppId ?? '')),
+    );
+    if (metaCampaignId && appProducts.length === 1)
+      appProductByCampaign.set(metaCampaignId, appProducts[0]);
   }
 
   const briefIds = [...new Set(briefIdByCampaign.values())];
@@ -158,11 +170,13 @@ export async function buildProductResolver(
     // A name that positively matches multiple configured products is not the
     // same thing as a name with no product evidence. Do not let the sole-active
     // fallback silently pick one of those conflicting matches.
-    if (campaignNameProduct === ambiguousNameMatch) return undefined;
+    const appProduct = appProductByCampaign.get(metaCampaignId);
+    if (campaignNameProduct === ambiguousNameMatch) return appProduct;
     return (
       explicitProduct ??
       briefProduct ??
       detectedProduct ??
+      appProduct ??
       campaignNameProduct ??
       soleActiveProduct
     );

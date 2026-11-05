@@ -183,6 +183,32 @@ export const PM_PRODUCTS: PmProduct[] = [
 export const findPmProduct = (id: string) =>
   PM_PRODUCTS.find((p) => p.id === id);
 
+/**
+ * Products sold inside the mobile app. Kept apart from PM_PRODUCTS because they
+ * have no web funnel or orders we can tie to a campaign: Meta is the only
+ * per-campaign source, so these stay out of the first-party views.
+ */
+export interface PmAppProduct {
+  id: string;
+  label: string;
+  /** The app an ad set promotes (promoted_object.application_id). */
+  metaAppId: string;
+  /** What the campaign sells, shown to the analyst. */
+  offer: string;
+}
+
+export const PM_APP_PRODUCTS: PmAppProduct[] = [
+  {
+    id: 'app-chat',
+    label: 'App Chat',
+    metaAppId: '935762695083961',
+    offer: '₹50 for 5 chats',
+  },
+];
+
+export const findPmAppProduct = (id: string | undefined) =>
+  PM_APP_PRODUCTS.find((p) => p.id === id);
+
 export const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 

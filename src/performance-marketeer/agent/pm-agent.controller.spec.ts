@@ -193,14 +193,29 @@ describe('PmAgentController', () => {
     targets.findOneAndUpdate.mockReturnValue(
       q({ campaignId: '120', targetPurchases: 500, updatedBy: 'u1' }),
     );
-    const r = await c.setTarget(T, '120', { targetPurchases: 500 }, {
+    const r = await c.setTarget(T, '120', { maxDailyBudget: 500 }, {
       user: { sub: 'u1' },
     } as never);
     expect(r.targetPurchases).toBe(500);
     const [filter, update, opts] = targets.findOneAndUpdate.mock.calls[0];
     expect(filter).toEqual({ tenantId: T, campaignId: '120' });
-    expect(update.$set).toEqual({ targetPurchases: 500, updatedBy: 'u1' });
-    expect(update.$push.history.$each[0]).toMatchObject({ targetPurchases: 500, by: 'u1' });
+    // A budget change alone doesn't restart the count.
+    expect(update.$set).toEqual({ maxDailyBudget: 500, updatedBy: 'u1' });
+
+    // A target starts the period today, and needs a number of days.
+    await c.setTarget(T, '120', { targetRoas: 2, targetPurchases: 60, targetDays: 3 }, {
+      user: { sub: 'u1' },
+    } as never);
+    const set = targets.findOneAndUpdate.mock.calls.at(-1)[1].$set;
+    expect(set).toMatchObject({ targetRoas: 2, targetPurchases: 60, targetDays: 3 });
+    expect(set.targetStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    await expect(
+      c.setTarget(T, '120', { targetRoas: 2 }, { user: { sub: 'u1' } } as never),
+    ).rejects.toThrow('number of days');
+    expect(
+      validateSync(plainToInstance(PmCampaignTargetDto, { targetDays: 91 })).length,
+    ).toBe(1);
+    expect(update.$push.history.$each[0]).toMatchObject({ maxDailyBudget: 500, by: 'u1' });
     expect(opts).toMatchObject({ upsert: true });
     await expect(
       c.setTarget('other', '120', { targetPurchases: 1 }, {} as never),
