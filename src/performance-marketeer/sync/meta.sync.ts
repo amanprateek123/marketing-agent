@@ -345,6 +345,9 @@ export class MetaSync {
 
     // Ad product: a readable landing URL decides; traffic/name only without one.
     const traffic = await this.trafficProducts(ads.map((a) => a.id));
+    const appOfAdset = new Map(
+      adsets.map((s) => [s.id, s.promoted_object?.application_id]),
+    );
     const adProductOf = new Map(
       ads.map((a) => [
         a.id,
@@ -352,6 +355,7 @@ export class MetaSync {
           landingUrlOf(a.creative),
           traffic.get(a.id),
           `${campaignName.get(a.campaign_id) ?? ''} ${a.name ?? ''}`,
+          appOfAdset.get(a.adset_id),
         ),
       ]),
     );
@@ -499,9 +503,22 @@ export class MetaSync {
     const ads = await this.entities
       .find(
         { tenantId, level: 'ad' },
-        { entityId: 1, name: 1, campaignId: 1, 'creative.linkUrl': 1 },
+        { entityId: 1, name: 1, campaignId: 1, adsetId: 1, 'creative.linkUrl': 1 },
       )
       .lean();
+    const adsetRows = await this.entities
+      .find(
+        { tenantId, level: 'adset' },
+        { entityId: 1, 'promotedObject.application_id': 1 },
+      )
+      .lean();
+    const appOfAdset = new Map(
+      adsetRows.map((s) => [
+        s.entityId,
+        (s.promotedObject as { application_id?: string } | null)
+          ?.application_id,
+      ]),
+    );
     const campaigns = await this.entities
       .find({ tenantId, level: 'campaign' }, { entityId: 1, name: 1 })
       .lean();
@@ -512,6 +529,7 @@ export class MetaSync {
         a.creative?.linkUrl ?? '',
         traffic.get(a.entityId),
         `${campaignName.get(a.campaignId) ?? ''} ${a.name ?? ''}`,
+        appOfAdset.get(a.adsetId),
       );
       return {
         updateOne: {

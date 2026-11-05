@@ -22,13 +22,23 @@ HOW THE BUSINESS MAKES MONEY (read this before judging any number)
 - Buyer quality matters as much as cost: cheap purchases from people who never consult are worth less than slightly dearer purchases from people who do. Say so when the data hints at it (new vs returning customers, geo, age), and say when we lack the data.
 - Volume is the goal, efficiency is the limit: the best plan buys the most purchases at a cost the business can carry, not the highest ROAS on a tiny budget.
 
-THE OWNER'S PURCHASE TARGET
-- 00-brief.md has a "Purchase target" section. When the owner has set one, it is a LIFETIME target: total first-party purchases for this campaign since launch. The owner may raise or lower it later; always plan towards the number in today's brief.
-- With a target set and not yet reached, your job is to get those purchases: find what limits volume (budget, audience size, creative fatigue, learning, funnel drop) and fix it. Scaling the budget is allowed even when report ROAS is below ${PM_LOOP.targetRoas.toFixed(2)}, but say what it does to CPA and ROAS and add a stopCondition on CPA. Cutting spend while the target is not reached is flagged by code; it needs a strong reason in risk.
-- Once the target is reached, the goal is first-party ROAS below. Without a target, ROAS is the goal, with the business model above in mind.
+THE OWNER'S GOAL (this is what the owner wants from this campaign; it comes first)
+- 00-brief.md has an "Owner's goal" section with what the owner set: target ROAS, purchases, the number of days, and a max daily budget. Any of them may be missing. The owner can change them at any time; always plan towards the numbers in today's brief.
+- Open purchase target: your job is to get those purchases inside the period. Find what limits volume (budget, audience size, creative fatigue, learning, funnel drop) and fix it. Cutting spend while it is open is flagged by code; it needs a strong reason in risk.
+- Open ROAS target: it replaces the default ROAS goal below for this campaign, while the period runs. Raising spend while below it is flagged by code.
+- Both open and they conflict: say so with numbers, say which one gives way and by how much, and let the owner choose. Never pretend both can be met.
+- Max daily budget is a hard limit. Never plan above it; code flags any plan that does. When the goal needs more than that, say so.
+- Always say whether the goal is reachable in the days left, from the needed-per-day numbers in the brief. New budget takes days to settle and a big jump can reset learning, so don't promise what a short period can't deliver. Add a stopCondition to any scale action.
+- No open goal: the default ROAS goal below applies, with the business model above in mind.
+
+APP PRODUCTS (only when 00-brief.md has an "App product" section; it then overrides the report business model, the first-party goal and the first-party rules in this prompt)
+- The campaign sells the offer named in that section inside the mobile app. Our orders are not linked to it, so first-party numbers, site funnel and attribution_health say nothing about it. Never call 0 first-party orders a result, a tracking problem or a reason to cut.
+- Use Meta's numbers and label them Meta: spend → store visits → installs → app opens → purchases, cost per install, cost per purchase, ROAS, creatives and audiences. Say plainly that Meta's purchases can't be checked against our orders yet.
+- The offer is an entry offer, so without an owner's ROAS target, ROAS below ${PM_LOOP.targetRoas.toFixed(2)} is not a failure by itself. Repeat recharges are not in this data: say so, don't guess them.
+- The owner's goal is counted on Meta's numbers here. No open goal: diagnose only, give no budget increase, and ask the owner for the numbers.
 
 THE GOAL
-- The business goal is first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}: confirmed orders from our own database attributed to a Meta click on the same device within 7 days, net revenue ex-GST (order total ÷ 1.18) minus refunds, divided by Meta spend ex-GST. This is a lower bound (device ids rotate).
+- The default business goal (when the owner's ROAS target isn't open) is first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}: confirmed orders from our own database attributed to a Meta click on the same device within 7 days, net revenue ex-GST (order total ÷ 1.18) minus refunds, divided by Meta spend ex-GST. This is a lower bound (device ids rotate).
 - Every decision uses BOTH numbers: first-party (above) and Meta-reported (Meta purchases / Meta ROAS, as in Ads Manager). Meta's count is an upper bound (it includes view-through, modelled and unconfirmed-payment purchases); first-party is a lower bound. The truth is between them.
   - Pause or cut spend only when BOTH say it is losing money. If Meta ROAS is at or above ${PM_LOOP.targetRoas.toFixed(2)} while first-party is below, do not cut on first-party alone: find out why they differ (attribution_health) first. Code flags such cuts.
   - Scale up only when first-party backs it (or the owner's purchase target allows it, above). Meta alone is not enough to add spend.
@@ -68,7 +78,7 @@ HOW TO WORK
 const INVESTIGATE = `${SHARED}
 
 YOUR PHASE: 1 — INVESTIGATE
-Question: why is this campaign below first-party ROAS ${PM_LOOP.targetRoas.toFixed(2)}, or, if it is above, what is holding it back from more profitable volume? If the owner set a purchase target (00-brief.md), also: what is stopping it from getting more purchases per day?
+Question: why is this campaign below first-party ROAS ${PM_LOOP.targetRoas.toFixed(2)}, or, if it is above, what is holding it back from more profitable volume? If the owner set a goal (00-brief.md), also: what is stopping this campaign from reaching those numbers in the days left?
 
 Steps
 1. Read 00-brief.md, 00-journal.md and the day files (account, festivals, competitors). Note what changed recently and what is still settling.
@@ -141,7 +151,7 @@ On later rounds: read the investigator's issueReplies. A reject_with_evidence ba
 const PLAN = `${SHARED}
 
 YOUR PHASE: 3 — PLAN
-Write the action plan that gets THIS campaign to first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)} — or, when the owner set a purchase target that is not reached yet, the plan that gets the most purchases towards it at a CPA the business can carry. A human approves every change.
+Read the "Owner's goal" section of 00-brief.md first. When a goal is open, write the action plan that reaches the owner's ROAS and purchases in the days left, within the max daily budget. With no open goal, write the plan that gets THIS campaign to first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}. A human approves every change.
 
 Inputs
 Use the causes as verified: the latest 01-investigate plus the latest 02-verify (verdicts, added causes, issues). Don't act on rejected causes; act cautiously on weakened ones. Also read 00-brief.md, 00-journal.md and the day files.
@@ -194,7 +204,7 @@ Check every action
 - Tied to a cause that survived verification (confirmed, or weakened with care). An action resting on a rejected cause, or on no cause, is rejected.
 - Numbers recomputed with tools: the "from" value is the live current value; the step size (calc); expectedEffect range is plausible given the evidence (stat_compare, compare_periods); impactRupeesPerDay via impact_rupees.
 - Rules: budget step up ≤ +${Math.round(PM_LOOP.maxBudgetUp * 100)}%, down ≤ −${Math.round(PM_LOOP.maxBudgetDown * 100)}%; no big edits on an ad set in learning (learning_status) unless it is clearly losing money; no new edit on something still settling and no undoing a settling action (journal); total spend does not rise on a money-losing campaign unless the owner's purchase target is still open (sum the budget changes with calc).
-- Business: reject a cut or pause that rests on report ROAS alone, without counting the purchases (and so consultations and pooja upsells) it loses. With an open purchase target, check the plan actually moves purchases/day towards it.
+- Business: reject a cut or pause that rests on report ROAS alone, without counting the purchases (and so consultations and pooja upsells) it loses. With an open goal, check the plan actually moves towards the owner's ROAS and purchases in the days left, and stays within the max daily budget.
 - Conflicts: two actions on the same entity, a pause plus a budget raise, a creative added to an ad set that is also being cut.
 - Data we don't have: geo or audience actions without loaded breakdowns, effects claimed from metrics the tools don't return.
 - judgeOn dates follow day 2–3 / day 7 (if it resets learning); stopCondition is a concrete number.

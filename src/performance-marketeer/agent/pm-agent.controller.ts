@@ -18,13 +18,13 @@ import {
   IsArray,
   IsBoolean,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Matches,
   Max,
   MaxLength,
   Min,
-  ValidateIf,
 } from 'class-validator';
 import { Model } from 'mongoose';
 import type { AuthedRequest } from '../../auth/roles';
@@ -33,6 +33,7 @@ import { pmEnv, PmEnv, PM_HISTORY_START } from '../pm.config';
 import { dayRange } from '../pm.logic';
 import { PmAgentRun } from '../schemas/pm-agent-run.schema';
 import { PmCampaignTarget } from '../schemas/pm-campaign-target.schema';
+import { istDayFromToday } from '../pm.logic';
 import { PmMetaEntity } from '../schemas/pm-meta.schema';
 
 const ID_RE = /^[0-9A-Za-z_-]{1,64}$/;
@@ -67,13 +68,33 @@ export class PmAgentCancelDto {
   date: string;
 }
 
+/** Omitted = leave as it is; null = remove. */
 export class PmCampaignTargetDto {
-  /** Lifetime first-party purchases; null removes the target. */
-  @ValidateIf((o: PmCampaignTargetDto) => o.targetPurchases !== null)
+  @IsOptional()
   @IsInt()
   @Min(1)
   @Max(1_000_000)
-  targetPurchases: number | null;
+  targetPurchases?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  targetRoas?: number | null;
+
+  /** Period in days, starting today (IST). Saving it starts a new count. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  targetDays?: number | null;
+
+  /** Rupees per day. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100_000_000)
+  maxDailyBudget?: number | null;
 }
 
 type Q = Record<string, unknown>;
@@ -315,23 +336,34 @@ export class PmAgentController {
     };
   }
 
-  /** Lifetime purchase targets that are set. */
+  /** Campaign goals that are set. */
   @Get('targets')
   async targetList(@Param('tenantId') t: string) {
     this.assertTenant(t);
     const docs = await this.targets
-      .find({ tenantId: t, targetPurchases: { $ne: null } })
+      .find({
+        tenantId: t,
+        $or: [
+          { targetPurchases: { $ne: null } },
+          { targetRoas: { $ne: null } },
+          { maxDailyBudget: { $ne: null } },
+        ],
+      })
       .lean()
       .exec();
     return docs.map((d) => ({
       campaignId: d.campaignId,
       targetPurchases: d.targetPurchases,
+      targetRoas: d.targetRoas ?? null,
+      targetDays: d.targetDays ?? null,
+      targetStart: d.targetStart ?? null,
+      maxDailyBudget: d.maxDailyBudget ?? null,
       updatedBy: d.updatedBy,
       updatedAt: (d as { updatedAt?: Date }).updatedAt ?? null,
     }));
   }
 
-  /** Set, change or (null) remove a campaign's lifetime purchase target. Any logged-in user. */
+  /** Set, change or (null) remove parts of a campaign's goal. Any logged-in user. */
   @Put('targets/:campaignId')
   async setTarget(
     @Param('tenantId') t: string,
@@ -341,14 +373,25 @@ export class PmAgentController {
   ) {
     this.assertTenant(t);
     const by = req.user?.sub ?? '';
+    if ((body.targetPurchases != null || body.targetRoas != null) && !body.targetDays)
+      throw new BadRequestException('A ROAS or purchase target needs a number of days');
+    const change = Object.fromEntries(
+      (['targetPurchases', 'targetRoas', 'targetDays', 'maxDailyBudget'] as const)
+        .filter((k) => body[k] !== undefined)
+        .map((k) => [k, body[k]]),
+    );
+    const start =
+      body.targetDays === undefined
+        ? {}
+        : { targetStart: body.targetDays === null ? null : istDayFromToday() };
     const doc = await this.targets
       .findOneAndUpdate(
         { tenantId: t, campaignId: campaign(c) },
         {
-          $set: { targetPurchases: body.targetPurchases, updatedBy: by },
+          $set: { ...change, ...start, updatedBy: by },
           $push: {
             history: {
-              $each: [{ targetPurchases: body.targetPurchases, by, at: new Date() }],
+              $each: [{ ...change, by, at: new Date() }],
               $slice: -50,
             },
           },
@@ -360,6 +403,10 @@ export class PmAgentController {
     return {
       campaignId: doc.campaignId,
       targetPurchases: doc.targetPurchases,
+      targetRoas: doc.targetRoas ?? null,
+      targetDays: doc.targetDays ?? null,
+      targetStart: doc.targetStart ?? null,
+      maxDailyBudget: doc.maxDailyBudget ?? null,
       updatedBy: doc.updatedBy,
       updatedAt: (doc as { updatedAt?: Date }).updatedAt ?? null,
     };

@@ -10,6 +10,7 @@ import type {
 import {
   accuracyCap,
   decisionShape,
+  goalProgress,
   finalActions,
   hitRateFactor,
   lessonsUsed,
@@ -390,6 +391,98 @@ describe('finalActions + checks', () => {
     // first-party below target but Meta says it pays back: cut is flagged
     expect(run(8000, undefined, 1.2)).toEqual(['cut_while_meta_roas_ok']);
     expect(run(8000, undefined, 0.4)).toEqual([]); // both bad: cut is fine
+  });
+
+  it('app products need an open target to raise spend, and first-party ROAS does not apply', () => {
+    const run = (to: number, purchaseTarget: { targetPurchases: number; remaining: number } | null) =>
+      runChecks({
+        evidence: [
+          { id: 'ev-1', tool: 'campaign_overview' },
+          { id: 'ev-9', tool: 'impact_rupees' },
+        ],
+        causes: [cause('C1', 1, 0.5)],
+        actions: finalActions(
+          plan([
+            action('A1', { change: { field: 'daily_budget', from: 10000, to } }),
+          ]),
+          pv({}),
+          [],
+        ),
+        entityIds: new Set(['as1']),
+        settling: new Set(),
+        campaignRoas: null,
+        appProduct: true,
+        purchaseTarget,
+        date: '2026-10-27',
+      }).map((r) => r.check);
+    const open = { targetPurchases: 60, remaining: 40 };
+    expect(run(20000, open)).toEqual([]);
+    expect(run(20000, null)).toEqual(['app_raise_without_target']);
+    expect(run(8000, open)).toEqual(['cut_below_purchase_target']);
+  });
+
+  it('works out what a goal still needs', () => {
+    const g = { targetPurchases: 60, targetRoas: 2, targetDays: 3, start: '2026-11-05' };
+    expect(goalProgress(g, '2026-11-05', 0, 100)).toMatchObject({
+      end: '2026-11-07',
+      daysLeft: 3,
+      remaining: 60,
+      purchasesPerDayNeeded: 20,
+      spendPerDayNeeded: 2000,
+    });
+    expect(goalProgress(g, '2026-11-07', 40, null)).toMatchObject({
+      daysLeft: 1,
+      remaining: 20,
+      spendPerDayNeeded: null,
+    });
+    expect(goalProgress(g, '2026-11-08', 40, 100)).toMatchObject({
+      daysLeft: 0,
+      remaining: 0,
+      purchasesPerDayNeeded: null,
+    });
+    // ROAS-only goal: nothing to work out for purchases.
+    expect(
+      goalProgress({ ...g, targetPurchases: null }, '2026-11-05', 9, 100),
+    ).toMatchObject({ daysLeft: 3, remaining: 0, purchasesPerDayNeeded: null });
+  });
+
+  it('holds plans to the owner ROAS target and max budget', () => {
+    const run = (extra: Partial<Parameters<typeof runChecks>[0]>, to = 20000) =>
+      runChecks({
+        evidence: [
+          { id: 'ev-1', tool: 'campaign_overview' },
+          { id: 'ev-9', tool: 'impact_rupees' },
+        ],
+        causes: [cause('C1', 1, 0.5)],
+        actions: finalActions(
+          plan([
+            action('A1', { change: { field: 'daily_budget', from: 10000, to } }),
+          ]),
+          pv({}),
+          [],
+        ),
+        entityIds: new Set(['as1']),
+        settling: new Set(),
+        campaignRoas: 1.5,
+        date: '2026-10-27',
+        ...extra,
+      }).map((r) => r.check);
+    expect(run({})).toEqual([]); // 1.5 beats the default
+    expect(run({ targetRoas: 2 })).toEqual(['no_spend_increase_below_target']);
+    expect(
+      run({
+        targetRoas: 2,
+        purchaseTarget: { targetPurchases: 60, remaining: 40 },
+      }),
+    ).toEqual(['no_spend_increase_below_target']); // the owner's ROAS still holds
+    expect(run({ maxDailyBudget: 15000, currentDailyBudget: 10000 })).toEqual([
+      'over_max_budget',
+    ]);
+    expect(run({ maxDailyBudget: 20000, currentDailyBudget: 10000 })).toEqual([]);
+    // Ad-set budgets: the campaign total counts, not this ad set alone.
+    expect(run({ maxDailyBudget: 25000, currentDailyBudget: 20000 })).toEqual([
+      'over_max_budget',
+    ]);
   });
 });
 

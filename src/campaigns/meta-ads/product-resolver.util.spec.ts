@@ -1,4 +1,9 @@
 import { buildProductResolver } from './product-resolver.util';
+import {
+  extractActionValue,
+  extractConversions,
+  resolveProductConversionTypes,
+} from './conversion-extractor.util';
 
 function queryReturning<T>(value: T) {
   const query: any = {};
@@ -61,6 +66,36 @@ describe('buildProductResolver', () => {
         $in: ['explicit', 'brief', 'detected', 'fallback'],
       },
     });
+  });
+
+  it('links a campaign to the one product whose app its ad sets promote', async () => {
+    const chat = { name: '91Astrology App - Chat', metaAppId: 'app-1' };
+    const products = [{ name: 'Other', active: true }, { name: 'B', active: true }, chat];
+    const campaignModel = {
+      find: jest.fn(() =>
+        queryReturning([
+          {
+            metaCampaignId: 'app',
+            name: 'App Chat Promotion',
+            metaAdSets: [{ promotedObject: { application_id: 'app-1' } }],
+          },
+          {
+            metaCampaignId: 'unknown-app',
+            name: 'App Chat Promotion',
+            metaAdSets: [{ promotedObject: { application_id: 'app-2' } }],
+          },
+        ]),
+      ),
+    };
+    const resolve = await buildProductResolver(
+      campaignModel as any,
+      { find: jest.fn(() => queryReturning([])) } as any,
+      't',
+      ['app', 'unknown-app'],
+      products,
+    );
+    expect(resolve('app')).toBe(chat);
+    expect(resolve('unknown-app')).toBeUndefined();
   });
 
   it('uses a unique whole-phrase campaign-name match with multiple active products', async () => {
@@ -172,5 +207,27 @@ describe('buildProductResolver', () => {
     );
 
     expect(resolve('ambiguous')).toBeUndefined();
+  });
+});
+
+describe('in-app purchases on a sales campaign', () => {
+  // Real action names from an App Chat campaign with the OUTCOME_SALES objective.
+  const counted = (rows: { action_type: string; value: string }[]) => {
+    const { conversionTypes, source } = resolveProductConversionTypes(
+      { name: 'App', metaAppId: 'app-1', conversionEvent: 'Purchase' } as any,
+      new Set(),
+      { useAppEvents: false },
+    );
+    return { source, total: extractConversions(rows, conversionTypes), value: extractActionValue(rows, conversionTypes) };
+  };
+  it('reads them once, not once per Meta name', () => {
+    expect(
+      counted([
+        { action_type: 'omni_purchase', value: '94' },
+        { action_type: 'onsite_app_purchase', value: '94' },
+        { action_type: 'purchase', value: '94' },
+        { action_type: 'app_custom_event.fb_mobile_purchase', value: '94' },
+      ]),
+    ).toEqual({ source: 'standard_event', total: 94, value: 94 });
   });
 });

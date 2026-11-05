@@ -17,7 +17,13 @@ import {
   PmQuery,
 } from '../../analysis/pm-analysis.types';
 import { addDays } from '../../analysis/pm-stats';
-import { pmEnv, PmEnv, PM_HISTORY_START } from '../../pm.config';
+import {
+  findPmAppProduct,
+  PmAppProduct,
+  pmEnv,
+  PmEnv,
+  PM_HISTORY_START,
+} from '../../pm.config';
 import { istDay } from '../../pm.logic';
 import { PmCampaignTarget } from '../../schemas/pm-campaign-target.schema';
 import { PmAgentRun } from '../../schemas/pm-agent-run.schema';
@@ -57,6 +63,7 @@ import {
   mergeCauses,
   mergeContradictions,
   runChecks,
+  goalProgress,
   BUDGET_STEPS,
   shouldSendBackInvestigation,
   shouldSendBackPlan,
@@ -577,6 +584,9 @@ export class PmPipelineService {
         'campaign',
         campaignId,
       );
+      const app = findPmAppProduct(camp.product);
+      const goal = await this.goal(date, camp);
+      const goalOpen = goal?.daysLeft ? goal : null;
       const lessonEffects = new Map(
         (
           await Promise.all(
@@ -602,14 +612,29 @@ export class PmPipelineService {
         actions,
         entityIds: new Set(ents.keys()),
         settling: await this.settlingEntities(campaignId, journal.entries),
-        campaignRoas: m7.firstPartyRoas,
+        // App products have no first-party orders: 0 would read as "no return".
+        campaignRoas: app
+          ? goalOpen?.targetRoas != null
+            ? m7.metaRoas
+            : null
+          : m7.firstPartyRoas,
+        appProduct: Boolean(app),
+        targetRoas: goalOpen?.targetRoas ?? null,
+        maxDailyBudget: goal?.maxDailyBudget ?? null,
+        currentDailyBudget: await this.currentDailyBudget(camp),
         metaRoas: new Map([
           [campaignId, m7.metaRoas],
           ...[...adset7.rows, ...ad7.rows].map(
             (r) => [r.id, r.metrics.metaRoas] as const,
           ),
         ]),
-        purchaseTarget: await this.targetStatus(date, camp),
+        purchaseTarget:
+          goalOpen?.targetPurchases != null
+            ? {
+                targetPurchases: goalOpen.targetPurchases,
+                remaining: goalOpen.remaining,
+              }
+            : null,
         date,
         ownerRules,
         situation,
@@ -818,40 +843,195 @@ export class PmPipelineService {
   // ---------------------------------------------------------------- target
 
   /** The owner's lifetime purchase target and progress (first-party orders since launch), or null. */
-  private async targetStatus(date: string, camp: PmMetaEntity) {
+  /** The owner's goal and where the campaign stands. App products count on Meta's numbers. */
+  private async goal(date: string, camp: PmMetaEntity) {
     const doc = await this.targets
       .findOne({ tenantId: this.env.tenantId, campaignId: camp.entityId })
       .lean();
-    if (!doc?.targetPurchases) return null;
-    const launched = camp.createdTime
-      ? istDay(new Date(camp.createdTime))
-      : PM_HISTORY_START;
-    const from = launched < PM_HISTORY_START ? PM_HISTORY_START : launched;
-    const to = addDays(date, -1);
-    const [life, m7] = await Promise.all([
-      this.analysis.scopeMetrics({ from, to }, 'campaign', camp.entityId),
+    if (!doc) return null;
+    const app = Boolean(findPmAppProduct(camp.product));
+    const purchasesOf = (m: PmMetrics) =>
+      app ? m.metaPurchases : m.firstPartyOrders;
+    const costOf = (m: PmMetrics) =>
+      app
+        ? m.metaPurchases
+          ? m.spend / m.metaPurchases
+          : null
+        : m.firstPartyCpa;
+    const roasOf = (m: PmMetrics) => (app ? m.metaRoas : m.firstPartyRoas);
+    const base = {
+      source: app ? 'Meta' : 'first-party',
+      maxDailyBudget: doc.maxDailyBudget ?? null,
+      currentDailyBudget: await this.currentDailyBudget(camp),
+    };
+    const hasPeriod =
+      (doc.targetPurchases != null || doc.targetRoas != null) &&
+      doc.targetDays &&
+      doc.targetStart;
+    if (!hasPeriod)
+      return doc.maxDailyBudget == null
+        ? null
+        : { ...base, daysLeft: null, targetPurchases: null, targetRoas: null };
+    const start = doc.targetStart!;
+    const end = addDays(start, doc.targetDays! - 1);
+    const yesterday = addDays(date, -1);
+    const to = end < yesterday ? end : yesterday;
+    const [period, m7] = await Promise.all([
+      start <= to
+        ? this.analysis.scopeMetrics({ from: start, to }, 'campaign', camp.entityId)
+        : Promise.resolve(null),
       this.analysis.scopeMetrics(window(date, 7), 'campaign', camp.entityId),
     ]);
-    const purchases = from > to ? 0 : life.firstPartyOrders;
-    const remaining = Math.max(0, doc.targetPurchases - purchases);
-    const pace = m7.firstPartyOrders / 7;
     return {
-      targetPurchases: doc.targetPurchases,
-      launched,
-      from,
-      to,
-      purchases,
-      remaining,
-      pacePerDay7: Math.round(pace * 100) / 100,
-      daysToTarget:
-        remaining === 0 ? 0 : pace > 0 ? Math.ceil(remaining / pace) : null,
-      cpa7: m7.firstPartyCpa,
-      roas7: m7.firstPartyRoas,
-      cpaLifetime: from > to ? null : life.firstPartyCpa,
+      ...base,
+      ...goalProgress(
+        {
+          targetPurchases: doc.targetPurchases ?? null,
+          targetRoas: doc.targetRoas ?? null,
+          targetDays: doc.targetDays!,
+          start,
+        },
+        date,
+        period ? purchasesOf(period) : 0,
+        costOf(m7),
+      ),
+      dataTo: to,
+      periodRoas: period ? roasOf(period) : null,
+      periodSpend: period?.spend ?? 0,
+      purchasesPerDay7: purchasesOf(m7) / 7,
+      cost7: costOf(m7),
+      roas7: roasOf(m7),
     };
   }
 
+  /** What the campaign is set to spend per day: its own budget, or its active ad sets'. */
+  private async currentDailyBudget(camp: PmMetaEntity) {
+    if (camp.budgetLevel === 'campaign') return camp.dailyBudget ?? null;
+    const adsets = await this.entities
+      .find(
+        {
+          tenantId: this.env.tenantId,
+          level: 'adset',
+          campaignId: camp.entityId,
+          effectiveStatus: 'ACTIVE',
+        },
+        { dailyBudget: 1 },
+      )
+      .lean();
+    return adsets.reduce((t, a) => t + (a.dailyBudget ?? 0), 0) || null;
+  }
+
+  /** The brief's section on the owner's goal. All arithmetic is done here, not by the models. */
+  private goalLines(
+    g: Awaited<ReturnType<PmPipelineService['goal']>>,
+    evGoal: string | null,
+  ) {
+    const head = `## Owner's goal${evGoal ? ` (${evGoal})` : ''}`;
+    if (!g) return [head, '- None set by the owner.', ''];
+    const budget =
+      g.maxDailyBudget === null
+        ? '- Max daily budget: not set.'
+        : `- Max daily budget: **${inr(g.maxDailyBudget)}**. Currently set to ${inr(g.currentDailyBudget)}/day.`;
+    if (!('end' in g))
+      return [head, '- No ROAS or purchase target is set.', budget, ''];
+    const wanted = [
+      g.targetRoas !== null ? `ROAS ${x2(g.targetRoas)}` : '',
+      g.targetPurchases !== null ? `${g.targetPurchases} purchases` : '',
+    ]
+      .filter(Boolean)
+      .join(' and ');
+    if (g.daysLeft === 0)
+      return [
+        head,
+        `- The goal of ${wanted} in ${g.targetDays} days (${g.start} → ${g.end}) has ended: ${g.purchases} ${g.source} purchases, ${g.source} ROAS ${x2(g.periodRoas)}. **No goal is open now.**`,
+        budget,
+        '',
+      ];
+    return [
+      head,
+      `- **${wanted} in ${g.targetDays} days** (${g.start} → ${g.end}), counted on ${g.source} numbers. ${g.daysLeft} day${g.daysLeft === 1 ? '' : 's'} left including today. Data to ${g.dataTo}.`,
+      ...(g.targetPurchases !== null
+        ? [
+            `- Purchases: ${g.purchases} so far, **${g.remaining} to go**. Needed: ${x2(g.purchasesPerDayNeeded)}/day, about ${inr(g.spendPerDayNeeded)}/day at the last 7 days' cost per purchase of ${inr(g.cost7)}. Last 7 days' pace: ${x2(g.purchasesPerDay7)}/day.`,
+          ]
+        : []),
+      ...(g.targetRoas !== null
+        ? [
+            `- ROAS: ${x2(g.periodRoas)} so far in this period on ${inr(g.periodSpend)} spend, last 7 days ${x2(g.roas7)}.`,
+          ]
+        : []),
+      budget,
+      ...(g.maxDailyBudget !== null &&
+      g.spendPerDayNeeded !== null &&
+      g.spendPerDayNeeded > g.maxDailyBudget
+        ? ['- The spend needed per day is **above the max daily budget**.']
+        : []),
+      '',
+    ];
+  }
+
   // ---------------------------------------------------------------- brief
+
+  /** The brief's section for a product sold in the app: Meta's steps and the owner's cost limit. */
+  private async appBrief(
+    app: PmAppProduct,
+    date: string,
+    camp: PmMetaEntity,
+    life: { from: string; to: string },
+    hasLife: boolean,
+    ev: EvidenceLog,
+  ) {
+    const id = camp.entityId;
+    const [f7, f30, fLife] = await Promise.all([
+      this.analysis.appFunnel(window(date, 7), id),
+      this.analysis.appFunnel(window(date, 30), id),
+      hasLife ? this.analysis.appFunnel(life, id) : Promise.resolve(null),
+    ]);
+    const evApp = ev.record(
+      'prep',
+      0,
+      'brief_app',
+      { campaignId: id, date },
+      { offer: app.offer, f7, f30, fLife },
+    );
+    const row = (label: string, f: typeof f7) => [
+      label,
+      inr(f.spend),
+      f.storeVisits,
+      f.installs,
+      f.appOpens,
+      f.purchases,
+      inr(f.purchaseValue),
+      inr(f.costPerInstall),
+      inr(f.costPerPurchase),
+      x2(f.roas),
+    ];
+    return [
+      `## App product (${evApp})`,
+      `- Sells **${app.label}** inside the mobile app. Offer: **${app.offer}**.`,
+      '- All numbers below are Meta-reported. Our orders are not linked to this campaign, so the 1P columns in this brief are not results.',
+      table(
+        [
+          'Window',
+          'Spend',
+          'Store visits',
+          'Installs',
+          'App opens',
+          'Purchases',
+          'Value',
+          'Cost/install',
+          'Cost/purchase',
+          'ROAS',
+        ],
+        [
+          row('last 7d', f7),
+          row('last 30d', f30),
+          ...(fLife ? [row(`since launch ${life.from}…`, fLife)] : []),
+        ],
+      ),
+      '',
+    ];
+  }
 
   /** Code-built data pack. Each section is also an evidence line, so the models can cite it. */
   private async briefMarkdown(
@@ -906,7 +1086,7 @@ export class PmPipelineService {
         .lean(),
       this.analysis.coverage(window(date, 7, camp.product)),
       this.analysis.missingDays(window(date, 30, camp.product)),
-      this.targetStatus(date, camp),
+      this.goal(date, camp),
       hasLife
         ? this.analysis.scopeMetrics(life, 'campaign', id)
         : Promise.resolve(null),
@@ -987,6 +1167,10 @@ export class PmPipelineService {
     const evTarget = target
       ? ev.record('prep', 0, 'brief_target', { campaignId: id, date }, target)
       : null;
+    const app = findPmAppProduct(camp.product);
+    const appLines = app
+      ? await this.appBrief(app, date, camp, life, hasLife, ev)
+      : [];
     const evAttr = ev.record(
       'prep',
       0,
@@ -1028,19 +1212,12 @@ export class PmPipelineService {
       '',
       'Built by code. Numbers cite the evidence line of their section. 1P = first-party (our orders, device-matched to a Meta click ≤ 7 days, net ex-GST); Meta = Meta-reported.',
       '',
+      ...appLines,
       '## Settings',
       `- Product: ${camp.product} · account ${camp.accountId} · objective ${camp.objective || '–'} · status ${camp.status}/${camp.effectiveStatus} · created ${camp.createdTime ? new Date(camp.createdTime).toISOString().slice(0, 10) : '–'}`,
       `- Budget: ${camp.budgetLevel === 'campaign' ? `campaign (CBO) ${inr(camp.dailyBudget)}/day` : camp.budgetLevel === 'adset' ? 'ad set level (ABO)' : '–'}${camp.lifetimeBudget ? ` · lifetime ${inr(camp.lifetimeBudget)}` : ''} · bid ${camp.bidStrategy || '–'}`,
       '',
-      ...(target
-        ? [
-            `## Purchase target (${evTarget})`,
-            `- Owner's lifetime target: **${target.targetPurchases} first-party purchases**; ${target.purchases} so far (${target.from} → ${target.to}${target.from > target.launched ? `, data starts ${target.from}` : ''}), **${target.remaining} to go**.`,
-            `- Pace last 7d: ${target.pacePerDay7}/day at 1P CPA ${inr(target.cpa7)}, 1P ROAS ${x2(target.roas7)} · lifetime 1P CPA ${inr(target.cpaLifetime)}. ${target.remaining === 0 ? 'Target reached.' : target.daysToTarget === null ? 'No purchases in the last 7 days, so no time-to-target at this pace.' : `At this pace ≈ ${target.daysToTarget} more days.`}`,
-            '- The owner can change this target at any time; plan towards the current number.',
-            '',
-          ]
-        : ['## Purchase target', '- None set by the owner.', '']),
+      ...this.goalLines(target, evTarget),
       `## Metrics (${evMetrics})`,
       table(METRICS_HEAD, [
         metricsRow('last 7d', m7),
@@ -1050,8 +1227,7 @@ export class PmPipelineService {
         ...(mLife ? [metricsRow(`since launch ${life.from}…`, mLife)] : []),
       ]),
       '',
-      `Funnel 7d (${evMetrics}): ${funnel(m7)}`,
-      '',
+      ...(app ? [] : [`Funnel 7d (${evMetrics}): ${funnel(m7)}`, '']),
       `## Budget signals 14d (${evBudget})`,
       table(
         [
@@ -1192,11 +1368,15 @@ export class PmPipelineService {
         ]),
       ),
       '',
-      `## Attribution health (${evAttr}, ${evMetrics})`,
-      `- 7d: Meta purchases ${m7.metaPurchases} vs 1P orders ${m7.firstPartyOrders} (1P ÷ Meta ${x2(m7.metaPurchases ? m7.firstPartyOrders / m7.metaPurchases : null)}); Meta ROAS ${x2(m7.metaRoas)} vs 1P ROAS ${x2(m7.firstPartyRoas)}`,
-      `- ${camp.product} web orders 7d linked to a visit ${pct(coverage.linkedToVisit, 0)}, to a Meta ad ${pct(coverage.linkedToMetaAd, 0)}`,
-      `- Missing days 30d: Meta ${missing.meta.join(', ') || 'none'}; orders ${missing.orders.join(', ') || 'none'}; visitors ${missing.visitors.join(', ') || 'none'}`,
-      '',
+      ...(app
+        ? []
+        : [
+            `## Attribution health (${evAttr}, ${evMetrics})`,
+            `- 7d: Meta purchases ${m7.metaPurchases} vs 1P orders ${m7.firstPartyOrders} (1P ÷ Meta ${x2(m7.metaPurchases ? m7.firstPartyOrders / m7.metaPurchases : null)}); Meta ROAS ${x2(m7.metaRoas)} vs 1P ROAS ${x2(m7.firstPartyRoas)}`,
+            `- ${camp.product} web orders 7d linked to a visit ${pct(coverage.linkedToVisit, 0)}, to a Meta ad ${pct(coverage.linkedToMetaAd, 0)}`,
+            `- Missing days 30d: Meta ${missing.meta.join(', ') || 'none'}; orders ${missing.orders.join(', ') || 'none'}; visitors ${missing.visitors.join(', ') || 'none'}`,
+            '',
+          ]),
     ].join('\n');
   }
 

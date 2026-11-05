@@ -17,6 +17,7 @@ import {
   PmEvidence,
   VerifyOutput,
 } from '../pm-agent.types';
+import { addDays } from '../../analysis/pm-stats';
 import type { PmOwnerRule, PmSituation } from '../lessons/lessons.types';
 
 export interface SendBack {
@@ -265,8 +266,15 @@ export interface CheckInput {
   campaignRoas: number | null;
   /** Entity id (campaign, ad sets, ads) → Meta-reported ROAS, same window as campaignRoas. */
   metaRoas?: Map<string, number | null>;
-  /** The owner's lifetime purchase target, when set (PmPipelineService.targetStatus). */
+  /** The owner's open purchase target, when set (PmPipelineService.goal). */
   purchaseTarget?: { targetPurchases: number; remaining: number } | null;
+  /** The owner's open ROAS target; replaces PM_LOOP.targetRoas for this campaign. */
+  targetRoas?: number | null;
+  /** The owner's limit, rupees per day, and what the campaign is set to now. */
+  maxDailyBudget?: number | null;
+  currentDailyBudget?: number | null;
+  /** The campaign sells an app product (judged on Meta's numbers). */
+  appProduct?: boolean;
   /** Run date YYYY-MM-DD; judgeOn may not be before it. */
   date: string;
   /** Owner rules; those with a `check` are enforced here. */
@@ -303,6 +311,42 @@ export const BUDGET_STEPS = `+${PM_LOOP.maxBudgetUp * 100}% / −${PM_LOOP.maxBu
  * an action: they are attached to it (checksFailed, mutating `actions`) and
  * listed in 05-checks.md. A failing cause marks every action that cites it.
  */
+/**
+ * Where a campaign stands against the owner's goal. The period counts from
+ * start; data runs to the day before `date`.
+ */
+export function goalProgress(
+  g: {
+    targetPurchases: number | null;
+    targetRoas: number | null;
+    targetDays: number;
+    start: string;
+  },
+  date: string,
+  purchases: number,
+  costPerPurchase: number | null,
+) {
+  const end = addDays(g.start, g.targetDays - 1);
+  const daysLeft = end >= date ? daysBetween(date, end) + 1 : 0;
+  const wanted = g.targetPurchases;
+  const remaining =
+    wanted !== null && daysLeft ? Math.max(0, wanted - purchases) : 0;
+  const purchasesPerDayNeeded =
+    wanted !== null && daysLeft ? remaining / daysLeft : null;
+  return {
+    ...g,
+    end,
+    daysLeft,
+    purchases,
+    remaining,
+    purchasesPerDayNeeded,
+    spendPerDayNeeded:
+      purchasesPerDayNeeded !== null && costPerPurchase !== null
+        ? purchasesPerDayNeeded * costPerPurchase
+        : null,
+  };
+}
+
 export function runChecks(i: CheckInput): CheckResult[] {
   const ev = new Map(i.evidence.map((e) => [e.id, e.tool]));
   const out: CheckResult[] = [];
@@ -328,8 +372,8 @@ export function runChecks(i: CheckInput): CheckResult[] {
   for (const r of out)
     badCauses.set(r.target, [...(badCauses.get(r.target) ?? []), r.message]);
 
-  const roasBelow =
-    i.campaignRoas !== null && i.campaignRoas < PM_LOOP.targetRoas;
+  const roasGoal = i.targetRoas ?? PM_LOOP.targetRoas;
+  const roasBelow = i.campaignRoas !== null && i.campaignRoas < roasGoal;
   let spendDelta = 0;
   for (const a of i.actions) {
     const fail = (check: string, message: string) =>
@@ -416,20 +460,46 @@ export function runChecks(i: CheckInput): CheckResult[] {
     const cut =
       isPause(a) ||
       (isBudget(a) && (num(a.change.to) ?? 0) < (num(a.change.from) ?? 0));
-    if (cut && meta !== null && meta >= PM_LOOP.targetRoas)
+    if (cut && meta !== null && meta >= roasGoal)
       out.push({
         check: 'cut_while_meta_roas_ok',
         target: a.id,
-        message: `cuts ${a.entityLevel} ${a.entityId} while its Meta ROAS ${meta.toFixed(2)} ≥ ${PM_LOOP.targetRoas} — explain the Meta vs first-party gap first`,
+        message: `cuts ${a.entityLevel} ${a.entityId} while its Meta ROAS ${meta.toFixed(2)} ≥ ${roasGoal} — explain the Meta vs first-party gap first`,
       });
   }
-  if (roasBelow && spendDelta > 0 && !chasing)
+  if (i.maxDailyBudget != null && spendDelta > 0) {
+    const after = (i.currentDailyBudget ?? 0) + spendDelta;
+    for (const a of i.actions) {
+      const to = isBudget(a) ? (num(a.change.to) ?? 0) : 0;
+      if (
+        to > (num(a.change.from) ?? 0) &&
+        Math.max(after, to) > i.maxDailyBudget
+      )
+        out.push({
+          check: 'over_max_budget',
+          target: a.id,
+          message: `takes the campaign to ₹${Math.round(Math.max(after, to))}/day, over the owner's maximum of ₹${i.maxDailyBudget}/day`,
+        });
+    }
+  }
+  // App products have no first-party ROAS guard, so the owner's target is what allows more spend.
+  if (i.appProduct && !chasing && i.targetRoas == null)
+    for (const a of i.actions)
+      if (isBudget(a) && (num(a.change.to) ?? 0) > (num(a.change.from) ?? 0))
+        out.push({
+          check: 'app_raise_without_target',
+          target: a.id,
+          message:
+            'raises spend, but the owner has no open purchase target for this app campaign',
+        });
+  // A ROAS target the owner set themselves still holds while chasing purchases.
+  if (roasBelow && spendDelta > 0 && (!chasing || i.targetRoas != null))
     for (const a of i.actions)
       if (isBudget(a) && (num(a.change.to) ?? 0) > (num(a.change.from) ?? 0))
         out.push({
           check: 'no_spend_increase_below_target',
           target: a.id,
-          message: `raises spend while first-party ROAS ${i.campaignRoas!.toFixed(2)} < ${PM_LOOP.targetRoas} (net +₹${Math.round(spendDelta)}/day)`,
+          message: `raises spend while ROAS ${i.campaignRoas!.toFixed(2)} < ${roasGoal} (net +₹${Math.round(spendDelta)}/day)`,
         });
 
   const byAction = new Map(i.actions.map((a) => [a.id, a]));
