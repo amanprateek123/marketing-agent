@@ -1,4 +1,5 @@
 /** Pure Launch Planner rules: money, sizes, plan checks, readiness (doc 11). */
+import { basename } from 'path';
 import { checkCopySafety } from '../../../common/safety/copy-safety-checker.util';
 import { GST_RATE } from '../../pm.config';
 import type {
@@ -81,6 +82,23 @@ export interface KnownIds {
   audiences: Set<string>;
 }
 
+/** The AI may write creatives/C1.jpg; everything else matches on C1.jpg. */
+export function cleanReviewFiles(review: LaunchReview): LaunchReview {
+  return {
+    ...review,
+    creatives: review.creatives.map((c) => ({ ...c, file: basename(c.file) })),
+  };
+}
+
+/** Uploaded files the review doesn't cover. */
+export function unreviewedFiles(
+  review: LaunchReview,
+  creatives: LaunchCreativeFile[],
+) {
+  const reviewed = new Set(review.creatives.map((c) => c.file));
+  return creatives.map((c) => c.file).filter((f) => !reviewed.has(f));
+}
+
 /** Hard problems in a plan; the planner gets them back, and any left block creation. */
 export function checkPlan(i: {
   plan: LaunchPlanOutput;
@@ -95,9 +113,8 @@ export function checkPlan(i: {
   const problems: string[] = [];
   const warnings: string[] = [];
   const statusOf = designStatus(review);
-  const reviewed = new Set(review.creatives.map((c) => c.file));
-  for (const c of creatives)
-    if (!reviewed.has(c.file)) problems.push(`${c.file} was not reviewed`);
+  for (const f of unreviewedFiles(review, creatives))
+    problems.push(`${f} was not reviewed`);
 
   const ratiosOf = designRatios(review, creatives);
   for (const [d, rs] of ratiosOf) {
@@ -161,8 +178,27 @@ export function checkPlan(i: {
     }
   }
   for (const [d, s] of statusOf)
-    if (s !== 'excluded' && !used.has(d))
+    if (
+      s !== 'excluded' &&
+      !used.has(d) &&
+      plan.analysis.creativeCalls.find((c) => c.designId === d)?.call !==
+        'replace'
+    )
       warnings.push(`${d} is usable but is not in any ad set.`);
+
+  const calls = new Map(
+    plan.analysis.creativeCalls.map((c) => [c.designId, c]),
+  );
+  for (const [d, status] of statusOf) {
+    const c = calls.get(d);
+    if (!c) problems.push(`${d} has no creative call`);
+    else if (c.call === 'replace' && used.has(d))
+      problems.push(`${d} is marked replace but is in an ad set`);
+    else if (c.call === 'replace' && !c.replacements.length)
+      problems.push(`${d} is marked replace with nothing to make instead`);
+    else if (c.call !== 'replace' && status === 'excluded')
+      problems.push(`${d} is excluded, so its call must be replace`);
+  }
 
   const claims = [
     ...review.creatives.flatMap((c) => c.claimsToVerify),

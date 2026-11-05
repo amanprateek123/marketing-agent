@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   checklistMissing,
   checkPlan,
+  cleanReviewFiles,
   economics,
   ratioLabel,
   readiness,
@@ -45,14 +46,20 @@ const reviewed = (n: number, designId: string, over = {}) => ({
   hook: '',
   language: 'en',
   angle: '',
-  messaging: 'good' as const,
+  firstLook: {
+    viewer: '',
+    noticesFirst: '',
+    thinks: '',
+    reaction: 'stops_and_taps' as const,
+    why: '',
+  },
+  verdict: '',
   policyRisk: 'low' as const,
-  phoneReadability: 'pass' as const,
-  landingMatch: 'pass' as const,
   finalStatus: 'ready' as const,
-  scores: { hook: 3, clarity: 3, offer: 3, trust: 3 },
   strengths: [],
-  weaknesses: [],
+  changes: [],
+  tests: [],
+  promise: { adPromises: '', pageDelivers: 'yes' as const, note: '' },
   resizeAdvice: [],
   claimsToVerify: [],
   ...over,
@@ -112,6 +119,18 @@ const plan = (over: Partial<LaunchPlanOutput> = {}): LaunchPlanOutput => ({
     whySetup: [],
     creativeTakeaway: '',
     competitorTakeaway: '',
+    creativeCalls: [
+      { designId: 'D1', call: 'run', why: '', replacements: [] },
+      { designId: 'D2', call: 'run', why: '', replacements: [] },
+      {
+        designId: 'D3',
+        call: 'replace',
+        why: '',
+        replacements: [
+          { topic: 'x', hook: '', format: '', forWho: '', why: '' },
+        ],
+      },
+    ],
     todo: [],
     risks: [],
     newCreativeIdeas: [],
@@ -500,4 +519,45 @@ it('every AI output schema converts to JSON schema for the SDK', () => {
     expect(z.toJSONSchema(schema, { target: 'draft-7' })).toHaveProperty(
       'properties.markdown',
     );
+});
+
+describe('cleanReviewFiles', () => {
+  it('matches a review that names files with their folder', () => {
+    const c = { file: 'creatives/C1.jpg' } as ReviewShape['creatives'][number];
+    const out = cleanReviewFiles({ creatives: [c] } as ReviewShape);
+    expect(out.creatives[0].file).toBe('C1.jpg');
+  });
+});
+
+describe('creative calls', () => {
+  const base = {
+    review: review(),
+    creatives: [file(1, '1:1')],
+    economics: money(),
+    known: {} as never,
+  };
+  const withCalls = (
+    creativeCalls: LaunchPlanOutput['analysis']['creativeCalls'],
+  ) => {
+    const p = plan();
+    return { ...p, analysis: { ...p.analysis, creativeCalls } };
+  };
+  it('needs a call for every design', () => {
+    expect(
+      checkPlan({ ...base, plan: withCalls([]) } as never).problems,
+    ).toContain('D1 has no creative call');
+  });
+  it('refuses a replaced design in an ad set', () => {
+    const replacements = [
+      { topic: 'x', hook: '', format: '', forWho: '', why: '' },
+    ];
+    expect(
+      checkPlan({
+        ...base,
+        plan: withCalls([
+          { designId: 'D1', call: 'replace', why: '', replacements },
+        ]),
+      } as never).problems,
+    ).toContain('D1 is marked replace but is in an ad set');
+  });
 });
