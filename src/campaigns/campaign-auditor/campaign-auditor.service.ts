@@ -38,7 +38,6 @@ import {
   BreakdownSnapshotDocument,
 } from '../schemas/breakdown-snapshot.schema';
 import { MetaAdsService } from '../meta-ads/meta-ads.service';
-import { withUtmParams } from '../meta-ads/meta-utm.util';
 import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
 import { AlertsService } from '../../delivery/alerts.service';
 import {
@@ -2200,11 +2199,8 @@ export class CampaignAuditorService {
               );
             } else {
               const newAdName = `${adSetName} — Variant ${bestVariantIndex + 1}`;
-              const taggedLandingUrl = withUtmParams(product.landingUrl, {
-                campaignName: campaign.name ?? String(campaign._id),
-                adSetName,
-                adName: newAdName,
-              });
+              // Untagged: Meta appends utm_content={ad id} etc. itself.
+              const taggedLandingUrl = product.landingUrl;
               try {
                 const { adId } = await this.metaAds.createAdInAdSet(
                   newAdSetId,

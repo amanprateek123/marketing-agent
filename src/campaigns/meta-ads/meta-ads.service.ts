@@ -9,7 +9,6 @@ import {
   checkCopySafety,
   formatSafetyError,
 } from '../../common/safety/copy-safety-checker.util';
-import { resolveAdLandingUrl } from './meta-utm.util';
 import { PlacementPreset, resolvePlacementPreset } from './placement-presets';
 
 export class MetaLaunchRollbackError extends Error {
@@ -546,16 +545,13 @@ export class MetaAdsService {
         const selectedCopyIndex = config.selectedCopyIndex ?? 0;
 
         // Per-ad-set URL override (landing-page A/B test) falls back to the
-        // campaign-global landingUrl. See resolveAdLandingUrl's doc comment
-        // for why app campaigns (applicationId set) skip UTM tagging entirely.
+        // campaign-global landingUrl. Links stay untagged: Meta appends
+        // utm_content={ad id}, utm_term={ad set id}, utm_id={campaign id} itself,
+        // which is what PM attribution reads. Our own name-based UTMs blocked
+        // that (Career Report, Nov 2026). App ads must be untagged anyway: Meta
+        // rejects a link that differs from the ad set's object_store_url (1885031).
         const adSetLandingUrl =
           adSetConfig.landingUrlOverride || config.landingUrl;
-        const buildLandingUrl = (adName: string) =>
-          resolveAdLandingUrl(adSetLandingUrl, config.applicationId, {
-            campaignName: config.campaignName,
-            adSetName: adSetConfig.name,
-            adName,
-          });
 
         // Carousel: one ad per ad set, N cards inside it. Uses selected copy
         // variant's primaryText as the message above the cards, and the cards
@@ -582,7 +578,7 @@ export class MetaAdsService {
             selectedVariant.primaryText,
             selectedVariant.cta,
             config.pageId ?? '',
-            buildLandingUrl(adName),
+            adSetLandingUrl,
             config.carouselCards,
           );
           created.creativeIds.push(creativeId);
@@ -635,7 +631,7 @@ export class MetaAdsService {
                 variant,
                 videoAssets,
                 config.pageId!,
-                buildLandingUrl(videoAdName),
+                adSetLandingUrl,
                 variantImageHash, // fallback thumbnail for any video asset missing its own
                 verticalOnlyPlacements,
               );
@@ -656,7 +652,7 @@ export class MetaAdsService {
                 variant,
                 variantImages,
                 config.pageId ?? '',
-                buildLandingUrl(adName),
+                adSetLandingUrl,
                 verticalOnlyPlacements,
                 adSetConfig.imagePlacementOverrides,
               );
@@ -686,7 +682,7 @@ export class MetaAdsService {
               variant,
               videoAssets,
               config.pageId!,
-              buildLandingUrl(videoAdName),
+              adSetLandingUrl,
               variantImageHash, // fallback thumbnail for any video asset missing its own
               verticalOnlyPlacements,
             );
@@ -715,7 +711,7 @@ export class MetaAdsService {
               variant,
               variantImages,
               config.pageId ?? '',
-              buildLandingUrl(adName2),
+              adSetLandingUrl,
               verticalOnlyPlacements,
               adSetConfig.imagePlacementOverrides,
             );

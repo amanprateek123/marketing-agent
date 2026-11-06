@@ -8,7 +8,6 @@ import { AdMediaSize, MetaAdsService } from '../meta-ads/meta-ads.service';
 import { CampaignDocument } from '../schemas/campaign.schema';
 import { CompanyDocument } from '../../companies/schemas/company.schema';
 import { SafetyChecks } from '../campaign-creator/safety-checks';
-import { withUtmParams } from '../meta-ads/meta-utm.util';
 import { tryResolveCampaignProduct } from '../campaign-creator/resolve-campaign-product';
 import { GalleryService } from '../../gallery/gallery.service';
 import { CreativePackage, CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
@@ -876,12 +875,8 @@ export class CampaignOptimizerService {
       entries,
       company.meta!.accessToken,
       (entry) => `${adSetName} — ${entry.copy.headline || 'ad'}`,
-      (adName) =>
-        withUtmParams(landingUrl, {
-          campaignName: campaign.name ?? String(campaign._id),
-          adSetName,
-          adName,
-        }),
+      // Untagged: Meta appends utm_content={ad id} etc. itself.
+      () => landingUrl,
       pageId,
       specialAdCategories,
     );
@@ -1036,12 +1031,8 @@ export class CampaignOptimizerService {
       entries,
       company.meta!.accessToken,
       adNameFor,
-      (adName) =>
-        withUtmParams(landingUrl, {
-          campaignName: campaign.name ?? String(campaign._id),
-          adSetName,
-          adName,
-        }),
+      // Untagged: Meta appends utm_content={ad id} etc. itself.
+      () => landingUrl,
       pageId,
       specialAdCategories,
     );

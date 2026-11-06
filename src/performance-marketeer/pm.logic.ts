@@ -8,6 +8,7 @@ import {
   DAY_MS,
   GST_RATE,
   IST_OFFSET_MS,
+  META_AD_ID_RE,
 } from './pm.config';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -44,7 +45,10 @@ export function dayRange(from: string, to: string, maxDays = 200): string[] {
 }
 
 /** Days → runs of consecutive days, at most `max` long: [1,2,3,5] → [1..3, 5..5]. */
-export function dayRuns(days: string[], max = 60): { from: string; to: string }[] {
+export function dayRuns(
+  days: string[],
+  max = 60,
+): { from: string; to: string }[] {
   const out: { from: string; to: string; n: number }[] = [];
   for (const d of [...new Set(days)].sort()) {
     const last = out[out.length - 1];
@@ -83,6 +87,61 @@ export type Channel =
   | 'other_utm'
   | 'referral'
   | 'direct';
+
+/**
+ * Ads launched from Meridian before Nov 2026 carried our own UTMs: the ad's
+ * NAME, slugged, in utm_content (Meta still added utm_id = campaign id).
+ * Same slug rule the launcher used, so those clicks can be mapped back to ids.
+ */
+export const utmSlug = (s: string) =>
+  (s ?? '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'untagged';
+
+/** `${campaignId}|${slug(ad name)}` → ids; null when two ads share the slug. */
+export type AdNames = Map<string, { adId: string; adsetId: string } | null>;
+
+export function adNameIndex(
+  ads: {
+    entityId: string;
+    adsetId: string;
+    campaignId: string;
+    name: string;
+  }[],
+): AdNames {
+  const out: AdNames = new Map();
+  for (const a of ads) {
+    const k = `${a.campaignId}|${utmSlug(a.name)}`;
+    out.set(k, out.has(k) ? null : { adId: a.entityId, adsetId: a.adsetId });
+  }
+  return out;
+}
+
+const AD_ID = new RegExp(META_AD_ID_RE);
+
+/** An ad click with real ids, or null when its name tag can't be pinned to one ad. */
+export function resolveAdClick<
+  T extends { adId: string; adsetId: string; campaignId: string },
+>(c: T, names: AdNames): T | null {
+  if (AD_ID.test(c.adId)) return c;
+  const hit = names.get(`${c.campaignId}|${c.adId}`);
+  return hit ? { ...c, ...hit } : null;
+}
+
+/** Campaign ids of name-tagged clicks: the only campaigns whose ads need loading. */
+export const nameTaggedCampaigns = (
+  clicks: { adId: string; campaignId: string }[],
+) => [
+  ...new Set(
+    clicks
+      .filter((c) => !AD_ID.test(c.adId) && AD_ID.test(c.campaignId))
+      .map((c) => c.campaignId),
+  ),
+];
 
 export interface TrafficRaw {
   utmSource: string;

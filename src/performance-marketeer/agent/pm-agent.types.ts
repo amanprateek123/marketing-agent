@@ -196,11 +196,31 @@ export const ActionSchema = z.object({
 });
 export type Action = z.infer<typeof ActionSchema>;
 
+/** A new creative to make, for the report's creative section (not an action). */
+export const CreativeIdeaSchema = z.object({
+  title: z.string(),
+  angle: z.string(),
+  /** First 3 seconds. */
+  hook: z.string(),
+  format: z.string(), // e.g. "9:16 Reel, face-to-camera"
+  language: z.string(),
+  primaryText: z.string(),
+  headline: z.string(),
+  cta: z.string(),
+  /** Ad id or name of the ad it builds on; '' when new. */
+  basedOn: z.string(),
+  /** One line, with the number that backs it. */
+  why: z.string(),
+});
+export type CreativeIdea = z.infer<typeof CreativeIdeaSchema>;
+
 export const PlanOutput = z.object({
   summary: z.string(),
   /** Honest view: can this campaign reach ROAS > 1? */
   pathToTarget: z.enum(['likely', 'possible', 'unlikely']),
   actions: z.array(ActionSchema).min(1),
+  /** Optional so plans from before Nov 2026 still parse. */
+  creativeIdeas: z.array(CreativeIdeaSchema).max(5).optional(),
   issueReplies: z.array(IssueReplySchema),
   lessonsContradicted: LessonsContradicted,
   markdown: z.string(),
@@ -271,6 +291,8 @@ export const PM_LOOP = {
   maxBudgetUp: 1.0, // +100% per change (owner, D-29)
   maxBudgetDown: 0.2, // −20% per change
   targetRoas: 1.0,
+  /** A funnel or payment action needs this many people at that step (7d); fewer → Watch. */
+  minFunnelPeople: 20,
 } as const;
 
 export const PM_MODELS: Record<PmPhase | 'plan_revision', string> = {

@@ -3,7 +3,15 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { PmClickhouseClient } from '../clients/pm-clickhouse.client';
 import { META_AD_ID_RE, pmEnv, PmEnv, PmProduct } from '../pm.config';
-import { classifyChannel, localeOf } from '../pm.logic';
+import {
+  AdNames,
+  adNameIndex,
+  classifyChannel,
+  localeOf,
+  nameTaggedCampaigns,
+  resolveAdClick,
+} from '../pm.logic';
+import { PmMetaEntity } from '../schemas/pm-meta.schema';
 import { PmVisitorDay } from '../schemas/pm-visitor-day.schema';
 
 /**
@@ -23,7 +31,8 @@ export function visitorDaySql(product: PmProduct) {
     .join(',\n  ');
   const utm = (k: string) => `properties['__query.${k}']`;
   const adTuple = `tuple(${utm('utm_content')}, ${utm('utm_term')}, ${utm('utm_id')}, toUnixTimestamp64Milli(created_at))`;
-  const isAd = `match(${utm('utm_content')}, {adRe:String})`;
+  // Ad id in utm_content, or (older Meridian launches) an ad name plus Meta's utm_id.
+  const isAd = `(match(${utm('utm_content')}, {adRe:String}) OR (match(${utm('utm_id')}, {adRe:String}) AND ${utm('utm_content')} != ''))`;
   return `
 WITH if(properties['path'] != '', properties['path'], path) AS p
 SELECT
@@ -113,12 +122,18 @@ export function toVisitorDay(
   product: PmProduct,
   day: string,
   tenantId: string,
+  names: AdNames = new Map(),
 ): PmVisitorDay {
   const [utmSource, utmMedium, utmCampaign, utmContent, utmTerm, utmId] = tuple(
     r.utm,
   ) as string[];
   const [referrer, referrerName, referrerType] = tuple(r.ref) as string[];
-  const metaAdCount = Number(r.metaAdCount) || 0;
+  const firstRaw = adClick(tuple(r.firstAd) as any);
+  const lastRaw = adClick(tuple(r.lastAd) as any);
+  const first = resolveAdClick(firstRaw, names);
+  const last = resolveAdClick(lastRaw, names) ?? first;
+  // A name tag that matches no single ad is not an ad click we can use.
+  const metaAdCount = last ? Number(r.metaAdCount) || 0 : 0;
   const hasFbclid = Boolean(Number(r.hasFbclid));
   const hasGoogleClickId = Boolean(Number(r.hasGoogleClickId));
   const steps: PmVisitorDay['steps'] = {};
@@ -173,10 +188,10 @@ export function toVisitorDay(
       hasFbclid,
       hasGoogleClickId,
     },
-    metaAd: metaAdCount
+    metaAd: last
       ? {
-          first: adClick(tuple(r.firstAd) as any),
-          last: adClick(tuple(r.lastAd) as any),
+          first: first ?? last,
+          last,
           distinctAds: metaAdCount,
         }
       : null,
@@ -197,6 +212,8 @@ export class VisitorDaysSync {
   constructor(
     private readonly clickhouse: PmClickhouseClient,
     @InjectModel(PmVisitorDay.name) private readonly model: Model<PmVisitorDay>,
+    @InjectModel(PmMetaEntity.name)
+    private readonly entities: Model<PmMetaEntity>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
   ) {}
 
@@ -206,8 +223,22 @@ export class VisitorDaysSync {
       visitorDaySql(product),
       visitorDayParams(product, day, this.clickhouse.project),
     );
+    const names = await loadAdNames(
+      this.entities,
+      this.env.tenantId,
+      nameTaggedCampaigns(
+        rows.flatMap((r) =>
+          r.metaAdCount
+            ? [
+                adClick(tuple(r.firstAd) as any),
+                adClick(tuple(r.lastAd) as any),
+              ]
+            : [],
+        ),
+      ),
+    );
     const docs = rows.map((r) =>
-      toVisitorDay(r, product, day, this.env.tenantId),
+      toVisitorDay(r, product, day, this.env.tenantId, names),
     );
     await this.model.deleteMany({
       tenantId: this.env.tenantId,
@@ -217,4 +248,20 @@ export class VisitorDaysSync {
     if (docs.length) await this.model.insertMany(docs, { ordered: false });
     return docs.length;
   }
+}
+
+/** Ad names of the given campaigns, for mapping name-tagged clicks to ids. */
+export async function loadAdNames(
+  entities: Model<PmMetaEntity>,
+  tenantId: string,
+  campaignIds: string[],
+): Promise<AdNames> {
+  if (!campaignIds.length) return new Map();
+  const ads = await entities
+    .find(
+      { tenantId, level: 'ad', campaignId: { $in: campaignIds } },
+      { entityId: 1, adsetId: 1, campaignId: 1, name: 1 },
+    )
+    .lean();
+  return adNameIndex(ads);
 }

@@ -9,7 +9,6 @@ import type {
 } from '../pm-agent.types';
 import {
   accuracyCap,
-  decisionShape,
   goalProgress,
   finalActions,
   hitRateFactor,
@@ -394,7 +393,10 @@ describe('finalActions + checks', () => {
   });
 
   it('app products need an open target to raise spend, and first-party ROAS does not apply', () => {
-    const run = (to: number, purchaseTarget: { targetPurchases: number; remaining: number } | null) =>
+    const run = (
+      to: number,
+      purchaseTarget: { targetPurchases: number; remaining: number } | null,
+    ) =>
       runChecks({
         evidence: [
           { id: 'ev-1', tool: 'campaign_overview' },
@@ -403,7 +405,9 @@ describe('finalActions + checks', () => {
         causes: [cause('C1', 1, 0.5)],
         actions: finalActions(
           plan([
-            action('A1', { change: { field: 'daily_budget', from: 10000, to } }),
+            action('A1', {
+              change: { field: 'daily_budget', from: 10000, to },
+            }),
           ]),
           pv({}),
           [],
@@ -422,7 +426,12 @@ describe('finalActions + checks', () => {
   });
 
   it('works out what a goal still needs', () => {
-    const g = { targetPurchases: 60, targetRoas: 2, targetDays: 3, start: '2026-11-05' };
+    const g = {
+      targetPurchases: 60,
+      targetRoas: 2,
+      targetDays: 3,
+      start: '2026-11-05',
+    };
     expect(goalProgress(g, '2026-11-05', 0, 100)).toMatchObject({
       end: '2026-11-07',
       daysLeft: 3,
@@ -456,7 +465,9 @@ describe('finalActions + checks', () => {
         causes: [cause('C1', 1, 0.5)],
         actions: finalActions(
           plan([
-            action('A1', { change: { field: 'daily_budget', from: 10000, to } }),
+            action('A1', {
+              change: { field: 'daily_budget', from: 10000, to },
+            }),
           ]),
           pv({}),
           [],
@@ -478,7 +489,9 @@ describe('finalActions + checks', () => {
     expect(run({ maxDailyBudget: 15000, currentDailyBudget: 10000 })).toEqual([
       'over_max_budget',
     ]);
-    expect(run({ maxDailyBudget: 20000, currentDailyBudget: 10000 })).toEqual([]);
+    expect(run({ maxDailyBudget: 20000, currentDailyBudget: 10000 })).toEqual(
+      [],
+    );
     // Ad-set budgets: the campaign total counts, not this ad set alone.
     expect(run({ maxDailyBudget: 25000, currentDailyBudget: 20000 })).toEqual([
       'over_max_budget',
@@ -659,5 +672,65 @@ describe('lesson bookkeeping', () => {
       { id: 'L-1', evidence: ['ev-1', 'ev-2'], note: 'a | b' },
       { id: 'L-4', evidence: [], note: 'c' },
     ]);
+  });
+});
+
+describe('small funnel samples become Watch items', () => {
+  const run = (sample: { visitors: number; paymentPeople: number }) => {
+    const actions = finalActions(
+      plan([
+        action('A1', {
+          type: 'landing_funnel',
+          entityLevel: 'site',
+          title: 'Check the payment step',
+          change: { field: 'checkout', from: null, to: null },
+          impactRupeesPerDay: 763,
+        }),
+        action('A2', {
+          type: 'landing_funnel',
+          entityLevel: 'site',
+          title: 'Shorter hero',
+          change: { field: 'landing page', from: null, to: null },
+          impactRupeesPerDay: 500,
+        }),
+        action('A3', { type: 'creative', impactRupeesPerDay: 100 }),
+      ]),
+      pv({}),
+      [],
+    );
+    runChecks({
+      evidence: [{ id: 'ev-1', tool: 'campaign_overview' }],
+      causes: [],
+      actions,
+      entityIds: new Set(['as1']),
+      settling: new Set(),
+      campaignRoas: null,
+      date: '2026-10-25',
+      funnelSample: sample,
+    });
+    return actions;
+  };
+
+  it('payment actions need 20+ people who started an order', () => {
+    const a = run({ visitors: 300, paymentPeople: 3 });
+    const pay = a.find((x) => x.id === 'A1')!;
+    expect(pay.checksFailed).toEqual(['small_sample']);
+    expect(pay.title).toBe('Watch: Check the payment step');
+    expect(pay.impactRupeesPerDay).toBe(0);
+    expect(pay.rank).toBe(3); // re-ranked last
+    expect(a.find((x) => x.id === 'A2')!.checksFailed).toEqual([]);
+    expect(a.find((x) => x.id === 'A3')!.checksFailed).toEqual([]);
+  });
+
+  it('landing actions need 20+ site visitors; enough people passes', () => {
+    expect(
+      run({ visitors: 12, paymentPeople: 50 }).find((x) => x.id === 'A2')!
+        .checksFailed,
+    ).toEqual(['small_sample']);
+    expect(
+      run({ visitors: 300, paymentPeople: 20 }).every(
+        (x) => !x.checksFailed.length,
+      ),
+    ).toBe(true);
   });
 });

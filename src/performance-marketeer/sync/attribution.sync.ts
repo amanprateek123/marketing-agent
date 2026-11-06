@@ -9,9 +9,17 @@ import {
   pmEnv,
   PmEnv,
 } from '../pm.config';
-import { MetaTouch, nearestPayment, pickMetaClicks } from '../pm.logic';
+import {
+  MetaTouch,
+  nameTaggedCampaigns,
+  nearestPayment,
+  pickMetaClicks,
+  resolveAdClick,
+} from '../pm.logic';
+import { PmMetaEntity } from '../schemas/pm-meta.schema';
 import { PmOrder } from '../schemas/pm-order.schema';
 import { PmVisitorDay } from '../schemas/pm-visitor-day.schema';
+import { loadAdNames } from './visitor-days.sync';
 
 /**
  * One row per (device, session, ad): the Meta ad clicks those devices made in
@@ -34,7 +42,8 @@ WHERE project_id = {project:String}
   AND created_at >= fromUnixTimestamp64Milli({from:Int64})
   AND created_at <= fromUnixTimestamp64Milli({to:Int64})
   AND name IN ('session_start', 'screen_view')
-  AND match(properties['__query.utm_content'], {adRe:String})
+  AND (match(properties['__query.utm_content'], {adRe:String})
+       OR (match(properties['__query.utm_id'], {adRe:String}) AND properties['__query.utm_content'] != ''))
 GROUP BY device_id, session_id, adId, adsetId, campaignId`;
 
 const DEVICE_BATCH = 300;
@@ -59,6 +68,8 @@ export class AttributionSync {
     @InjectModel(PmOrder.name) private readonly orders: Model<PmOrder>,
     @InjectModel(PmVisitorDay.name)
     private readonly visitors: Model<PmVisitorDay>,
+    @InjectModel(PmMetaEntity.name)
+    private readonly entities: Model<PmMetaEntity>,
     @Inject(pmEnv.KEY) private readonly env: PmEnv,
   ) {}
 
@@ -199,6 +210,7 @@ export class AttributionSync {
     const from = Math.min(...times) - ATTRIBUTION_WINDOW_DAYS * DAY_MS;
     const to = Math.max(...times);
     const devices = [...new Set(withDevices.flatMap((l) => l.deviceIds))];
+    const raw: { deviceId: string; touch: MetaTouch }[] = [];
     for (const batch of chunk(devices, DEVICE_BATCH)) {
       const rows = await this.clickhouse.query<{
         deviceId: string;
@@ -220,8 +232,19 @@ export class AttributionSync {
           adsetId: r.adsetId,
           campaignId: r.campaignId,
         };
-        byDevice.set(r.deviceId, [...(byDevice.get(r.deviceId) ?? []), touch]);
+        raw.push({ deviceId: r.deviceId, touch });
       }
+    }
+    // Older Meridian launches tagged the ad name: map it to the ad id, or drop it.
+    const names = await loadAdNames(
+      this.entities,
+      this.env.tenantId,
+      nameTaggedCampaigns(raw.map((x) => x.touch)),
+    );
+    for (const { deviceId, touch: t } of raw) {
+      const touch = resolveAdClick(t, names);
+      if (touch)
+        byDevice.set(deviceId, [...(byDevice.get(deviceId) ?? []), touch]);
     }
     return byDevice;
   }
