@@ -585,6 +585,7 @@ export class PmPipelineService {
         campaignId,
       );
       const app = findPmAppProduct(camp.product);
+      const onMeta = (await this.metaBasis(date, camp)) !== null;
       const goal = await this.goal(date, camp);
       const goalOpen = goal?.daysLeft ? goal : null;
       const lessonEffects = new Map(
@@ -612,13 +613,22 @@ export class PmPipelineService {
         actions,
         entityIds: new Set(ents.keys()),
         settling: await this.settlingEntities(campaignId, journal.entries),
-        // App products have no first-party orders: 0 would read as "no return".
+        // App products and untracked web products have no linked first-party
+        // orders: 0 would read as "no return", so judge them on Meta.
         campaignRoas: app
           ? goalOpen?.targetRoas != null
             ? m7.metaRoas
             : null
-          : m7.firstPartyRoas,
+          : onMeta
+            ? m7.metaRoas
+            : m7.firstPartyRoas,
         appProduct: Boolean(app),
+        funnelSample: {
+          visitors: m7.siteVisitors,
+          paymentPeople: (
+            await this.analysis.orderPeopleFor(window(date, 7), camp.product)
+          ).people,
+        },
         targetRoas: goalOpen?.targetRoas ?? null,
         maxDailyBudget: goal?.maxDailyBudget ?? null,
         currentDailyBudget: await this.currentDailyBudget(camp),
@@ -842,14 +852,28 @@ export class PmPipelineService {
 
   // ---------------------------------------------------------------- target
 
-  /** The owner's lifetime purchase target and progress (first-party orders since launch), or null. */
-  /** The owner's goal and where the campaign stands. App products count on Meta's numbers. */
-  private async goal(date: string, camp: PmMetaEntity) {
+  /**
+   * Why a campaign is judged on Meta's numbers instead of first-party, or null.
+   * 'untracked': the product had orders in the last 7 days but none link to a
+   * Meta ad, so first-party would read 0 whatever the ads did.
+   */
+  async metaBasis(
+    date: string,
+    camp: PmMetaEntity,
+  ): Promise<'app' | 'untracked' | null> {
+    if (findPmAppProduct(camp.product)) return 'app';
+    const c = await this.analysis.coverage(window(date, 7, camp.product));
+    return c.linkedToMetaAd === 0 ? 'untracked' : null;
+  }
+
+  /** The owner's goal and where the campaign stands, counted on metaBasis' numbers. */
+  async goal(date: string, camp: PmMetaEntity) {
     const doc = await this.targets
       .findOne({ tenantId: this.env.tenantId, campaignId: camp.entityId })
       .lean();
     if (!doc) return null;
-    const app = Boolean(findPmAppProduct(camp.product));
+    const basis = await this.metaBasis(date, camp);
+    const app = basis !== null;
     const purchasesOf = (m: PmMetrics) =>
       app ? m.metaPurchases : m.firstPartyOrders;
     const costOf = (m: PmMetrics) =>
@@ -861,6 +885,7 @@ export class PmPipelineService {
     const roasOf = (m: PmMetrics) => (app ? m.metaRoas : m.firstPartyRoas);
     const base = {
       source: app ? 'Meta' : 'first-party',
+      basis,
       maxDailyBudget: doc.maxDailyBudget ?? null,
       currentDailyBudget: await this.currentDailyBudget(camp),
     };
@@ -878,7 +903,11 @@ export class PmPipelineService {
     const to = end < yesterday ? end : yesterday;
     const [period, m7] = await Promise.all([
       start <= to
-        ? this.analysis.scopeMetrics({ from: start, to }, 'campaign', camp.entityId)
+        ? this.analysis.scopeMetrics(
+            { from: start, to },
+            'campaign',
+            camp.entityId,
+          )
         : Promise.resolve(null),
       this.analysis.scopeMetrics(window(date, 7), 'campaign', camp.entityId),
     ]);
@@ -949,7 +978,7 @@ export class PmPipelineService {
       ];
     return [
       head,
-      `- **${wanted} in ${g.targetDays} days** (${g.start} → ${g.end}), counted on ${g.source} numbers. ${g.daysLeft} day${g.daysLeft === 1 ? '' : 's'} left including today. Data to ${g.dataTo}.`,
+      `- **${wanted} in ${g.targetDays} days** (${g.start} → ${g.end}), counted on ${g.source} numbers${g.basis === 'untracked' ? ' (see "Tracking gap")' : ''}. ${g.daysLeft} day${g.daysLeft === 1 ? '' : 's'} left including today. Data to ${g.dataTo}.`,
       ...(g.targetPurchases !== null
         ? [
             `- Purchases: ${g.purchases} so far, **${g.remaining} to go**. Needed: ${x2(g.purchasesPerDayNeeded)}/day, about ${inr(g.spendPerDayNeeded)}/day at the last 7 days' cost per purchase of ${inr(g.cost7)}. Last 7 days' pace: ${x2(g.purchasesPerDay7)}/day.`,
@@ -1213,6 +1242,13 @@ export class PmPipelineService {
       'Built by code. Numbers cite the evidence line of their section. 1P = first-party (our orders, device-matched to a Meta click ≤ 7 days, net ex-GST); Meta = Meta-reported.',
       '',
       ...appLines,
+      ...(!app && coverage.linkedToMetaAd === 0
+        ? [
+            `## Tracking gap (${evAttr})`,
+            `- None of the ${camp.product} orders in the last 7 days link to a Meta ad, so every 1P column below reads 0 whatever the ads did. Judge this campaign on the Meta columns. The gap is in our data pipeline, not the site or the ads.`,
+            '',
+          ]
+        : []),
       '## Settings',
       `- Product: ${camp.product} · account ${camp.accountId} · objective ${camp.objective || '–'} · status ${camp.status}/${camp.effectiveStatus} · created ${camp.createdTime ? new Date(camp.createdTime).toISOString().slice(0, 10) : '–'}`,
       `- Budget: ${camp.budgetLevel === 'campaign' ? `campaign (CBO) ${inr(camp.dailyBudget)}/day` : camp.budgetLevel === 'adset' ? 'ad set level (ABO)' : '–'}${camp.lifetimeBudget ? ` · lifetime ${inr(camp.lifetimeBudget)}` : ''} · bid ${camp.bidStrategy || '–'}`,

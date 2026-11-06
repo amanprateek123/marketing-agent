@@ -275,6 +275,8 @@ export interface CheckInput {
   currentDailyBudget?: number | null;
   /** The campaign sells an app product (judged on Meta's numbers). */
   appProduct?: boolean;
+  /** People behind a funnel action, last 7 days: site visitors, and people who started an order. */
+  funnelSample?: { visitors: number; paymentPeople: number };
   /** Run date YYYY-MM-DD; judgeOn may not be before it. */
   date: string;
   /** Owner rules; those with a `check` are enforced here. */
@@ -299,6 +301,8 @@ export interface CheckResult {
 }
 
 export const IMPACT_TOOL = 'impact_rupees';
+const isPaymentStep = (a: Action) =>
+  /pay|checkout|gateway|cart/i.test(`${a.title} ${a.change.field}`);
 const num = (v: unknown) =>
   typeof v === 'number' && Number.isFinite(v) ? v : null;
 const isBudget = (a: Action) =>
@@ -502,12 +506,37 @@ export function runChecks(i: CheckInput): CheckResult[] {
           message: `raises spend while ROAS ${i.campaignRoas!.toFixed(2)} < ${roasGoal} (net +₹${Math.round(spendDelta)}/day)`,
         });
 
+  if (i.funnelSample)
+    for (const a of i.actions) {
+      if (a.type !== 'landing_funnel') continue;
+      const pay = isPaymentStep(a);
+      const n = pay ? i.funnelSample.paymentPeople : i.funnelSample.visitors;
+      if (n < PM_LOOP.minFunnelPeople)
+        out.push({
+          check: 'small_sample',
+          target: a.id,
+          message: `${n} ${pay ? 'people started an order' : 'site visitors from this campaign'} in the last 7 days; a funnel change needs ${PM_LOOP.minFunnelPeople}+. Watch only.`,
+        });
+    }
+
   const byAction = new Map(i.actions.map((a) => [a.id, a]));
   for (const r of out) {
     const a = byAction.get(r.target);
     if (!a) continue;
     if (!a.checksFailed.includes(r.check)) a.checksFailed.push(r.check);
     a.checkMessages.push(`${r.check}: ${r.message}`);
+  }
+  // Too few people: keep it as something to watch, worth nothing yet, ranked last.
+  let watched = false;
+  for (const a of i.actions)
+    if (a.checksFailed.includes('small_sample')) {
+      watched = true;
+      if (!a.title.startsWith('Watch: ')) a.title = `Watch: ${a.title}`;
+      a.impactRupeesPerDay = 0;
+    }
+  if (watched) {
+    i.actions.sort((a, b) => actionScore(b) - actionScore(a));
+    i.actions.forEach((a, n) => (a.rank = n + 1));
   }
   return out;
 }

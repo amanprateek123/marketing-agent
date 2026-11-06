@@ -37,6 +37,10 @@ APP PRODUCTS (only when 00-brief.md has an "App product" section; it then overri
 - The offer is an entry offer, so without an owner's ROAS target, ROAS below ${PM_LOOP.targetRoas.toFixed(2)} is not a failure by itself. Repeat recharges are not in this data: say so, don't guess them.
 - The owner's goal is counted on Meta's numbers here. No open goal: diagnose only, give no budget increase, and ask the owner for the numbers.
 
+TRACKING GAP (only when 00-brief.md has a "Tracking gap" section; it then overrides the first-party goal and rules in this prompt)
+- Our orders for this product are not linking to Meta ads, so every first-party number reads 0 for a data reason, not a result. Judge the campaign on Meta's numbers and label them Meta. The owner's goal is counted on Meta's numbers here.
+- Never call 0 first-party orders a result or a reason to cut, and never ask for site or tracking-code changes: the gap is in our data pipeline. Mention it once, as a caveat, not as an action.
+
 THE GOAL
 - The default business goal (when the owner's ROAS target isn't open) is first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}: confirmed orders from our own database attributed to a Meta click on the same device within 7 days, net revenue ex-GST (order total ÷ 1.18) minus refunds, divided by Meta spend ex-GST. This is a lower bound (device ids rotate).
 - Every decision uses BOTH numbers: first-party (above) and Meta-reported (Meta purchases / Meta ROAS, as in Ads Manager). Meta's count is an upper bound (it includes view-through, modelled and unconfirmed-payment purchases); first-party is a lower bound. The truth is between them.
@@ -50,6 +54,7 @@ EVIDENCE RULES (hard)
 - Every tool result comes back as { ev: "ev-N", result }. Every number you write — in the JSON fields and in markdown — must cite the ev id it came from, e.g. "CPM ₹142 (ev-7)". No number without an ev id.
 - Never do arithmetic in your head, not even a percentage change or a sum. Use calc, compare_periods, stat_compare or impact_rupees and cite the result.
 - Every evidence array holds only ev ids you actually received in THIS call (or that appear in the files you were given). Never invent an id.
+- Count people, not order rows: each payment retry creates a new order, so use payment_health's \`people\` (a buyer who retried and paid counts as paid). A funnel or payment action needs ${PM_LOOP.minFunnelPeople}+ people at that step in the last 7 days; with fewer, it is noise — code turns it into a "Watch" item worth ₹0.
 - Label each number with source (Meta / first-party / site), window and denominator when it is not obvious — in titles too, e.g. "first-party ROAS 0.20× (last 7d)", "2 first-party orders (last 30d)".
 - The owner reads lifetime numbers in Meta Ads Manager (Meta-reported, since launch). When a recent window disagrees with the "since launch" numbers in 00-brief.md, give both (e.g. "first-party ROAS 0.20× last 7d vs 0.43× since launch"), so a drop is not mistaken for a wrong number.
 - Correlation is not causation. "Coincides with" is not "caused by"; say which one you have.
@@ -183,6 +188,10 @@ Each action
 Creative actions
 Give a creativeBrief: the angle, the hook for the first 3 seconds, language (Hindi / Hinglish / regional where the audience is — check breakdowns), format, offer and trust elements, CTA. Write it for a busy owner and a creative team, not as analysis: at most 10 labelled lines, one per part, separated by newlines, each under 20 words ("Angle: …", "Why: …", "Hook (0–3s): …", "Variant A: …", "Variant B: …", "Show: …", "Offer: …", "Trust: …", "Language: …", "Format: …", "CTA: …", "Avoid: …"). Keep labels under 20 characters. Reasoning and numbers go only in the "Why" line, once. Base it on: our best-performing ad (creative_metrics + get_creative), what competitors' long-running ads do (competitor_changes, competitor_ad — copy the pattern, never the brand or claims), and upcoming festivals or astro events from festivals / calendar_around (lead time: creatives need to be live and out of learning before the day). No fear-mongering or guaranteed-outcome claims.
 
+Creative ideas (creativeIdeas, 3–5, for the owner's report — separate from actions)
+- New ads worth making next, even when no creative action is in the plan. Each: title, angle, hook (first 3 seconds), format, language, primaryText, headline, cta, basedOn (id or name of the ad it builds on, '' if new), why (one line with the number that backs it, e.g. "Variant 4: CTR 1.03% vs 0.60% campaign avg").
+- Build on what works in THIS campaign's data (best CTR / cost per purchase, the audience that buys per breakdowns), long-running competitor patterns and the days ahead in the calendar. Write ready-to-use copy in the language the buyers respond to. No fear-mongering or guaranteed outcomes.
+
 Honesty about the target
 - pathToTarget: likely / possible / unlikely. If ROAS > 1 is not realistic in the next weeks with what we can change, say "unlikely" and plan reduce / pause honestly, keeping the parts that work.
 - If the campaign is already above target: protect it. Scale in steps of up to +${Math.round(PM_LOOP.maxBudgetUp * 100)}%, only on entities out of learning and with enough orders to trust the ROAS, and keep a fresh creative in the pipeline before fatigue shows.
@@ -191,7 +200,7 @@ Honesty about the target
 On a revision round (round > 1)
 The latest 04-plan-verify lists issues and action verdicts. In issueReplies answer EVERY issue id exactly once: accept (and change the action), reject_with_evidence (cite new ev ids from your own tool calls), or revise (change it differently, explain). Keep action ids stable; a rejected action you drop simply disappears, a new one continues the A sequence. On round 1 issueReplies is [].
 
-Output fields: summary (the plan in 3–5 sentences, net spend change, expected ROAS direction), pathToTarget, actions, issueReplies, lessonsContradicted (lessons today's evidence contradicts: id, ev ids, note), markdown (one section per action: what, why, expected, risk, when to judge, when to stop).`;
+Output fields: summary (the plan in 3–5 sentences, net spend change, expected ROAS direction), pathToTarget, actions, creativeIdeas, issueReplies, lessonsContradicted (lessons today's evidence contradicts: id, ev ids, note), markdown (one section per action: what, why, expected, risk, when to judge, when to stop).`;
 
 const PLAN_VERIFY = `${SHARED}
 

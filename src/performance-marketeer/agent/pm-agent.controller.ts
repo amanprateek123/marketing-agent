@@ -29,6 +29,7 @@ import {
 import { Model } from 'mongoose';
 import type { AuthedRequest } from '../../auth/roles';
 import { PmAgentQueueService } from './pipeline/pm-agent-queue.service';
+import { PmReportService } from './report/pm-report.service';
 import { pmEnv, PmEnv, PM_HISTORY_START } from '../pm.config';
 import { dayRange } from '../pm.logic';
 import { PmAgentRun } from '../schemas/pm-agent-run.schema';
@@ -134,6 +135,7 @@ export class PmAgentController {
     private readonly queue: PmAgentQueueService,
     @InjectModel(PmMetaEntity.name)
     private readonly entities: Model<PmMetaEntity>,
+    private readonly reports: PmReportService,
   ) {}
 
   /**
@@ -151,7 +153,11 @@ export class PmAgentController {
           level: 'campaign',
           $or: [
             { effectiveStatus: 'ACTIVE' },
-            { createdTime: { $gte: new Date(`${PM_HISTORY_START}T00:00:00+05:30`) } },
+            {
+              createdTime: {
+                $gte: new Date(`${PM_HISTORY_START}T00:00:00+05:30`),
+              },
+            },
           ],
         },
         {
@@ -166,6 +172,18 @@ export class PmAgentController {
       )
       .lean()
       .exec();
+    // Latest finished run per campaign, so the list can link to its report.
+    const done = await this.runs.aggregate<{ _id: string; date: string }>([
+      {
+        $match: {
+          tenantId: t,
+          status: 'done',
+          campaignId: { $in: docs.map((d) => d.entityId) },
+        },
+      },
+      { $group: { _id: '$campaignId', date: { $max: '$date' } } },
+    ]);
+    const lastRun = new Map(done.map((x) => [x._id, x.date]));
     return docs
       .map((d) => ({
         id: d.entityId,
@@ -175,6 +193,7 @@ export class PmAgentController {
         createdTime: d.createdTime ?? null,
         product: d.product,
         dailyBudget: d.dailyBudget ?? null,
+        lastRunDate: lastRun.get(d.entityId) ?? null,
       }))
       .sort(
         (a, b) =>
@@ -311,6 +330,17 @@ export class PmAgentController {
     return doc;
   }
 
+  /** The owner's report for one run: ?date= (default: the latest run). */
+  @Get('runs/:campaignId/report')
+  report(
+    @Param('tenantId') t: string,
+    @Param('campaignId') c: string,
+    @Query() q: Q,
+  ) {
+    this.assertTenant(t);
+    return this.reports.report(campaign(c), optDate(q));
+  }
+
   /** The user's note on a run's actions; tomorrow's journal reads it. */
   @Post('runs/:campaignId/note')
   async note(
@@ -373,10 +403,22 @@ export class PmAgentController {
   ) {
     this.assertTenant(t);
     const by = req.user?.sub ?? '';
-    if ((body.targetPurchases != null || body.targetRoas != null) && !body.targetDays)
-      throw new BadRequestException('A ROAS or purchase target needs a number of days');
+    if (
+      (body.targetPurchases != null || body.targetRoas != null) &&
+      !body.targetDays
+    )
+      throw new BadRequestException(
+        'A ROAS or purchase target needs a number of days',
+      );
     const change = Object.fromEntries(
-      (['targetPurchases', 'targetRoas', 'targetDays', 'maxDailyBudget'] as const)
+      (
+        [
+          'targetPurchases',
+          'targetRoas',
+          'targetDays',
+          'maxDailyBudget',
+        ] as const
+      )
         .filter((k) => body[k] !== undefined)
         .map((k) => [k, body[k]]),
     );

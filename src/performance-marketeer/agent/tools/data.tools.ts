@@ -1099,18 +1099,19 @@ export class PmDataTools {
         { $sort: { n: -1 } },
       ]);
     const scopes = this.visitorScopes(q, ctx.campaignId, product);
-    const [co, ao, wo, cv, av] = await Promise.all([
-      statusOf(
-        this.webOrders(q, {
-          'attribution.metaLast.campaignId': ctx.campaignId,
-        }),
-      ),
+    const campaignMatch = this.webOrders(q, {
+      'attribution.metaLast.campaignId': ctx.campaignId,
+    });
+    const [co, ao, wo, cv, av, cp, wp] = await Promise.all([
+      statusOf(campaignMatch),
       statusOf(
         this.webOrders(q, { 'attribution.metaLast.adId': NOT_EMPTY, ...prod }),
       ),
       statusOf(this.webOrders(q, prod)),
       this.funnelCounts(scopes.campaign, []),
       this.funnelCounts(scopes.account, []),
+      this.pm.orderPeople(campaignMatch),
+      this.pm.orderPeople(this.webOrders(q, prod)),
     ]);
     const sumUp = (
       rows: Awaited<ReturnType<typeof statusOf>>,
@@ -1136,11 +1137,13 @@ export class PmDataTools {
     };
     return {
       query: { ...q, product: product ?? 'all' },
+      // Judge payment on people: one buyer's retries are several order rows.
+      people: { campaign: cp, allWebOrders: wp },
       campaign: sumUp(co, cv.paymentsStarted),
       allMetaAttributed: sumUp(ao, av.paymentsStarted),
       allWebOrders: sumUp(wo),
       caveat:
-        "Orders created = order rows (the order is created before the gateway). Not paid = ORDER_CREATED / IN_PROGRESS etc.: abandoned or failed at the gateway, not separable here. Campaign orders are attributed by the buyer's Meta click in the 7 days before, so not every unpaid attempt is linked to a campaign. visitorsStartedPayment = visitor-days with a browser payment event.",
+        "Judge payment on `people` (one per buyer; paid = paid at least once; retriedThenPaid = had unpaid attempts but paid), never on order rows: each payment retry creates a new order, so order rows count a buyer who retried and paid as lost sales. Orders created = order rows (the order is created before the gateway). Not paid = ORDER_CREATED / IN_PROGRESS etc.: abandoned or failed at the gateway, not separable here. Campaign orders are attributed by the buyer's Meta click in the 7 days before, so not every unpaid attempt is linked to a campaign. visitorsStartedPayment = visitor-days with a browser payment event.",
     };
   }
 

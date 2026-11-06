@@ -408,6 +408,74 @@ export class PmAnalysisService {
     };
   }
 
+  /**
+   * People behind the orders in `match` (the user, else the order itself), and
+   * how many paid. Each payment retry creates a new order, so order counts read
+   * a buyer who retried and paid as a lost sale; people counts don't.
+   */
+  async orderPeople(match: Record<string, unknown>) {
+    const [r] = await this.orders.aggregate<{
+      people: number;
+      paid: number;
+      retriedThenPaid: number;
+    }>([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $gt: [{ $ifNull: ['$userId', ''] }, ''] },
+              '$userId',
+              '$orderId',
+            ],
+          },
+          orders: { $sum: 1 },
+          paidOrders: { $sum: { $cond: ['$confirmed', 1, 0] } },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          people: { $sum: 1 },
+          paid: { $sum: { $cond: [{ $gt: ['$paidOrders', 0] }, 1, 0] } },
+          retriedThenPaid: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $gt: ['$paidOrders', 0] },
+                    { $gt: ['$orders', '$paidOrders'] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    const people = r?.people ?? 0;
+    const paid = r?.paid ?? 0;
+    return {
+      people,
+      paid,
+      didNotPay: people - paid,
+      paidPct: people ? Math.round((paid / people) * 1000) / 10 : null,
+      retriedThenPaid: r?.retriedThenPaid ?? 0,
+    };
+  }
+
+  /** People who started a web order for `product` in range (paid or not). */
+  orderPeopleFor(q: { from: string; to: string }, product: string) {
+    return this.orderPeople({
+      tenantId: this.env.tenantId,
+      day: { $gte: q.from, $lte: q.to },
+      adminCreated: false,
+      product,
+    });
+  }
+
   async coverage(q: PmQuery) {
     const [r] = await this.orders.aggregate<{
       n: number;

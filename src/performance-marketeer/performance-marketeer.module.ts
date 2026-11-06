@@ -34,6 +34,7 @@ import {
 } from './schemas/pm-lesson-records.schema';
 import { PmJournalService } from './agent/journal/journal.service';
 import { PmPipelineService } from './agent/pipeline/pm-pipeline.service';
+import { PmReportService } from './agent/report/pm-report.service';
 import { PmAgentQueueService } from './agent/pipeline/pm-agent-queue.service';
 import { PmCalendarTools } from './agent/tools/calendar.tools';
 import { PmCompetitorSync } from './agent/competitors/competitor.sync';
@@ -146,6 +147,7 @@ import { VisitorDaysSync } from './sync/visitor-days.sync';
     PmCreativeTools,
     PmLandingTools,
     PmPipelineService,
+    PmReportService,
     PmAgentQueueService,
     PmSituationService,
     PmRecordsService,

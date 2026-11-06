@@ -42,6 +42,7 @@ describe('PmAgentController', () => {
     { tenantId: '91astrology' } as PmEnv,
     queue as unknown as PmAgentQueueService,
     entities as never,
+    {} as never,
   );
   const T = '91astrology';
   beforeEach(() => jest.clearAllMocks());
@@ -183,7 +184,8 @@ describe('PmAgentController', () => {
 
   it('sets, changes and removes a lifetime purchase target, keeping history', async () => {
     const ok = (v: unknown) =>
-      validateSync(plainToInstance(PmCampaignTargetDto, { targetPurchases: v })).length === 0;
+      validateSync(plainToInstance(PmCampaignTargetDto, { targetPurchases: v }))
+        .length === 0;
     expect(ok(500)).toBe(true);
     expect(ok(null)).toBe(true);
     expect(ok(0)).toBe(false);
@@ -203,19 +205,34 @@ describe('PmAgentController', () => {
     expect(update.$set).toEqual({ maxDailyBudget: 500, updatedBy: 'u1' });
 
     // A target starts the period today, and needs a number of days.
-    await c.setTarget(T, '120', { targetRoas: 2, targetPurchases: 60, targetDays: 3 }, {
-      user: { sub: 'u1' },
-    } as never);
+    await c.setTarget(
+      T,
+      '120',
+      { targetRoas: 2, targetPurchases: 60, targetDays: 3 },
+      {
+        user: { sub: 'u1' },
+      } as never,
+    );
     const set = targets.findOneAndUpdate.mock.calls.at(-1)[1].$set;
-    expect(set).toMatchObject({ targetRoas: 2, targetPurchases: 60, targetDays: 3 });
+    expect(set).toMatchObject({
+      targetRoas: 2,
+      targetPurchases: 60,
+      targetDays: 3,
+    });
     expect(set.targetStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     await expect(
-      c.setTarget(T, '120', { targetRoas: 2 }, { user: { sub: 'u1' } } as never),
+      c.setTarget(T, '120', { targetRoas: 2 }, {
+        user: { sub: 'u1' },
+      } as never),
     ).rejects.toThrow('number of days');
     expect(
-      validateSync(plainToInstance(PmCampaignTargetDto, { targetDays: 91 })).length,
+      validateSync(plainToInstance(PmCampaignTargetDto, { targetDays: 91 }))
+        .length,
     ).toBe(1);
-    expect(update.$push.history.$each[0]).toMatchObject({ maxDailyBudget: 500, by: 'u1' });
+    expect(update.$push.history.$each[0]).toMatchObject({
+      maxDailyBudget: 500,
+      by: 'u1',
+    });
     expect(opts).toMatchObject({ upsert: true });
     await expect(
       c.setTarget('other', '120', { targetPurchases: 1 }, {} as never),
@@ -225,13 +242,38 @@ describe('PmAgentController', () => {
   it('campaign list: active first, then newest; tenant checked', async () => {
     entities.find.mockReturnValue(
       q([
-        { entityId: '1', name: 'Old paused', effectiveStatus: 'PAUSED', createdTime: new Date('2026-05-01') },
-        { entityId: '2', name: 'New paused', effectiveStatus: 'PAUSED', createdTime: new Date('2026-10-01') },
-        { entityId: '3', name: 'Active', effectiveStatus: 'ACTIVE', createdTime: new Date('2026-04-01') },
+        {
+          entityId: '1',
+          name: 'Old paused',
+          effectiveStatus: 'PAUSED',
+          createdTime: new Date('2026-05-01'),
+        },
+        {
+          entityId: '2',
+          name: 'New paused',
+          effectiveStatus: 'PAUSED',
+          createdTime: new Date('2026-10-01'),
+        },
+        {
+          entityId: '3',
+          name: 'Active',
+          effectiveStatus: 'ACTIVE',
+          createdTime: new Date('2026-04-01'),
+        },
       ]),
     );
-    expect((await c.campaigns(T)).map((x) => x.id)).toEqual(['3', '2', '1']);
-    expect(entities.find.mock.calls[0][0]).toMatchObject({ tenantId: T, level: 'campaign' });
+    model.aggregate.mockResolvedValueOnce([{ _id: '2', date: '2026-11-05' }]);
+    const list = await c.campaigns(T);
+    expect(list.map((x) => x.id)).toEqual(['3', '2', '1']);
+    expect(list.map((x) => x.lastRunDate)).toEqual([null, '2026-11-05', null]);
+    expect(model.aggregate.mock.calls.at(-1)![0][0].$match).toMatchObject({
+      tenantId: T,
+      status: 'done',
+    });
+    expect(entities.find.mock.calls[0][0]).toMatchObject({
+      tenantId: T,
+      level: 'campaign',
+    });
     await expect(c.campaigns('other')).rejects.toThrow(NotFoundException);
   });
 });

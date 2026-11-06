@@ -5,7 +5,6 @@ import { Model } from 'mongoose';
 import { Job } from 'bullmq';
 import { CreativeProducerService } from '../creative/creative-producer/creative-producer.service';
 import { MetaAdsService } from '../campaigns/meta-ads/meta-ads.service';
-import { withUtmParams } from '../campaigns/meta-ads/meta-utm.util';
 import { tryResolveCampaignProduct } from '../campaigns/campaign-creator/resolve-campaign-product';
 import { CompaniesService } from '../companies/companies.service';
 import { Campaign, CampaignDocument } from '../campaigns/schemas/campaign.schema';
@@ -176,12 +175,8 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
       try {
         const adName = `Ad (${replacementHook}) — added ${new Date().toISOString().split('T')[0]}`;
-        const adSetName = ((campaign as any)?.adSets ?? []).find((as: any) => as.metaAdSetId === adSetId)?.name ?? adSetId;
-        const taggedLandingUrl = withUtmParams(product.landingUrl, {
-          campaignName: campaign?.name ?? campaignId,
-          adSetName,
-          adName,
-        });
+        // Untagged: Meta appends utm_content={ad id} etc. itself (PM attribution reads those).
+        const taggedLandingUrl = product.landingUrl;
         const { adId } = await this.metaAds.createAdInAdSet(
           adSetId,
           accessToken,
