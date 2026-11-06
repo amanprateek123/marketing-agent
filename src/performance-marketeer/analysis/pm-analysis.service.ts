@@ -778,7 +778,13 @@ export class PmAnalysisService {
     // Entities with delivery or with attributed orders (orders with no spend
     // in range still show, with ROAS null — they are not hidden). Unknown
     // entities (no tag) are left out; scopeLeaks reports their orders.
-    const ids = all.filter((id) => scope.has(tagOf(id)));
+    // Under a parent, its children are the scope: app products (PM_APP_PRODUCTS)
+    // are not in PM_PRODUCTS, and filtering by tag hid all their ads.
+    const ids = all.filter(
+      (id) =>
+        (parentId && !q.product && (meta.has(id) || byId.has(id))) ||
+        scope.has(tagOf(id)),
+    );
     const rows: PmEntityRow[] = ids.map((id) => {
       const m = meta.get(id);
       const o = ords.get(id);
