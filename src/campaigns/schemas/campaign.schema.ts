@@ -680,6 +680,7 @@ export class Campaign {
   pendingActions: {
     actionId: string;
     type:
+      | 'pause_campaign'
       | 'pause_ad'
       | 'pause_adset'
       | 'scale_adset'
@@ -703,6 +704,8 @@ export class Campaign {
     executeAt: Date; // recommendedAt + gracePeriod
     status: 'pending' | 'executed' | 'overridden' | 'expired';
     executedAt?: Date;
+    /** Set only by the explicit approval path; never inferred from execution. */
+    humanApprovedAt?: Date;
     /**
      * True when the action was auto-applied via the Layer 3 low-risk path
      * (AUTO_APPLY_TYPES = narrow_placement, add_creative, dayparting, small
