@@ -661,6 +661,12 @@ export class DecisionsService {
     doc: IntelligenceDecisionDocument,
     campaign: Campaign | null,
   ): string | undefined {
+    if (
+      !doc.humanReviewedAt ||
+      !Number.isFinite(new Date(doc.humanReviewedAt).getTime())
+    ) {
+      return 'Recorded human approval is required before executing a decision';
+    }
     if (!doc.campaignId) return 'Decision has no campaignId — cannot execute';
     if (!campaign) {
       return `Campaign ${doc.campaignId} was not found in tenant ${doc.tenantId}`;

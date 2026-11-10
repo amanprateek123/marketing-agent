@@ -314,15 +314,35 @@ export class CampaignsService {
     if (action.status !== 'pending')
       throw new Error(`Action already ${action.status}`);
 
-    // Mark as executed — actual Meta API call happens in auditor's executePendingActions
-    action.status = 'executed';
-    action.executedAt = new Date();
-    action.executeAt = new Date(); // trigger immediate execution on next audit
-
-    await this.campaignModel.updateOne(
-      { tenantId, _id: campaignId },
-      { pendingActions },
+    // Retired: a status/timestamp alone also authorized automatic actions.
+    //     // Mark as executed — actual Meta API call happens in auditor's executePendingActions
+    //     action.status = 'executed';
+    //     action.executedAt = new Date();
+    //     action.executeAt = new Date(); // trigger immediate execution on next audit
+    //
+    //     await this.campaignModel.updateOne(
+    //       { tenantId, _id: campaignId },
+    //       { pendingActions },
+    //     );
+    const now = new Date();
+    const claimed = await this.campaignModel.updateOne(
+      {
+        tenantId,
+        _id: campaignId,
+        pendingActions: { $elemMatch: { actionId, status: 'pending' } },
+      },
+      {
+        $set: {
+          'pendingActions.$.status': 'executed',
+          'pendingActions.$.humanApprovedAt': now,
+          'pendingActions.$.executedAt': now,
+          'pendingActions.$.executeAt': now,
+          'pendingActions.$.autoApplied': false,
+        },
+      },
     );
+    if (!claimed.modifiedCount)
+      throw new Error('Action is no longer pending approval');
 
     return { type: action.type, targetName: action.targetName };
   }

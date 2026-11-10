@@ -51,6 +51,7 @@ describe('CampaignAuditorService explicit execution acknowledgement', () => {
       targetName: 'Ad 1',
       status: 'executed',
       executedAt: new Date(),
+      humanApprovedAt: new Date(),
       executeAt: new Date(),
       metrics: {},
     };
@@ -90,6 +91,7 @@ describe('CampaignAuditorService explicit execution acknowledgement', () => {
           targetName: 'Donor',
           status: 'executed',
           executedAt: new Date(),
+          humanApprovedAt: new Date(),
           executeAt: new Date(),
           metrics: {},
         },

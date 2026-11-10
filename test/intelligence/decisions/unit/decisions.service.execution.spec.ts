@@ -32,6 +32,7 @@ function decision(overrides: AnyRecord = {}) {
     targetId: 'ad-1',
     parameters: {},
     status: 'approved',
+    humanReviewedAt: new Date(),
     executionStatus: 'pending',
     executionAttempts: 0,
     shadowModeOnly: true,
@@ -461,6 +462,17 @@ describe('DecisionsService execution boundary', () => {
     ).resolves.toEqual({ executed: true });
     expect(execute).toHaveBeenCalledTimes(2);
     expect(state.doc.executionStatus).toBe('succeeded');
+  });
+
+  it('blocks approved status without a recorded human review', async () => {
+    const state = setup({ doc: decision({ humanReviewedAt: undefined }) });
+    const result = await state.service.executeApprovedDecision(
+      'tenant-1',
+      'decision-1',
+    );
+    expect(result.executed).toBe(false);
+    expect(result.error).toContain('Recorded human approval');
+    expect(state.campaignAuditor.executeExternalAction).not.toHaveBeenCalled();
   });
 
   it('will not execute a decision that is not approved', async () => {

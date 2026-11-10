@@ -1,3 +1,4 @@
+import { hasHumanActionApproval } from '../human-action-approval';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -591,7 +592,7 @@ export class CampaignAuditorService {
       campaign._id.toString(),
     );
 
-    // Execute any expired pending actions (agent campaigns only)
+    // Legacy call retained; background execution now returns without applying anything.
     if (isManagedCampaignSource(campaign.source)) {
       await this.executePendingActions(campaign, company);
     }
@@ -611,7 +612,7 @@ export class CampaignAuditorService {
         weeklySpend,
       );
       if (safetyPaused) {
-        result.paused++;
+        // Safety limits now create a pause proposal, not a live pause.
         return;
       }
     }
@@ -1506,6 +1507,7 @@ export class CampaignAuditorService {
     company: CompanyDocument,
     action: {
       type:
+        | 'pause_campaign'
         | 'pause_ad'
         | 'pause_adset'
         | 'scale_adset'
@@ -1709,42 +1711,42 @@ export class CampaignAuditorService {
       now.getTime() + action.gracePeriodHours * 60 * 60 * 1000,
     );
 
-    // Layer 3 — auto-apply for low-risk, reversible actions. Skips the human
-    // approval gate so the autonomous loop closes end-to-end. Non-reversible
-    // actions (pause, audience refresh, big budget cuts) still require approval.
-    //
-    // Reversibility criteria:
-    //   - narrow_placement: placements can be re-broadened by another narrow_placement
-    //   - add_creative: additive, doesn't pause winners
-    //   - dayparting: schedule can be cleared anytime
-    //   - shift_budget_between_adsets: small (≤30%) intra-campaign reallocation
-    //
-    // Safety nets that make auto-apply safe:
-    //   - TS-side parser validates params (e.g. position constants, schedule shape)
-    //   - Optimizer-side guards refuse actions that violate Meta business rules
-    //   - Frequency/CTR/breakeven gates inside the optimizer prevent extreme moves
-    //   - The verdict was produced by Sonnet against the LEAK DIAGNOSIS FRAMEWORK
-    const AUTO_APPLY_TYPES = new Set([
-      'narrow_placement',
-      'add_creative',
-      'dayparting',
-    ]);
-    const shiftPercent = Number(action.metrics?.shiftPercent ?? 0);
-    const isSmallShift =
-      action.type === 'shift_budget_between_adsets' &&
-      Number.isFinite(shiftPercent) &&
-      shiftPercent > 0 &&
-      shiftPercent <= 30;
-    // scale_adset defaults to approval-gated (company.pipelineConfig.scaleRequiresApproval
-    // defaults true) — set false on the Settings page to let winning ad sets scale
-    // up immediately, same as the other Layer 3 types, instead of sitting until a
-    // human clicks approve.
-    const scaleAutoApply =
-      action.type === 'scale_adset' &&
-      company.pipelineConfig?.scaleRequiresApproval === false;
-    const autoApply =
-      AUTO_APPLY_TYPES.has(action.type) || isSmallShift || scaleAutoApply;
-
+    // Retired: recommendations must never authorize their own execution.
+    //     // Layer 3 — auto-apply for low-risk, reversible actions. Skips the human
+    //     // approval gate so the autonomous loop closes end-to-end. Non-reversible
+    //     // actions (pause, audience refresh, big budget cuts) still require approval.
+    //     //
+    //     // Reversibility criteria:
+    //     //   - narrow_placement: placements can be re-broadened by another narrow_placement
+    //     //   - add_creative: additive, doesn't pause winners
+    //     //   - dayparting: schedule can be cleared anytime
+    //     //   - shift_budget_between_adsets: small (≤30%) intra-campaign reallocation
+    //     //
+    //     // Safety nets that make auto-apply safe:
+    //     //   - TS-side parser validates params (e.g. position constants, schedule shape)
+    //     //   - Optimizer-side guards refuse actions that violate Meta business rules
+    //     //   - Frequency/CTR/breakeven gates inside the optimizer prevent extreme moves
+    //     //   - The verdict was produced by Sonnet against the LEAK DIAGNOSIS FRAMEWORK
+    //     const AUTO_APPLY_TYPES = new Set([
+    //       'narrow_placement',
+    //       'add_creative',
+    //       'dayparting',
+    //     ]);
+    //     const shiftPercent = Number(action.metrics?.shiftPercent ?? 0);
+    //     const isSmallShift =
+    //       action.type === 'shift_budget_between_adsets' &&
+    //       Number.isFinite(shiftPercent) &&
+    //       shiftPercent > 0 &&
+    //       shiftPercent <= 30;
+    //     // scale_adset defaults to approval-gated (company.pipelineConfig.scaleRequiresApproval
+    //     // defaults true) — set false on the Settings page to let winning ad sets scale
+    //     // up immediately, same as the other Layer 3 types, instead of sitting until a
+    //     // human clicks approve.
+    //     const scaleAutoApply =
+    //       action.type === 'scale_adset' &&
+    //       company.pipelineConfig?.scaleRequiresApproval === false;
+    //     const autoApply =
+    //       AUTO_APPLY_TYPES.has(action.type) || isSmallShift || scaleAutoApply;
     pendingActions.push({
       actionId,
       type: action.type,
@@ -1757,31 +1759,34 @@ export class CampaignAuditorService {
       priority: action.priority,
       metrics: action.metrics,
       recommendedAt: now,
-      // Auto-apply actions get executeAt=now so the next executePendingActions pass
-      // picks them up immediately. Approval-gated actions retain the grace period
-      // (gives operators time to review in Slack/dashboard).
-      executeAt: autoApply ? now : executeAt,
-      status: autoApply ? 'executed' : 'pending',
-      // CRITICAL: set executedAt for auto-applied actions so the inner-handler
-      // `manuallyApproved` checks (e.g. add_creative line ~1045) treat them as
-      // approved-to-run. Without this, action sits at status='executed' but each
-      // handler's `if (!manuallyApproved) continue;` skips it forever. The "already
-      // ran" guard at line 904 still works because on first executePendingActions
-      // pass executedAt is < 60s old (not skipped); on subsequent audits it's
-      // hours old → skipped. Same semantics as a human-approved action.
-      executedAt: autoApply ? now : undefined,
-      autoApplied: autoApply || undefined,
+      //       // Auto-apply actions get executeAt=now so the next executePendingActions pass
+      //       // picks them up immediately. Approval-gated actions retain the grace period
+      //       // (gives operators time to review in Slack/dashboard).
+      //       executeAt: autoApply ? now : executeAt,
+      //       status: autoApply ? 'executed' : 'pending',
+      //       // CRITICAL: set executedAt for auto-applied actions so the inner-handler
+      //       // `manuallyApproved` checks (e.g. add_creative line ~1045) treat them as
+      //       // approved-to-run. Without this, action sits at status='executed' but each
+      //       // handler's `if (!manuallyApproved) continue;` skips it forever. The "already
+      //       // ran" guard at line 904 still works because on first executePendingActions
+      //       // pass executedAt is < 60s old (not skipped); on subsequent audits it's
+      //       // hours old → skipped. Same semantics as a human-approved action.
+      //       executedAt: autoApply ? now : undefined,
+      //       autoApplied: autoApply || undefined,
+      executeAt, // Informational review timing only; expiry never executes.
+      status: 'pending',
+      autoApplied: false,
     });
 
     await this.campaignModel.updateOne(
       { _id: campaign._id },
       { pendingActions },
     );
-    if (autoApply) {
-      this.logger.log(
-        `Auto-applied ${action.type} on "${action.targetName}" (Layer 3 low-risk auto-apply)`,
-      );
-    }
+    //     if (autoApply) {
+    //       this.logger.log(
+    //         `Auto-applied ${action.type} on "${action.targetName}" (Layer 3 low-risk auto-apply)`,
+    //       );
+    //     }
     return true;
   }
 
@@ -1790,6 +1795,8 @@ export class CampaignAuditorService {
     company: CompanyDocument,
     requestedActionId?: string,
   ): Promise<boolean> {
+    // Background audits never execute suggestions, including legacy overdue rows.
+    if (!requestedActionId) return false;
     const pendingActions = (campaign as any).pendingActions ?? [];
     const now = new Date();
     let updated = false;
@@ -1798,21 +1805,37 @@ export class CampaignAuditorService {
     for (const action of pendingActions) {
       if (requestedActionId && action.actionId !== requestedActionId) continue;
       if (action.status !== 'pending' && action.status !== 'executed') continue;
-      // Only execute if manually triggered (status = 'executed') or grace period expired
-      const graceExpired = new Date(action.executeAt) <= now;
-      const manuallyApproved =
-        action.status === 'executed' && action.executedAt;
-
-      if (!graceExpired && !manuallyApproved) continue;
-      if (
-        action.status === 'executed' &&
-        action.executedAt &&
-        new Date(action.executedAt) < new Date(now.getTime() - 60 * 1000)
-      )
-        continue; // already ran
+      //       // Only execute if manually triggered (status = 'executed') or grace period expired
+      //       const graceExpired = new Date(action.executeAt) <= now;
+      //       const manuallyApproved =
+      //         action.status === 'executed' && action.executedAt;
+      //
+      //       if (!graceExpired && !manuallyApproved) continue;
+      //       if (
+      //         action.status === 'executed' &&
+      //         action.executedAt &&
+      //         new Date(action.executedAt) < new Date(now.getTime() - 60 * 1000)
+      //       )
+      //         continue; // already ran
+      const manuallyApproved = hasHumanActionApproval(action);
+      if (!manuallyApproved) {
+        throw new Error(
+          'Human approval is required before applying a campaign change',
+        );
+      }
 
       try {
-        if (action.type === 'pause_ad') {
+        if (action.type === 'pause_campaign') {
+          await this.metaAds.pauseCampaign(
+            campaign.metaCampaignId,
+            company.meta!.accessToken,
+          );
+          await this.campaignsService.pause(
+            company.tenantId,
+            campaign._id.toString(),
+            action.reason,
+          );
+        } else if (action.type === 'pause_ad') {
           await this.metaAds.pauseAd(
             action.targetId,
             company.meta!.accessToken,
@@ -1833,7 +1856,7 @@ export class CampaignAuditorService {
           );
           if (adSet) adSet.status = 'paused';
         } else if (action.type === 'shift_budget_between_adsets') {
-          // Revenue-neutral redistribution within the campaign — auto-executes on grace expiry.
+          // Budget redistribution only runs after the explicit approval gate above.
           // Total spend unchanged, so risk is capped vs scale_adset which raises total burn.
           // Params were persisted into action.metrics by createPendingAction.
           const toAdSetId = action.metrics?.toAdSetId;
@@ -1853,7 +1876,7 @@ export class CampaignAuditorService {
             shiftPercent,
           );
         } else if (action.type === 'reduce_total_budget') {
-          // Throttle without killing — auto-executes on grace expiry. Reduces total spend
+          // Explicitly approved throttle. Reduces total spend
           // so it's lower-risk than scale_adset; explicit cap of 50% reduction in optimizer.
           const reductionPct = Number(action.metrics?.reductionPercent);
           if (!Number.isFinite(reductionPct) || reductionPct <= 0) {
@@ -1933,13 +1956,14 @@ export class CampaignAuditorService {
             { frequency: sourceFreq, ctrTrend: sourceCtrTrend },
           );
         } else if (action.type === 'scale_adset') {
-          // Scale requires explicit approval by default (company.pipelineConfig.scaleRequiresApproval,
-          // default true) — grace-period expiry alone isn't enough, unlike shift/reduce above.
-          // Set scaleRequiresApproval=false on the Settings page to let this auto-execute
-          // once the grace period passes too, same as the other budget actions.
-          const scaleNeedsApproval =
-            company.pipelineConfig?.scaleRequiresApproval !== false;
-          if (scaleNeedsApproval && !manuallyApproved) continue;
+          // Retired optional scaling approval policy; the common gate is mandatory.
+          //           // Scale requires explicit approval by default (company.pipelineConfig.scaleRequiresApproval,
+          //           // default true) — grace-period expiry alone isn't enough, unlike shift/reduce above.
+          //           // Set scaleRequiresApproval=false on the Settings page to let this auto-execute
+          //           // once the grace period passes too, same as the other budget actions.
+          //           const scaleNeedsApproval =
+          //             company.pipelineConfig?.scaleRequiresApproval !== false;
+          //           if (scaleNeedsApproval && !manuallyApproved) continue;
           await this.optimizer.scaleAdSet(campaign, company, action.targetId, {
             spend: campaign.spend ?? 0,
             impressions: campaign.impressions ?? 0,
@@ -1982,6 +2006,7 @@ export class CampaignAuditorService {
             {
               tenantId: company.tenantId,
               campaignId: campaign._id.toString(),
+              actionId: action.actionId,
               briefId: campaign.briefId,
               fatiguedAdId: action.targetId,
               fatiguedHook: action.metrics?.fatiguedHook ?? '',
@@ -2020,6 +2045,7 @@ export class CampaignAuditorService {
             {
               tenantId: company.tenantId,
               campaignId: campaign._id.toString(),
+              actionId: action.actionId,
               briefId: campaign.briefId,
               fatiguedAdId: '', // empty = add new, don't replace
               fatiguedHook: '',
@@ -2293,11 +2319,8 @@ export class CampaignAuditorService {
             priority: action.priority,
             params: action.metrics ?? {},
           },
-          trigger: manuallyApproved
-            ? 'human_approved'
-            : action.autoApplied
-              ? 'auto_applied'
-              : 'grace_expired',
+          // Legacy inferred approval mislabelled auto-applied actions as human.
+          trigger: 'human_approved',
           context: {
             ageDays:
               Math.round(
@@ -2325,8 +2348,8 @@ export class CampaignAuditorService {
         await this.actionLogger.log({
           tenantId: company.tenantId,
           agent: AgentType.CAMPAIGN_AUDITOR,
-          action: `auto_${action.type}`,
-          reason: `Grace period expired — ${action.reason}`,
+          action: `approved_${action.type}`,
+          reason: `Human approved — ${action.reason}`,
           outcome: `${action.type} executed on ${action.targetName}`,
           metadata: { actionId: action.actionId, targetId: action.targetId },
         });
@@ -2402,10 +2425,8 @@ ${lines}
       verdict.recommendedActions.length > 0
         ? verdict.recommendedActions
             .map((a) => {
-              const approval =
-                a.type === 'scale_adset' || a.type === 'replace_creative'
-                  ? ' (needs your approval on the campaign page)'
-                  : '';
+              // All recommendations require explicit approval.
+              const approval = ' (needs your approval on the campaign page)';
               return `• ${a.type.replace(/_/g, ' ')}: ${a.targetName} — ${a.reason}${approval}`;
             })
             .join('\n')
@@ -2416,7 +2437,11 @@ ${lines}
     await this.alerts.raise({
       kind: 'campaign_audit',
       severity:
-        verdict.urgency === 'immediate' ? 'critical' : verdict.urgency === '48h' ? 'warn' : 'info',
+        verdict.urgency === 'immediate'
+          ? 'critical'
+          : verdict.urgency === '48h'
+            ? 'warn'
+            : 'info',
       title: `${campaign.name || 'A campaign'} needs action`,
       body: `${verdict.contextInsight}\n\nRecommended:\n${actionsText}${watchText}`,
       dedupeKey: `audit:${company.tenantId}:${campaign._id.toString()}:${new Date().toISOString().slice(0, 10)}`,
@@ -2442,34 +2467,53 @@ ${lines}
     company: CompanyDocument,
     reason: string,
   ): Promise<void> {
-    await this.campaignsService.pause(
-      company.tenantId,
-      campaign._id.toString(),
+    //     await this.campaignsService.pause(
+    //       company.tenantId,
+    //       campaign._id.toString(),
+    //       reason,
+    //     );
+    //
+    //     await this.actionLogger.log({
+    //       tenantId: company.tenantId,
+    //       agent: AgentType.CAMPAIGN_AUDITOR,
+    //       action: 'campaign_paused',
+    //       reason,
+    //       outcome: `Campaign ${campaign.metaCampaignId} paused (safety rail)`,
+    //       metadata: { metaCampaignId: campaign.metaCampaignId },
+    //     });
+    //
+    //     await this.alerts.raise({
+    //       kind: 'campaign_paused',
+    //       severity: 'critical',
+    //       title: `${campaign.name || 'A campaign'} was paused automatically`,
+    //       body: `A safety limit paused it: ${reason}`,
+    //       dedupeKey: `paused:${company.tenantId}:${campaign._id.toString()}`,
+    //     });
+    //
+    //     this.campaignLearning
+    //       .runRootCauseAnalysis(company.tenantId, campaign._id.toString())
+    //       .catch((err) =>
+    //         this.logger.error(`Root cause analysis failed: ${err.message}`),
+    //       );
+    //   }
+    const created = await this.createPendingAction(campaign, company, {
+      type: 'pause_campaign',
+      targetId: campaign.metaCampaignId,
+      targetName: campaign.name || campaign.metaCampaignId,
       reason,
-    );
-
-    await this.actionLogger.log({
-      tenantId: company.tenantId,
-      agent: AgentType.CAMPAIGN_AUDITOR,
-      action: 'campaign_paused',
-      reason,
-      outcome: `Campaign ${campaign.metaCampaignId} paused (safety rail)`,
-      metadata: { metaCampaignId: campaign.metaCampaignId },
+      priority: 'high',
+      metrics: {},
+      gracePeriodHours: 0,
     });
-
-    await this.alerts.raise({
-      kind: 'campaign_paused',
-      severity: 'critical',
-      title: `${campaign.name || 'A campaign'} was paused automatically`,
-      body: `A safety limit paused it: ${reason}`,
-      dedupeKey: `paused:${company.tenantId}:${campaign._id.toString()}`,
-    });
-
-    this.campaignLearning
-      .runRootCauseAnalysis(company.tenantId, campaign._id.toString())
-      .catch((err) =>
-        this.logger.error(`Root cause analysis failed: ${err.message}`),
-      );
+    if (created) {
+      await this.alerts.raise({
+        kind: 'campaign_watch',
+        severity: 'critical',
+        title: `Approval needed: pause ${campaign.name || 'campaign'}`,
+        body: `A safety limit was reached: ${reason}. No campaign change was applied.`,
+        dedupeKey: `pause-approval:${company.tenantId}:${campaign._id.toString()}`,
+      });
+    }
   }
 
   private async writePerformanceBack(

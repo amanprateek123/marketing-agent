@@ -1,3 +1,4 @@
+import { hasHumanActionApproval } from '../campaigns/human-action-approval';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -15,6 +16,7 @@ import { QUEUES } from './queue.constants';
 interface ReplacementJobData {
   tenantId: string;
   campaignId: string;
+  actionId?: string; // Old automatic jobs have no id and are blocked.
   briefId: string;
   fatiguedAdId: string;    // empty string = add_creative mode (create new ad, don't replace)
   fatiguedHook: string;
@@ -57,16 +59,29 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
   async process(job: Job<ReplacementJobData>): Promise<void> {
     const { tenantId, campaignId, briefId, fatiguedAdId, fatiguedHook, replacementHook, adSetId, audienceStage } = job.data;
+    const approvedCampaign = await this.campaignModel.findOne({ _id: campaignId, tenantId }).lean().exec();
+    const approvedAction = approvedCampaign?.pendingActions?.find((a: any) => a.actionId === job.data.actionId);
+    const expectedType = fatiguedAdId ? 'replace_creative' : 'add_creative';
+    if (!job.data.actionId || !hasHumanActionApproval(approvedAction) ||
+        approvedAction?.type !== expectedType ||
+        approvedAction?.targetId !== (fatiguedAdId || adSetId)) {
+      this.logger.warn(`Creative job blocked: human approval required for campaign ${campaignId}`);
+      return;
+    }
     const isAddMode = !fatiguedAdId; // add_creative vs replace_creative
     this.logger.log(`Creative ${isAddMode ? 'addition' : 'replacement'} starting: tenantId=${tenantId} hook=${replacementHook}`);
 
     const company = await this.companiesService.findByTenantId(tenantId);
 
     const updateReplacementStatus = async (status: 'producing' | 'complete' | 'failed') => {
-      const filter = isAddMode
-        ? { _id: campaignId, 'pendingActions.type': 'add_creative', 'pendingActions.targetId': adSetId }
-        : { _id: campaignId, 'pendingActions.targetId': fatiguedAdId, 'pendingActions.type': 'replace_creative' };
-      await this.campaignModel.updateOne(filter, { $set: { 'pendingActions.$.replacementStatus': status } });
+//       const filter = isAddMode
+//         ? { _id: campaignId, 'pendingActions.type': 'add_creative', 'pendingActions.targetId': adSetId }
+//         : { _id: campaignId, 'pendingActions.targetId': fatiguedAdId, 'pendingActions.type': 'replace_creative' };
+//       await this.campaignModel.updateOne(filter, { $set: { 'pendingActions.$.replacementStatus': status } });
+      await this.campaignModel.updateOne(
+        { _id: campaignId, tenantId, 'pendingActions.actionId': job.data.actionId },
+        { $set: { 'pendingActions.$.replacementStatus': status } },
+      );
     };
 
     // Load original brief
@@ -145,6 +160,12 @@ export class CreativeReplacementProcessor extends WorkerHost {
 
     const selectedIndex = creativePackage.copyPackage?.selectedIndex ?? 0;
     const campaign = await this.campaignModel.findOne({ _id: campaignId }).exec();
+
+    const currentAction = campaign?.pendingActions?.find((a: any) => a.actionId === job.data.actionId);
+    if (!hasHumanActionApproval(currentAction)) {
+      this.logger.warn(`Creative publish blocked: approval missing for ${job.data.actionId}`);
+      return;
+    }
 
     if (isAddMode) {
       // ── ADD MODE: Create a new ad in the target ad set ──────────────────────
