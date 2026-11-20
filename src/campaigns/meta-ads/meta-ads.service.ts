@@ -2991,6 +2991,19 @@ export class MetaAdsService {
    * invalid or the token can't see it, so the approval screen can surface
    * that as its own warning rather than failing to render.
    */
+  /**
+   * Fresh creative thumbnail for one ad. Meta's thumbnail_url is a signed
+   * fbcdn link that expires after a few days, and the sync only refreshes
+   * ads of ACTIVE campaigns — so paused campaigns end up with dead images.
+   */
+  async getAdThumbnailUrl(adId: string, accessToken: string): Promise<string | null> {
+    const res = await this.metaApiCall('GET', `${META_API_BASE}/${adId}`, {
+      fields: 'creative.thumbnail_width(1080).thumbnail_height(1080){thumbnail_url}',
+      access_token: accessToken,
+    });
+    return res?.data?.creative?.thumbnail_url ?? null;
+  }
+
   async getPage(pageId: string, accessToken: string): Promise<{ id: string; name: string; category?: string } | null> {
     try {
       const res = await this.metaApiCall('GET', `${META_API_BASE}/${pageId}`, {
