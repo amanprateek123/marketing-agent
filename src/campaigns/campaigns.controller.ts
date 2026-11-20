@@ -1743,6 +1743,38 @@ export class CampaignsController {
    * and per-asset (video/body/title) rows — campaign-level rollup by default.
    * Pass ?level=adset&entityId=<metaAdSetId> for one ad set's own rows instead.
    */
+  /**
+   * GET /api/v1/campaigns/:tenantId/:campaignId/ads/:adId/thumbnail
+   * Re-fetches an ad's thumbnail from Meta and stores it. The dashboard calls
+   * this when the stored (expired) fbcdn image fails to load.
+   */
+  @Get(':tenantId/:campaignId/ads/:adId/thumbnail')
+  async refreshAdThumbnail(
+    @Param('tenantId') tenantId: string,
+    @Param('campaignId') campaignId: string,
+    @Param('adId') adId: string,
+  ) {
+    if (!/^\d+$/.test(adId)) throw new BadRequestException('Invalid ad id');
+    const campaign = await this.campaignsService.findById(tenantId, campaignId);
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    const company = await this.companiesService.findByTenantId(tenantId);
+    if (!company?.meta?.accessToken)
+      throw new BadRequestException('No Meta access token configured');
+
+    const thumbnailUrl = await this.metaAdsService.getAdThumbnailUrl(
+      adId,
+      company.meta.accessToken,
+    );
+    if (thumbnailUrl) {
+      await this.campaignModel.updateOne(
+        { _id: campaignId, tenantId },
+        { $set: { 'metaAdSets.$[].ads.$[ad].thumbnailUrl': thumbnailUrl } },
+        { arrayFilters: [{ 'ad.id': adId }] },
+      );
+    }
+    return { thumbnailUrl };
+  }
+
   @Get(':tenantId/:campaignId/breakdowns')
   async getCampaignBreakdowns(
     @Param('tenantId') tenantId: string,
