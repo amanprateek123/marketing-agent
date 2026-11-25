@@ -2213,6 +2213,56 @@ export class MetaAdsService {
   }
 
   /**
+   * Carousel counterpart of createAdInAdSet: one ad whose 2-10 cards the
+   * viewer swipes through, in the order given. One copy block (primary text
+   * above the cards, CTA), a headline per card. Meta serves one card size on
+   * every placement, so callers pick one ratio (1:1 or 4:5) for all cards.
+   */
+  async createCarouselAdInAdSet(
+    adSetId: string,
+    accessToken: string,
+    adName: string,
+    copy: { primaryText: string; headline: string; cta: string },
+    cards: Array<{ imageUrl: string; headline: string; description?: string }>,
+    pageId: string,
+    landingUrl: string,
+    declaredSpecialAdCategories?: string[],
+  ): Promise<{ adId: string; creativeId: string }> {
+    const safety = checkCopySafety({
+      primaryText: copy.primaryText,
+      headline: [copy.headline, ...cards.map((c) => c.headline)].filter(Boolean).join(' | '),
+      cta: copy.cta,
+      declaredSpecialAdCategories,
+    });
+    if (!safety.safe) {
+      const errorMsg = formatSafetyError(safety);
+      this.logger.error(`Refusing to launch carousel ad "${adName}" — ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+
+    const { accountId } = await this.getAdSetPlacementContext(adSetId, accessToken);
+    const uploaded: Array<{ imageHash: string; headline: string; description?: string }> = [];
+    for (const card of cards) {
+      const imageHash = await this.uploadImage(card.imageUrl, accountId, accessToken);
+      uploaded.push({ imageHash, headline: card.headline, description: card.description });
+    }
+
+    const result = await this.createCarouselAd(
+      accountId,
+      accessToken,
+      adSetId,
+      adName,
+      copy.primaryText,
+      copy.cta,
+      pageId,
+      landingUrl,
+      uploaded,
+    );
+    await this.updateAdStatus(result.adId, 'ACTIVE', accessToken);
+    return result;
+  }
+
+  /**
    * Attach a custom audience to a live ad set's targeting. Read-modify-write
    * so we don't blow away geo / age / placements set at launch.
    *

@@ -13,6 +13,7 @@ import { GalleryService } from '../../gallery/gallery.service';
 import { CreativePackage, CreativePackageDocument } from '../../creative/schemas/creative-package.schema';
 import { PlacementPreset, resolvePlacementPreset } from '../meta-ads/placement-presets';
 import { VALID_OPTIMIZATION_GOALS } from '../meta-ads/optimization-goals';
+import { CarouselRatio, assertCarouselCardCount, pickCarouselCardUrl } from '../meta-ads/carousel-cards';
 
 export interface CampaignMetrics {
   spend: number;
@@ -27,16 +28,24 @@ export interface CampaignMetrics {
 
 /** One ad's worth of media + copy — the unit createAdsForEntries fans out over. */
 interface AdEntry {
-  assetType: 'image' | 'video';
+  assetType: 'image' | 'video' | 'carousel';
   mediaUrl: string;
   /** Every uploaded size of this creative, primary first — mapped per placement. */
   sizes?: AdMediaSize[];
   copy: { primaryText: string; headline: string; cta: string };
+  /** Carousel only: the cards in swipe order. */
+  cards?: Array<{ imageUrl: string; headline: string }>;
+}
+
+/** Sheet-mode option: ship the sheet's images as separate ads (default) or as one carousel. */
+export interface SheetCarouselOption {
+  imagesAs?: 'separate' | 'carousel';
+  carouselRatio?: CarouselRatio;
 }
 
 /** Result of creating N ads from N entries — some may fail without aborting the rest. */
 interface CreateAdsResult {
-  createdAds: Array<{ adId: string; creativeId: string; headline: string; assetType: 'image' | 'video' }>;
+  createdAds: Array<{ adId: string; creativeId: string; headline: string; assetType: 'image' | 'video' | 'carousel' }>;
   failed: Array<{ headline?: string; error: string }>;
 }
 
@@ -570,6 +579,7 @@ export class CampaignOptimizerService {
     tenantId: string,
     sheetId: string,
     excludeAssetIds?: string[],
+    carousel?: SheetCarouselOption,
   ): Promise<{ entries: AdEntry[]; skippedCarousel: number }> {
     const assets = await this.galleryService.listSheetAssets(tenantId, sheetId);
     const excludeSet = new Set(excludeAssetIds ?? []);
@@ -610,7 +620,27 @@ export class CampaignOptimizerService {
       };
     });
 
-    return { entries, skippedCarousel };
+    if (carousel?.imagesAs !== 'carousel') return { entries, skippedCarousel };
+
+    // All selected images become ONE carousel ad, cards in sheet order; the
+    // first image's copy is the carousel's primary text and CTA. Videos stay
+    // separate ads.
+    const images = entries.filter((e) => e.assetType === 'image');
+    assertCarouselCardCount(images.length);
+    const ratio = carousel.carouselRatio ?? '1:1';
+    const carouselEntry: AdEntry = {
+      assetType: 'carousel',
+      mediaUrl: '',
+      copy: { ...images[0].copy, headline: images[0].copy.headline || 'Carousel' },
+      cards: images.map((e) => ({
+        imageUrl: pickCarouselCardUrl(e.sizes ?? [{ url: e.mediaUrl }], ratio),
+        headline: e.copy.headline,
+      })),
+    };
+    return {
+      entries: [carouselEntry, ...entries.filter((e) => e.assetType === 'video')],
+      skippedCarousel,
+    };
   }
 
   /**
@@ -642,6 +672,18 @@ export class CampaignOptimizerService {
         batch.map((entry) => {
           const adName = adNameFor(entry);
           const landingUrl = landingUrlFor(adName);
+          if (entry.assetType === 'carousel') {
+            return this.metaAdsService.createCarouselAdInAdSet(
+              adSetId,
+              accessToken,
+              adName,
+              entry.copy,
+              entry.cards ?? [],
+              pageId,
+              landingUrl,
+              specialAdCategories,
+            );
+          }
           return entry.assetType === 'video'
             ? this.metaAdsService.createVideoAdInAdSet(
                 adSetId,
@@ -731,7 +773,7 @@ export class CampaignOptimizerService {
           mediaUrl: string;
           copy: { primaryText: string; headline: string; cta: string };
         }
-      | { sheetId: string; excludeAssetIds?: string[] }
+      | ({ sheetId: string; excludeAssetIds?: string[] } & SheetCarouselOption)
     ),
   ): Promise<{
     newAdSetId: string;
@@ -798,6 +840,7 @@ export class CampaignOptimizerService {
         company.tenantId,
         opts.sheetId,
         opts.excludeAssetIds,
+        opts,
       );
       entries = resolved.entries;
       skippedCarousel = resolved.skippedCarousel;
@@ -874,7 +917,7 @@ export class CampaignOptimizerService {
       newAdSetId,
       entries,
       company.meta!.accessToken,
-      (entry) => `${adSetName} — ${entry.copy.headline || 'ad'}`,
+      (entry) => `${adSetName} — ${entry.assetType === 'carousel' ? `Carousel (${entry.cards?.length} cards)` : entry.copy.headline || 'ad'}`,
       // Untagged: Meta appends utm_content={ad id} etc. itself.
       () => landingUrl,
       pageId,
@@ -955,7 +998,7 @@ export class CampaignOptimizerService {
           mediaUrl: string;
           copy: { primaryText: string; headline: string; cta: string };
         }
-      | { sheetId: string; excludeAssetIds?: string[] }
+      | ({ sheetId: string; excludeAssetIds?: string[] } & SheetCarouselOption)
     ),
   ): Promise<{
     adId: string;
@@ -997,6 +1040,7 @@ export class CampaignOptimizerService {
         company.tenantId,
         opts.sheetId,
         opts.excludeAssetIds,
+        opts,
       );
       entries = resolved.entries;
       skippedCarousel = resolved.skippedCarousel;
@@ -1023,7 +1067,7 @@ export class CampaignOptimizerService {
       `${adSetName} — manual ${new Date().toISOString().split('T')[0]}`;
     const adNameFor =
       'sheetId' in opts
-        ? (entry: AdEntry) => `${adSetName} — ${entry.copy.headline || 'ad'}`
+        ? (entry: AdEntry) => `${adSetName} — ${entry.assetType === 'carousel' ? `Carousel (${entry.cards?.length} cards)` : entry.copy.headline || 'ad'}`
         : () => fixedAdName;
 
     const { createdAds, failed } = await this.createAdsForEntries(
