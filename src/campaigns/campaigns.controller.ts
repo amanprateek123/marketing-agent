@@ -1,3 +1,4 @@
+import { CAROUSEL_RATIOS, CarouselRatio } from './meta-ads/carousel-cards';
 import {
   Controller,
   Get,
@@ -71,6 +72,19 @@ const VALID_PLACEMENT_PRESETS = new Set<PlacementPreset>([
   'vertical_feed',
   'everywhere',
 ]);
+
+
+/** Validates the sheet-mode "images as one carousel" option from a request body. */
+function validCarouselOption(body: { imagesAs?: string; carouselRatio?: string }) {
+  if (body.imagesAs === undefined || body.imagesAs === 'separate') return {};
+  if (body.imagesAs !== 'carousel') {
+    throw new BadRequestException("imagesAs must be 'separate' or 'carousel'");
+  }
+  if (body.carouselRatio !== undefined && !CAROUSEL_RATIOS.includes(body.carouselRatio as CarouselRatio)) {
+    throw new BadRequestException(`carouselRatio must be one of ${CAROUSEL_RATIOS.join(', ')}`);
+  }
+  return { imagesAs: 'carousel' as const, carouselRatio: body.carouselRatio as CarouselRatio | undefined };
+}
 
 @Controller('campaigns')
 export class CampaignsController {
@@ -1408,6 +1422,8 @@ export class CampaignsController {
       optimizationGoal?: string;
       sheetId?: string;
       excludeAssetIds?: string[];
+      imagesAs?: 'separate' | 'carousel';
+      carouselRatio?: CarouselRatio;
       assetType?: 'image' | 'video';
       mediaUrl?: string;
       primaryText?: string;
@@ -1484,7 +1500,11 @@ export class CampaignsController {
           placementPreset: body.placementPreset,
           optimizationGoal: body.optimizationGoal,
           ...(body.sheetId
-            ? { sheetId: body.sheetId, excludeAssetIds: body.excludeAssetIds }
+            ? {
+                sheetId: body.sheetId,
+                excludeAssetIds: body.excludeAssetIds,
+                ...validCarouselOption(body),
+              }
             : {
                 assetType: body.assetType!,
                 mediaUrl: body.mediaUrl!,
@@ -1625,7 +1645,13 @@ export class CampaignsController {
     @Param('tenantId') tenantId: string,
     @Param('campaignId') campaignId: string,
     @Param('adSetId') adSetId: string,
-    @Body() body: { sheetId?: string; excludeAssetIds?: string[] },
+    @Body()
+    body: {
+      sheetId?: string;
+      excludeAssetIds?: string[];
+      imagesAs?: 'separate' | 'carousel';
+      carouselRatio?: CarouselRatio;
+    },
   ) {
     if (!body?.sheetId) {
       throw new BadRequestException('sheetId is required');
@@ -1656,6 +1682,7 @@ export class CampaignsController {
           adSetId,
           sheetId: body.sheetId,
           excludeAssetIds: body.excludeAssetIds,
+          ...validCarouselOption(body),
         },
       );
 

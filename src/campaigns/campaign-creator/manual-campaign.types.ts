@@ -93,6 +93,12 @@ export interface ManualCreativeVideo {
   aspectRatio?: string;
 }
 
+export interface ManualCarouselCard {
+  imageUrl: string;
+  headline: string;
+  description?: string;
+}
+
 export interface CreateManualCampaignDto {
   name: string;
   /** Which of the tenant's products this campaign is for — resolves conversion event/value. Defaults to the first active product. */
@@ -129,6 +135,12 @@ export interface CreateManualCampaignDto {
      * When set, this takes priority over `video` entirely (don't set both).
      */
     videos?: ManualCreativeVideo[];
+    /**
+     * Cards for ad sets with creativeFormat 'carousel', in swipe order (2-10,
+     * one shared size). The carousel ad uses copyVariants[0] for its primary
+     * text and CTA; each card has its own headline.
+     */
+    carouselCards?: ManualCarouselCard[];
   };
   creativePackageId?: string;
 }

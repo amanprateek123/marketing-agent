@@ -1,3 +1,4 @@
+import { assertCarouselCardCount } from '../meta-ads/carousel-cards';
 import { validateImagePlacementOverrides } from '../meta-ads/image-placement-overrides';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -118,7 +119,13 @@ export class ManualCampaignService {
         images: dto.creative!.images ?? [],
         video: dto.creative!.videos?.length ? null : (dto.creative!.video ?? null),
         videos: dto.creative!.videos ?? [],
-        carouselCards: [],
+        carouselCards: (dto.creative!.carouselCards ?? []).map((card, slotIndex) => ({
+          slotIndex,
+          headline: card.headline,
+          description: card.description,
+          imagePrompt: '',
+          imageUrl: card.imageUrl,
+        })),
         completedAt: new Date(),
       });
     }
@@ -418,7 +425,14 @@ export class ManualCampaignService {
     }
     const hasImage = (dto.creative.images?.length ?? 0) > 0;
     const hasVideo = !!dto.creative.video || (dto.creative.videos?.length ?? 0) > 0;
-    if (!hasImage && !hasVideo) {
+    const cards = dto.creative.carouselCards ?? [];
+    if (dto.adSets.some((a) => a.creativeFormat === 'carousel')) {
+      assertCarouselCardCount(cards.length);
+      if (cards.some((c) => !c.imageUrl?.trim())) {
+        throw new Error('Every carousel card needs an image');
+      }
+    }
+    if (!hasImage && !hasVideo && cards.length < 2) {
       throw new Error(
         'At least one image or a video is required to launch ads',
       );
