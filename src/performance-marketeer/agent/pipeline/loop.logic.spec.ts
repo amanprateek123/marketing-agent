@@ -11,7 +11,9 @@ import {
   accuracyCap,
   goalProgress,
   finalActions,
+  focusPlan,
   hitRateFactor,
+  launchCheck,
   lessonsUsed,
   mergeContradictions,
   mergeCauses,
@@ -93,7 +95,9 @@ const action = (id: string, p: Partial<Action> = {}): Action => ({
 const plan = (actions: Action[]): PlanOutput => ({
   summary: '',
   pathToTarget: 'possible',
+  decision: { call: 'keep', verdict: '', stopGo: null },
   actions,
+  watch: [],
   issueReplies: [],
   lessonsContradicted: [],
   markdown: '',
@@ -732,5 +736,104 @@ describe('small funnel samples become Watch items', () => {
         (x) => !x.checksFailed.length,
       ),
     ).toBe(true);
+  });
+});
+
+describe('decisive plans (25 Nov 2026)', () => {
+  const final = (actions: Action[]) =>
+    finalActions(
+      plan(actions),
+      pv({
+        actionVerdicts: actions.map((x) => ({
+          actionId: x.id,
+          verdict: 'approve' as const,
+          note: '',
+          evidence: [],
+        })),
+      }),
+      [],
+    );
+
+  it('keeps the top 3 actions; low confidence, small samples and the rest go to Watch at ₹0', () => {
+    const actions = final([
+      action('A1', { impactRupeesPerDay: 900, causeIds: ['C1'] }),
+      action('A2', { impactRupeesPerDay: 800, causeIds: ['C2'] }),
+      action('A3', { impactRupeesPerDay: 700, causeIds: ['C3'] }),
+      action('A4', { impactRupeesPerDay: 600, causeIds: ['C4'] }),
+      action('A5', { impactRupeesPerDay: 5000, confidence: 0.2, causeIds: ['C5'] }),
+    ]);
+    actions.find((a) => a.id === 'A3')!.checksFailed.push('small_sample');
+    focusPlan(
+      actions,
+      ['C1', 'C2', 'C3', 'C4', 'C5'].map((id) => cause(id, 10_000, 0.5)),
+    );
+    expect(actions.slice(0, 3).map((a) => [a.id, !!a.watch, a.rank])).toEqual([
+      ['A1', false, 1],
+      ['A2', false, 2],
+      ['A4', false, 3],
+    ]);
+    expect(actions.slice(3).map((a) => [a.id, !!a.watch]).sort()).toEqual([
+      ['A3', true],
+      ['A5', true],
+    ]);
+    expect(actions.filter((a) => a.watch).every((a) => a.impactRupeesPerDay === 0)).toBe(true);
+    expect(actions.find((a) => a.id === 'A5')!.watchReason).toMatch(/low confidence/);
+  });
+
+  it('counts a cause once when two actions share it', () => {
+    const actions = final([
+      action('A1', { impactRupeesPerDay: 475, causeIds: ['C1'] }),
+      action('A4', { impactRupeesPerDay: 475, causeIds: ['C1'], confidence: 0.5 }),
+    ]);
+    focusPlan(actions, [cause('C1', 600, 0.8)]);
+    const total = actions.reduce((s, a) => s + a.impactRupeesPerDay, 0);
+    expect(total).toBe(600);
+    expect(actions[1].impactRupeesPerDay).toBe(125);
+    expect(actions[1].impactNote).toMatch(/A1 already counts the same cause \(C1\)/);
+  });
+
+  it('sends a plan back to apply reviewer notes, and a launch check without a stop/go rule', () => {
+    const p = plan([action('A1')]);
+    const notes = pv({
+      actionVerdicts: [{ actionId: 'A1', verdict: 'change', note: 'judgeOn 2026-12-05', evidence: [] }],
+    });
+    expect(shouldSendBackPlan(notes, p).reasons).toEqual(['reviewer notes to apply on A1']);
+    const approved = pv({
+      actionVerdicts: [{ actionId: 'A1', verdict: 'approve', note: '', evidence: [] }],
+    });
+    expect(shouldSendBackPlan(approved, p).sendBack).toBe(false);
+    expect(shouldSendBackPlan(approved, p, { launch: true }).reasons).toEqual([
+      'launch check needs a stop/go rule (decision.stopGo)',
+    ]);
+  });
+
+  it('lets a corrective fix through while the entity settles', () => {
+    const actions = final([
+      action('A1', { type: 'creative', entityId: 'settling', corrective: true, change: { field: 'creative', from: 'Nadi', to: 'Career' } }),
+      action('A2', { type: 'budget', entityId: 'settling', corrective: true }),
+    ]);
+    const results = runChecks({
+      evidence: [{ id: 'ev-1', tool: 'x' }],
+      causes: [],
+      actions,
+      entityIds: new Set(['settling']),
+      settling: new Set(['settling']),
+      campaignRoas: null,
+      date: '2026-10-27',
+    });
+    expect(results.filter((r) => r.check === 'settling').map((r) => r.target)).toEqual(['A2']);
+  });
+
+  it('puts young or under-spent campaigns in launch check mode', () => {
+    const base = { date: '2026-11-25', lifetimeSpend: 3040, refCpa: 4062 };
+    const young = launchCheck({ ...base, launchedDay: '2026-11-23' });
+    expect(young.on).toBe(true);
+    expect(young.day).toBe(2);
+    expect(young.spendBar).toBe(12186);
+    expect(young.reasons).toHaveLength(2);
+    const grown = launchCheck({ ...base, launchedDay: '2026-11-01', lifetimeSpend: 50_000 });
+    expect(grown.on).toBe(false);
+    const noRef = launchCheck({ ...base, launchedDay: '2026-11-01', refCpa: null });
+    expect(noRef.on).toBe(false);
   });
 });

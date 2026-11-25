@@ -25,6 +25,7 @@ import {
   PM_HISTORY_START,
 } from '../../pm.config';
 import { istDay } from '../../pm.logic';
+import { conversionEventText, learningText } from '../../sync/meta.logic';
 import { PmCampaignTarget } from '../../schemas/pm-campaign-target.schema';
 import { PmAgentRun } from '../../schemas/pm-agent-run.schema';
 import { PmLock } from '../../schemas/pm-lock.schema';
@@ -58,6 +59,8 @@ import {
   decisionShape,
   FinalAction,
   finalActions,
+  focusPlan,
+  launchCheck,
   lessonsUsed,
   MergedCause,
   mergeCauses,
@@ -409,11 +412,14 @@ export class PmPipelineService {
           },
         });
       const evidence = new EvidenceLog(join(dir, PM_FILES.evidence));
+      const launch = await this.launchMode(date, camp);
+      if (!opts.dry)
+        await this.runs.updateOne(key, { $set: { launchCheck: launch } });
       const briefFile = join(dir, PM_FILES.brief);
       if (!existsSync(briefFile))
         writeFileSync(
           briefFile,
-          await this.briefMarkdown(date, camp, evidence),
+          await this.briefMarkdown(date, camp, evidence, launch),
         );
       await setStep('journal');
       const journal = await this.journal.build(campaignId, date);
@@ -468,6 +474,7 @@ export class PmPipelineService {
             previousFiles: [...written],
             lessonsFile: lessonFiles[p],
             historyFile,
+            launchCheck: launch.on,
           }),
           tools,
           ctx: { tenantId: t, campaignId, date, dir },
@@ -550,9 +557,11 @@ export class PmPipelineService {
         );
         const planNow = plan;
         pv = await phase('plan_verify', round, PM_MODELS.plan_verify, (v) =>
-          shouldSendBackPlan(v, planNow).sendBack ? 'send_back' : 'pass',
+          shouldSendBackPlan(v, planNow, { launch: launch.on }).sendBack
+            ? 'send_back'
+            : 'pass',
         );
-        const d = shouldSendBackPlan(pv, plan);
+        const d = shouldSendBackPlan(pv, plan, { launch: launch.on });
         if (!d.sendBack) break;
         if (round > PM_LOOP.maxSendBacks || stopEarly(pv.issues.length, prev)) {
           openPlanIssues = pv.issues;
@@ -653,6 +662,7 @@ export class PmPipelineService {
         ),
         lessonEffects,
       });
+      focusPlan(actions, causes);
       writeFileSync(
         join(dir, PM_FILES.checks),
         checksMarkdown(campaignId, date, checks),
@@ -669,6 +679,9 @@ export class PmPipelineService {
           unresolved,
           pathToTarget: plan.pathToTarget,
           summary: plan.summary,
+          decision: plan.decision,
+          watch: plan.watch,
+          launch,
         }),
       );
 
@@ -688,6 +701,8 @@ export class PmPipelineService {
           unresolved,
           actions,
           causes,
+          decision: plan.decision ?? null,
+          watch: plan.watch ?? [],
           lessonsUsed: used,
           lessonsContradicted: contradicted,
           impactRupeesPerDay: Math.round(impact),
@@ -805,13 +820,45 @@ export class PmPipelineService {
    * actions (entity from that day's run) and outside changes that name an
    * entity, read before day 7.
    */
+  /** Launch check mode for this run: too young, or too little spend for a verdict (launchCheck). */
+  private async launchMode(date: string, camp: PmMetaEntity) {
+    const launchedDay = camp.createdTime
+      ? istDay(new Date(camp.createdTime))
+      : null;
+    const to = addDays(date, -1);
+    const from =
+      launchedDay && launchedDay > PM_HISTORY_START
+        ? launchedDay
+        : PM_HISTORY_START;
+    const [life, product] = await Promise.all([
+      from <= to
+        ? this.analysis.scopeMetrics({ from, to }, 'campaign', camp.entityId)
+        : null,
+      this.analysis.scopeMetrics(window(date, 30, camp.product), 'account'),
+    ]);
+    // The product's usual cost per purchase: first-party when it has orders, else Meta's.
+    const refCpa =
+      product.firstPartyOrders >= 3
+        ? product.firstPartyCpa
+        : product.metaPurchases >= 3
+          ? product.spend / product.metaPurchases
+          : null;
+    return launchCheck({
+      date,
+      launchedDay,
+      lifetimeSpend: life?.spend ?? 0,
+      refCpa,
+    });
+  }
+
   private async settlingEntities(
     campaignId: string,
     entries: PmJournalEntry[],
   ) {
     const out = new Set<string>();
+    // The campaign's own launch is not an edit to wait out (launch check mode handles new campaigns).
     const open = entries.filter(
-      (e) => e.status !== 'not_taken' && e.read !== 'settled',
+      (e) => e.status !== 'not_taken' && e.read !== 'settled' && !e.launch,
     );
     const dates = [
       ...new Set(open.filter((e) => e.actionId).map((e) => e.date)),
@@ -1067,6 +1114,7 @@ export class PmPipelineService {
     date: string,
     camp: PmMetaEntity,
     ev: EvidenceLog,
+    launch?: ReturnType<typeof launchCheck>,
   ) {
     const id = camp.entityId;
     // Lifetime = since launch (data starts PM_HISTORY_START): the owner compares with Ads Manager.
@@ -1241,6 +1289,14 @@ export class PmPipelineService {
       '',
       'Built by code. Numbers cite the evidence line of their section. 1P = first-party (our orders, device-matched to a Meta click ≤ 7 days, net ex-GST); Meta = Meta-reported.',
       '',
+      ...(launch?.on
+        ? [
+            `## Run mode: LAUNCH CHECK`,
+            `- This campaign is too new for a performance verdict: ${launch.reasons.join('; ')}.`,
+            '- Check setup, delivery, tracking and creative errors, fix what is measurably broken, and end with one stop/go rule (decision.stopGo): the date, the spend it may reach by then, and the number that decides go or stop.',
+            '',
+          ]
+        : []),
       ...appLines,
       ...(!app && coverage.linkedToMetaAd === 0
         ? [
@@ -1300,6 +1356,7 @@ export class PmPipelineService {
           'Status',
           'Budget',
           'Opt. goal',
+          'Conversion event',
           'Learning',
           'Targeting',
           'Spend',
@@ -1322,7 +1379,8 @@ export class PmPipelineService {
             s.effectiveStatus,
             inr(s.dailyBudget),
             s.optimizationGoal || '–',
-            s.learningStage || '–',
+            conversionEventText(s.promotedObject) || 'none set',
+            learningText(s.learningStage, s.learningConversions) || '–',
             ts(s),
             inr(m?.spend),
             inr(m?.cpm),
@@ -1611,6 +1669,9 @@ function actionsMarkdown(a: {
   causes: MergedCause[];
   dropped: { id: string; title: string }[];
   unresolved: string[];
+  decision?: PhaseOutput<'plan'>['decision'];
+  watch?: PhaseOutput<'plan'>['watch'];
+  launch?: ReturnType<typeof launchCheck>;
 }) {
   const cause = new Map(a.causes.map((c) => [c.id, c]));
   const why = (ids: string[]) =>
@@ -1629,6 +1690,19 @@ function actionsMarkdown(a: {
     '',
     `Path to first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}: **${a.pathToTarget}**`,
     '',
+    ...(a.launch?.on ? [`Launch check: ${a.launch.reasons.join('; ')}`, ''] : []),
+    ...(a.decision
+      ? [
+          `## Decision: ${a.decision.call.toUpperCase()}`,
+          a.decision.verdict,
+          ...(a.decision.stopGo
+            ? [
+                `- **Stop/go on ${a.decision.stopGo.judgeOn}** (spend up to ₹${Math.round(a.decision.stopGo.spendUpTo)}): ${a.decision.stopGo.metric} ≥ ${a.decision.stopGo.goAt} → ${a.decision.stopGo.ifGo}; below → ${a.decision.stopGo.ifStop}`,
+              ]
+            : []),
+          '',
+        ]
+      : []),
     '## Causes (final scores)',
     ...a.causes.map(
       (c) =>
@@ -1645,7 +1719,8 @@ function actionsMarkdown(a: {
     '## Actions (ranked by ₹ impact × confidence × action-type hit rate)',
     ...a.actions.flatMap((x) => [
       '',
-      `### ${x.rank}. ${x.id} — ${x.title}${x.verdict !== 'approve' ? ` [${x.verdict.toUpperCase()}]` : ''}${x.checksFailed.length ? ' [CHECK FAILED]' : ''}`,
+      `### ${x.rank}. ${x.id} — ${x.title}${x.watch ? ' [WATCH]' : ''}${x.verdict !== 'approve' ? ` [${x.verdict.toUpperCase()}]` : ''}${x.checksFailed.length ? ' [CHECK FAILED]' : ''}`,
+      ...(x.impactNote ? [`- ${x.impactNote}`] : []),
       `- **Do in Ads Manager:** ${x.type} on ${x.entityLevel} "${x.entityName}" (${x.entityId}): ${x.change.field} ${x.change.from ?? '–'} → ${x.change.to ?? '–'}`,
       `- **Why:** ${why(x.causeIds)}`,
       `- **Expected:** ${x.expectedEffect.metric} ${x.expectedEffect.low} to ${x.expectedEffect.high} · ₹${Math.round(x.impactRupeesPerDay)}/day · conf ${x.confidence}`,
@@ -1663,6 +1738,14 @@ function actionsMarkdown(a: {
       ...x.notes.map((n) => `- Note: ${n}`),
       ...x.checkMessages.map((f) => `- Check failed: ${f}`),
     ]),
+    '',
+    '## Watch (not in the plan)',
+    ...(a.watch ?? []).map(
+      (w) => `- ${w.title} — ${w.why} · act if ${w.actIf} · check ${w.checkOn}`,
+    ),
+    ...a.actions
+      .filter((x) => x.watch)
+      .map((x) => `- ${x.id} ${x.title} — ${x.watchReason ?? ''}`),
     '',
     '## Unresolved',
     ...(a.unresolved.length ? a.unresolved.map((u) => `- ${u}`) : ['None.']),

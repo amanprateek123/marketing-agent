@@ -297,3 +297,41 @@ export function parseExtraData(
   }
   return { field, oldValue: plain(oldRaw), newValue: plain(newRaw) };
 }
+
+/**
+ * What an ad set optimises for, in words, from Meta's promoted_object:
+ * "PURCHASE on pixel 123", "custom conversion 456 (pixel 123)",
+ * "app 789: PURCHASE". '' when Meta set none.
+ */
+export function conversionEventText(
+  po: Record<string, any> | null | undefined,
+): string {
+  if (!po) return '';
+  const event = po.custom_event_type ? String(po.custom_event_type) : '';
+  if (po.custom_conversion_id)
+    return `custom conversion ${po.custom_conversion_id}${po.pixel_id ? ` (pixel ${po.pixel_id})` : ''}${event ? `, ${event}` : ''}`;
+  if (po.application_id)
+    return `app ${po.application_id}${event ? `: ${event}` : ''}`;
+  if (po.pixel_id)
+    return `${event || 'no event set'} on pixel ${po.pixel_id}`;
+  if (po.page_id) return `page ${po.page_id}${event ? `: ${event}` : ''}`;
+  return event;
+}
+
+/** "LEARNING, 3 of 50 conversions" — Meta's learning status with its conversion count. */
+export function learningText(
+  stage: string | null | undefined,
+  conversions: number | null | undefined,
+): string {
+  if (!stage) return '';
+  return conversions === null || conversions === undefined
+    ? stage
+    : `${stage}, ${conversions} of 50 conversions`;
+}
+
+/** ThruPlays (watched to the end or 15 s) from an insights row; 0 for images. */
+export const thruPlaysOf = (r: Record<string, any>) =>
+  Object.values(actionMap(r.video_thruplay_watched_actions)).reduce(
+    (s, n) => s + n,
+    0,
+  );

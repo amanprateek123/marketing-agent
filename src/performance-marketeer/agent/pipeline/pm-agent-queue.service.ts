@@ -388,7 +388,7 @@ export class PmAgentQueueService implements OnModuleInit, OnModuleDestroy {
     const camp = await this.entities
       .findOne(
         { tenantId: t, level: 'campaign', entityId: run.campaignId },
-        { entityId: 1, accountId: 1, createdTime: 1 },
+        { entityId: 1, accountId: 1, createdTime: 1, product: 1 },
       )
       .lean();
     // No entity: runCampaign fails it with the reason.

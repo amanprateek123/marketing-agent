@@ -6,13 +6,14 @@ import { addDays } from '../../analysis/pm-stats';
 import { pmEnv, PmEnv } from '../../pm.config';
 import { istDay } from '../../pm.logic';
 import { PmAgentRun } from '../../schemas/pm-agent-run.schema';
-import { PmMetaEntity } from '../../schemas/pm-meta.schema';
+import { PmMetaDaily, PmMetaEntity } from '../../schemas/pm-meta.schema';
 import type { CreativeIdea, PmToolCtx } from '../pm-agent.types';
 import { PmPipelineService } from '../pipeline/pm-pipeline.service';
 import { PmDataTools } from '../tools/data.tools';
 import {
   creativeVerdict,
   latestFile,
+  mergeAdRows,
   mdSections,
   sectionBody,
 } from './report.logic';
@@ -33,6 +34,8 @@ export class PmReportService {
     @InjectModel(PmAgentRun.name) private readonly runs: Model<PmAgentRun>,
     @InjectModel(PmMetaEntity.name)
     private readonly entities: Model<PmMetaEntity>,
+    @InjectModel(PmMetaDaily.name)
+    private readonly daily: Model<PmMetaDaily>,
     private readonly analysis: PmAnalysisService,
     private readonly tools: PmDataTools,
     private readonly pipeline: PmPipelineService,
@@ -89,6 +92,7 @@ export class PmReportService {
       region,
       goal,
       basis,
+      plays,
     ] = await Promise.all([
       this.analysis.scopeMetrics(q, 'campaign', campaignId),
       life ? this.analysis.scopeMetrics(life, 'campaign', campaignId) : null,
@@ -112,7 +116,18 @@ export class PmReportService {
       tool('breakdowns', { breakdown: 'region' }),
       this.pipeline.goal(d, camp).catch(() => null),
       this.pipeline.metaBasis(d, camp).catch(() => null),
+      this.daily.aggregate<{ _id: string; plays3s: number }>([
+        {
+          $match: {
+            tenantId: t,
+            campaignId,
+            date: { $gte: q.from, $lte: q.to },
+          },
+        },
+        { $group: { _id: '$adId', plays3s: { $sum: '$videoPlays3s' } } },
+      ]),
     ]);
+    const plays3s = new Map(plays.map((p) => [p._id, p.plays3s]));
 
     // What the AI wrote: latest round of each phase.
     const files = run.files ?? {};
@@ -127,40 +142,78 @@ export class PmReportService {
       ctr: m7.ctr,
       metaPurchases: m7.metaPurchases,
       metaRoas: m7.metaRoas,
+      landingPageViews: m7.landingPageViews,
     };
-    const creatives = ads.rows
-      .filter((a) => a.metrics.spend > 0)
-      .sort((a, b) => b.metrics.spend - a.metrics.spend)
+    // One row per creative: the same ad in two ad sets is summed.
+    const merged = mergeAdRows(
+      ads.rows
+        .filter((a) => a.metrics.spend > 0)
+        .map((a) => {
+          const c = creative.get(a.id)?.creative;
+          const m = a.metrics;
+          return {
+            id: a.id,
+            name: a.name,
+            status: a.effectiveStatus,
+            thumbnailUrl: c?.thumbnailUrl || c?.imageUrl || null,
+            format: c?.videoId ? 'video' : c?.objectType || null,
+            title: c?.title ?? '',
+            body: c?.body ?? '',
+            cta: c?.cta ?? '',
+            spend: m.spend,
+            impressions: m.impressions,
+            linkClicks: m.linkClicks,
+            landingPageViews: m.landingPageViews,
+            metaPurchases: m.metaPurchases,
+            metaPurchaseValue: m.metaPurchaseValue,
+            firstPartyOrders: m.firstPartyOrders,
+            plays3s: plays3s.get(a.id) ?? 0,
+          };
+        }),
+    );
+    const creatives = merged
+      .sort((a, b) => b.spend - a.spend)
       .map((a) => {
-        const c = creative.get(a.id)?.creative;
-        const m = a.metrics;
+        const ctr = a.impressions ? a.linkClicks / a.impressions : null;
+        const roas = a.spend ? a.metaPurchaseValue / a.spend : null;
+        const hookRate =
+          a.format === 'video' && a.impressions
+            ? a.plays3s / a.impressions
+            : null;
         return {
           id: a.id,
+          ids: a.ids,
           name: a.name,
-          status: a.effectiveStatus,
-          thumbnailUrl: c?.thumbnailUrl || c?.imageUrl || null,
-          format: c?.videoId ? 'video' : c?.objectType || null,
-          title: c?.title ?? '',
-          body: c?.body ?? '',
-          cta: c?.cta ?? '',
-          spend: Math.round(m.spend),
-          spendSharePct: m7.spend ? r2((m.spend / m7.spend) * 100) : null,
-          impressions: m.impressions,
-          ctrPct: m.ctr === null ? null : r2(m.ctr * 100),
-          cpm: r2(m.cpm),
-          metaPurchases: m.metaPurchases,
-          costPerPurchase: m.metaPurchases
-            ? Math.round(m.spend / m.metaPurchases)
+          status: a.status,
+          thumbnailUrl: a.thumbnailUrl,
+          format: a.format,
+          title: a.title,
+          body: a.body,
+          cta: a.cta,
+          spend: Math.round(a.spend),
+          spendSharePct: m7.spend ? r2((a.spend / m7.spend) * 100) : null,
+          impressions: a.impressions,
+          ctrPct: ctr === null ? null : r2(ctr * 100),
+          cpm: a.impressions ? r2((a.spend * 1000) / a.impressions) : null,
+          costPerPageView: a.landingPageViews
+            ? Math.round(a.spend / a.landingPageViews)
             : null,
-          metaRoas: r2(m.metaRoas),
-          firstPartyOrders: m.firstPartyOrders,
+          hookRatePct: hookRate === null ? null : r2(hookRate * 100),
+          metaPurchases: a.metaPurchases,
+          costPerPurchase: a.metaPurchases
+            ? Math.round(a.spend / a.metaPurchases)
+            : null,
+          metaRoas: r2(roas),
+          firstPartyOrders: a.firstPartyOrders,
           verdict: creativeVerdict(
             {
-              spend: m.spend,
-              impressions: m.impressions,
-              ctr: m.ctr,
-              metaPurchases: m.metaPurchases,
-              metaRoas: m.metaRoas,
+              spend: a.spend,
+              impressions: a.impressions,
+              ctr,
+              metaPurchases: a.metaPurchases,
+              metaRoas: roas,
+              landingPageViews: a.landingPageViews,
+              hookRate,
             },
             campStats,
           ),
@@ -227,6 +280,10 @@ export class PmReportService {
       verdict: sectionBody(invMd, 'Verdict') || invJson?.summary || '',
       planSummary: planJson?.summary ?? '',
       pathToTarget: planJson?.pathToTarget ?? null,
+      /** The plan's single call and stop/go rule (null on runs before 25 Nov 2026). */
+      decision: run.decision ?? planJson?.decision ?? null,
+      watch: run.watch ?? planJson?.watch ?? [],
+      launchCheck: run.launchCheck ?? null,
       funnel: {
         meta: {
           impressions: m7.impressions,

@@ -94,7 +94,7 @@ export class PmJournalService {
       this.entities
         .findOne(
           { tenantId, level: 'campaign', entityId: campaignId },
-          { name: 1 },
+          { name: 1, createdTime: 1 },
         )
         .lean(),
     ]);
@@ -108,6 +108,9 @@ export class PmJournalService {
         userNote: r.userNote ?? '',
       })),
       changes,
+      launchDay: campaign?.createdTime
+        ? istDay(new Date(campaign.createdTime))
+        : undefined,
       // Learning has ended once Meta reports anything but LEARNING for the ad set.
       learningEnded: (id) =>
         Boolean(learning.get(id)) && learning.get(id) !== 'LEARNING',

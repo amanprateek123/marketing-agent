@@ -3,8 +3,10 @@ import { HydratedDocument } from 'mongoose';
 import type {
   Action,
   Cause,
+  Decision,
   LessonContradiction,
   PmJournalEntry,
+  WatchItem,
 } from '../agent/pm-agent.types';
 import type { PmSituation } from '../agent/lessons/lessons.types';
 
@@ -40,7 +42,22 @@ export class PmAgentRun {
     checksFailed?: string[];
     /** Action-type track record factor used in the rank (1 = no record). */
     hitRateFactor?: number;
+    /** Not in the plan: shown under Watch (focusPlan). */
+    watch?: boolean;
+    watchReason?: string;
+    impactNote?: string;
   })[];
+  /** The plan's single call and stop/go rule (runs from 25 Nov 2026). */
+  @Prop({ type: Object, default: null }) decision: Decision | null;
+  /** Things to watch, not act on yet (the plan's watch list). */
+  @Prop({ type: [Object], default: [] }) watch: WatchItem[];
+  /** Launch check mode and why (null = normal run, or a run before it existed). */
+  @Prop({ type: Object, default: null }) launchCheck: {
+    on: boolean;
+    day: number | null;
+    spendBar: number | null;
+    reasons: string[];
+  } | null;
   /** Final merged causes (after verify): merged confidence, verdict, disputed, lessonIds. */
   @Prop({ type: [Object], default: [] }) causes: (Cause & {
     investigatorConfidence: number | null;

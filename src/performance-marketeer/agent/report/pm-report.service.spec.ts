@@ -82,6 +82,7 @@ describe('PmReportService', () => {
           },
         ]),
     } as never,
+    { aggregate: async () => [{ _id: 'ad1', plays3s: 0 }] } as never,
     {
       scopeMetrics: async () => metrics(),
       entities: async () => ({

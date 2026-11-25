@@ -9,6 +9,13 @@ describe('phase prompts', () => {
     },
   );
 
+  it('works towards an out-of-reach goal instead of giving up', () => {
+    for (const p of ['plan', 'plan_verify'] as const) {
+      expect(PM_SYSTEM_PROMPTS[p]).not.toMatch(/plan reduce \/ pause honestly|should say "unlikely" and reduce\/pause|let the owner choose/);
+      expect(PM_SYSTEM_PROMPTS[p]).toMatch(/closest|close the most of the gap/);
+    }
+  });
+
   it('names the key per-phase fields', () => {
     expect(PM_SYSTEM_PROMPTS.investigate).toContain('impactRupeesPerDay');
     expect(PM_SYSTEM_PROMPTS.investigate).toContain('disproofTried');

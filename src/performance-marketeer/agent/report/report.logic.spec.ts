@@ -1,5 +1,6 @@
 import {
   creativeVerdict,
+  mergeAdRows,
   latestFile,
   mdSections,
   sectionBody,
@@ -169,5 +170,35 @@ describe('creativeVerdict', () => {
         none,
       ).tag,
     ).toBe('cut');
+  });
+});
+
+describe('ads without purchases', () => {
+  const camp = { spend: 3040, impressions: 64039, ctr: 0.0026, metaPurchases: 0, metaRoas: 0, landingPageViews: 13 };
+  it('cuts on a weak click rate or a dear page view once there are 3,000+ impressions', () => {
+    // "Job Vs Business Video": 1 click from 3,237 impressions.
+    const weak = creativeVerdict({ spend: 106, impressions: 3237, ctr: 0.0003, metaPurchases: 0, metaRoas: 0, landingPageViews: 0, hookRate: 0.037 }, camp);
+    expect(weak.tag).toBe('cut');
+    expect(weak.reason).toMatch(/CTR 0\.03% vs 0\.26%/);
+    expect(weak.reason).toMatch(/3\.7% watch past 3 s/);
+  });
+  it('marks the best early click rate and leaves the rest to keep or too early', () => {
+    const best = creativeVerdict({ spend: 125, impressions: 5000, ctr: 0.0052, metaPurchases: 0, metaRoas: 0, landingPageViews: 2 }, camp);
+    expect(best).toEqual({ tag: 'keep', reason: expect.stringMatching(/^Best early signal: CTR 0\.52%/) });
+    expect(creativeVerdict({ spend: 30, impressions: 900, ctr: 0.001, metaPurchases: 0, metaRoas: 0 }, camp).tag).toBe('too_early');
+  });
+});
+
+describe('mergeAdRows', () => {
+  it('sums the same creative across ad sets', () => {
+    const row = (id: string, name: string, spend: number) => ({
+      id, name, format: 'image', title: 'Get Your Career Report', spend, impressions: 1000,
+      linkClicks: 3, landingPageViews: 1, metaPurchases: 0, metaPurchaseValue: 0, firstPartyOrders: 0, plays3s: 0,
+    });
+    const out = mergeAdRows([row('a', 'Career Memes 2', 457), row('b', 'Career Memes 2 ', 113), row('c', 'Career Question', 185)]);
+    expect(out.map((r) => [r.name, r.ids, r.spend, r.impressions])).toEqual([
+      ['Career Memes 2', ['a', 'b'], 570, 2000],
+      ['Career Question', ['c'], 185, 1000],
+    ]);
   });
 });

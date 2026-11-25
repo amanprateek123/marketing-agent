@@ -45,6 +45,8 @@ const LEASE_MS = 60 * 60 * 1000;
 const REFUND_RECHECK_DAYS = 60;
 // Before an AI run: account-wide Meta days and campaign breakdowns this far back (D-30).
 const HISTORY_RECENT_DAYS = 30;
+/** The same product's top-spending other campaigns whose breakdowns are loaded too. */
+const HISTORY_PEER_CAMPAIGNS = 2;
 // Change log before an AI run: only recent edits matter, and a big account's log is slow to page.
 const HISTORY_CHANGES_DAYS = 14;
 // Attribution looks 7 days back for the click, so newly loaded visitor days re-attribute a week on.
@@ -145,7 +147,12 @@ export class PmSyncService {
    * Throws PmBusyError while another sync holds the lock.
    */
   campaignHistory(
-    camp: { entityId: string; accountId: string; createdTime?: Date | null },
+    camp: {
+      entityId: string;
+      accountId: string;
+      createdTime?: Date | null;
+      product?: string;
+    },
     to: string,
     onStep: (step: string) => Promise<unknown> = async () => undefined,
   ) {
@@ -246,22 +253,55 @@ export class PmSyncService {
       ]);
       const haveSet = new Set(have);
       const bDays = (spent as string[]).filter((d) => !haveSet.has(d));
-      if (bDays.length) {
-        await onStep(`history: breakdowns (${bDays.length} days)`);
-        for (const r of dayRuns(bDays))
-          await must(
-            this.track('meta-breakdowns', req(r), async (_e, stats) => {
-              await this.heartbeat();
-              const rows = await this.meta.syncBreakdowns(
-                camp.accountId,
-                r.from,
-                r.to,
-                cid,
-              );
-              stats[cid] = rows;
-              return { rows };
+      await this.fillBreakdowns(cid, camp.accountId, bDays, req, must, onStep, 'this campaign');
+
+      // The same product's top other campaigns: the AI compares placement and
+      // audience against them, which needs their breakdowns too.
+      if (camp.product) {
+        const peers = await this.metaDaily.aggregate<{
+          _id: string;
+          accountId: string;
+          days: string[];
+        }>([
+          {
+            $match: {
+              tenantId: t,
+              product: camp.product,
+              campaignId: { $ne: cid },
+              date: range,
+              spend: { $gt: 0 },
+            },
+          },
+          {
+            $group: {
+              _id: '$campaignId',
+              accountId: { $first: '$accountId' },
+              spend: { $sum: '$spend' },
+              days: { $addToSet: '$date' },
+            },
+          },
+          { $sort: { spend: -1 } },
+          { $limit: HISTORY_PEER_CAMPAIGNS },
+        ]);
+        for (const p of peers) {
+          const got = new Set(
+            await this.breakdowns.distinct('date', {
+              tenantId: t,
+              campaignId: p._id,
+              breakdown: 'device',
+              date: range,
             }),
           );
+          await this.fillBreakdowns(
+            p._id,
+            p.accountId,
+            p.days.filter((d) => !got.has(d)).sort(),
+            req,
+            must,
+            onStep,
+            'a comparison campaign',
+          );
+        }
       }
 
       const cKey = `changes:${camp.accountId}`;
@@ -293,6 +333,34 @@ export class PmSyncService {
         }
       }
     });
+  }
+
+  /** Loads one campaign's placement / age / region / device breakdowns for the given days. */
+  private async fillBreakdowns(
+    campaignId: string,
+    accountId: string,
+    days: string[],
+    req: (r: { from: string; to: string }) => PmSyncRequest,
+    must: (p: Promise<{ status: string; errors: string[] }>) => Promise<void>,
+    onStep: (step: string) => Promise<unknown>,
+    label: string,
+  ) {
+    if (!days.length) return;
+    await onStep(`history: breakdowns, ${label} (${days.length} days)`);
+    for (const r of dayRuns(days))
+      await must(
+        this.track('meta-breakdowns', req(r), async (_e, stats) => {
+          await this.heartbeat();
+          const rows = await this.meta.syncBreakdowns(
+            accountId,
+            r.from,
+            r.to,
+            campaignId,
+          );
+          stats[campaignId] = rows;
+          return { rows };
+        }),
+      );
   }
 
   /** Every campaign's name/status/launch from Meta (~15 s, no lock: settings upserts only). */

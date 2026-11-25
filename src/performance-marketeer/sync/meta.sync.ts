@@ -21,6 +21,7 @@ import {
 import { PmVisitorDay } from '../schemas/pm-visitor-day.schema';
 import {
   breakdownKey,
+  thruPlaysOf,
   dateChunks,
   landingUrlOf,
   adProduct,
@@ -142,7 +143,8 @@ export class MetaSync {
       await this.beat?.();
       const data = await this.insights(accountId, range, {
         level: 'ad',
-        fields: `ad_id,adset_id,campaign_id,${INSIGHT_FIELDS}`,
+        // ThruPlays only exist as their own field, not in `actions`.
+        fields: `ad_id,adset_id,campaign_id,${INSIGHT_FIELDS},video_thruplay_watched_actions`,
         ...campaignFilter(campaignId),
       });
       const known = await this.productsByEntity(
@@ -162,6 +164,7 @@ export class MetaSync {
                 campaignId: r.campaign_id ?? '',
                 ...metrics,
                 videoPlays3s: actions['video_view'] ?? 0,
+                thruPlays: thruPlaysOf(r),
                 actions,
                 actionValues: values,
                 ...(known.has(r.ad_id) ? { product: known.get(r.ad_id) } : {}),

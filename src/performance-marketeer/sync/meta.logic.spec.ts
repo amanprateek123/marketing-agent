@@ -11,6 +11,9 @@ import {
   productFromUrl,
   rupees,
   targetingSummary,
+  conversionEventText,
+  thruPlaysOf,
+  learningText,
 } from './meta.logic';
 
 describe('meta.logic', () => {
@@ -294,4 +297,21 @@ describe('parseExtraData', () => {
       newValue: null,
     });
   });
+});
+
+describe('conversion event text', () => {
+  it('says what each ad set optimises for', () => {
+    expect(conversionEventText({ pixel_id: '9', custom_event_type: 'PURCHASE' })).toBe('PURCHASE on pixel 9');
+    expect(conversionEventText({ pixel_id: '9', custom_event_type: 'ADD_TO_CART' })).toBe('ADD_TO_CART on pixel 9');
+    expect(conversionEventText({ pixel_id: '9', custom_conversion_id: '5' })).toBe('custom conversion 5 (pixel 9)');
+    expect(conversionEventText({ application_id: '7', custom_event_type: 'PURCHASE' })).toBe('app 7: PURCHASE');
+    expect(conversionEventText(null)).toBe('');
+    expect(learningText('LEARNING', 3)).toBe('LEARNING, 3 of 50 conversions');
+    expect(learningText('', 3)).toBe('');
+  });
+});
+
+it('reads ThruPlays from their own insights field', () => {
+  expect(thruPlaysOf({ video_thruplay_watched_actions: [{ action_type: 'video_view', value: '41' }] })).toBe(41);
+  expect(thruPlaysOf({})).toBe(0);
 });

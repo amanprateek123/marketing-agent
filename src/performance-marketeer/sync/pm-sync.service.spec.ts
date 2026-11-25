@@ -105,6 +105,10 @@ describe('PmSyncService campaignHistory', () => {
     };
     const metaDaily = {
       distinct: jest.fn().mockResolvedValue(['2026-10-20', '2026-10-21']),
+      // The same product's other campaign: spent 10-19 and 10-21; has breakdowns for 10-21.
+      aggregate: jest.fn().mockResolvedValue([
+        { _id: 'peer', accountId: '222', days: ['2026-10-21', '2026-10-19'] },
+      ]),
     };
     const breakdowns = { distinct: jest.fn().mockResolvedValue(['2026-10-21']) };
     const runs = {
@@ -129,7 +133,7 @@ describe('PmSyncService campaignHistory', () => {
       breakdowns as any,
       coverage as any,
     );
-    return { sync, meta, visitorDays, orders, attribution, analysis, coverage };
+    return { sync, meta, visitorDays, orders, attribution, analysis, coverage, metaDaily };
   };
   const camp = {
     entityId: 'c1',
@@ -170,6 +174,19 @@ describe('PmSyncService campaignHistory', () => {
     expect(changeDays).not.toContain('2026-10-14');
     expect(m.meta.syncChanges.mock.calls[0]).toEqual(['111', '2026-10-13', '2026-10-13']);
     expect(steps[0]).toBe('history: visitors (1 days)');
+  });
+
+  it("also loads the same product's top other campaign's missing breakdown days", async () => {
+    const m = setup();
+    await m.sync.campaignHistory({ ...camp, product: 'career_report' }, '2026-10-26');
+    expect(m.metaDaily.aggregate.mock.calls[0][0][0].$match).toMatchObject({
+      product: 'career_report',
+      campaignId: { $ne: 'c1' },
+    });
+    expect(m.meta.syncBreakdowns.mock.calls).toEqual([
+      ['111', '2026-10-20', '2026-10-20', 'c1'],
+      ['222', '2026-10-19', '2026-10-19', 'peer'],
+    ]);
   });
 
   it('a failed step stops the load with its error', async () => {
