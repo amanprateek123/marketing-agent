@@ -193,8 +193,48 @@ export const ActionSchema = z.object({
   /** For creative actions: the brief for the new creative. */
   creativeBrief: z.string().optional(),
   lessonIds: LessonIds,
+  /**
+   * Fixes something plainly wrong (wrong product named in an ad, broken link,
+   * policy risk, wrong conversion event), so it may go ahead while the entity
+   * settles. Optional so older plans still parse.
+   */
+  corrective: z.boolean().optional(),
 });
 export type Action = z.infer<typeof ActionSchema>;
+
+/** The one rule that decides the campaign's next step: a date, a spend limit and a number. */
+export const StopGoSchema = z.object({
+  judgeOn: z.string(), // YYYY-MM-DD
+  /** Lifetime spend (₹, Meta) the campaign may reach by judgeOn before the call is made. */
+  spendUpTo: z.number(),
+  /** The number that decides it, with source and window, e.g. "first-party purchases since launch". */
+  metric: z.string(),
+  /** Go when metric reaches this (e.g. 3); stop below it. */
+  goAt: z.number(),
+  ifGo: z.string(),
+  ifStop: z.string(),
+});
+export type StopGo = z.infer<typeof StopGoSchema>;
+
+/** The plan's single call on the campaign, said once at the top of the report. */
+export const DecisionSchema = z.object({
+  call: z.enum(['scale', 'keep', 'fix', 'reduce', 'pause', 'wait']),
+  /** One sentence the owner can act on, with the number behind it. */
+  verdict: z.string(),
+  /** Required in launch check mode; elsewhere when a clear stop rule exists. */
+  stopGo: StopGoSchema.nullable(),
+});
+export type Decision = z.infer<typeof DecisionSchema>;
+
+/** Something to keep an eye on, not to act on yet (low confidence or too few people). */
+export const WatchItemSchema = z.object({
+  title: z.string(),
+  why: z.string(),
+  /** The number that would make it an action, e.g. "site visitors per click below 30% on 50+ clicks". */
+  actIf: z.string(),
+  checkOn: z.string(), // YYYY-MM-DD
+});
+export type WatchItem = z.infer<typeof WatchItemSchema>;
 
 /** A new creative to make, for the report's creative section (not an action). */
 export const CreativeIdeaSchema = z.object({
@@ -218,7 +258,10 @@ export const PlanOutput = z.object({
   summary: z.string(),
   /** Honest view: can this campaign reach ROAS > 1? */
   pathToTarget: z.enum(['likely', 'possible', 'unlikely']),
+  decision: DecisionSchema,
   actions: z.array(ActionSchema).min(1),
+  /** Low-confidence or too-early items; never more than a few. */
+  watch: z.array(WatchItemSchema),
   /** Optional so plans from before Nov 2026 still parse. */
   creativeIdeas: z.array(CreativeIdeaSchema).max(5).optional(),
   issueReplies: z.array(IssueReplySchema),
@@ -293,6 +336,12 @@ export const PM_LOOP = {
   targetRoas: 1.0,
   /** A funnel or payment action needs this many people at that step (7d); fewer → Watch. */
   minFunnelPeople: 20,
+  /** At most this many actions reach the plan; the rest become Watch items. */
+  maxActions: 3,
+  /** Launch check mode: campaign younger than this many days … */
+  launchDays: 7,
+  /** … or lifetime spend below this many reference costs per purchase. */
+  launchCpaMultiple: 3,
 } as const;
 
 export const PM_MODELS: Record<PmPhase | 'plan_revision', string> = {
@@ -326,4 +375,6 @@ export interface PmJournalEntry {
   resultSoFar: string;
   judgeAgainOn?: string;
   userNote?: string;
+  /** The campaign's own launch (objects created on its first days): not a change to wait out. */
+  launch?: boolean;
 }

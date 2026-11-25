@@ -240,3 +240,20 @@ describe('journal.logic', () => {
     );
   });
 });
+
+describe('launch entries', () => {
+  it("flags objects created on the campaign's first two days as its launch, not later additions", () => {
+    const created = (day: string, id: string) =>
+      change({ at: at(`${day}T12:00:00`), field: 'created', objectId: id, oldValue: null, newValue: null });
+    const items = buildJournal({
+      date: '2026-11-25',
+      days: 14,
+      runs: [],
+      changes: [created('2026-11-23', 'ad1'), created('2026-11-24', 'ad2'), created('2026-11-25', 'ad3')],
+      learningEnded: () => false,
+      launchDay: '2026-11-23',
+    });
+    const launch = Object.fromEntries(items.map((i) => [i.entityId, !!i.launch]));
+    expect(launch).toEqual({ ad1: true, ad2: true, ad3: false });
+  });
+});

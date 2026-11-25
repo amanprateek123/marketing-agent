@@ -12,6 +12,7 @@ import { addDays } from '../../analysis/pm-stats';
 import { pmEnv, PmEnv } from '../../pm.config';
 import { PmMetaDaily, PmMetaEntity } from '../../schemas/pm-meta.schema';
 import { PM_FILES, PmToolCtx } from '../pm-agent.types';
+import { measurePageLoad } from './page-load';
 import { PmToolDef } from './pm-tool';
 
 const run = promisify(execFile);
@@ -144,13 +145,16 @@ export class PmLandingTools {
       {
         name: 'landing_page',
         description:
-          "Read one of OUR live landing pages (91astrology.com only) as a mobile visitor sees it now: title, headings, every ₹ price in order (offer, struck-out price, add-ons), buttons/CTAs, image alt texts, full visible text (incl. FAQ), word count. Default url = the campaign's top-spend landing page. screenshot=true also saves a 390px-wide full-page mobile screenshot into helpers/ and returns its path — open it with Read to see above-the-fold, hierarchy and trust signals. Tracking scripts are blocked, so this never counts as a visit. The page shows today's version; it may differ from what ran earlier in the period.",
+          "Read one of OUR live landing pages (91astrology.com only) as a mobile visitor sees it now: title, headings, every ₹ price in order (offer, struck-out price, add-ons), buttons/CTAs, image alt texts, full visible text (incl. FAQ), word count. Default url = the campaign's top-spend landing page. screenshot=true also saves a 390px-wide full-page mobile screenshot into helpers/ and returns its path — open it with Read to see above-the-fold, hierarchy and trust signals. loadTest=true loads the page once as Instagram's Android in-app browser on 4G with a phone-speed CPU and returns time to first byte, first paint, main content shown, fully loaded, requests and KB (about a minute) — use it whenever Meta's landing page views are far below link clicks. Tracking scripts are blocked, so this never counts as a visit. The page shows today's version; it may differ from what ran earlier in the period.",
         shape: {
           url: z.string().optional(),
           screenshot: z.boolean().optional(),
+          loadTest: z.boolean().optional(),
         },
-        run: (a: { url?: string; screenshot?: boolean }, ctx: PmToolCtx) =>
-          this.read(a, ctx),
+        run: (
+          a: { url?: string; screenshot?: boolean; loadTest?: boolean },
+          ctx: PmToolCtx,
+        ) => this.read(a, ctx),
       },
     ];
   }
@@ -194,7 +198,10 @@ export class PmLandingTools {
     };
   }
 
-  private async read(a: { url?: string; screenshot?: boolean }, ctx: PmToolCtx) {
+  private async read(
+    a: { url?: string; screenshot?: boolean; loadTest?: boolean },
+    ctx: PmToolCtx,
+  ) {
     const url = a.url
       ? ownUrl(a.url)
       : (await this.pagesFor(ctx)).pages[0]?.url ?? null;
@@ -218,7 +225,17 @@ export class PmLandingTools {
       ...(res.status === 200 ? parseLanding(res.data) : {}),
     };
     if (a.screenshot) out.screenshot = await this.screenshot(url, ctx);
+    if (a.loadTest) out.loadTest = await this.loadTest(url);
     return out;
+  }
+
+  private async loadTest(url: string) {
+    const chrome = process.env.PM_CHROME_PATH ?? '';
+    if (!chrome || !existsSync(chrome))
+      return { error: 'no headless Chrome configured (PM_CHROME_PATH)' };
+    return measurePageLoad(chrome, url, BLOCKED_HOSTS).catch((e: Error) => ({
+      error: `load test failed: ${e.message}`,
+    }));
   }
 
   /**
@@ -237,6 +254,9 @@ export class PmLandingTools {
       chrome,
       [
         '--headless',
+        // Docker runs Chrome as a non-root user without the namespaces its sandbox needs.
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
         '--disable-gpu',
         '--hide-scrollbars',
         '--window-size=390,2400',

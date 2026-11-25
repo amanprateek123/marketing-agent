@@ -34,6 +34,11 @@ ENV NODE_ENV=production
 # with a browser — see higgsfield.service.ts's class comment) — that's a deploy-time
 # secret-provisioning step, not something this Dockerfile can do.
 RUN apk add --no-cache ffmpeg && npm install -g @higgsfield/cli
+# Headless Chromium: the Performance Marketeer's landing-page screenshots and
+# Instagram in-app load test (agent/tools/landing.tools.ts). Noto fonts so
+# Hindi (Devanagari) text renders in screenshots.
+RUN apk add --no-cache chromium font-noto font-noto-devanagari font-noto-emoji
+ENV PM_CHROME_PATH=/usr/bin/chromium-browser
 RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

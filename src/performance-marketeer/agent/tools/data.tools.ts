@@ -20,6 +20,7 @@ import {
 } from '../../analysis/pm-stats';
 import { findPmProduct, PM_PRODUCTS, pmEnv, PmEnv } from '../../pm.config';
 import { dayRange, istDay, istDayBounds } from '../../pm.logic';
+import { conversionEventText, learningText } from '../../sync/meta.logic';
 import {
   PmMetaBreakdown,
   PmMetaChange,
@@ -330,7 +331,7 @@ export class PmDataTools {
             campaignId: id,
             level: { $in: ['adset', 'ad'] },
           },
-          { targeting: 0, promotedObject: 0, creative: 0 },
+          { targeting: 0, creative: 0 },
         )
         .lean(),
       this.pm.entities(q14, 'adset', id),
@@ -397,7 +398,9 @@ export class PmDataTools {
           lifetimeBudget: d.lifetimeBudget || null,
           bidStrategy: d.bidStrategy || null,
           optimizationGoal: d.optimizationGoal || null,
-          learningStage: d.learningStage || null,
+          /** What Meta optimises for: event and pixel (or app / custom conversion). */
+          conversionEvent: conversionEventText(d.promotedObject) || 'none set',
+          learningStage: learningText(d.learningStage, d.learningConversions) || null,
           created: d.createdTime ? istDay(d.createdTime) : null,
           targeting: ts && {
             age: `${ts.ageMin ?? '?'}-${ts.ageMax ?? '?'}`,

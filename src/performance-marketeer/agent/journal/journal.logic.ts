@@ -321,8 +321,10 @@ export function buildJournal(input: {
   runs: PmPastRun[];
   changes: PmChangeRow[];
   learningEnded: (adsetId: string) => boolean;
+  /** IST day the campaign was created; objects created by the next day count as its launch. */
+  launchDay?: string;
 }): PmJournalItem[] {
-  const { date, days, runs, changes, learningEnded } = input;
+  const { date, days, runs, changes, learningEnded, launchDay } = input;
   const from = addDays(date, -days);
   const used = new Set<PmChangeRow>();
   const items: PmJournalItem[] = [];
@@ -410,6 +412,9 @@ export function buildJournal(input: {
       entityName: c.objectName || c.objectId,
       level: levelOf(c),
       changeAt: c.at,
+      ...(c.field === 'created' && launchDay && day <= addDays(launchDay, 1)
+        ? { launch: true }
+        : {}),
     });
   }
 

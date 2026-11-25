@@ -55,10 +55,15 @@ export function shouldSendBackInvestigation(
   return { sendBack: reasons.length > 0, reasons, ...n };
 }
 
-/** Any blocker, ≥ 2 majors, or more than a third of the actions rejected. */
+/**
+ * Any blocker, ≥ 2 majors, more than a third of the actions rejected, any
+ * action the reviewer wants changed (the planner applies the notes, so the
+ * owner never has to), or a launch check without its stop/go rule.
+ */
 export function shouldSendBackPlan(
   planVerify: PlanVerifyOutput,
   plan: PlanOutput,
+  opts: { launch?: boolean } = {},
 ): SendBack {
   const n = count(planVerify.issues);
   const reasons: string[] = [];
@@ -73,6 +78,15 @@ export function shouldSendBackPlan(
     rejected / plan.actions.length > PM_LOOP.plan.rejectedShare
   )
     reasons.push(`${rejected}/${plan.actions.length} actions rejected`);
+  const changes = planVerify.actionVerdicts.filter(
+    (v) => v.verdict === 'change' && ids.has(v.actionId),
+  );
+  if (changes.length)
+    reasons.push(
+      `reviewer notes to apply on ${changes.map((v) => v.actionId).join(', ')}`,
+    );
+  if (opts.launch && !plan.decision?.stopGo)
+    reasons.push('launch check needs a stop/go rule (decision.stopGo)');
   return { sendBack: reasons.length > 0, reasons, ...n };
 }
 
@@ -196,6 +210,11 @@ export interface FinalAction extends Action {
   checkMessages: string[];
   /** Track record of this action type, (hits+1)/(n+2) ÷ 0.5 clamped 0.5–1.5; 1 = no record. */
   hitRateFactor: number;
+  /** Not in the plan: something to watch (focusPlan). */
+  watch?: boolean;
+  watchReason?: string;
+  /** Set when the ₹ impact was cut because another action already counts the same cause. */
+  impactNote?: string;
 }
 
 /** Action type track record from graded outcomes. */
@@ -298,6 +317,96 @@ export interface CheckResult {
   check: string;
   target: string; // C… / A… id
   message: string;
+}
+
+/**
+ * Narrows the plan to what the owner should act on: at most
+ * PM_LOOP.maxActions actions, best first; low-confidence, too-small-sample,
+ * still-disputed and surplus actions become Watch items worth ₹0. Each cause's
+ * ₹ impact is counted once: actions sharing a cause split it in rank order.
+ * Mutates and re-ranks `actions` (plan first, then watch).
+ */
+export function focusPlan(actions: FinalAction[], causes: Cause[]): void {
+  const watch = (a: FinalAction, reason: string) => {
+    a.watch = true;
+    a.watchReason ??= reason;
+  };
+  for (const a of actions) {
+    if (a.checksFailed.includes('small_sample'))
+      watch(a, 'too few people at this step to judge a change yet');
+    else if (a.confidence <= 0.2)
+      watch(a, 'low confidence: possible, not shown by the data');
+    else if (a.verdict === 'unresolved')
+      watch(a, "the reviewer's objection is still open");
+  }
+  actions.sort((a, b) => actionScore(b) - actionScore(a));
+  let kept = 0;
+  for (const a of actions) {
+    if (a.watch) continue;
+    if (kept < PM_LOOP.maxActions) kept++;
+    else watch(a, `beyond the top ${PM_LOOP.maxActions} actions`);
+  }
+  // Each cause's ₹/day can be won once, whichever actions go after it.
+  const left = new Map(causes.map((c) => [c.id, c.impactRupeesPerDay]));
+  const usedBy = new Map<string, string>();
+  for (const a of actions) {
+    if (a.watch) {
+      a.impactRupeesPerDay = 0;
+      continue;
+    }
+    const own = a.causeIds.filter((id) => left.has(id));
+    if (!own.length) continue;
+    const room = own.reduce((s, id) => s + left.get(id)!, 0);
+    const take = Math.max(0, Math.min(a.impactRupeesPerDay, room));
+    if (take < a.impactRupeesPerDay - EPS) {
+      const others = [
+        ...new Set(own.map((id) => usedBy.get(id)).filter(Boolean)),
+      ];
+      a.impactNote = `₹${Math.round(a.impactRupeesPerDay)}/day estimated, ₹${Math.round(take)} counted: ${others.length ? `${others.join(', ')} already counts` : 'capped at'} the same cause (${own.join(', ')})`;
+      a.impactRupeesPerDay = take;
+    }
+    let rest = take;
+    for (const id of own) {
+      const t = Math.min(rest, left.get(id)!);
+      left.set(id, left.get(id)! - t);
+      rest -= t;
+      if (!usedBy.has(id)) usedBy.set(id, a.id);
+    }
+  }
+  actions.sort(
+    (a, b) =>
+      Number(!!a.watch) - Number(!!b.watch) || actionScore(b) - actionScore(a),
+  );
+  actions.forEach((a, n) => (a.rank = n + 1));
+}
+
+/**
+ * Launch check mode: a campaign younger than PM_LOOP.launchDays, or that has
+ * spent less than PM_LOOP.launchCpaMultiple × the product's usual cost per
+ * purchase, is too new for a performance verdict. The run then checks setup,
+ * delivery, tracking and creative errors and ends with one stop/go rule.
+ */
+export function launchCheck(i: {
+  date: string;
+  /** IST day the campaign was created (null = unknown). */
+  launchedDay: string | null;
+  lifetimeSpend: number;
+  /** The product's usual cost per purchase, ₹ (null = no reference). */
+  refCpa: number | null;
+}): { on: boolean; day: number | null; spendBar: number | null; reasons: string[] } {
+  const day = i.launchedDay ? daysBetween(i.launchedDay, i.date) : null;
+  const spendBar =
+    i.refCpa !== null && i.refCpa > 0
+      ? Math.round(i.refCpa * PM_LOOP.launchCpaMultiple)
+      : null;
+  const reasons: string[] = [];
+  if (day !== null && day < PM_LOOP.launchDays)
+    reasons.push(`day ${day} since launch (under ${PM_LOOP.launchDays})`);
+  if (spendBar !== null && i.lifetimeSpend < spendBar)
+    reasons.push(
+      `₹${Math.round(i.lifetimeSpend).toLocaleString('en-IN')} spent since launch, under ${PM_LOOP.launchCpaMultiple}× the usual ₹${Math.round(i.refCpa!).toLocaleString('en-IN')} per purchase (₹${spendBar.toLocaleString('en-IN')})`,
+    );
+  return { on: reasons.length > 0, day, spendBar, reasons };
 }
 
 export const IMPACT_TOOL = 'impact_rupees';
@@ -421,7 +530,7 @@ export function runChecks(i: CheckInput): CheckResult[] {
         'judge_on',
         `judgeOn ${a.judgeOn} must be a YYYY-MM-DD on or after the run date ${i.date}`,
       );
-    if (a.type !== 'hold' && i.settling.has(a.entityId))
+    if (a.type !== 'hold' && !isCorrective(a) && i.settling.has(a.entityId))
       fail(
         'settling',
         `${a.entityLevel} ${a.entityId} is still settling from an earlier change (journal)`,
@@ -540,6 +649,11 @@ export function runChecks(i: CheckInput): CheckResult[] {
   }
   return out;
 }
+
+/** A fix for something plainly wrong may go ahead while the entity settles. */
+const isCorrective = (a: Action) =>
+  a.corrective === true &&
+  ['creative', 'tracking', 'landing_funnel', 'pause'].includes(a.type);
 
 const normMetric = (m: string) => m.toLowerCase().replace(/[^a-z0-9]/g, '');
 const isPause = (a: Action) =>

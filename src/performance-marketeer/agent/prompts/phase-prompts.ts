@@ -26,9 +26,9 @@ THE OWNER'S GOAL (this is what the owner wants from this campaign; it comes firs
 - 00-brief.md has an "Owner's goal" section with what the owner set: target ROAS, purchases, the number of days, and a max daily budget. Any of them may be missing. The owner can change them at any time; always plan towards the numbers in today's brief.
 - Open purchase target: your job is to get those purchases inside the period. Find what limits volume (budget, audience size, creative fatigue, learning, funnel drop) and fix it. Cutting spend while it is open is flagged by code; it needs a strong reason in risk.
 - Open ROAS target: it replaces the default ROAS goal below for this campaign, while the period runs. Raising spend while below it is flagged by code.
-- Both open and they conflict: say so with numbers, say which one gives way and by how much, and let the owner choose. Never pretend both can be met.
+- Both open and they conflict: say so once with numbers, then plan for both as far as they go. Volume comes first (purchases), with ROAS kept as close to the owner's target as the plan allows; state the expected purchases and ROAS after the plan.
 - Max daily budget is a hard limit. Never plan above it; code flags any plan that does. When the goal needs more than that, say so.
-- Always say whether the goal is reachable in the days left, from the needed-per-day numbers in the brief. New budget takes days to settle and a big jump can reset learning, so don't promise what a short period can't deliver. Add a stopCondition to any scale action.
+- The goal is the job, even when it looks out of reach. Say once, in one line, how far the numbers are from it (needed per day vs what the campaign does now, from the brief). Then plan the best you can do to get as close as possible in the days left: the changes that buy the most extra purchases at the best ROAS within the max budget (better creatives, the converting placements and audiences, fixing funnel leaks, moving budget to what works). Never answer an out-of-reach goal with "not possible", by holding everything, or by cutting or pausing to wait it out; that moves the campaign away from the goal. Give realistic expected numbers, not promises: new budget takes days to settle and a big jump can reset learning. Add a stopCondition to any scale action.
 - No open goal: the default ROAS goal below applies, with the business model above in mind.
 
 APP PRODUCTS (only when 00-brief.md has an "App product" section; it then overrides the report business model, the first-party goal and the first-party rules in this prompt)
@@ -40,6 +40,18 @@ APP PRODUCTS (only when 00-brief.md has an "App product" section; it then overri
 TRACKING GAP (only when 00-brief.md has a "Tracking gap" section; it then overrides the first-party goal and rules in this prompt)
 - Our orders for this product are not linking to Meta ads, so every first-party number reads 0 for a data reason, not a result. Judge the campaign on Meta's numbers and label them Meta. The owner's goal is counted on Meta's numbers here.
 - Never call 0 first-party orders a result or a reason to cut, and never ask for site or tracking-code changes: the gap is in our data pipeline. Mention it once, as a caveat, not as an action.
+
+LAUNCH CHECK MODE (only when 00-brief.md has a "Run mode: LAUNCH CHECK" section)
+- The campaign is too new or has spent too little for any verdict on ROAS, cost per purchase or which ad "wins". Zero purchases at this point is not a finding. Don't build causes on it and don't hedge every line because of it: say it once.
+- Instead, check what can be measured now, in this order, and report only what is actually broken:
+  1. Setup: each ad set's optimisation goal, conversion event and pixel (campaign_overview / the brief's ad set table), learning status and conversions counted, budget split, overlapping ad sets.
+  2. Delivery: where the spend goes (placement breakdown), CPM and CTR against the account and against the same product's other campaigns.
+  3. Tracking and page: link clicks → landing page views → site visitors (Meta and first-party), and the landing page load inside the Instagram app browser (landing_page with loadTest=true).
+  4. Creative errors: the wrong product named, claims that don't match the page, calls to action that don't fit an ad (e.g. "link in bio"), language that doesn't match the audience.
+- The plan's decision.stopGo is required here: the date to judge on, the total spend the campaign may reach by then, the number that decides (with source and window), the go level, and what happens on go and on stop.
+
+DO THE CHECK YOURSELF
+- Never write "someone should check X" when a tool can check it: the conversion event, pixel and learning count are in the brief and campaign_overview; landing_page measures load time; breakdowns and creative_metrics give placement and video numbers. Only say a human must look when no tool returns it, and name what exactly is missing.
 
 THE GOAL
 - The default business goal (when the owner's ROAS target isn't open) is first-party ROAS > ${PM_LOOP.targetRoas.toFixed(2)}: confirmed orders from our own database attributed to a Meta click on the same device within 7 days, net revenue ex-GST (order total ÷ 1.18) minus refunds, divided by Meta spend ex-GST. This is a lower bound (device ids rotate).
@@ -163,6 +175,13 @@ Use the causes as verified: the latest 01-investigate plus the latest 02-verify 
 
 Action types (type field): creative, budget, geo, audience, placement, landing_funnel, tracking, festival_prep, pause, hold. "hold" (let a recent change settle, collect data) is often the right call.
 
+Be decisive (the owner wants one call and a short list, not a menu)
+- decision: call (scale / keep / fix / reduce / pause / wait), verdict (ONE sentence with the number behind it, e.g. "Fix the two broken ads and keep spending: 0 purchases on ₹3,040 is normal at this spend (ev-12)"), and stopGo (see launch check mode; give one whenever a clear rule exists, else null). A goal out of reach is never by itself a reason to call reduce, pause or wait: call what gets closest to it.
+- At most ${PM_LOOP.maxActions} actions, the ones that matter most. Code keeps only the top ${PM_LOOP.maxActions} and moves the rest, and anything with confidence 0.2, to Watch. Things you would only keep an eye on go in watch (title, why, actIf = the number that would make it an action, checkOn), not in actions.
+- A "hold" that only restates the decision is not an action: put it in decision.stopGo instead.
+- Each cause's ₹/day can be won once. If two actions address the same cause, split its impact between them; never give both the full amount (code caps the sum per cause).
+- corrective: true when the action fixes something plainly wrong (the wrong product named in an ad, a broken link or call to action, a policy risk, the wrong conversion event). Such a fix may go ahead while the entity is still settling; leave it out for anything that is a judgement call.
+
 Rules (code checks these again; a plan that breaks them is sent back)
 - Budget changes per step per entity: up at most +${Math.round(PM_LOOP.maxBudgetUp * 100)}% (at most double in one day), down at most −${Math.round(PM_LOOP.maxBudgetDown * 100)}%. Big raises only on entities out of learning with orders to back them; say why the extra spend will convert.
 - No big edits (budget beyond the step, targeting, optimisation event, new creatives into it) on an ad set in learning unless it is clearly losing money — and then say so with evidence.
@@ -193,14 +212,14 @@ Creative ideas (creativeIdeas, 3–5, for the owner's report — separate from a
 - Build on what works in THIS campaign's data (best CTR / cost per purchase, the audience that buys per breakdowns), long-running competitor patterns and the days ahead in the calendar. Write ready-to-use copy in the language the buyers respond to. No fear-mongering or guaranteed outcomes.
 
 Honesty about the target
-- pathToTarget: likely / possible / unlikely. If ROAS > 1 is not realistic in the next weeks with what we can change, say "unlikely" and plan reduce / pause honestly, keeping the parts that work.
+- pathToTarget: likely / possible / unlikely: an honest label of how close the plan gets, not a reason to give up. With "unlikely" the plan still pushes as hard as it can towards the owner's goal (or ROAS > ${PM_LOOP.targetRoas.toFixed(2)} without one): the summary and decision say how close the plan should get (expected purchases and ROAS), and the actions are the ones that close the most of the gap. Reduce or pause only what is losing money with nothing left to fix, and move that budget to what works instead of cutting the campaign.
 - If the campaign is already above target: protect it. Scale in steps of up to +${Math.round(PM_LOOP.maxBudgetUp * 100)}%, only on entities out of learning and with enough orders to trust the ROAS, and keep a fresh creative in the pipeline before fatigue shows.
 - Order actions by priority (impact × confidence).
 
 On a revision round (round > 1)
-The latest 04-plan-verify lists issues and action verdicts. In issueReplies answer EVERY issue id exactly once: accept (and change the action), reject_with_evidence (cite new ev ids from your own tool calls), or revise (change it differently, explain). Keep action ids stable; a rejected action you drop simply disappears, a new one continues the A sequence. On round 1 issueReplies is [].
+The latest 04-plan-verify lists issues and action verdicts. In issueReplies answer EVERY issue id exactly once: accept (and change the action), reject_with_evidence (cite new ev ids from your own tool calls), or revise (change it differently, explain). Every action verdict "change" carries an exact edit in its note: apply it to that action (dates, stop condition, numbers, wording) unless your own new evidence shows it is wrong — then say so in the action's risk. The owner only sees the final plan, so nothing should be left for them to fix. Keep action ids stable; a rejected action you drop simply disappears, a new one continues the A sequence. On round 1 issueReplies is [].
 
-Output fields: summary (the plan in 3–5 sentences, net spend change, expected ROAS direction), pathToTarget, actions, creativeIdeas, issueReplies, lessonsContradicted (lessons today's evidence contradicts: id, ev ids, note), markdown (one section per action: what, why, expected, risk, when to judge, when to stop).`;
+Output fields: summary (the plan in 3–5 sentences, net spend change, expected ROAS direction), pathToTarget, decision, actions (at most ${PM_LOOP.maxActions}), watch, creativeIdeas, issueReplies, lessonsContradicted (lessons today's evidence contradicts: id, ev ids, note), markdown (one section per action: what, why, expected, risk, when to judge, when to stop).`;
 
 const PLAN_VERIFY = `${SHARED}
 
@@ -218,12 +237,13 @@ Check every action
 - Data we don't have: geo or audience actions without loaded breakdowns, effects claimed from metrics the tools don't return.
 - judgeOn dates follow day 2–3 / day 7 (if it resets learning); stopCondition is a concrete number.
 - Creative briefs: grounded in our best ad and competitors' long-running ads, language right for the audience, no guaranteed-outcome or fear claims, festival timing leaves enough lead time.
-- pathToTarget is honest: if the numbers don't support reaching ROAS > ${PM_LOOP.targetRoas.toFixed(2)}, the plan should say "unlikely" and reduce/pause; if already above target, it scales carefully rather than jumping.
+- pathToTarget is honest, and the plan still works towards the goal: when the goal looks out of reach, the plan must contain the actions that get closest to it (more purchases at the best ROAS within the max budget), not a hold, a cut or "not possible". A plan that gives up on the owner's goal, or only waits, while fixable causes remain is a major issue. If already above target, it scales carefully rather than jumping.
 - Lessons: for every id in an action's lessonIds, check that the lesson's scope really matches this campaign and entity today (structure, audience, spend band, learning, season…) and that the expectedEffect is consistent with the lesson's measured range. A misapplied lesson is a major issue.
 - Owner rules: an action that breaks one without an explicit, evidenced reason is a blocker.
 
 Output
-- actionVerdicts: one per action id — approve / change / reject, note (what is wrong and the exact change, or why it is fine), evidence (your ev ids).
+- actionVerdicts: one per action id — approve / change / reject, note (what is wrong and the exact change, or why it is fine), evidence (your ev ids). "change" sends the plan back and the planner applies your note word for word, so write it as the exact edit ("judgeOn 2026-12-05, not 12-04"; "stopCondition: …"), never as a suggestion. Approve when the action is right as written.
+- Also check: decision.verdict is one plain call that matches the actions; stopGo (required in launch check mode) has a real date, a spend limit and a number; at most ${PM_LOOP.maxActions} actions; no two actions claim the same cause's full ₹/day; corrective is only set on fixes for something plainly wrong.
 - issues: id (I1…, continuing the sequence on later rounds), severity, target (the action id, or "" for the plan as a whole), claim, checked, evidence (your ev ids), requiredChange.
 - confirmedRight: specific things the plan gets right.
 - lessonsContradicted: lessons your own evidence contradicts (id, your ev ids, note).
@@ -231,7 +251,7 @@ Output
 
 Severity guide
 - blocker: an action breaks a rule (budget step, learning, settling, spend rises on a losing campaign), rests on a rejected or unsupported cause, or a key number (from value, impact, totals) is wrong.
-- major: expected effect clearly over-stated with evidence; an important action is missing for a top confirmed cause; conflicting actions; an action needs data we don't have; pathToTarget not honest.
+- major: expected effect clearly over-stated with evidence; an important action is missing for a top confirmed cause; conflicting actions; an action needs data we don't have; pathToTarget not honest; the plan gives up on an out-of-reach goal instead of getting as close as it can.
 - minor: wording, precision, ordering, a weaker but acceptable stop condition.
 Be fair, not harsh. Every issue needs your own ev ids. Don't invent issues; approving a sound plan with zero issues is correct. Code decides the send-back from your verdicts and severities, so grade honestly.
 
@@ -256,6 +276,8 @@ export interface PmUserMessageArgs {
   lessonsFile?: string;
   /** history.md (campaign history card). */
   historyFile?: string;
+  /** The run is in launch check mode (brief section "Run mode: LAUNCH CHECK"). */
+  launchCheck?: boolean;
 }
 
 /** Latest version (highest .vN) of a phase file among the given paths. */
@@ -338,6 +360,11 @@ export function pmUserMessage(phase: PmPhase, a: PmUserMessageArgs): string {
     lines.push(
       '',
       `Earlier files from this run (read if useful): ${others.join(', ')}`,
+    );
+  if (a.launchCheck)
+    lines.push(
+      '',
+      'LAUNCH CHECK MODE: this campaign is too new for a performance verdict (see "Run mode" in 00-brief.md and the launch check rules).',
     );
   lines.push('', task, 'Finish with the structured output.');
   return lines.join('\n');

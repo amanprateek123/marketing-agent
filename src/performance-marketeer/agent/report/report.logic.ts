@@ -56,7 +56,14 @@ export interface AdStats {
   ctr: number | null; // 0–1
   metaPurchases: number;
   metaRoas: number | null;
+  /** Meta landing page views: what a click costs once the page actually opens. */
+  landingPageViews?: number;
+  /** Video only: 3-second plays ÷ impressions. */
+  hookRate?: number | null;
 }
+
+/** Leading signals need this many impressions before an ad without purchases is cut on them. */
+export const MIN_SIGNAL_IMPRESSIONS = 3000;
 
 /** Below this many impressions an ad without purchases is not judged. */
 export const MIN_AD_IMPRESSIONS = 1500;
@@ -105,10 +112,93 @@ export function creativeVerdict(
         reason: `${inr(ad.spend)} spent, 0 purchases${lowCtr ? `, CTR ${ctr(ad.ctr)} vs ${ctr(campaign.ctr)}` : ''}`,
       };
   }
+  // No purchases to judge on yet: use what happens before the purchase.
+  if (ad.metaPurchases === 0 && ad.impressions >= MIN_SIGNAL_IMPRESSIONS) {
+    const cplv = (x: AdStats) =>
+      x.landingPageViews ? x.spend / x.landingPageViews : null;
+    const adCplv = cplv(ad);
+    const campCplv = cplv(campaign);
+    const weakCtr =
+      ad.ctr !== null && campaign.ctr !== null && ad.ctr < campaign.ctr * 0.5;
+    const dearPage =
+      campCplv !== null &&
+      (adCplv === null
+        ? ad.spend >= campCplv * 3
+        : adCplv > campCplv * 2);
+    if (weakCtr || dearPage)
+      return {
+        tag: 'cut',
+        reason: [
+          weakCtr && `CTR ${ctr(ad.ctr)} vs ${ctr(campaign.ctr)} for the campaign`,
+          dearPage &&
+            (adCplv === null
+              ? `${inr(ad.spend)} spent and no page opened`
+              : `${inr(adCplv)} per page opened vs ${inr(campCplv!)}`),
+          ad.hookRate != null && `${(ad.hookRate * 100).toFixed(1)}% watch past 3 s`,
+        ]
+          .filter(Boolean)
+          .join(', '),
+      };
+    if (
+      ad.ctr !== null &&
+      campaign.ctr !== null &&
+      ad.ctr >= campaign.ctr * 1.5 &&
+      (adCplv === null || campCplv === null || adCplv <= campCplv)
+    )
+      return {
+        tag: 'keep',
+        reason: `Best early signal: CTR ${ctr(ad.ctr)} vs ${ctr(campaign.ctr)}${adCplv !== null ? `, ${inr(adCplv)} per page opened` : ''}; no purchase yet`,
+      };
+  }
   return {
     tag: 'keep',
     reason: ad.metaPurchases
       ? `${ad.metaPurchases} purchase${ad.metaPurchases > 1 ? 's' : ''}, CTR ${ctr(ad.ctr)}`
       : `No purchase yet on ${inr(ad.spend)}, CTR ${ctr(ad.ctr)}`,
   };
+}
+
+/** One ad's numbers, as the report merges them. */
+export interface AdRow {
+  id: string;
+  name: string;
+  format: string | null;
+  title: string;
+  spend: number;
+  impressions: number;
+  linkClicks: number;
+  landingPageViews: number;
+  metaPurchases: number;
+  metaPurchaseValue: number;
+  firstPartyOrders: number;
+  plays3s: number;
+}
+
+/**
+ * The same creative running in several ad sets is one ad to the owner:
+ * rows with the same name, format and title are summed (ids kept).
+ */
+export function mergeAdRows<T extends AdRow>(rows: T[]): (T & { ids: string[] })[] {
+  const out = new Map<string, T & { ids: string[] }>();
+  for (const r of rows) {
+    const k = `${r.name.trim().toLowerCase()}|${r.format ?? ''}|${r.title.trim().toLowerCase()}`;
+    const m = out.get(k);
+    if (!m) {
+      out.set(k, { ...r, ids: [r.id] });
+      continue;
+    }
+    m.ids.push(r.id);
+    for (const f of [
+      'spend',
+      'impressions',
+      'linkClicks',
+      'landingPageViews',
+      'metaPurchases',
+      'metaPurchaseValue',
+      'firstPartyOrders',
+      'plays3s',
+    ] as const)
+      (m as AdRow)[f] += r[f];
+  }
+  return [...out.values()];
 }
